@@ -11,6 +11,9 @@ import {
   Sparkles,
   X,
 } from "lucide-react";
+import ReactMarkdown from "react-markdown";
+import rehypeSanitize from "rehype-sanitize";
+import remarkGfm from "remark-gfm";
 import { CitationList } from "./CitationList";
 import { ToolCallList } from "./ToolCallList";
 import { quickActions } from "../shared/mockWorkspace";
@@ -238,7 +241,7 @@ export function AgentPanel({
               {message.role === "assistant" ? <Sparkles size={14} /> : <MessageSquareText size={14} />}
               <span>{message.role === "assistant" ? "Cici Agent" : "你"}</span>
             </div>
-            <p>{message.content}</p>
+            <MessageMarkdown content={message.content} />
             <ToolCallList toolCalls={message.toolCalls} />
             <CitationList citations={message.citations} />
           </article>
@@ -259,5 +262,16 @@ export function AgentPanel({
         </button>
       </footer>
     </aside>
+  );
+}
+
+/** 安全渲染 Agent 对话中的 GFM Markdown，避免模型内容中的 HTML 被直接执行。 */
+function MessageMarkdown({ content }: { content: string }) {
+  return (
+    <div className="message-markdown">
+      <ReactMarkdown remarkPlugins={[remarkGfm]} rehypePlugins={[rehypeSanitize]}>
+        {content}
+      </ReactMarkdown>
+    </div>
   );
 }
