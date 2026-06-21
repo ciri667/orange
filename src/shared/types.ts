@@ -12,6 +12,8 @@ export type MarkdownViewMode = "edit" | "preview" | "split";
 
 /** Agent 工具名称，检索是可选择工具而不是固定前置流程。 */
 export type AgentToolName =
+  | "model_request"
+  | "local_rule_agent"
   | "search_notes"
   | "read_note"
   | "list_tree"
@@ -22,6 +24,12 @@ export type AgentToolName =
 
 /** Agent 工具调用状态，用于前端展示本轮 loop 的执行轨迹。 */
 export type AgentToolCallStatus = "planned" | "running" | "completed" | "failed";
+
+/** 首版云端模型提供商，M3 先固定 OpenAI-compatible BYOK 协议。 */
+export type ModelProvider = "openai-compatible";
+
+/** 用户选择的隐私策略，决定模型请求是否允许携带本地笔记片段。 */
+export type PrivacyPolicy = "local-only" | "allow-selected-scope";
 
 /** 用户选择的本地 Markdown 知识库元信息。 */
 export interface KnowledgeBase {
@@ -123,6 +131,40 @@ export interface AgentSession {
   pendingChange?: ProposedChange;
   createdAt: string;
   updatedAt: string;
+}
+
+/** 云端模型配置只保存 key 引用，不在普通 SQLite payload 中保存明文密钥。 */
+export interface ModelConfig {
+  provider: ModelProvider;
+  apiBase: string;
+  model: string;
+  keyReference: string;
+  enabled: boolean;
+}
+
+/** 用户设置聚合模型、隐私和写入确认策略，供 M3 Runtime 读取。 */
+export interface UserSettings {
+  modelConfig: ModelConfig;
+  privacyPolicy: PrivacyPolicy;
+  writeConfirmationRequired: boolean;
+}
+
+/** 模型密钥状态只说明是否可读取，不包含明文密钥。 */
+export interface ModelApiKeyStatus {
+  keyReference: string;
+  configured: boolean;
+  message: string;
+}
+
+/** 模型请求和本地工具调用审计摘要，用于解释每轮 Agent 使用了哪些范围。 */
+export interface RequestAuditLog {
+  id: string;
+  kind: string;
+  sessionId?: string;
+  scopeSummary: string;
+  contentSummary: string;
+  toolSummary: string;
+  createdAt: string;
 }
 
 /** 本地目录树节点，用于把 Markdown 路径还原成文件夹和文件层级。 */

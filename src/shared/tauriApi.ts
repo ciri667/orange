@@ -1,4 +1,4 @@
-import { invoke } from "@tauri-apps/api/core";
+import { invoke, isTauri } from "@tauri-apps/api/core";
 import { createContentHash, createLocalId } from "./id";
 import {
   acceptMockProposedChange,
@@ -10,18 +10,43 @@ import {
 } from "./mockWorkspace";
 import type {
   AgentActionType,
+  AgentSession,
   AgentTurnRequest,
   AgentTurnResult,
   FolderEntry,
   KnowledgeBase,
   KnowledgeBaseSelection,
+  ModelApiKeyStatus,
   Note,
   ProposedChange,
+  RequestAuditLog,
+  UserSettings,
   WorkspaceSnapshot,
 } from "./types";
 
+/** 浏览器开发态的默认模型设置；桌面端真实设置由 SQLite 和系统 keyring 保存。 */
+const defaultBrowserUserSettings: UserSettings = {
+  modelConfig: {
+    provider: "openai-compatible",
+    apiBase: "https://api.openai.com/v1",
+    model: "gpt-4o-mini",
+    keyReference: "cici-note-openai-compatible-api-key",
+    enabled: false,
+  },
+  privacyPolicy: "allow-selected-scope",
+  writeConfirmationRequired: true,
+};
+
+/** 浏览器 fallback 的临时用户设置，仅用于 Vite 开发态模拟设置页交互。 */
+let browserUserSettings: UserSettings = defaultBrowserUserSettings;
+
+/** 浏览器 fallback 的临时审计日志，模拟桌面端模型和工具边界展示。 */
+let browserAuditLogs: RequestAuditLog[] = [];
+
 declare global {
   interface Window {
+    /** Tauri v2 运行时标记，官方 isTauri helper 会优先读取这个值。 */
+    isTauri?: boolean;
     /** Tauri 运行时注入对象，用于区分桌面环境与浏览器开发环境。 */
     __TAURI_INTERNALS__?: unknown;
   }
@@ -29,7 +54,7 @@ declare global {
 
 /** 判断当前是否运行在 Tauri 桌面壳中。 */
 export function isTauriRuntime() {
-  return typeof window !== "undefined" && Boolean(window.__TAURI_INTERNALS__);
+  return isTauri() || (typeof window !== "undefined" && Boolean(window.__TAURI_INTERNALS__));
 }
 
 /** 从 Tauri 本地层加载工作台状态，浏览器中回退到 mock 数据。 */
@@ -39,6 +64,148 @@ export async function loadWorkspaceState(): Promise<WorkspaceSnapshot> {
   }
 
   return invoke<WorkspaceSnapshot>("load_workspace_state");
+}
+
+/** 读取持久化 Agent 会话，浏览器中返回按当前快照清理后的会话列表。 */
+export async function loadSessions(snapshot: WorkspaceSnapshot): Promise<AgentSession[]> {
+  if (!isTauriRuntime()) {
+    return normalizeMockSnapshotSessions(cloneWorkspaceSnapshot(snapshot)).sessions;
+  }
+
+  return invoke<AgentSession[]>("load_sessions", { payload: { snapshot } });
+}
+
+/** 保存单个 Agent 会话，并返回后端归一化后的工作台快照。 */
+export async function saveSession(snapshot: WorkspaceSnapshot, session: AgentSession): Promise<WorkspaceSnapshot> {
+  if (!isTauriRuntime()) {
+    const nextSnapshot = cloneWorkspaceSnapshot(snapshot);
+    const sessionIndex = nextSnapshot.sessions.findIndex((item) => item.id === session.id);
+
+    if (sessionIndex >= 0) {
+      nextSnapshot.sessions[sessionIndex] = session;
+    } else {
+      nextSnapshot.sessions = [session, ...nextSnapshot.sessions];
+    }
+
+    nextSnapshot.activeSessionId = session.id;
+
+    return normalizeMockSnapshotSessions(nextSnapshot);
+  }
+
+  return invoke<WorkspaceSnapshot>("save_session", { payload: { snapshot, session } });
+}
+
+/** 更新当前会话工具范围；桌面端会强制保留激活知识库。 */
+export async function updateSessionScope(
+  snapshot: WorkspaceSnapshot,
+  sessionId: string,
+  knowledgeBaseIds: string[],
+  activeKnowledgeBaseId: string,
+): Promise<WorkspaceSnapshot> {
+  if (!isTauriRuntime()) {
+    const nextSnapshot = cloneWorkspaceSnapshot(snapshot);
+    const validIds = new Set(nextSnapshot.knowledgeBases.map((knowledgeBase) => knowledgeBase.id));
+    const selectedIds = new Set(knowledgeBaseIds.filter((knowledgeBaseId) => validIds.has(knowledgeBaseId)));
+
+    selectedIds.add(activeKnowledgeBaseId);
+    nextSnapshot.sessions = nextSnapshot.sessions.map((session) =>
+      session.id === sessionId
+        ? {
+            ...session,
+            knowledgeBaseIds: orderValidKnowledgeBaseIds(Array.from(selectedIds), nextSnapshot.knowledgeBases),
+            updatedAt: "刚刚",
+          }
+        : session,
+    );
+
+    return normalizeMockSnapshotSessions(nextSnapshot);
+  }
+
+  return invoke<WorkspaceSnapshot>("update_session_scope", {
+    payload: { snapshot, sessionId, knowledgeBaseIds, activeKnowledgeBaseId },
+  });
+}
+
+/** 恢复历史会话绑定的知识库、笔记和会话焦点。 */
+export async function restoreSessionContext(snapshot: WorkspaceSnapshot, sessionId: string): Promise<WorkspaceSnapshot> {
+  if (!isTauriRuntime()) {
+    const nextSnapshot = normalizeMockSnapshotSessions(cloneWorkspaceSnapshot(snapshot));
+    const session = nextSnapshot.sessions.find((item) => item.id === sessionId);
+
+    if (!session) {
+      return nextSnapshot;
+    }
+
+    const nextKnowledgeBaseId =
+      session.knowledgeBaseIds.find((knowledgeBaseId) =>
+        nextSnapshot.knowledgeBases.some((knowledgeBase) => knowledgeBase.id === knowledgeBaseId),
+      ) ??
+      nextSnapshot.knowledgeBases[0]?.id ??
+      "";
+    const nextNoteId =
+      session.activeNoteId && nextSnapshot.notes.some((note) => note.id === session.activeNoteId)
+        ? session.activeNoteId
+        : nextSnapshot.notes.find((note) => note.knowledgeBaseId === nextKnowledgeBaseId)?.id ?? "";
+
+    nextSnapshot.activeSessionId = session.id;
+    nextSnapshot.activeKnowledgeBaseId = nextKnowledgeBaseId;
+    nextSnapshot.activeNoteId = nextNoteId;
+
+    return nextSnapshot;
+  }
+
+  return invoke<WorkspaceSnapshot>("restore_session_context", { payload: { snapshot, sessionId } });
+}
+
+/** 读取用户模型、隐私和写入设置；浏览器开发态返回内存默认值。 */
+export async function loadUserSettings(): Promise<UserSettings> {
+  if (!isTauriRuntime()) {
+    return { ...browserUserSettings, modelConfig: { ...browserUserSettings.modelConfig } };
+  }
+
+  return invoke<UserSettings>("load_user_settings");
+}
+
+/** 保存用户模型、隐私和写入设置；API key 由单独入口处理。 */
+export async function saveUserSettings(settings: UserSettings): Promise<UserSettings> {
+  if (!isTauriRuntime()) {
+    browserUserSettings = { ...settings, modelConfig: { ...settings.modelConfig } };
+
+    return loadUserSettings();
+  }
+
+  return invoke<UserSettings>("save_user_settings", { payload: { settings } });
+}
+
+/** 保存 BYOK 模型密钥；桌面端写入系统安全存储并返回读回校验状态。 */
+export async function saveModelApiKey(apiKey: string): Promise<ModelApiKeyStatus> {
+  if (!isTauriRuntime()) {
+    throw new Error("浏览器开发态不能保存模型密钥，请在 Tauri 桌面端配置。");
+  }
+
+  return invoke<ModelApiKeyStatus>("save_model_api_key", { payload: { apiKey } });
+}
+
+/** 读取 BYOK 模型密钥状态；不返回明文密钥。 */
+export async function loadModelApiKeyStatus(): Promise<ModelApiKeyStatus> {
+  if (!isTauriRuntime()) {
+    return {
+      keyReference: defaultBrowserUserSettings.modelConfig.keyReference,
+      configured: false,
+      message: "浏览器开发态未连接系统安全存储。",
+    };
+  }
+
+  return invoke<ModelApiKeyStatus>("load_model_api_key_status");
+}
+
+/** 读取最近请求审计日志，用于展示模型发送范围和工具调用摘要。 */
+export async function loadRequestAuditLogs(): Promise<RequestAuditLog[]> {
+  if (!isTauriRuntime()) {
+    return browserAuditLogs;
+  }
+
+  return invoke<RequestAuditLog[]>("load_request_audit_logs");
 }
 
 /** 通过 Tauri 目录选择器连接知识库，浏览器中创建 mock 目录。 */
@@ -407,7 +574,11 @@ export async function runAgentTurn(
   };
 
   if (!isTauriRuntime()) {
-    return { snapshot: runMockAgentTurn(snapshot, prompt, action) };
+    const nextSnapshot = runMockAgentTurn(snapshot, prompt, action);
+
+    browserAuditLogs = [createBrowserAuditLog(nextSnapshot, prompt), ...browserAuditLogs].slice(0, 20);
+
+    return { snapshot: nextSnapshot };
   }
 
   return invoke<AgentTurnResult>("run_agent_turn", { payload: { snapshot, request } });
@@ -416,7 +587,7 @@ export async function runAgentTurn(
 /** 接受当前会话的待确认变更，Tauri 环境中由本地层执行安全写入。 */
 export async function acceptProposedChange(snapshot: WorkspaceSnapshot): Promise<WorkspaceSnapshot> {
   if (!isTauriRuntime()) {
-    return acceptMockProposedChange(snapshot);
+    return normalizeMockSnapshotSessions(acceptMockProposedChange(snapshot));
   }
 
   return invoke<WorkspaceSnapshot>("apply_proposed_change", { payload: { snapshot } });
@@ -425,7 +596,7 @@ export async function acceptProposedChange(snapshot: WorkspaceSnapshot): Promise
 /** 拒绝当前会话的待确认变更，Tauri 环境中只更新会话状态。 */
 export async function rejectProposedChange(snapshot: WorkspaceSnapshot): Promise<WorkspaceSnapshot> {
   if (!isTauriRuntime()) {
-    return rejectMockProposedChange(snapshot);
+    return normalizeMockSnapshotSessions(rejectMockProposedChange(snapshot));
   }
 
   return invoke<WorkspaceSnapshot>("reject_proposed_change", { payload: { snapshot } });
@@ -599,4 +770,62 @@ function removeNoteReferencesAfterDelete(snapshot: WorkspaceSnapshot, noteId: st
     pinnedNoteIds: session.pinnedNoteIds.filter((pinnedNoteId) => pinnedNoteId !== noteId),
     pendingChange: session.pendingChange?.noteId === noteId ? undefined : session.pendingChange,
   }));
+}
+
+/** 浏览器 fallback 清理会话中的失效知识库和笔记引用，模拟后端持久化入口的归一化。 */
+function normalizeMockSnapshotSessions(snapshot: WorkspaceSnapshot): WorkspaceSnapshot {
+  const knowledgeBaseIds = new Set(snapshot.knowledgeBases.map((knowledgeBase) => knowledgeBase.id));
+  const noteIds = new Set(snapshot.notes.map((note) => note.id));
+
+  snapshot.sessions = snapshot.sessions
+    .map((session) => ({
+      ...session,
+      knowledgeBaseIds: orderValidKnowledgeBaseIds(
+        session.knowledgeBaseIds.filter((knowledgeBaseId) => knowledgeBaseIds.has(knowledgeBaseId)),
+        snapshot.knowledgeBases,
+      ),
+      activeNoteId: session.activeNoteId && noteIds.has(session.activeNoteId) ? session.activeNoteId : undefined,
+      pinnedNoteIds: session.pinnedNoteIds.filter((noteId) => noteIds.has(noteId)),
+      pendingChange:
+        session.pendingChange?.noteId && !noteIds.has(session.pendingChange.noteId) ? undefined : session.pendingChange,
+    }))
+    .filter((session) => session.knowledgeBaseIds.length > 0);
+
+  if (!snapshot.sessions.some((session) => session.id === snapshot.activeSessionId)) {
+    snapshot.activeSessionId = snapshot.sessions[0]?.id ?? "";
+  }
+
+  return snapshot;
+}
+
+/** 按知识库列表顺序整理范围 ID，避免 UI 多选顺序随点击行为抖动。 */
+function orderValidKnowledgeBaseIds(selectedIds: string[], knowledgeBases: KnowledgeBase[]) {
+  const selectedIdSet = new Set(selectedIds);
+
+  return knowledgeBases.filter((knowledgeBase) => selectedIdSet.has(knowledgeBase.id)).map((knowledgeBase) => knowledgeBase.id);
+}
+
+/** 为浏览器 fallback 创建请求审计摘要，便于设置页预览 M3 审计信息。 */
+function createBrowserAuditLog(snapshot: WorkspaceSnapshot, prompt: string): RequestAuditLog {
+  const session = snapshot.sessions.find((item) => item.id === snapshot.activeSessionId) ?? snapshot.sessions[0];
+  const scopeSummary =
+    session?.knowledgeBaseIds
+      .map((knowledgeBaseId) => snapshot.knowledgeBases.find((knowledgeBase) => knowledgeBase.id === knowledgeBaseId)?.name)
+      .filter(Boolean)
+      .join(" / ") || "未绑定知识库";
+  const toolSummary =
+    session?.messages
+      .at(-1)
+      ?.toolCalls?.map((toolCall) => toolCall.name)
+      .join(", ") || "未调用工具";
+
+  return {
+    id: createLocalId("audit"),
+    kind: "browser_mock_turn",
+    sessionId: session?.id,
+    scopeSummary,
+    contentSummary: `浏览器 mock；输入长度 ${prompt.length} 字符`,
+    toolSummary,
+    createdAt: "刚刚",
+  };
 }

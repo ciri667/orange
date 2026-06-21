@@ -16,14 +16,22 @@ import {
   createFolder,
   createNote,
   deleteNote,
+  loadModelApiKeyStatus,
+  loadRequestAuditLogs,
+  loadUserSettings,
   loadWorkspaceState,
   removeKnowledgeBase,
   renameNote,
   rejectProposedChange,
   rescanKnowledgeBase,
+  restoreSessionContext,
   runAgentTurn,
   saveNoteContent,
+  saveModelApiKey,
+  saveSession,
+  saveUserSettings,
   selectKnowledgeBaseDirectory,
+  updateSessionScope,
 } from "../shared/tauriApi";
 import type {
   AgentActionType,
@@ -31,7 +39,10 @@ import type {
   AgentSessionType,
   KnowledgeBase,
   MarkdownViewMode,
+  ModelApiKeyStatus,
   Note,
+  RequestAuditLog,
+  UserSettings,
   WorkspaceSnapshot,
 } from "../shared/types";
 import { TopBar } from "./TopBar";
@@ -92,22 +103,17 @@ function buildAgentSession({
   };
 }
 
-/** 按知识库列表顺序整理会话选中的知识库，保证界面和引用范围稳定。 */
-function orderKnowledgeBaseIds(selectedIds: string[], knowledgeBases: KnowledgeBase[]) {
-  const selectedIdSet = new Set(selectedIds);
-
-  return knowledgeBases
-    .filter((knowledgeBase) => selectedIdSet.has(knowledgeBase.id))
-    .map((knowledgeBase) => knowledgeBase.id);
-}
-
 /** 正式工作台根组件，集中编排知识库、编辑器、Agent loop 和设置状态。 */
 export function WorkspaceShell() {
   const [snapshot, setSnapshot] = useState<WorkspaceSnapshot | null>(null);
+  const [userSettings, setUserSettings] = useState<UserSettings | null>(null);
+  /** 模型密钥状态只保存是否可读，不包含明文 API key。 */
+  const [modelApiKeyStatus, setModelApiKeyStatus] = useState<ModelApiKeyStatus | null>(null);
   /** 首屏初始化是否仍在进行，用于区分加载中和加载失败。 */
   const [isBooting, setIsBooting] = useState(true);
   /** 首屏初始化失败原因，失败后展示重试入口而不是停留在 loading。 */
   const [bootError, setBootError] = useState("");
+  const [auditLogs, setAuditLogs] = useState<RequestAuditLog[]>([]);
   const [searchTerm, setSearchTerm] = useState("");
   const [agentPrompt, setAgentPrompt] = useState("");
   const [collapsedFolderPaths, setCollapsedFolderPaths] = useState<Set<string>>(new Set());
@@ -139,28 +145,57 @@ export function WorkspaceShell() {
     };
   }, []);
 
-  /** 加载首屏必需的工作台快照，失败时进入可重试错误态。 */
+  /** 加载首屏必需数据；审计日志失败不阻断进入工作台。 */
   async function loadInitialData(shouldCommit: () => boolean = () => true) {
     setIsBooting(true);
     setBootError("");
     setNotice("");
 
     try {
-      // 加载工作台状态时优先走 Tauri 本地层，浏览器开发态自动使用 mock 快照。
-      const nextSnapshot = await loadWorkspaceState();
+      // 工作台快照和用户设置是首屏必需数据，必须同时成功后才能进入主界面。
+      const [nextSnapshot, nextUserSettings, nextModelApiKeyStatus] = await Promise.all([
+        loadWorkspaceState(),
+        loadUserSettings(),
+        loadModelApiKeyStatus().catch((error) => ({
+          keyReference: "cici-note-openai-compatible-api-key",
+          configured: false,
+          message: formatErrorMessage(error),
+        })),
+      ]);
 
-      if (shouldCommit()) {
-        setSnapshot(nextSnapshot);
-        setEditingBaseHashes(buildNoteHashMap(nextSnapshot.notes));
+      if (!shouldCommit()) {
+        return;
       }
+
+      setSnapshot(nextSnapshot);
+      setUserSettings(nextUserSettings);
+      setModelApiKeyStatus(nextModelApiKeyStatus);
+      setEditingBaseHashes(buildNoteHashMap(nextSnapshot.notes));
+      setIsBooting(false);
+
+      void loadInitialAuditLogs(shouldCommit);
     } catch (error) {
       if (shouldCommit()) {
         setSnapshot(null);
+        setUserSettings(null);
+        setAuditLogs([]);
         setBootError(formatErrorMessage(error));
       }
     } finally {
       if (shouldCommit()) {
         setIsBooting(false);
+      }
+    }
+  }
+
+  /** 后台加载非首屏必需的审计日志，失败时降级为空列表并提示用户。 */
+  async function loadInitialAuditLogs(shouldCommit: () => boolean = () => true) {
+    try {
+      setAuditLogs(await loadRequestAuditLogs());
+    } catch (error) {
+      if (shouldCommit()) {
+        setAuditLogs([]);
+        setNotice(`审计日志加载失败：${formatErrorMessage(error)}`);
       }
     }
   }
@@ -176,7 +211,7 @@ export function WorkspaceShell() {
     );
   }
 
-  if (!snapshot) {
+  if (!snapshot || !userSettings) {
     const errorMessage = bootError || "工作台初始化未完成，请重试。";
 
     return (
@@ -227,22 +262,6 @@ export function WorkspaceShell() {
     searchTerm,
   });
 
-  /** 更新当前快照中的单个会话，确保消息、范围和 diff 都绑定在同一上下文。 */
-  function updateActiveSession(updater: (session: AgentSession) => AgentSession) {
-    setSnapshot((currentSnapshot) => {
-      if (!currentSnapshot) {
-        return currentSnapshot;
-      }
-
-      return {
-        ...currentSnapshot,
-        sessions: currentSnapshot.sessions.map((session) =>
-          session.id === currentSnapshot.activeSessionId ? updater(session) : session,
-        ),
-      };
-    });
-  }
-
   /** 统一进入忙碌状态，附带可展示的操作说明。 */
   function beginBusy(label: string) {
     setIsBusy(true);
@@ -286,7 +305,7 @@ export function WorkspaceShell() {
   }
 
   /** 选择知识库时同步收窄 Agent 工具范围，避免跨库误检索。 */
-  function handleSelectKnowledgeBase(knowledgeBaseId: string) {
+  async function handleSelectKnowledgeBase(knowledgeBaseId: string) {
     const nextKnowledgeBase = currentSnapshot.knowledgeBases.find((knowledgeBase) => knowledgeBase.id === knowledgeBaseId);
     const nextNotes = currentSnapshot.notes.filter((note) => note.knowledgeBaseId === knowledgeBaseId);
 
@@ -301,16 +320,30 @@ export function WorkspaceShell() {
         session.knowledgeBaseIds[0] === nextKnowledgeBase.id,
     );
     const nextSession = existingSession ?? buildAgentSession({ type: "knowledge-base", knowledgeBase: nextKnowledgeBase });
-
-    setSnapshot({
+    const activatedSnapshot = {
       ...currentSnapshot,
       sessions: existingSession ? currentSnapshot.sessions : [nextSession, ...currentSnapshot.sessions],
       activeKnowledgeBaseId: knowledgeBaseId,
       activeNoteId: nextNotes[0]?.id ?? "",
       activeSessionId: nextSession.id,
-    });
-    setSearchTerm("");
-    setCollapsedFolderPaths(new Set());
+    };
+
+    beginBusy("正在切换知识库会话...");
+
+    try {
+      // 选择知识库会创建或恢复默认知识库会话，确保会话和 scope 可重启恢复。
+      const nextSnapshot = existingSession
+        ? await restoreSessionContext(activatedSnapshot, nextSession.id)
+        : await saveSession(activatedSnapshot, nextSession);
+
+      commitSnapshot(nextSnapshot);
+      setSearchTerm("");
+      setCollapsedFolderPaths(new Set());
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : String(error));
+    } finally {
+      endBusy();
+    }
   }
 
   /** 添加知识库时走 Tauri 目录选择器，浏览器开发态使用 mock 目录。 */
@@ -362,7 +395,7 @@ export function WorkspaceShell() {
   }
 
   /** 打开 Markdown 文件时同步激活对应笔记会话，避免 Agent 使用旧文件上下文。 */
-  function handleSelectNote(noteId: string) {
+  async function handleSelectNote(noteId: string) {
     const nextNote = currentSnapshot.notes.find((note) => note.id === noteId);
 
     if (!nextNote) {
@@ -375,14 +408,28 @@ export function WorkspaceShell() {
       (session) => session.type === "note" && session.activeNoteId === nextNote.id,
     );
     const nextSession = existingSession ?? buildAgentSession({ type: "note", knowledgeBase: nextKnowledgeBase, note: nextNote });
-
-    setSnapshot({
+    const activatedSnapshot = {
       ...currentSnapshot,
       sessions: existingSession ? currentSnapshot.sessions : [nextSession, ...currentSnapshot.sessions],
       activeKnowledgeBaseId: nextKnowledgeBase.id,
       activeNoteId: noteId,
       activeSessionId: nextSession.id,
-    });
+    };
+
+    beginBusy("正在切换笔记会话...");
+
+    try {
+      // 笔记会话绑定 activeNoteId，pending diff 也会留在创建它的会话中。
+      const nextSnapshot = existingSession
+        ? await restoreSessionContext(activatedSnapshot, nextSession.id)
+        : await saveSession(activatedSnapshot, nextSession);
+
+      commitSnapshot(nextSnapshot);
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : String(error));
+    } finally {
+      endBusy();
+    }
   }
 
   /** 更新当前笔记正文，只修改内存草稿；保存时才写回本地 Markdown 文件。 */
@@ -456,8 +503,9 @@ export function WorkspaceShell() {
                 activeSessionId: nextSession.id,
               }
             : nextSnapshot;
+        const persistedSnapshot = nextNote && nextSession ? await saveSession(activatedSnapshot, nextSession) : activatedSnapshot;
 
-        commitSnapshot(activatedSnapshot);
+        commitSnapshot(persistedSnapshot);
         setSearchTerm("");
         expandFolderPaths([createDialog.parentPath]);
         setMarkdownViewMode("edit");
@@ -598,73 +646,84 @@ export function WorkspaceShell() {
   }
 
   /** 新建一个任务会话，绑定当前笔记和当前知识库作为上下文起点。 */
-  function handleCreateSession() {
+  async function handleCreateSession() {
     const nextSession = buildAgentSession({
       type: "task",
       knowledgeBase: activeKnowledgeBase,
       note: activeNote,
     });
-
-    setSnapshot({
+    const nextSnapshot = {
       ...currentSnapshot,
       sessions: [nextSession, ...currentSnapshot.sessions],
       activeSessionId: nextSession.id,
-    });
-    setIsSessionListOpen(true);
-    setIsSessionContextOpen(false);
-    setIsScopeSelectorOpen(false);
+    };
+
+    beginBusy("正在创建 Agent 会话...");
+
+    try {
+      commitSnapshot(await saveSession(nextSnapshot, nextSession));
+      setIsSessionListOpen(true);
+      setIsSessionContextOpen(false);
+      setIsScopeSelectorOpen(false);
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : String(error));
+    } finally {
+      endBusy();
+    }
   }
 
   /** 切换会话时恢复它绑定的知识库、笔记和工具范围。 */
-  function handleSelectSession(sessionId: string) {
+  async function handleSelectSession(sessionId: string) {
     const nextSession = currentSnapshot.sessions.find((session) => session.id === sessionId);
 
     if (!nextSession) {
       return;
     }
 
-    const nextKnowledgeBaseId = nextSession.knowledgeBaseIds[0] ?? activeKnowledgeBase.id;
-    const nextNoteId =
-      nextSession.activeNoteId ??
-      currentSnapshot.notes.find((note) => note.knowledgeBaseId === nextKnowledgeBaseId)?.id ??
-      activeNote?.id ??
-      "";
+    beginBusy("正在恢复 Agent 会话...");
 
-    setSnapshot({
-      ...currentSnapshot,
-      activeSessionId: sessionId,
-      activeKnowledgeBaseId: nextKnowledgeBaseId,
-      activeNoteId: nextNoteId,
-    });
-    setSearchTerm("");
-    setCollapsedFolderPaths(new Set());
-    setIsSessionListOpen(false);
-    setIsSessionContextOpen(false);
-    setIsScopeSelectorOpen(false);
+    try {
+      const nextSnapshot = await restoreSessionContext(currentSnapshot, sessionId);
+
+      commitSnapshot(nextSnapshot);
+      setSearchTerm("");
+      setCollapsedFolderPaths(new Set());
+      setIsSessionListOpen(false);
+      setIsSessionContextOpen(false);
+      setIsScopeSelectorOpen(false);
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : String(error));
+    } finally {
+      endBusy();
+    }
   }
 
   /** 为当前会话勾选或取消额外知识库，当前激活知识库始终保留。 */
-  function handleToggleScopeKnowledgeBase(knowledgeBaseId: string) {
-    updateActiveSession((session) => {
-      const selectedIds = new Set(session.knowledgeBaseIds.length ? session.knowledgeBaseIds : [activeKnowledgeBase.id]);
+  async function handleToggleScopeKnowledgeBase(knowledgeBaseId: string) {
+    const selectedIds = new Set(activeSession.knowledgeBaseIds.length ? activeSession.knowledgeBaseIds : [activeKnowledgeBase.id]);
 
-      selectedIds.add(activeKnowledgeBase.id);
+    selectedIds.add(activeKnowledgeBase.id);
 
-      // 当前激活知识库是默认工具范围边界，不能在本会话中取消。
-      if (knowledgeBaseId !== activeKnowledgeBase.id) {
-        if (selectedIds.has(knowledgeBaseId)) {
-          selectedIds.delete(knowledgeBaseId);
-        } else {
-          selectedIds.add(knowledgeBaseId);
-        }
+    // 当前激活知识库是默认工具范围边界，不能在本会话中取消。
+    if (knowledgeBaseId !== activeKnowledgeBase.id) {
+      if (selectedIds.has(knowledgeBaseId)) {
+        selectedIds.delete(knowledgeBaseId);
+      } else {
+        selectedIds.add(knowledgeBaseId);
       }
+    }
 
-      return {
-        ...session,
-        knowledgeBaseIds: orderKnowledgeBaseIds(Array.from(selectedIds), currentSnapshot.knowledgeBases),
-        updatedAt: "刚刚",
-      };
-    });
+    beginBusy("正在更新工具范围...");
+
+    try {
+      commitSnapshot(
+        await updateSessionScope(currentSnapshot, activeSession.id, Array.from(selectedIds), activeKnowledgeBase.id),
+      );
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : String(error));
+    } finally {
+      endBusy();
+    }
   }
 
   /** 提交 Agent 输入，运行时会自行决定是否调用检索工具。 */
@@ -681,6 +740,7 @@ export function WorkspaceShell() {
     try {
       const result = await runAgentTurn(currentSnapshot, prompt, action);
       commitSnapshot(result.snapshot);
+      setAuditLogs(await loadRequestAuditLogs());
       setAgentPrompt("");
     } catch (error) {
       setNotice(error instanceof Error ? error.message : String(error));
@@ -774,6 +834,59 @@ export function WorkspaceShell() {
     }
   }
 
+  /** 保存模型、隐私和写入设置，密钥由单独入口写入系统安全存储。 */
+  async function handleSaveSettings(nextSettings: UserSettings) {
+    beginBusy("正在保存 Agent 设置...");
+
+    try {
+      setUserSettings(await saveUserSettings(nextSettings));
+      setNotice("已保存 Agent 设置。");
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : String(error));
+    } finally {
+      endBusy();
+    }
+  }
+
+  /** 保存 BYOK API key；桌面端写入系统 keyring，避免明文进入 SQLite。 */
+  async function handleSaveApiKey(apiKey: string) {
+    const trimmedApiKey = apiKey.trim();
+
+    if (!trimmedApiKey) {
+      setNotice("API key 不能为空。");
+      return;
+    }
+
+    beginBusy("正在保存模型密钥...");
+
+    try {
+      const nextModelApiKeyStatus = await saveModelApiKey(trimmedApiKey);
+
+      setModelApiKeyStatus(nextModelApiKeyStatus);
+      setNotice(nextModelApiKeyStatus.message);
+    } catch (error) {
+      const message = formatErrorMessage(error);
+
+      setNotice(message);
+      throw new Error(message);
+    } finally {
+      endBusy();
+    }
+  }
+
+  /** 重新读取最近审计日志，便于设置页查看最新模型和工具调用边界。 */
+  async function handleRefreshAuditLogs() {
+    beginBusy("正在刷新审计日志...");
+
+    try {
+      setAuditLogs(await loadRequestAuditLogs());
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : String(error));
+    } finally {
+      endBusy();
+    }
+  }
+
   return (
     <div className="app-shell">
       <TopBar
@@ -857,11 +970,17 @@ export function WorkspaceShell() {
         <SettingsDrawer
           knowledgeBases={currentSnapshot.knowledgeBases}
           activeKnowledgeBaseId={activeKnowledgeBase.id}
+          settings={userSettings}
+          modelApiKeyStatus={modelApiKeyStatus}
+          auditLogs={auditLogs}
           isBusy={isBusy}
           onSelectKnowledgeBase={handleSelectKnowledgeBase}
           onAddKnowledgeBase={handleAddKnowledgeBase}
           onRescanKnowledgeBase={handleRescanKnowledgeBase}
           onRemoveKnowledgeBase={handleRemoveKnowledgeBase}
+          onSaveSettings={handleSaveSettings}
+          onSaveApiKey={handleSaveApiKey}
+          onRefreshAuditLogs={handleRefreshAuditLogs}
           onClose={() => setIsSettingsOpen(false)}
         />
       )}
