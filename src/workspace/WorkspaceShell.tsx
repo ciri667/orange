@@ -963,7 +963,6 @@ export function WorkspaceShell() {
           onToggleScopeKnowledgeBase={handleToggleScopeKnowledgeBase}
           onPromptChange={setAgentPrompt}
           onSubmitPrompt={() => handleSubmitPrompt("ask")}
-          onQuickAction={(action, prompt) => handleSubmitPrompt(action, prompt)}
         />
       </main>
       {isSettingsOpen && (

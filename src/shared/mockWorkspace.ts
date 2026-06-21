@@ -288,15 +288,6 @@ const initialFolders: FolderEntry[] = [
   },
 ];
 
-/** 快捷操作定义，驱动 Agent 侧栏顶部的高频命令。 */
-export const quickActions: Array<{ label: string; action: AgentActionType; prompt: string }> = [
-  { label: "基于知识库回答", action: "ask", prompt: "首版产品为什么要采用本地优先？" },
-  { label: "查找相关笔记", action: "find", prompt: "查找关于写入确认和隐私边界的笔记" },
-  { label: "改写当前段落", action: "rewrite", prompt: "把当前笔记的产品定位改写得更清晰" },
-  { label: "生成新笔记", action: "create", prompt: "基于这些材料生成一篇上线检查清单" },
-  { label: "整理知识结构", action: "organize", prompt: "建议这篇笔记应该放在哪个目录并添加哪些标签" },
-];
-
 /** 为内置笔记补齐内容 hash，确保 mock 写入也走冲突校验路径。 */
 function hydrateNoteHashes(notes: Note[]) {
   return notes.map((note) => ({ ...note, contentHash: createContentHash(note.content) }));

@@ -2,7 +2,6 @@ import {
   ArrowRight,
   Check,
   Database,
-  FileText,
   History,
   Layers3,
   MessageSquareText,
@@ -16,14 +15,13 @@ import rehypeSanitize from "rehype-sanitize";
 import remarkGfm from "remark-gfm";
 import { CitationList } from "./CitationList";
 import { ToolCallList } from "./ToolCallList";
-import { quickActions } from "../shared/mockWorkspace";
 import {
   getScopeSummaryLabel,
   getSessionKnowledgeBaseLabel,
   getSessionNoteLabel,
   getSessionTypeLabel,
 } from "../shared/selectors";
-import type { AgentActionType, AgentSession, KnowledgeBase, Note } from "../shared/types";
+import type { AgentSession, KnowledgeBase, Note } from "../shared/types";
 
 /** 右侧 Agent 侧栏，承载会话、工具调用、检索范围、引用和输入框。 */
 export function AgentPanel({
@@ -45,7 +43,6 @@ export function AgentPanel({
   onToggleScopeKnowledgeBase,
   onPromptChange,
   onSubmitPrompt,
-  onQuickAction,
 }: {
   sessions: AgentSession[];
   activeSession: AgentSession;
@@ -65,7 +62,6 @@ export function AgentPanel({
   onToggleScopeKnowledgeBase: (knowledgeBaseId: string) => void;
   onPromptChange: (value: string) => void;
   onSubmitPrompt: () => void;
-  onQuickAction: (action: AgentActionType, prompt: string) => void;
 }) {
   /** 当前会话选中的知识库 ID，用于驱动范围摘要和多选列表。 */
   const selectedKnowledgeBaseIds = activeSession.knowledgeBaseIds.length
@@ -75,8 +71,8 @@ export function AgentPanel({
   const selectedKnowledgeBaseSet = new Set(selectedKnowledgeBaseIds);
   /** 当前会话范围摘要，展示 Agent 可调用检索工具的权限边界。 */
   const selectedScopeLabel = getScopeSummaryLabel(activeSession, knowledgeBases);
-  /** 当前会话的写入状态，用短标签替代大面积说明区。 */
-  const writeStatus = activeSession.pendingChange?.status === "pending" ? "待确认 diff" : "确认后写入";
+  /** 当前会话的写入状态，用不可点击标签展示，避免和上下文弹窗入口混淆。 */
+  const writeStatus = activeSession.pendingChange?.status === "pending" ? "待确认 diff" : "写入需确认";
 
   return (
     <aside className="agent-panel" aria-label="AI 侧栏">
@@ -102,9 +98,9 @@ export function AgentPanel({
         <span>{getSessionTypeLabel(activeSession.type)}</span>
         <span>{selectedScopeLabel}</span>
         <span>{getSessionNoteLabel(activeSession, notes)}</span>
-        <button className={activeSession.pendingChange?.status === "pending" ? "pending" : ""} type="button" onClick={onToggleSessionContext}>
+        <span className={`session-write-status ${activeSession.pendingChange?.status === "pending" ? "pending" : ""}`}>
           {writeStatus}
-        </button>
+        </span>
       </div>
 
       {isSessionListOpen && (
@@ -224,15 +220,6 @@ export function AgentPanel({
           </div>
         </section>
       )}
-
-      <div className="quick-actions" aria-label="Agent 快捷操作">
-        {quickActions.map((item) => (
-          <button key={item.action} type="button" onClick={() => onQuickAction(item.action, item.prompt)} disabled={isBusy}>
-            <Sparkles size={14} />
-            {item.label}
-          </button>
-        ))}
-      </div>
 
       <div className="message-list" aria-live="polite">
         {activeSession.messages.map((message) => (

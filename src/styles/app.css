@@ -292,8 +292,7 @@ textarea:disabled {
 .add-kb-button,
 .file-tree-row,
 .session-row,
-.scope-selector,
-.quick-actions button {
+.scope-selector {
   width: 100%;
   border: 1px solid transparent;
   border-radius: 7px;
@@ -342,8 +341,7 @@ textarea:disabled {
   font-size: 12px;
 }
 
-.add-kb-button,
-.quick-actions button {
+.add-kb-button {
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -960,7 +958,7 @@ textarea:disabled {
 .agent-panel {
   position: relative;
   display: grid;
-  grid-template-rows: auto auto auto auto 1fr auto;
+  grid-template-rows: auto auto auto 1fr auto;
   gap: 12px;
   border-right: 0;
   border-left: 1px solid var(--border);
@@ -974,7 +972,6 @@ textarea:disabled {
 }
 
 .session-summary span,
-.session-summary button,
 .kb-card-title span {
   border: 1px solid var(--border);
   border-radius: 999px;
@@ -984,7 +981,7 @@ textarea:disabled {
   font-size: 12px;
 }
 
-.session-summary button.pending,
+.session-write-status.pending,
 .session-pending {
   border-color: #f2b8a8;
   background: var(--danger-soft);
@@ -1118,21 +1115,6 @@ textarea:disabled {
   border: 1px solid var(--border-strong);
   border-radius: 5px;
   background: #ffffff;
-}
-
-.quick-actions {
-  display: flex;
-  gap: 8px;
-  overflow-x: auto;
-  padding-bottom: 2px;
-}
-
-.quick-actions button {
-  flex: 0 0 auto;
-  width: auto;
-  min-height: 32px;
-  padding: 0 10px;
-  white-space: nowrap;
 }
 
 .message-list {
