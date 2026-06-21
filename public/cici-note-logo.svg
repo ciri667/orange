@@ -1,0 +1,32 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-label="Cici Note logo">
+  <defs>
+    <linearGradient id="tile" x1="8" y1="6" x2="58" y2="58" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#0F766E" />
+      <stop offset="0.58" stop-color="#15857C" />
+      <stop offset="1" stop-color="#24313A" />
+    </linearGradient>
+    <linearGradient id="page" x1="19" y1="14" x2="47" y2="52" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#FFFFFF" />
+      <stop offset="1" stop-color="#E9F7F4" />
+    </linearGradient>
+  </defs>
+  <rect x="4" y="4" width="56" height="56" rx="14" fill="url(#tile)" />
+  <path
+    d="M42.5 14.5C39.2 11.8 35 10.2 30.4 10.2C19.8 10.2 11.3 18.7 11.3 29.2C11.3 39.8 19.8 48.3 30.4 48.3C35.1 48.3 39.4 46.6 42.7 43.8"
+    fill="none"
+    stroke="#8FE7DB"
+    stroke-linecap="round"
+    stroke-width="5"
+  />
+  <path
+    d="M22 16H39L48 25V47C48 50 46 52 43 52H22C19 52 17 50 17 47V21C17 18 19 16 22 16Z"
+    fill="url(#page)"
+  />
+  <path d="M39 16V24C39 25.1 39.9 26 41 26H48" fill="#CFF0EA" />
+  <path d="M24 29H36" stroke="#0F766E" stroke-linecap="round" stroke-width="3" />
+  <path d="M24 37H33" stroke="#7A8A95" stroke-linecap="round" stroke-width="3" />
+  <path d="M28 44C32.5 40.2 37.1 39.4 42 41.6" fill="none" stroke="#0F766E" stroke-linecap="round" stroke-width="3" />
+  <circle cx="28" cy="44" r="2.7" fill="#F6B73C" />
+  <circle cx="42" cy="41.6" r="2.7" fill="#F6B73C" />
+  <path d="M49.5 11.5L51 16L55.5 17.5L51 19L49.5 23.5L48 19L43.5 17.5L48 16L49.5 11.5Z" fill="#F6B73C" />
+</svg>
