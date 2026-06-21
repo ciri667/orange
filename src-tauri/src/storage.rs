@@ -39,7 +39,7 @@ const USER_SETTINGS_KEY: &str = "default";
 /** 系统安全存储中的模型密钥引用，SQLite 只保存这个引用而不保存明文 key。 */
 pub const MODEL_KEY_REFERENCE: &str = "cici-note-openai-compatible-api-key";
 
-/** 当前桌面进程内的模型密钥缓存，用于避开部分 keychain 后端读写后短期不可见的问题。 */
+/** 当前桌面进程内的模型密钥缓存，用于减少同一会话内反复访问系统安全存储。 */
 static MODEL_API_KEY_CACHE: OnceLock<Mutex<Option<String>>> = OnceLock::new();
 
 /** SQLite 中持久化的知识库授权记录，用于启动时重新扫描真实目录。 */
@@ -581,6 +581,8 @@ pub fn save_user_settings(app: &AppHandle, settings: &UserSettings) -> Result<()
 
 /** 把 BYOK 模型密钥保存到系统安全存储，避免明文进入 SQLite。 */
 pub fn save_model_api_key(api_key: &str) -> Result<ModelApiKeyStatus, String> {
+    ensure_persistent_model_keyring()?;
+
     let entry = keyring::Entry::new("Cici Note", MODEL_KEY_REFERENCE)
         .map_err(|error| format!("无法打开系统安全存储：{error}"))?;
 
@@ -608,6 +610,8 @@ pub fn save_model_api_key(api_key: &str) -> Result<ModelApiKeyStatus, String> {
 
 /** 从系统安全存储读取 BYOK 模型密钥；缺失时返回 None。 */
 pub fn load_model_api_key() -> Result<Option<String>, String> {
+    ensure_persistent_model_keyring()?;
+
     if let Some(api_key) = load_model_api_key_from_cache()? {
         return Ok(Some(api_key));
     }
@@ -650,6 +654,23 @@ pub fn load_model_api_key_status() -> Result<ModelApiKeyStatus, String> {
     })
 }
 
+/** 确认当前 keyring 构建使用可跨进程持久化的系统安全存储。 */
+fn ensure_persistent_model_keyring() -> Result<(), String> {
+    if model_keyring_persists_until_delete() {
+        return Ok(());
+    }
+
+    Err("当前构建未启用系统安全存储，模型密钥无法跨重启保存。请为 keyring 启用平台后端 feature 后重新构建。".to_owned())
+}
+
+/** 判断默认 keyring 后端是否会把密钥保存到磁盘级安全存储。 */
+fn model_keyring_persists_until_delete() -> bool {
+    matches!(
+        keyring::default::default_credential_builder().persistence(),
+        keyring::credential::CredentialPersistence::UntilDelete
+    )
+}
+
 /** 把已验证密钥放入进程内缓存，避免同一桌面会话内反复访问 keychain。 */
 fn store_model_api_key_in_cache(api_key: &str) -> Result<(), String> {
     let cache = MODEL_API_KEY_CACHE.get_or_init(|| Mutex::new(None));
@@ -657,7 +678,7 @@ fn store_model_api_key_in_cache(api_key: &str) -> Result<(), String> {
         .lock()
         .map_err(|_| "模型密钥缓存已损坏。".to_owned())?;
 
-    // todo: 后续替换为稳定的系统级安全存储诊断后，可以去掉这个仅进程内的兜底缓存。
+    // 缓存只优化当前进程的重复读取，真实持久化仍完全依赖系统安全存储。
     *cached_api_key = Some(api_key.to_owned());
 
     Ok(())
@@ -1661,11 +1682,12 @@ mod tests {
     use super::trash_markdown_file_with;
     use super::{
         atomic_write_markdown, create_blank_markdown_file, create_folder, create_id,
-        create_stable_note_id, hash_content, is_missing_keyring_entry_error,
-        load_model_api_key_from_cache, rename_markdown_file, resolve_existing_file_inside_root,
-        resolve_inside_root, scan_markdown_directory, store_model_api_key_in_cache,
-        trash_markdown_file, validate_folder_name, validate_markdown_file_name,
-        validate_new_markdown_file_name,
+        create_stable_note_id, ensure_persistent_model_keyring, hash_content,
+        is_missing_keyring_entry_error, load_model_api_key_from_cache,
+        model_keyring_persists_until_delete, rename_markdown_file,
+        resolve_existing_file_inside_root, resolve_inside_root, scan_markdown_directory,
+        store_model_api_key_in_cache, trash_markdown_file, validate_folder_name,
+        validate_markdown_file_name, validate_new_markdown_file_name,
     };
     use crate::domain::KnowledgeBaseSelection;
     use std::fs;
@@ -1689,6 +1711,13 @@ mod tests {
         assert!(!is_missing_keyring_entry_error(
             "User interaction is not allowed"
         ));
+    }
+
+    /** keyring 默认后端必须是系统级持久化存储，防止 API key 重启后丢失。 */
+    #[test]
+    fn model_keyring_uses_persistent_backend() {
+        assert!(model_keyring_persists_until_delete());
+        assert!(ensure_persistent_model_keyring().is_ok());
     }
 
     /** 读回校验后的密钥会进入进程缓存，供同一桌面会话内的 Agent turn 复用。 */
