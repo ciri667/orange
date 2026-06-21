@@ -44,6 +44,23 @@ pub enum AgentToolCallStatus {
     Failed,
 }
 
+/** 首版云端模型提供商，M3 先固定 OpenAI-compatible BYOK 协议。 */
+#[allow(dead_code)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum ModelProvider {
+    OpenaiCompatible,
+}
+
+/** 用户选择的隐私策略，决定模型请求是否允许携带本地笔记片段。 */
+#[allow(dead_code)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum PrivacyPolicy {
+    LocalOnly,
+    AllowSelectedScope,
+}
+
 /** 用户选择的本地 Markdown 知识库元信息。 */
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -163,6 +180,49 @@ pub struct AgentSession {
     pub pending_change: Option<ProposedChange>,
     pub created_at: String,
     pub updated_at: String,
+}
+
+/** 云端模型配置只保存 key 引用，不在普通 SQLite payload 中保存明文密钥。 */
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ModelConfig {
+    pub provider: String,
+    pub api_base: String,
+    pub model: String,
+    pub key_reference: String,
+    pub enabled: bool,
+}
+
+/** 用户设置聚合模型、隐私和写入确认策略，供 M3 Runtime 读取。 */
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UserSettings {
+    pub model_config: ModelConfig,
+    pub privacy_policy: String,
+    pub write_confirmation_required: bool,
+}
+
+/** 模型密钥保存状态，只暴露是否可读取，不返回明文密钥。 */
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ModelApiKeyStatus {
+    pub key_reference: String,
+    pub configured: bool,
+    pub message: String,
+}
+
+/** 模型请求和本地工具调用审计摘要，用于解释每轮 Agent 使用了哪些范围。 */
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RequestAuditLog {
+    pub id: String,
+    pub kind: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<String>,
+    pub scope_summary: String,
+    pub content_summary: String,
+    pub tool_summary: String,
+    pub created_at: String,
 }
 
 /** 前后端传输的工作台快照。 */
@@ -294,4 +354,51 @@ pub struct AgentTurnPayload {
 #[serde(rename_all = "camelCase")]
 pub struct ChangePayload {
     pub snapshot: WorkspaceSnapshot,
+}
+
+/** 持久化或更新单个 Agent 会话的命令入参。 */
+#[derive(Clone, Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SaveSessionPayload {
+    pub snapshot: WorkspaceSnapshot,
+    pub session: AgentSession,
+}
+
+/** 读取会话列表时携带当前快照，用于清理失效知识库和笔记引用。 */
+#[derive(Clone, Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LoadSessionsPayload {
+    pub snapshot: WorkspaceSnapshot,
+}
+
+/** 更新会话检索范围的命令入参，后端会强制保留当前激活知识库。 */
+#[derive(Clone, Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UpdateSessionScopePayload {
+    pub snapshot: WorkspaceSnapshot,
+    pub session_id: String,
+    pub knowledge_base_ids: Vec<String>,
+    pub active_knowledge_base_id: String,
+}
+
+/** 从历史会话恢复知识库和笔记上下文的命令入参。 */
+#[derive(Clone, Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RestoreSessionContextPayload {
+    pub snapshot: WorkspaceSnapshot,
+    pub session_id: String,
+}
+
+/** 保存用户模型和隐私设置的命令入参。 */
+#[derive(Clone, Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SaveUserSettingsPayload {
+    pub settings: UserSettings,
+}
+
+/** 保存 BYOK 模型密钥的命令入参；密钥只进入系统安全存储。 */
+#[derive(Clone, Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SaveModelApiKeyPayload {
+    pub api_key: String,
 }

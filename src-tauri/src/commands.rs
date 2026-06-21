@@ -1,10 +1,12 @@
-use crate::agent;
 use crate::domain::{
-    AgentTurnPayload, AgentTurnResult, ChangePayload, CreateFolderPayload, CreateNotePayload,
-    DeleteNotePayload, FolderEntry, KnowledgeBaseSelection, RemoveKnowledgeBasePayload,
-    RenameNotePayload, RescanKnowledgeBasePayload, SaveNoteContentPayload,
-    ScanKnowledgeBasePayload, ScanReport, WorkspaceSnapshot,
+    AgentSession, AgentTurnPayload, AgentTurnResult, ChangePayload, CreateFolderPayload,
+    CreateNotePayload, DeleteNotePayload, FolderEntry, KnowledgeBaseSelection, LoadSessionsPayload,
+    ModelApiKeyStatus, RemoveKnowledgeBasePayload, RenameNotePayload, RequestAuditLog,
+    RescanKnowledgeBasePayload, RestoreSessionContextPayload, SaveModelApiKeyPayload,
+    SaveNoteContentPayload, SaveSessionPayload, SaveUserSettingsPayload, ScanKnowledgeBasePayload,
+    ScanReport, UpdateSessionScopePayload, UserSettings, WorkspaceSnapshot,
 };
+use crate::runtime;
 use crate::storage;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -31,6 +33,110 @@ pub async fn load_workspace_state(app: AppHandle) -> Result<WorkspaceSnapshot, S
     });
 
     Ok(snapshot)
+}
+
+/** 读取持久化 Agent 会话，并按当前工作台快照清理已失效的知识库或笔记引用。 */
+#[tauri::command]
+pub async fn load_sessions(
+    app: AppHandle,
+    payload: LoadSessionsPayload,
+) -> Result<Vec<AgentSession>, String> {
+    run_blocking("读取 Agent 会话", move || {
+        storage::load_sessions_for_snapshot(&app, &payload.snapshot)
+    })
+    .await
+}
+
+/** 保存单个 Agent 会话，供前端创建会话或更新消息后统一进入 SQLite。 */
+#[tauri::command]
+pub async fn save_session(
+    app: AppHandle,
+    payload: SaveSessionPayload,
+) -> Result<WorkspaceSnapshot, String> {
+    run_blocking("保存 Agent 会话", move || {
+        storage::save_session(&app, payload.snapshot, payload.session)
+    })
+    .await
+}
+
+/** 更新当前会话工具范围；后端强制保留激活知识库并剔除不存在的引用。 */
+#[tauri::command]
+pub async fn update_session_scope(
+    app: AppHandle,
+    payload: UpdateSessionScopePayload,
+) -> Result<WorkspaceSnapshot, String> {
+    run_blocking("更新 Agent 会话范围", move || {
+        storage::update_session_scope(
+            &app,
+            payload.snapshot,
+            &payload.session_id,
+            payload.knowledge_base_ids,
+            &payload.active_knowledge_base_id,
+        )
+    })
+    .await
+}
+
+/** 从历史会话恢复知识库、笔记和会话焦点。 */
+#[tauri::command]
+pub async fn restore_session_context(
+    app: AppHandle,
+    payload: RestoreSessionContextPayload,
+) -> Result<WorkspaceSnapshot, String> {
+    run_blocking("恢复 Agent 会话上下文", move || {
+        storage::restore_session_context(&app, payload.snapshot, &payload.session_id)
+    })
+    .await
+}
+
+/** 读取用户模型和隐私设置，缺失时返回本地安全默认值。 */
+#[tauri::command]
+pub async fn load_user_settings(app: AppHandle) -> Result<UserSettings, String> {
+    run_blocking("读取用户设置", move || {
+        storage::load_user_settings(&app)
+    })
+    .await
+}
+
+/** 保存用户模型和隐私设置；明文 API key 不进入这份配置。 */
+#[tauri::command]
+pub async fn save_user_settings(
+    app: AppHandle,
+    payload: SaveUserSettingsPayload,
+) -> Result<UserSettings, String> {
+    let saved_settings = payload.settings;
+
+    run_blocking("保存用户设置", move || {
+        storage::save_user_settings(&app, &saved_settings)?;
+        Ok(saved_settings)
+    })
+    .await
+}
+
+/** 保存 BYOK 模型密钥到系统安全存储，SQLite 只保存 keyReference。 */
+#[tauri::command]
+pub async fn save_model_api_key(
+    payload: SaveModelApiKeyPayload,
+) -> Result<ModelApiKeyStatus, String> {
+    run_blocking("保存模型密钥", move || {
+        storage::save_model_api_key(&payload.api_key)
+    })
+    .await
+}
+
+/** 读取 BYOK 模型密钥状态，只返回是否已配置，不返回明文。 */
+#[tauri::command]
+pub async fn load_model_api_key_status() -> Result<ModelApiKeyStatus, String> {
+    run_blocking("读取模型密钥状态", storage::load_model_api_key_status).await
+}
+
+/** 读取最近模型请求和工具调用审计摘要，用于设置页解释发送边界。 */
+#[tauri::command]
+pub async fn load_request_audit_logs(app: AppHandle) -> Result<Vec<RequestAuditLog>, String> {
+    run_blocking("读取请求审计日志", move || {
+        storage::load_request_audit_logs(&app, 20)
+    })
+    .await
 }
 
 /** 打开系统目录选择器，让用户连接一个本地 Markdown 知识库。 */
@@ -502,12 +608,38 @@ pub async fn run_agent_turn(
     app: AppHandle,
     payload: AgentTurnPayload,
 ) -> Result<AgentTurnResult, String> {
-    let result = agent::run_agent_turn(&app, payload.snapshot, payload.request);
+    let mut snapshot = hydrate_persisted_sessions_for_turn(&app, payload.snapshot).await?;
+    let request = payload.request;
+    let settings_app = app.clone();
+    let settings = run_blocking("读取模型设置", move || {
+        storage::load_user_settings(&settings_app)
+    })
+    .await?;
 
-    // 每轮后刷新本地索引，确保新草稿确认前不会写入，但现有笔记编辑能被检索。
-    index_snapshot_in_background(app, &result.snapshot).await?;
+    // request 中的 active 信息来自 UI 当前焦点；会话 scope 已由 SQLite 中恢复的 session 决定。
+    snapshot.active_knowledge_base_id = request.active_knowledge_base_id.clone();
+    snapshot.active_note_id = request.active_note_id.clone();
+    if snapshot
+        .sessions
+        .iter()
+        .any(|session| session.id == request.session_id)
+    {
+        snapshot.active_session_id = request.session_id.clone();
+    }
 
-    Ok(result)
+    let runtime_result = runtime::run_agent_turn(&app, snapshot, request, settings).await;
+    let audit_app = app.clone();
+    let audit_log = runtime_result.audit_log.clone();
+
+    run_blocking("写入请求审计日志", move || {
+        storage::append_request_audit_log(&audit_app, &audit_log)
+    })
+    .await?;
+
+    // 每轮后刷新本地索引并持久化会话，确保消息、工具轨迹和 pending diff 可在重启后恢复。
+    index_snapshot_in_background(app, &runtime_result.turn_result.snapshot).await?;
+
+    Ok(runtime_result.turn_result)
 }
 
 /** 确认待写入 diff，校验知识库边界和内容 hash 后原子写回 Markdown。 */
@@ -607,7 +739,10 @@ pub async fn apply_proposed_change(
 
 /** 拒绝待写入 diff，只更新会话状态，不修改任何 Markdown 文件。 */
 #[tauri::command]
-pub fn reject_proposed_change(payload: ChangePayload) -> Result<WorkspaceSnapshot, String> {
+pub async fn reject_proposed_change(
+    app: AppHandle,
+    payload: ChangePayload,
+) -> Result<WorkspaceSnapshot, String> {
     let mut snapshot = payload.snapshot;
     let session_index = snapshot
         .sessions
@@ -620,6 +755,42 @@ pub fn reject_proposed_change(payload: ChangePayload) -> Result<WorkspaceSnapsho
             status: "rejected".to_owned(),
             ..change
         });
+        snapshot.sessions[session_index].updated_at = "刚刚".to_owned();
+    }
+
+    index_snapshot_in_background(app, &snapshot).await?;
+
+    Ok(snapshot)
+}
+
+/** Agent turn 前合并 SQLite 中的持久化会话，避免模型或规则 Agent 只信任前端传入的 scope 快照。 */
+async fn hydrate_persisted_sessions_for_turn(
+    app: &AppHandle,
+    mut snapshot: WorkspaceSnapshot,
+) -> Result<WorkspaceSnapshot, String> {
+    let sessions_app = app.clone();
+    let snapshot_for_sessions = snapshot.clone();
+    let persisted_sessions = run_blocking("读取持久化 Agent 会话", move || {
+        storage::load_sessions_for_snapshot(&sessions_app, &snapshot_for_sessions)
+    })
+    .await?;
+
+    if !persisted_sessions.is_empty() {
+        snapshot.sessions = persisted_sessions;
+    }
+
+    storage::normalize_sessions_for_snapshot(&mut snapshot);
+
+    if !snapshot
+        .sessions
+        .iter()
+        .any(|session| session.id == snapshot.active_session_id)
+    {
+        snapshot.active_session_id = snapshot
+            .sessions
+            .first()
+            .map(|session| session.id.clone())
+            .unwrap_or_default();
     }
 
     Ok(snapshot)
@@ -845,15 +1016,11 @@ fn normalize_active_entities(
 
 /** 重扫后清理会话中已经不存在的笔记引用，避免上下文指向旧文件。 */
 fn normalize_sessions_after_rescan(snapshot: &mut WorkspaceSnapshot, knowledge_base_id: &str) {
-    let note_ids: std::collections::HashSet<String> = snapshot
-        .notes
-        .iter()
-        .filter(|note| note.knowledge_base_id == knowledge_base_id)
-        .map(|note| note.id.clone())
-        .collect();
+    let note_ids: std::collections::HashSet<String> =
+        snapshot.notes.iter().map(|note| note.id.clone()).collect();
 
     for session in &mut snapshot.sessions {
-        // 只有绑定目标知识库的会话需要修正，其他会话上下文不能被重扫影响。
+        // 只有绑定目标知识库的会话需要修正；多知识库会话中的其他有效笔记引用必须保留。
         if !session
             .knowledge_base_ids
             .iter()
@@ -873,5 +1040,114 @@ fn normalize_sessions_after_rescan(snapshot: &mut WorkspaceSnapshot, knowledge_b
         session
             .pinned_note_ids
             .retain(|note_id| note_ids.contains(note_id));
+
+        if session
+            .pending_change
+            .as_ref()
+            .and_then(|change| change.note_id.as_ref())
+            .is_some_and(|note_id| !note_ids.contains(note_id))
+        {
+            session.pending_change = None;
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::domain::{AgentSession, KnowledgeBase, Note, ProposedChange};
+
+    /** 构造 commands 单元测试使用的最小知识库。 */
+    fn test_knowledge_base(id: &str) -> KnowledgeBase {
+        KnowledgeBase {
+            id: id.to_owned(),
+            name: format!("知识库 {id}"),
+            path: format!("/tmp/{id}"),
+            description: "测试知识库".to_owned(),
+            status: "ready".to_owned(),
+            note_count: 1,
+            updated_at: "刚刚".to_owned(),
+            is_default: id == "kb-a",
+            semantic_index_enabled: false,
+            scan_report: None,
+        }
+    }
+
+    /** 构造 commands 单元测试使用的最小笔记。 */
+    fn test_note(id: &str, knowledge_base_id: &str) -> Note {
+        Note {
+            id: id.to_owned(),
+            knowledge_base_id: knowledge_base_id.to_owned(),
+            title: format!("笔记 {id}"),
+            path: format!("{id}.md"),
+            content: format!("# 笔记 {id}"),
+            tags: Vec::new(),
+            updated_at: "刚刚".to_owned(),
+            backlinks: Vec::new(),
+            content_hash: storage::hash_content(&format!("# 笔记 {id}")),
+        }
+    }
+
+    /** 构造 commands 单元测试使用的多知识库会话。 */
+    fn test_session() -> AgentSession {
+        AgentSession {
+            id: "session-a".to_owned(),
+            title: "多知识库会话".to_owned(),
+            r#type: "knowledge-base".to_owned(),
+            knowledge_base_ids: vec!["kb-a".to_owned(), "kb-b".to_owned()],
+            active_note_id: Some("note-b".to_owned()),
+            pinned_note_ids: vec![
+                "note-a".to_owned(),
+                "note-b".to_owned(),
+                "missing-note".to_owned(),
+            ],
+            messages: Vec::new(),
+            pending_change: Some(ProposedChange {
+                id: "change-a".to_owned(),
+                knowledge_base_id: "kb-b".to_owned(),
+                note_id: Some("note-b".to_owned()),
+                r#type: "rewrite".to_owned(),
+                title: "改写 note-b".to_owned(),
+                target_path: "note-b.md".to_owned(),
+                original: "旧内容".to_owned(),
+                next: "新内容".to_owned(),
+                original_hash: storage::hash_content("旧内容"),
+                status: "pending".to_owned(),
+            }),
+            created_at: "刚刚".to_owned(),
+            updated_at: "刚刚".to_owned(),
+        }
+    }
+
+    /** 重扫单个知识库不能误删多知识库会话中仍然有效的其他知识库笔记引用。 */
+    #[test]
+    fn rescan_preserves_valid_references_from_other_scoped_knowledge_bases() {
+        let mut snapshot = WorkspaceSnapshot {
+            knowledge_bases: vec![test_knowledge_base("kb-a"), test_knowledge_base("kb-b")],
+            folders: Vec::new(),
+            notes: vec![test_note("note-a", "kb-a"), test_note("note-b", "kb-b")],
+            sessions: vec![test_session()],
+            active_knowledge_base_id: "kb-a".to_owned(),
+            active_note_id: "note-a".to_owned(),
+            active_session_id: "session-a".to_owned(),
+        };
+
+        normalize_sessions_after_rescan(&mut snapshot, "kb-a");
+
+        assert_eq!(
+            snapshot.sessions[0].active_note_id.as_deref(),
+            Some("note-b")
+        );
+        assert_eq!(
+            snapshot.sessions[0].pinned_note_ids,
+            vec!["note-a".to_owned(), "note-b".to_owned()]
+        );
+        assert_eq!(
+            snapshot.sessions[0]
+                .pending_change
+                .as_ref()
+                .and_then(|change| change.note_id.as_deref()),
+            Some("note-b")
+        );
     }
 }

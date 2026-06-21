@@ -1,6 +1,7 @@
 use crate::domain::{
-    AgentMessage, AgentSession, FolderEntry, KnowledgeBase, KnowledgeBaseSelection, Note,
-    ScanReport, WorkspaceSnapshot,
+    AgentMessage, AgentSession, FolderEntry, KnowledgeBase, KnowledgeBaseSelection,
+    ModelApiKeyStatus, ModelConfig, Note, RequestAuditLog, ScanReport, UserSettings,
+    WorkspaceSnapshot,
 };
 use rusqlite::{params, Connection};
 use sha2::{Digest, Sha256};
@@ -8,6 +9,7 @@ use std::collections::HashSet;
 use std::fs;
 use std::io::Write;
 use std::path::{Component, Path, PathBuf};
+use std::sync::{Mutex, OnceLock};
 use std::time::Duration;
 use tauri::{AppHandle, Manager};
 use tempfile::NamedTempFile;
@@ -31,6 +33,15 @@ const IGNORED_DIRECTORY_NAMES: &[&str] = &[
     ".cache",
 ];
 
+/** 用户设置表中的默认记录 key，首版只有一个本机用户配置。 */
+const USER_SETTINGS_KEY: &str = "default";
+
+/** 系统安全存储中的模型密钥引用，SQLite 只保存这个引用而不保存明文 key。 */
+pub const MODEL_KEY_REFERENCE: &str = "cici-note-openai-compatible-api-key";
+
+/** 当前桌面进程内的模型密钥缓存，用于避开部分 keychain 后端读写后短期不可见的问题。 */
+static MODEL_API_KEY_CACHE: OnceLock<Mutex<Option<String>>> = OnceLock::new();
+
 /** SQLite 中持久化的知识库授权记录，用于启动时重新扫描真实目录。 */
 struct StoredKnowledgeBase {
     id: String,
@@ -50,6 +61,21 @@ pub fn hash_content(content: &str) -> String {
 /** 生成本地唯一 ID，Rust 层用于新知识库、新笔记和工具调用记录。 */
 pub fn create_id(prefix: &str) -> String {
     format!("{prefix}-{}", Uuid::new_v4())
+}
+
+/** 返回用户设置默认值；模型默认关闭，直到用户显式保存 BYOK 配置。 */
+pub fn default_user_settings() -> UserSettings {
+    UserSettings {
+        model_config: ModelConfig {
+            provider: "openai-compatible".to_owned(),
+            api_base: "https://api.openai.com/v1".to_owned(),
+            model: "gpt-4o-mini".to_owned(),
+            key_reference: MODEL_KEY_REFERENCE.to_owned(),
+            enabled: false,
+        },
+        privacy_policy: "allow-selected-scope".to_owned(),
+        write_confirmation_required: true,
+    }
 }
 
 /** 根据知识库和相对路径生成稳定笔记 ID，避免重新扫描后会话引用全部失效。 */
@@ -152,6 +178,22 @@ pub fn open_database(app: &AppHandle) -> Result<Connection, String> {
               body
             );
 
+            CREATE TABLE IF NOT EXISTS agent_sessions (
+              id TEXT PRIMARY KEY,
+              type TEXT NOT NULL,
+              title TEXT NOT NULL,
+              active_note_id TEXT,
+              created_at TEXT NOT NULL,
+              updated_at TEXT NOT NULL,
+              payload_json TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS user_settings (
+              key TEXT PRIMARY KEY,
+              payload_json TEXT NOT NULL,
+              updated_at TEXT NOT NULL
+            );
+
             CREATE TABLE IF NOT EXISTS request_audit_logs (
               id TEXT PRIMARY KEY,
               kind TEXT NOT NULL,
@@ -161,8 +203,34 @@ pub fn open_database(app: &AppHandle) -> Result<Connection, String> {
             "#,
         )
         .map_err(|error| format!("无法初始化 SQLite schema：{error}"))?;
+    ensure_audit_log_columns(&connection)?;
 
     Ok(connection)
+}
+
+/** 为旧版审计表补齐 M3 需要的结构化列，避免已有用户数据阻塞启动。 */
+fn ensure_audit_log_columns(connection: &Connection) -> Result<(), String> {
+    let migration_columns = [
+        ("session_id", "TEXT"),
+        ("scope_summary", "TEXT NOT NULL DEFAULT ''"),
+        ("content_summary", "TEXT NOT NULL DEFAULT ''"),
+        ("tool_summary", "TEXT NOT NULL DEFAULT ''"),
+    ];
+
+    for (column_name, column_type) in migration_columns {
+        let sql = format!("ALTER TABLE request_audit_logs ADD COLUMN {column_name} {column_type}");
+
+        // SQLite 旧表已经有列时会返回 duplicate column name；这是幂等迁移的正常情况。
+        if let Err(error) = connection.execute(&sql, []) {
+            let message = error.to_string();
+
+            if !message.contains("duplicate column name") {
+                return Err(format!("无法迁移请求审计表：{error}"));
+            }
+        }
+    }
+
+    Ok(())
 }
 
 /** 将当前快照写入 SQLite FTS5 索引，供后续真实工具检索使用。 */
@@ -212,9 +280,473 @@ pub fn index_snapshot(app: &AppHandle, snapshot: &WorkspaceSnapshot) -> Result<(
             .map_err(|error| format!("无法写入 FTS 索引：{error}"))?;
     }
 
+    persist_sessions_in_transaction(&transaction, snapshot)?;
+
     transaction
         .commit()
         .map_err(|error| format!("无法提交索引事务：{error}"))
+}
+
+/** 在已有 SQLite 事务中持久化当前快照的完整会话列表。 */
+fn persist_sessions_in_transaction(
+    transaction: &rusqlite::Transaction<'_>,
+    snapshot: &WorkspaceSnapshot,
+) -> Result<(), String> {
+    transaction
+        .execute("DELETE FROM agent_sessions", [])
+        .map_err(|error| format!("无法清理会话表：{error}"))?;
+
+    for session in &snapshot.sessions {
+        let payload_json =
+            serde_json::to_string(session).map_err(|error| format!("无法序列化会话：{error}"))?;
+
+        transaction
+            .execute(
+                "INSERT OR REPLACE INTO agent_sessions
+                 (id, type, title, active_note_id, created_at, updated_at, payload_json)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                params![
+                    &session.id,
+                    &session.r#type,
+                    &session.title,
+                    session.active_note_id.as_deref(),
+                    &session.created_at,
+                    &session.updated_at,
+                    payload_json
+                ],
+            )
+            .map_err(|error| format!("无法持久化会话：{error}"))?;
+    }
+
+    Ok(())
+}
+
+/** 保存当前快照的完整会话列表，供前端会话操作和 Agent loop 后同步状态。 */
+pub fn save_sessions(app: &AppHandle, snapshot: &WorkspaceSnapshot) -> Result<(), String> {
+    let connection = open_database(app)?;
+    let transaction = connection
+        .unchecked_transaction()
+        .map_err(|error| format!("无法启动会话事务：{error}"))?;
+
+    persist_sessions_in_transaction(&transaction, snapshot)?;
+    transaction
+        .commit()
+        .map_err(|error| format!("无法提交会话事务：{error}"))
+}
+
+/** 保存单个会话，并返回已经写入快照的下一版工作台状态。 */
+pub fn save_session(
+    app: &AppHandle,
+    mut snapshot: WorkspaceSnapshot,
+    session: AgentSession,
+) -> Result<WorkspaceSnapshot, String> {
+    if let Some(index) = snapshot
+        .sessions
+        .iter()
+        .position(|existing_session| existing_session.id == session.id)
+    {
+        snapshot.sessions[index] = session.clone();
+    } else {
+        snapshot.sessions.insert(0, session.clone());
+    }
+
+    snapshot.active_session_id = session.id;
+    normalize_sessions_for_snapshot(&mut snapshot);
+    save_sessions(app, &snapshot)?;
+
+    Ok(snapshot)
+}
+
+/** 从 SQLite 读取并按当前知识库和笔记快照清理后的会话列表。 */
+pub fn load_sessions_for_snapshot(
+    app: &AppHandle,
+    snapshot: &WorkspaceSnapshot,
+) -> Result<Vec<AgentSession>, String> {
+    let connection = open_database(app)?;
+    let mut statement = connection
+        .prepare("SELECT payload_json FROM agent_sessions ORDER BY rowid DESC")
+        .map_err(|error| format!("无法准备会话读取：{error}"))?;
+    let rows = statement
+        .query_map([], |row| row.get::<_, String>(0))
+        .map_err(|error| format!("无法查询会话列表：{error}"))?;
+    let mut sessions = Vec::new();
+
+    for row in rows {
+        let payload_json = row.map_err(|error| format!("无法读取会话记录：{error}"))?;
+        let mut session: AgentSession = serde_json::from_str(&payload_json)
+            .map_err(|error| format!("无法解析会话记录：{error}"))?;
+
+        if normalize_session_for_snapshot(&mut session, snapshot) {
+            sessions.push(session);
+        }
+    }
+
+    Ok(sessions)
+}
+
+/** 更新会话知识库范围，当前激活知识库由后端强制保留。 */
+pub fn update_session_scope(
+    app: &AppHandle,
+    mut snapshot: WorkspaceSnapshot,
+    session_id: &str,
+    requested_knowledge_base_ids: Vec<String>,
+    active_knowledge_base_id: &str,
+) -> Result<WorkspaceSnapshot, String> {
+    let active_id = if snapshot
+        .knowledge_bases
+        .iter()
+        .any(|knowledge_base| knowledge_base.id == active_knowledge_base_id)
+    {
+        active_knowledge_base_id
+    } else {
+        snapshot.active_knowledge_base_id.as_str()
+    };
+    let next_ids = ordered_valid_scope_ids(&snapshot, &requested_knowledge_base_ids, active_id);
+    let session = snapshot
+        .sessions
+        .iter_mut()
+        .find(|session| session.id == session_id)
+        .ok_or_else(|| "找不到要更新范围的会话".to_owned())?;
+
+    session.knowledge_base_ids = next_ids;
+    session.updated_at = "刚刚".to_owned();
+    normalize_sessions_for_snapshot(&mut snapshot);
+    save_sessions(app, &snapshot)?;
+
+    Ok(snapshot)
+}
+
+/** 恢复历史会话绑定的知识库和笔记上下文。 */
+pub fn restore_session_context(
+    app: &AppHandle,
+    mut snapshot: WorkspaceSnapshot,
+    session_id: &str,
+) -> Result<WorkspaceSnapshot, String> {
+    normalize_sessions_for_snapshot(&mut snapshot);
+    let session = snapshot
+        .sessions
+        .iter()
+        .find(|session| session.id == session_id)
+        .cloned()
+        .ok_or_else(|| "找不到要恢复的会话".to_owned())?;
+    let next_knowledge_base_id = session
+        .knowledge_base_ids
+        .iter()
+        .find(|knowledge_base_id| {
+            snapshot
+                .knowledge_bases
+                .iter()
+                .any(|knowledge_base| &knowledge_base.id == *knowledge_base_id)
+        })
+        .cloned()
+        .or_else(|| {
+            snapshot
+                .knowledge_bases
+                .first()
+                .map(|knowledge_base| knowledge_base.id.clone())
+        })
+        .unwrap_or_default();
+    let next_note_id = session
+        .active_note_id
+        .as_ref()
+        .filter(|note_id| snapshot.notes.iter().any(|note| &note.id == *note_id))
+        .cloned()
+        .or_else(|| {
+            snapshot
+                .notes
+                .iter()
+                .find(|note| note.knowledge_base_id == next_knowledge_base_id)
+                .map(|note| note.id.clone())
+        })
+        .unwrap_or_default();
+
+    snapshot.active_session_id = session.id;
+    snapshot.active_knowledge_base_id = next_knowledge_base_id;
+    snapshot.active_note_id = next_note_id;
+    save_sessions(app, &snapshot)?;
+
+    Ok(snapshot)
+}
+
+/** 按当前快照清理所有会话，删除已经失去有效知识库范围的会话。 */
+pub fn normalize_sessions_for_snapshot(snapshot: &mut WorkspaceSnapshot) {
+    let snapshot_view = WorkspaceSnapshot {
+        knowledge_bases: snapshot.knowledge_bases.clone(),
+        folders: snapshot.folders.clone(),
+        notes: snapshot.notes.clone(),
+        sessions: Vec::new(),
+        active_knowledge_base_id: snapshot.active_knowledge_base_id.clone(),
+        active_note_id: snapshot.active_note_id.clone(),
+        active_session_id: snapshot.active_session_id.clone(),
+    };
+
+    snapshot
+        .sessions
+        .retain_mut(|session| normalize_session_for_snapshot(session, &snapshot_view));
+}
+
+/** 清理单个会话引用，返回 false 表示该会话已没有可访问知识库。 */
+pub fn normalize_session_for_snapshot(
+    session: &mut AgentSession,
+    snapshot: &WorkspaceSnapshot,
+) -> bool {
+    let knowledge_base_ids: HashSet<&str> = snapshot
+        .knowledge_bases
+        .iter()
+        .map(|knowledge_base| knowledge_base.id.as_str())
+        .collect();
+    let note_ids: HashSet<&str> = snapshot.notes.iter().map(|note| note.id.as_str()).collect();
+
+    session
+        .knowledge_base_ids
+        .retain(|knowledge_base_id| knowledge_base_ids.contains(knowledge_base_id.as_str()));
+    session
+        .pinned_note_ids
+        .retain(|note_id| note_ids.contains(note_id.as_str()));
+
+    if session
+        .active_note_id
+        .as_ref()
+        .is_some_and(|note_id| !note_ids.contains(note_id.as_str()))
+    {
+        session.active_note_id = None;
+    }
+
+    if session
+        .pending_change
+        .as_ref()
+        .and_then(|change| change.note_id.as_ref())
+        .is_some_and(|note_id| !note_ids.contains(note_id.as_str()))
+    {
+        session.pending_change = None;
+    }
+
+    !session.knowledge_base_ids.is_empty()
+}
+
+/** 根据知识库列表稳定排序范围，并强制保留当前激活知识库。 */
+fn ordered_valid_scope_ids(
+    snapshot: &WorkspaceSnapshot,
+    requested_knowledge_base_ids: &[String],
+    active_knowledge_base_id: &str,
+) -> Vec<String> {
+    let mut selected_ids: HashSet<&str> = requested_knowledge_base_ids
+        .iter()
+        .map(String::as_str)
+        .collect();
+
+    selected_ids.insert(active_knowledge_base_id);
+
+    snapshot
+        .knowledge_bases
+        .iter()
+        .filter(|knowledge_base| selected_ids.contains(knowledge_base.id.as_str()))
+        .map(|knowledge_base| knowledge_base.id.clone())
+        .collect()
+}
+
+/** 从 SQLite 读取用户设置，缺失时返回默认未启用模型配置。 */
+pub fn load_user_settings(app: &AppHandle) -> Result<UserSettings, String> {
+    let connection = open_database(app)?;
+    let payload_json = connection
+        .query_row(
+            "SELECT payload_json FROM user_settings WHERE key = ?1",
+            params![USER_SETTINGS_KEY],
+            |row| row.get::<_, String>(0),
+        )
+        .ok();
+
+    match payload_json {
+        Some(payload_json) => serde_json::from_str(&payload_json)
+            .map_err(|error| format!("无法解析用户设置：{error}")),
+        None => Ok(default_user_settings()),
+    }
+}
+
+/** 保存用户模型和隐私设置；密钥本身由单独命令写入系统安全存储。 */
+pub fn save_user_settings(app: &AppHandle, settings: &UserSettings) -> Result<(), String> {
+    let connection = open_database(app)?;
+    let payload_json =
+        serde_json::to_string(settings).map_err(|error| format!("无法序列化用户设置：{error}"))?;
+
+    connection
+        .execute(
+            "INSERT OR REPLACE INTO user_settings (key, payload_json, updated_at) VALUES (?1, ?2, ?3)",
+            params![USER_SETTINGS_KEY, payload_json, "刚刚"],
+        )
+        .map_err(|error| format!("无法保存用户设置：{error}"))?;
+
+    Ok(())
+}
+
+/** 把 BYOK 模型密钥保存到系统安全存储，避免明文进入 SQLite。 */
+pub fn save_model_api_key(api_key: &str) -> Result<ModelApiKeyStatus, String> {
+    let entry = keyring::Entry::new("Cici Note", MODEL_KEY_REFERENCE)
+        .map_err(|error| format!("无法打开系统安全存储：{error}"))?;
+
+    entry
+        .set_password(api_key)
+        .map_err(|error| format!("无法保存模型密钥：{error}"))?;
+
+    let saved_api_key = entry
+        .get_password()
+        .map_err(|error| format!("模型密钥已提交但读回校验失败：{error}"))?;
+
+    // 读回校验只比较是否为空，避免在错误信息或日志中暴露完整密钥内容。
+    if saved_api_key.trim().is_empty() {
+        return Err("模型密钥已提交但系统安全存储返回空值。".to_owned());
+    }
+
+    store_model_api_key_in_cache(&saved_api_key)?;
+
+    Ok(ModelApiKeyStatus {
+        key_reference: MODEL_KEY_REFERENCE.to_owned(),
+        configured: true,
+        message: "模型密钥已保存、读回校验通过，并已载入当前桌面进程。".to_owned(),
+    })
+}
+
+/** 从系统安全存储读取 BYOK 模型密钥；缺失时返回 None。 */
+pub fn load_model_api_key() -> Result<Option<String>, String> {
+    if let Some(api_key) = load_model_api_key_from_cache()? {
+        return Ok(Some(api_key));
+    }
+
+    let entry = keyring::Entry::new("Cici Note", MODEL_KEY_REFERENCE)
+        .map_err(|error| format!("无法打开系统安全存储：{error}"))?;
+
+    match entry.get_password() {
+        Ok(api_key) if !api_key.trim().is_empty() => {
+            store_model_api_key_in_cache(&api_key)?;
+            Ok(Some(api_key))
+        }
+        Ok(_) => Ok(None),
+        Err(error) => {
+            let message = error.to_string();
+
+            // 不同平台的 keyring 缺失错误文案不同，首版只把缺失视为未配置，其他错误继续暴露。
+            if is_missing_keyring_entry_error(&message) {
+                Ok(None)
+            } else {
+                Err(format!("无法读取模型密钥：{error}"))
+            }
+        }
+    }
+}
+
+/** 查询模型密钥是否已经可读取；不会返回明文密钥。 */
+pub fn load_model_api_key_status() -> Result<ModelApiKeyStatus, String> {
+    let configured = load_model_api_key()?.is_some();
+    let message = if configured {
+        "系统安全存储中已找到模型密钥。"
+    } else {
+        "系统安全存储中尚未找到模型密钥。"
+    };
+
+    Ok(ModelApiKeyStatus {
+        key_reference: MODEL_KEY_REFERENCE.to_owned(),
+        configured,
+        message: message.to_owned(),
+    })
+}
+
+/** 把已验证密钥放入进程内缓存，避免同一桌面会话内反复访问 keychain。 */
+fn store_model_api_key_in_cache(api_key: &str) -> Result<(), String> {
+    let cache = MODEL_API_KEY_CACHE.get_or_init(|| Mutex::new(None));
+    let mut cached_api_key = cache
+        .lock()
+        .map_err(|_| "模型密钥缓存已损坏。".to_owned())?;
+
+    // todo: 后续替换为稳定的系统级安全存储诊断后，可以去掉这个仅进程内的兜底缓存。
+    *cached_api_key = Some(api_key.to_owned());
+
+    Ok(())
+}
+
+/** 从进程内缓存读取模型密钥；不命中时再访问系统安全存储。 */
+fn load_model_api_key_from_cache() -> Result<Option<String>, String> {
+    let cache = MODEL_API_KEY_CACHE.get_or_init(|| Mutex::new(None));
+    let cached_api_key = cache
+        .lock()
+        .map_err(|_| "模型密钥缓存已损坏。".to_owned())?;
+
+    Ok(cached_api_key.clone())
+}
+
+/** 识别不同系统 keyring 后端返回的“条目不存在”错误文案。 */
+fn is_missing_keyring_entry_error(message: &str) -> bool {
+    let normalized_message = message.to_lowercase();
+
+    normalized_message.contains("no entry found")
+        || normalized_message.contains("no matching entry")
+        || normalized_message.contains("not found")
+        || normalized_message.contains("could not be found")
+}
+
+/** 追加一次模型请求或本地工具执行审计摘要。 */
+pub fn append_request_audit_log(app: &AppHandle, log: &RequestAuditLog) -> Result<(), String> {
+    let connection = open_database(app)?;
+    let summary = format!(
+        "{} | {} | {}",
+        log.scope_summary, log.content_summary, log.tool_summary
+    );
+
+    connection
+        .execute(
+            "INSERT INTO request_audit_logs
+             (id, kind, summary, session_id, scope_summary, content_summary, tool_summary, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            params![
+                &log.id,
+                &log.kind,
+                summary,
+                log.session_id.as_deref(),
+                &log.scope_summary,
+                &log.content_summary,
+                &log.tool_summary,
+                &log.created_at
+            ],
+        )
+        .map_err(|error| format!("无法写入请求审计日志：{error}"))?;
+
+    Ok(())
+}
+
+/** 读取最近的请求审计日志，用于设置页展示模型和工具边界。 */
+pub fn load_request_audit_logs(
+    app: &AppHandle,
+    limit: usize,
+) -> Result<Vec<RequestAuditLog>, String> {
+    let connection = open_database(app)?;
+    let bounded_limit = limit.clamp(1, 50);
+    let mut statement = connection
+        .prepare(
+            "SELECT id, kind, session_id, scope_summary, content_summary, tool_summary, created_at
+             FROM request_audit_logs
+             ORDER BY rowid DESC
+             LIMIT ?1",
+        )
+        .map_err(|error| format!("无法准备请求审计读取：{error}"))?;
+    let rows = statement
+        .query_map(params![bounded_limit as i64], |row| {
+            Ok(RequestAuditLog {
+                id: row.get(0)?,
+                kind: row.get(1)?,
+                session_id: row.get(2)?,
+                scope_summary: row.get(3)?,
+                content_summary: row.get(4)?,
+                tool_summary: row.get(5)?,
+                created_at: row.get(6)?,
+            })
+        })
+        .map_err(|error| format!("无法查询请求审计日志：{error}"))?;
+    let mut logs = Vec::new();
+
+    for row in rows {
+        logs.push(row.map_err(|error| format!("无法解析请求审计日志：{error}"))?);
+    }
+
+    Ok(logs)
 }
 
 /** 从 SQLite 恢复已连接知识库，并重新扫描 Markdown 文件生成可用工作台快照。 */
@@ -294,24 +826,45 @@ pub fn load_workspace_snapshot(app: &AppHandle) -> Result<WorkspaceSnapshot, Str
         .or_else(|| notes.first())
         .map(|note| note.id.clone())
         .unwrap_or_default();
-    let sessions = knowledge_bases
-        .first()
-        .map(|knowledge_base| vec![create_default_agent_session(knowledge_base)])
-        .unwrap_or_default();
-    let active_session_id = sessions
-        .first()
-        .map(|session| session.id.clone())
-        .unwrap_or_default();
-
-    Ok(WorkspaceSnapshot {
+    let mut snapshot = WorkspaceSnapshot {
         knowledge_bases,
         folders,
         notes,
-        sessions,
+        sessions: Vec::new(),
         active_knowledge_base_id,
         active_note_id,
-        active_session_id,
-    })
+        active_session_id: String::new(),
+    };
+    snapshot.sessions = load_sessions_for_snapshot(app, &snapshot)?;
+
+    if snapshot.sessions.is_empty() {
+        snapshot.sessions = snapshot
+            .knowledge_bases
+            .first()
+            .map(|knowledge_base| vec![create_default_agent_session(knowledge_base)])
+            .unwrap_or_default();
+    }
+
+    let restored_session = snapshot.sessions.first().cloned();
+
+    if let Some(session) = restored_session {
+        snapshot.active_session_id = session.id;
+        snapshot.active_knowledge_base_id = session
+            .knowledge_base_ids
+            .first()
+            .cloned()
+            .unwrap_or_else(|| snapshot.active_knowledge_base_id.clone());
+        snapshot.active_note_id = session.active_note_id.unwrap_or_else(|| {
+            snapshot
+                .notes
+                .iter()
+                .find(|note| note.knowledge_base_id == snapshot.active_knowledge_base_id)
+                .map(|note| note.id.clone())
+                .unwrap_or_default()
+        });
+    }
+
+    Ok(snapshot)
 }
 
 /** 为恢复或新增知识库创建默认 Agent 会话，绑定单个知识库作为工具范围。 */
@@ -1108,8 +1661,9 @@ mod tests {
     use super::trash_markdown_file_with;
     use super::{
         atomic_write_markdown, create_blank_markdown_file, create_folder, create_id,
-        create_stable_note_id, hash_content, rename_markdown_file,
-        resolve_existing_file_inside_root, resolve_inside_root, scan_markdown_directory,
+        create_stable_note_id, hash_content, is_missing_keyring_entry_error,
+        load_model_api_key_from_cache, rename_markdown_file, resolve_existing_file_inside_root,
+        resolve_inside_root, scan_markdown_directory, store_model_api_key_in_cache,
         trash_markdown_file, validate_folder_name, validate_markdown_file_name,
         validate_new_markdown_file_name,
     };
@@ -1121,6 +1675,31 @@ mod tests {
     #[test]
     fn hash_changes_when_content_changes() {
         assert_ne!(hash_content("a"), hash_content("b"));
+    }
+
+    /** keyring 后端的缺失条目错误应被识别为未配置，而不是模型读取故障。 */
+    #[test]
+    fn keyring_missing_entry_errors_are_detected() {
+        assert!(is_missing_keyring_entry_error(
+            "No matching entry found in secure storage"
+        ));
+        assert!(is_missing_keyring_entry_error(
+            "The specified item could not be found in the keychain"
+        ));
+        assert!(!is_missing_keyring_entry_error(
+            "User interaction is not allowed"
+        ));
+    }
+
+    /** 读回校验后的密钥会进入进程缓存，供同一桌面会话内的 Agent turn 复用。 */
+    #[test]
+    fn model_api_key_cache_round_trips_inside_process() {
+        store_model_api_key_in_cache("test-key-from-cache").unwrap();
+
+        assert_eq!(
+            load_model_api_key_from_cache().unwrap(),
+            Some("test-key-from-cache".to_owned())
+        );
     }
 
     /** 路径穿越必须被阻止，防止 Agent 写出知识库根目录。 */

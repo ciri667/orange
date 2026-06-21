@@ -1,6 +1,7 @@
 mod agent;
 mod commands;
 mod domain;
+mod runtime;
 mod storage;
 
 /** 桌面端应用入口，注册本地文件、索引、Agent loop 和写入确认命令。 */
@@ -11,6 +12,15 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             commands::load_workspace_state,
             commands::select_knowledge_base,
+            commands::load_sessions,
+            commands::save_session,
+            commands::update_session_scope,
+            commands::restore_session_context,
+            commands::load_user_settings,
+            commands::save_user_settings,
+            commands::save_model_api_key,
+            commands::load_model_api_key_status,
+            commands::load_request_audit_logs,
             commands::scan_knowledge_base,
             commands::rescan_knowledge_base,
             commands::create_note,
