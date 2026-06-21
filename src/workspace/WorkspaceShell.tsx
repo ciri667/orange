@@ -36,6 +36,11 @@ import type {
 } from "../shared/types";
 import { TopBar } from "./TopBar";
 
+/** 将未知异常统一转换为可展示文案，避免启动错误页渲染空对象。 */
+function formatErrorMessage(error: unknown) {
+  return error instanceof Error ? error.message : String(error);
+}
+
 /** 根据会话绑定范围生成标题，正式版本中可由用户重命名。 */
 function buildSessionTitle(type: AgentSessionType, knowledgeBase: KnowledgeBase, note?: Note) {
   if (type === "note" && note) {
@@ -99,6 +104,10 @@ function orderKnowledgeBaseIds(selectedIds: string[], knowledgeBases: KnowledgeB
 /** 正式工作台根组件，集中编排知识库、编辑器、Agent loop 和设置状态。 */
 export function WorkspaceShell() {
   const [snapshot, setSnapshot] = useState<WorkspaceSnapshot | null>(null);
+  /** 首屏初始化是否仍在进行，用于区分加载中和加载失败。 */
+  const [isBooting, setIsBooting] = useState(true);
+  /** 首屏初始化失败原因，失败后展示重试入口而不是停留在 loading。 */
+  const [bootError, setBootError] = useState("");
   const [searchTerm, setSearchTerm] = useState("");
   const [agentPrompt, setAgentPrompt] = useState("");
   const [collapsedFolderPaths, setCollapsedFolderPaths] = useState<Set<string>>(new Set());
@@ -123,26 +132,63 @@ export function WorkspaceShell() {
   useEffect(() => {
     let isMounted = true;
 
-    // 加载工作台状态时优先走 Tauri 本地层，浏览器开发态自动使用 mock 快照。
-    loadWorkspaceState().then((nextSnapshot) => {
-      if (isMounted) {
-        setSnapshot(nextSnapshot);
-        setEditingBaseHashes(buildNoteHashMap(nextSnapshot.notes));
-      }
-    });
+    void loadInitialData(() => isMounted);
 
     return () => {
       isMounted = false;
     };
   }, []);
 
-  if (!snapshot) {
+  /** 加载首屏必需的工作台快照，失败时进入可重试错误态。 */
+  async function loadInitialData(shouldCommit: () => boolean = () => true) {
+    setIsBooting(true);
+    setBootError("");
+    setNotice("");
+
+    try {
+      // 加载工作台状态时优先走 Tauri 本地层，浏览器开发态自动使用 mock 快照。
+      const nextSnapshot = await loadWorkspaceState();
+
+      if (shouldCommit()) {
+        setSnapshot(nextSnapshot);
+        setEditingBaseHashes(buildNoteHashMap(nextSnapshot.notes));
+      }
+    } catch (error) {
+      if (shouldCommit()) {
+        setSnapshot(null);
+        setBootError(formatErrorMessage(error));
+      }
+    } finally {
+      if (shouldCommit()) {
+        setIsBooting(false);
+      }
+    }
+  }
+
+  if (isBooting) {
     return (
       <main className="loading-shell">
         <div className="brand-mark">
           <img className="brand-logo" src="/cici-note-logo.svg" alt="" />
         </div>
         <p>正在加载本地知识库工作台...</p>
+      </main>
+    );
+  }
+
+  if (!snapshot) {
+    const errorMessage = bootError || "工作台初始化未完成，请重试。";
+
+    return (
+      <main className="loading-shell boot-error-shell">
+        <div className="brand-mark">
+          <img className="brand-logo" src="/cici-note-logo.svg" alt="" />
+        </div>
+        <p>本地知识库工作台加载失败</p>
+        <p className="boot-error-message">{errorMessage}</p>
+        <button className="primary-button compact" type="button" onClick={() => void loadInitialData()}>
+          重试
+        </button>
       </main>
     );
   }

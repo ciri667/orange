@@ -8,6 +8,7 @@ use std::collections::HashSet;
 use std::fs;
 use std::io::Write;
 use std::path::{Component, Path, PathBuf};
+use std::time::Duration;
 use tauri::{AppHandle, Manager};
 use tempfile::NamedTempFile;
 use uuid::Uuid;
@@ -108,6 +109,11 @@ fn database_path(app: &AppHandle) -> Result<PathBuf, String> {
 pub fn open_database(app: &AppHandle) -> Result<Connection, String> {
     let connection = Connection::open(database_path(app)?)
         .map_err(|error| format!("无法打开 SQLite：{error}"))?;
+
+    // 启动阶段多个命令可能同时打开 SQLite；短暂等待可降低索引写入导致的偶发锁冲突。
+    connection
+        .busy_timeout(Duration::from_secs(5))
+        .map_err(|error| format!("无法配置 SQLite 忙等待：{error}"))?;
 
     connection
         .execute_batch(

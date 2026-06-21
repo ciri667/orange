@@ -79,6 +79,25 @@ textarea:disabled {
   text-align: center;
 }
 
+.boot-error-shell {
+  align-content: center;
+  padding: 48px;
+  text-align: center;
+}
+
+.boot-error-message {
+  max-width: 680px;
+  margin: 0;
+  border: 1px solid #f2b8a8;
+  border-radius: 7px;
+  padding: 10px 12px;
+  background: var(--danger-soft);
+  color: var(--danger);
+  font-size: 13px;
+  line-height: 1.55;
+  overflow-wrap: anywhere;
+}
+
 .empty-shell h1 {
   max-width: 680px;
   margin: 10px 0 0;

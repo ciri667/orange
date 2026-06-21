@@ -15,16 +15,22 @@ use tauri_plugin_dialog::DialogExt;
 #[tauri::command]
 pub async fn load_workspace_state(app: AppHandle) -> Result<WorkspaceSnapshot, String> {
     let load_app = app.clone();
+    let index_app = app.clone();
 
-    run_blocking("加载工作台状态", move || {
-        let snapshot = storage::load_workspace_snapshot(&load_app)?;
-
-        // 启动恢复后立即刷新 FTS，确保外部编辑器改过的 Markdown 能被本轮 Agent 检索命中。
-        storage::index_snapshot(&load_app, &snapshot)?;
-
-        Ok(snapshot)
+    let snapshot = run_blocking("加载工作台状态", move || {
+        storage::load_workspace_snapshot(&load_app)
     })
-    .await
+    .await?;
+    let index_snapshot = snapshot.clone();
+
+    // 启动索引只影响后续检索，不阻塞首屏进入；失败时写 stderr 供桌面日志排查。
+    tauri::async_runtime::spawn(async move {
+        if let Err(error) = index_snapshot_in_background(index_app, &index_snapshot).await {
+            eprintln!("启动刷新本地检索索引失败：{error}");
+        }
+    });
+
+    Ok(snapshot)
 }
 
 /** 打开系统目录选择器，让用户连接一个本地 Markdown 知识库。 */
