@@ -95,6 +95,33 @@ export async function saveSession(snapshot: WorkspaceSnapshot, session: AgentSes
   return invoke<WorkspaceSnapshot>("save_session", { payload: { snapshot, session } });
 }
 
+/** 逻辑删除 Agent 会话；持久化记录保留 deletedAt，但普通会话列表不再展示。 */
+export async function deleteSession(snapshot: WorkspaceSnapshot, sessionId: string): Promise<WorkspaceSnapshot> {
+  if (!isTauriRuntime()) {
+    const nextSnapshot = cloneWorkspaceSnapshot(snapshot);
+    const deletedSession = nextSnapshot.sessions.find((session) => session.id === sessionId);
+
+    if (!deletedSession) {
+      return normalizeMockSnapshotSessions(nextSnapshot);
+    }
+
+    deletedSession.deletedAt = "刚刚";
+    deletedSession.updatedAt = "刚刚";
+    nextSnapshot.sessions = nextSnapshot.sessions.filter((session) => !session.deletedAt);
+
+    if (!nextSnapshot.sessions.some((session) => session.id === nextSnapshot.activeSessionId)) {
+      nextSnapshot.activeSessionId = nextSnapshot.sessions[0]?.id ?? "";
+    }
+
+    ensureMockVisibleSession(nextSnapshot);
+    restoreMockActiveSessionContext(nextSnapshot);
+
+    return normalizeMockSnapshotSessions(nextSnapshot);
+  }
+
+  return invoke<WorkspaceSnapshot>("delete_session", { payload: { snapshot, sessionId } });
+}
+
 /** 更新当前会话工具范围；桌面端会强制保留激活知识库。 */
 export async function updateSessionScope(
   snapshot: WorkspaceSnapshot,
@@ -778,6 +805,7 @@ function normalizeMockSnapshotSessions(snapshot: WorkspaceSnapshot): WorkspaceSn
   const noteIds = new Set(snapshot.notes.map((note) => note.id));
 
   snapshot.sessions = snapshot.sessions
+    .filter((session) => !session.deletedAt)
     .map((session) => ({
       ...session,
       knowledgeBaseIds: orderValidKnowledgeBaseIds(
@@ -796,6 +824,61 @@ function normalizeMockSnapshotSessions(snapshot: WorkspaceSnapshot): WorkspaceSn
   }
 
   return snapshot;
+}
+
+/** 浏览器 fallback 删除最后一个会话时创建默认知识库会话，避免 Agent 面板失去 activeSession。 */
+function ensureMockVisibleSession(snapshot: WorkspaceSnapshot) {
+  if (snapshot.sessions.length || !snapshot.knowledgeBases.length) {
+    return;
+  }
+
+  const knowledgeBase =
+    snapshot.knowledgeBases.find((item) => item.id === snapshot.activeKnowledgeBaseId) ?? snapshot.knowledgeBases[0];
+  const title = `${knowledgeBase.name}问答助手`;
+  const session: AgentSession = {
+    id: createLocalId("session-knowledge-base"),
+    title,
+    type: "knowledge-base",
+    knowledgeBaseIds: [knowledgeBase.id],
+    pinnedNoteIds: [],
+    messages: [
+      {
+        id: createLocalId("assistant-session"),
+        role: "assistant",
+        action: "find",
+        content: `已开启「${title}」。检索工具默认只允许访问「${knowledgeBase.name}」。`,
+        toolCalls: [],
+      },
+    ],
+    createdAt: "刚刚",
+    updatedAt: "刚刚",
+  };
+
+  snapshot.sessions = [session];
+  snapshot.activeSessionId = session.id;
+}
+
+/** 浏览器 fallback 删除当前会话后同步恢复新 activeSession 绑定的知识库和笔记。 */
+function restoreMockActiveSessionContext(snapshot: WorkspaceSnapshot) {
+  const session = snapshot.sessions.find((item) => item.id === snapshot.activeSessionId);
+
+  if (!session) {
+    return;
+  }
+
+  const nextKnowledgeBaseId =
+    session.knowledgeBaseIds.find((knowledgeBaseId) =>
+      snapshot.knowledgeBases.some((knowledgeBase) => knowledgeBase.id === knowledgeBaseId),
+    ) ??
+    snapshot.knowledgeBases[0]?.id ??
+    "";
+  const nextNoteId =
+    session.activeNoteId && snapshot.notes.some((note) => note.id === session.activeNoteId)
+      ? session.activeNoteId
+      : snapshot.notes.find((note) => note.knowledgeBaseId === nextKnowledgeBaseId)?.id ?? "";
+
+  snapshot.activeKnowledgeBaseId = nextKnowledgeBaseId;
+  snapshot.activeNoteId = nextNoteId;
 }
 
 /** 按知识库列表顺序整理范围 ID，避免 UI 多选顺序随点击行为抖动。 */

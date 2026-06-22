@@ -1,10 +1,11 @@
 use crate::domain::{
     AgentSession, AgentTurnPayload, AgentTurnResult, ChangePayload, CreateFolderPayload,
-    CreateNotePayload, DeleteNotePayload, FolderEntry, KnowledgeBaseSelection, LoadSessionsPayload,
-    ModelApiKeyStatus, RemoveKnowledgeBasePayload, RenameNotePayload, RequestAuditLog,
-    RescanKnowledgeBasePayload, RestoreSessionContextPayload, SaveModelApiKeyPayload,
-    SaveNoteContentPayload, SaveSessionPayload, SaveUserSettingsPayload, ScanKnowledgeBasePayload,
-    ScanReport, UpdateSessionScopePayload, UserSettings, WorkspaceSnapshot,
+    CreateNotePayload, DeleteNotePayload, DeleteSessionPayload, FolderEntry,
+    KnowledgeBaseSelection, LoadSessionsPayload, ModelApiKeyStatus, RemoveKnowledgeBasePayload,
+    RenameNotePayload, RequestAuditLog, RescanKnowledgeBasePayload, RestoreSessionContextPayload,
+    SaveModelApiKeyPayload, SaveNoteContentPayload, SaveSessionPayload, SaveUserSettingsPayload,
+    ScanKnowledgeBasePayload, ScanReport, UpdateSessionScopePayload, UserSettings,
+    WorkspaceSnapshot,
 };
 use crate::runtime;
 use crate::storage;
@@ -55,6 +56,18 @@ pub async fn save_session(
 ) -> Result<WorkspaceSnapshot, String> {
     run_blocking("保存 Agent 会话", move || {
         storage::save_session(&app, payload.snapshot, payload.session)
+    })
+    .await
+}
+
+/** 逻辑删除单个 Agent 会话；记录保留在 SQLite payload 中但不再进入普通会话列表。 */
+#[tauri::command]
+pub async fn delete_session(
+    app: AppHandle,
+    payload: DeleteSessionPayload,
+) -> Result<WorkspaceSnapshot, String> {
+    run_blocking("删除 Agent 会话", move || {
+        storage::delete_session(&app, payload.snapshot, &payload.session_id)
     })
     .await
 }
@@ -1116,6 +1129,7 @@ mod tests {
             }),
             created_at: "刚刚".to_owned(),
             updated_at: "刚刚".to_owned(),
+            deleted_at: None,
         }
     }
 

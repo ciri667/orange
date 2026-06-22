@@ -738,6 +738,7 @@ mod tests {
                 pending_change: None,
                 created_at: "刚刚".to_owned(),
                 updated_at: "刚刚".to_owned(),
+                deleted_at: None,
             }],
             active_knowledge_base_id: "kb-a".to_owned(),
             active_note_id: "note-a".to_owned(),

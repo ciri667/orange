@@ -15,6 +15,7 @@ pub fn run() {
             commands::select_knowledge_base,
             commands::load_sessions,
             commands::save_session,
+            commands::delete_session,
             commands::update_session_scope,
             commands::restore_session_context,
             commands::load_user_settings,

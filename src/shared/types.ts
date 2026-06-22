@@ -131,6 +131,8 @@ export interface AgentSession {
   pendingChange?: ProposedChange;
   createdAt: string;
   updatedAt: string;
+  /** 逻辑删除时间；有值的会话只保留在持久化记录中，不再进入普通会话列表。 */
+  deletedAt?: string;
 }
 
 /** 云端模型配置只保存 key 引用，不在普通 SQLite payload 中保存明文密钥。 */

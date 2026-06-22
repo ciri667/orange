@@ -287,35 +287,84 @@ pub fn index_snapshot(app: &AppHandle, snapshot: &WorkspaceSnapshot) -> Result<(
         .map_err(|error| format!("无法提交索引事务：{error}"))
 }
 
-/** 在已有 SQLite 事务中持久化当前快照的完整会话列表。 */
+/** 在已有 SQLite 事务中读取已逻辑删除会话，供后续保存保留历史 payload。 */
+fn load_deleted_sessions_in_transaction(
+    transaction: &rusqlite::Transaction<'_>,
+) -> Result<Vec<AgentSession>, String> {
+    let mut statement = transaction
+        .prepare("SELECT payload_json FROM agent_sessions ORDER BY rowid")
+        .map_err(|error| format!("无法准备已删除会话读取：{error}"))?;
+    let rows = statement
+        .query_map([], |row| row.get::<_, String>(0))
+        .map_err(|error| format!("无法查询已删除会话：{error}"))?;
+    let mut sessions = Vec::new();
+
+    for row in rows {
+        let payload_json = row.map_err(|error| format!("无法读取已删除会话记录：{error}"))?;
+        let session: AgentSession = serde_json::from_str(&payload_json)
+            .map_err(|error| format!("无法解析已删除会话记录：{error}"))?;
+
+        if session.deleted_at.is_some() {
+            sessions.push(session);
+        }
+    }
+
+    Ok(sessions)
+}
+
+/** 在已有 SQLite 事务中写入单条会话记录，payload_json 保留完整上下文。 */
+fn persist_session_in_transaction(
+    transaction: &rusqlite::Transaction<'_>,
+    session: &AgentSession,
+) -> Result<(), String> {
+    let payload_json =
+        serde_json::to_string(session).map_err(|error| format!("无法序列化会话：{error}"))?;
+
+    transaction
+        .execute(
+            "INSERT OR REPLACE INTO agent_sessions
+             (id, type, title, active_note_id, created_at, updated_at, payload_json)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            params![
+                &session.id,
+                &session.r#type,
+                &session.title,
+                session.active_note_id.as_deref(),
+                &session.created_at,
+                &session.updated_at,
+                payload_json
+            ],
+        )
+        .map_err(|error| format!("无法持久化会话：{error}"))?;
+
+    Ok(())
+}
+
+/** 在已有 SQLite 事务中持久化当前快照的完整可见会话列表，同时保留逻辑删除记录。 */
 fn persist_sessions_in_transaction(
     transaction: &rusqlite::Transaction<'_>,
     snapshot: &WorkspaceSnapshot,
 ) -> Result<(), String> {
+    let deleted_sessions = load_deleted_sessions_in_transaction(transaction)?;
+    let snapshot_session_ids: HashSet<&str> = snapshot
+        .sessions
+        .iter()
+        .map(|session| session.id.as_str())
+        .collect();
+
     transaction
         .execute("DELETE FROM agent_sessions", [])
         .map_err(|error| format!("无法清理会话表：{error}"))?;
 
-    for session in &snapshot.sessions {
-        let payload_json =
-            serde_json::to_string(session).map_err(|error| format!("无法序列化会话：{error}"))?;
+    for session in deleted_sessions
+        .iter()
+        .filter(|session| !snapshot_session_ids.contains(session.id.as_str()))
+    {
+        persist_session_in_transaction(transaction, session)?;
+    }
 
-        transaction
-            .execute(
-                "INSERT OR REPLACE INTO agent_sessions
-                 (id, type, title, active_note_id, created_at, updated_at, payload_json)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-                params![
-                    &session.id,
-                    &session.r#type,
-                    &session.title,
-                    session.active_note_id.as_deref(),
-                    &session.created_at,
-                    &session.updated_at,
-                    payload_json
-                ],
-            )
-            .map_err(|error| format!("无法持久化会话：{error}"))?;
+    for session in &snapshot.sessions {
+        persist_session_in_transaction(transaction, session)?;
     }
 
     Ok(())
@@ -357,6 +406,74 @@ pub fn save_session(
     Ok(snapshot)
 }
 
+/** 逻辑删除单个会话，保留 payload 历史但从返回快照和普通读取中隐藏。 */
+pub fn delete_session(
+    app: &AppHandle,
+    mut snapshot: WorkspaceSnapshot,
+    session_id: &str,
+) -> Result<WorkspaceSnapshot, String> {
+    normalize_sessions_for_snapshot(&mut snapshot);
+    let session_index = snapshot
+        .sessions
+        .iter()
+        .position(|session| session.id == session_id)
+        .ok_or_else(|| "找不到要删除的会话".to_owned())?;
+    let mut deleted_session = snapshot.sessions.remove(session_index);
+
+    deleted_session.deleted_at = Some("刚刚".to_owned());
+    deleted_session.updated_at = "刚刚".to_owned();
+
+    if snapshot.active_session_id == session_id
+        || !snapshot
+            .sessions
+            .iter()
+            .any(|session| session.id == snapshot.active_session_id)
+    {
+        ensure_visible_session_after_delete(&mut snapshot);
+    }
+
+    let mut persisted_snapshot = snapshot.clone();
+
+    // 持久化时带上被删除会话，UI 返回值仍只包含未删除会话。
+    persisted_snapshot.sessions.insert(0, deleted_session);
+    save_sessions(app, &persisted_snapshot)?;
+
+    Ok(snapshot)
+}
+
+/** 删除当前会话后确保 UI 仍有一个可激活会话，必要时创建当前知识库默认会话。 */
+fn ensure_visible_session_after_delete(snapshot: &mut WorkspaceSnapshot) {
+    if snapshot.sessions.is_empty() {
+        if let Some(knowledge_base) = snapshot
+            .knowledge_bases
+            .iter()
+            .find(|knowledge_base| knowledge_base.id == snapshot.active_knowledge_base_id)
+            .or_else(|| snapshot.knowledge_bases.first())
+        {
+            snapshot.sessions.push(create_default_agent_session(knowledge_base));
+        }
+    }
+
+    if let Some(session) = snapshot.sessions.first() {
+        snapshot.active_session_id = session.id.clone();
+        snapshot.active_knowledge_base_id = session
+            .knowledge_base_ids
+            .first()
+            .cloned()
+            .unwrap_or_else(|| snapshot.active_knowledge_base_id.clone());
+        snapshot.active_note_id = session.active_note_id.clone().unwrap_or_else(|| {
+            snapshot
+                .notes
+                .iter()
+                .find(|note| note.knowledge_base_id == snapshot.active_knowledge_base_id)
+                .map(|note| note.id.clone())
+                .unwrap_or_default()
+        });
+    } else {
+        snapshot.active_session_id.clear();
+    }
+}
+
 /** 从 SQLite 读取并按当前知识库和笔记快照清理后的会话列表。 */
 pub fn load_sessions_for_snapshot(
     app: &AppHandle,
@@ -375,6 +492,10 @@ pub fn load_sessions_for_snapshot(
         let payload_json = row.map_err(|error| format!("无法读取会话记录：{error}"))?;
         let mut session: AgentSession = serde_json::from_str(&payload_json)
             .map_err(|error| format!("无法解析会话记录：{error}"))?;
+
+        if session.deleted_at.is_some() {
+            continue;
+        }
 
         if normalize_session_for_snapshot(&mut session, snapshot) {
             sessions.push(session);
@@ -490,6 +611,10 @@ pub fn normalize_session_for_snapshot(
     session: &mut AgentSession,
     snapshot: &WorkspaceSnapshot,
 ) -> bool {
+    if session.deleted_at.is_some() {
+        return false;
+    }
+
     let knowledge_base_ids: HashSet<&str> = snapshot
         .knowledge_bases
         .iter()
@@ -913,6 +1038,7 @@ pub fn create_default_agent_session(knowledge_base: &KnowledgeBase) -> AgentSess
         pending_change: None,
         created_at: "刚刚".to_owned(),
         updated_at: "刚刚".to_owned(),
+        deleted_at: None,
     }
 }
 

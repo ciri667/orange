@@ -180,6 +180,8 @@ pub struct AgentSession {
     pub pending_change: Option<ProposedChange>,
     pub created_at: String,
     pub updated_at: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub deleted_at: Option<String>,
 }
 
 /** 云端模型配置只保存 key 引用，不在普通 SQLite payload 中保存明文密钥。 */
@@ -362,6 +364,14 @@ pub struct ChangePayload {
 pub struct SaveSessionPayload {
     pub snapshot: WorkspaceSnapshot,
     pub session: AgentSession,
+}
+
+/** 逻辑删除 Agent 会话的命令入参；会话 payload 会保留 deletedAt 标记。 */
+#[derive(Clone, Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DeleteSessionPayload {
+    pub snapshot: WorkspaceSnapshot,
+    pub session_id: String,
 }
 
 /** 读取会话列表时携带当前快照，用于清理失效知识库和笔记引用。 */
