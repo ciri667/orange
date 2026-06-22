@@ -4,7 +4,7 @@ use crate::domain::{
     AgentMessage, AgentSession, AgentToolCall, AgentTurnRequest, AgentTurnResult, Citation,
     RequestAuditLog, UserSettings, WorkspaceSnapshot,
 };
-use crate::storage::create_id;
+use crate::storage::{create_id, format_local_datetime};
 use reqwest::Client;
 use serde_json::{json, Value};
 use std::collections::HashSet;
@@ -657,7 +657,7 @@ fn build_audit_log(
         scope_summary,
         content_summary: audit_trail.content_summary(content_summary, prompt),
         tool_summary,
-        created_at: "刚刚".to_owned(),
+        created_at: format_local_datetime(),
     }
 }
 

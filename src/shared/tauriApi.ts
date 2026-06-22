@@ -911,6 +911,6 @@ function createBrowserAuditLog(snapshot: WorkspaceSnapshot, prompt: string): Req
     scopeSummary,
     contentSummary: `浏览器 mock；输入长度 ${prompt.length} 字符`,
     toolSummary,
-    createdAt: "刚刚",
+    createdAt: formatLocalDateTime(),
   };
 }

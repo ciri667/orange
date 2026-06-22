@@ -3,7 +3,7 @@ use crate::domain::{
     ModelApiKeyStatus, ModelConfig, Note, RequestAuditLog, ScanReport, UserSettings,
     WorkspaceSnapshot,
 };
-use chrono::Local;
+use chrono::{Local, TimeZone};
 use rusqlite::{params, Connection};
 use sha2::{Digest, Sha256};
 use std::collections::HashSet;
@@ -64,9 +64,60 @@ pub fn create_id(prefix: &str) -> String {
     format!("{prefix}-{}", Uuid::new_v4())
 }
 
-/** 生成本地可读日期时间，用于长期展示的会话创建时间。 */
-fn format_local_datetime() -> String {
+/** 生成本地可读日期时间，用于长期展示的会话和审计记录时间。 */
+pub(crate) fn format_local_datetime() -> String {
     Local::now().format("%Y/%m/%d %H:%M").to_string()
+}
+
+/** 将毫秒时间戳格式化为本地可读日期时间，用于迁移前端旧会话 ID 中的创建时间。 */
+fn format_local_datetime_from_millis(timestamp_millis: i64) -> Option<String> {
+    Local
+        .timestamp_millis_opt(timestamp_millis)
+        .single()
+        .map(|datetime| datetime.format("%Y/%m/%d %H:%M").to_string())
+}
+
+/** 判断创建时间是否仍是旧版占位值，需要在持久化边界迁移。 */
+fn is_created_at_placeholder(created_at: &str) -> bool {
+    let trimmed_created_at = created_at.trim();
+
+    trimmed_created_at.is_empty() || trimmed_created_at == "刚刚"
+}
+
+/** 从前端 createLocalId 生成的 session ID 中提取 Date.now 毫秒时间戳。 */
+fn created_at_from_session_id(session_id: &str) -> Option<String> {
+    session_id
+        .split('-')
+        .filter_map(|part| part.parse::<i64>().ok())
+        .find_map(|timestamp_millis| {
+            // 只接受常见 Unix 毫秒时间戳范围，避免把会话类型或随机片段误当时间。
+            (timestamp_millis >= 946_684_800_000 && timestamp_millis <= 4_102_444_800_000)
+                .then(|| format_local_datetime_from_millis(timestamp_millis))
+                .flatten()
+        })
+}
+
+/** 归一化会话创建时间，避免历史列表永久显示旧版“刚刚”占位值。 */
+fn normalize_session_created_at(session: &mut AgentSession) {
+    if !is_created_at_placeholder(&session.created_at) {
+        return;
+    }
+
+    session.created_at = created_at_from_session_id(&session.id)
+        .or_else(|| {
+            // 如果 updated_at 已经是明确时间，用它作为旧记录迁移的次优来源。
+            (!is_created_at_placeholder(&session.updated_at)).then(|| session.updated_at.clone())
+        })
+        .unwrap_or_else(format_local_datetime);
+}
+
+/** 归一化请求审计创建时间，避免设置页永久显示旧版“刚刚”占位值。 */
+fn normalize_audit_log_created_at(log: &mut RequestAuditLog) {
+    if !is_created_at_placeholder(&log.created_at) {
+        return;
+    }
+
+    log.created_at = format_local_datetime();
 }
 
 /** 返回用户设置默认值；模型默认关闭，直到用户显式保存 BYOK 配置。 */
@@ -307,8 +358,10 @@ fn load_deleted_sessions_in_transaction(
 
     for row in rows {
         let payload_json = row.map_err(|error| format!("无法读取已删除会话记录：{error}"))?;
-        let session: AgentSession = serde_json::from_str(&payload_json)
+        let mut session: AgentSession = serde_json::from_str(&payload_json)
             .map_err(|error| format!("无法解析已删除会话记录：{error}"))?;
+
+        normalize_session_created_at(&mut session);
 
         if session.deleted_at.is_some() {
             sessions.push(session);
@@ -323,14 +376,18 @@ fn persist_session_in_transaction(
     transaction: &rusqlite::Transaction<'_>,
     session: &AgentSession,
 ) -> Result<(), String> {
+    let mut session = session.clone();
+
+    normalize_session_created_at(&mut session);
+
     let payload_json =
-        serde_json::to_string(session).map_err(|error| format!("无法序列化会话：{error}"))?;
+        serde_json::to_string(&session).map_err(|error| format!("无法序列化会话：{error}"))?;
 
     transaction
         .execute(
             "INSERT OR REPLACE INTO agent_sessions
              (id, type, title, active_note_id, created_at, updated_at, payload_json)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
             params![
                 &session.id,
                 &session.r#type,
@@ -456,7 +513,9 @@ fn ensure_visible_session_after_delete(snapshot: &mut WorkspaceSnapshot) {
             .find(|knowledge_base| knowledge_base.id == snapshot.active_knowledge_base_id)
             .or_else(|| snapshot.knowledge_bases.first())
         {
-            snapshot.sessions.push(create_default_agent_session(knowledge_base));
+            snapshot
+                .sessions
+                .push(create_default_agent_session(knowledge_base));
         }
     }
 
@@ -498,6 +557,8 @@ pub fn load_sessions_for_snapshot(
         let payload_json = row.map_err(|error| format!("无法读取会话记录：{error}"))?;
         let mut session: AgentSession = serde_json::from_str(&payload_json)
             .map_err(|error| format!("无法解析会话记录：{error}"))?;
+
+        normalize_session_created_at(&mut session);
 
         if session.deleted_at.is_some() {
             continue;
@@ -617,6 +678,8 @@ pub fn normalize_session_for_snapshot(
     session: &mut AgentSession,
     snapshot: &WorkspaceSnapshot,
 ) -> bool {
+    normalize_session_created_at(session);
+
     if session.deleted_at.is_some() {
         return false;
     }
@@ -838,6 +901,10 @@ fn is_missing_keyring_entry_error(message: &str) -> bool {
 /** 追加一次模型请求或本地工具执行审计摘要。 */
 pub fn append_request_audit_log(app: &AppHandle, log: &RequestAuditLog) -> Result<(), String> {
     let connection = open_database(app)?;
+    let mut log = log.clone();
+
+    normalize_audit_log_created_at(&mut log);
+
     let summary = format!(
         "{} | {} | {}",
         log.scope_summary, log.content_summary, log.tool_summary
@@ -871,6 +938,15 @@ pub fn load_request_audit_logs(
 ) -> Result<Vec<RequestAuditLog>, String> {
     let connection = open_database(app)?;
     let bounded_limit = limit.clamp(1, 50);
+
+    // 读取前迁移旧版占位时间，避免设置页每次打开都继续看到“刚刚”。
+    connection
+        .execute(
+            "UPDATE request_audit_logs SET created_at = ?1 WHERE TRIM(created_at) = '' OR created_at = '刚刚'",
+            params![format_local_datetime()],
+        )
+        .map_err(|error| format!("无法迁移请求审计时间：{error}"))?;
+
     let mut statement = connection
         .prepare(
             "SELECT id, kind, session_id, scope_summary, content_summary, tool_summary, created_at
@@ -895,7 +971,10 @@ pub fn load_request_audit_logs(
     let mut logs = Vec::new();
 
     for row in rows {
-        logs.push(row.map_err(|error| format!("无法解析请求审计日志：{error}"))?);
+        let mut log = row.map_err(|error| format!("无法解析请求审计日志：{error}"))?;
+
+        normalize_audit_log_created_at(&mut log);
+        logs.push(log);
     }
 
     Ok(logs)
@@ -1815,14 +1894,15 @@ mod tests {
     use super::trash_markdown_file_with;
     use super::{
         atomic_write_markdown, create_blank_markdown_file, create_folder, create_id,
-        create_stable_note_id, ensure_persistent_model_keyring, hash_content,
-        is_missing_keyring_entry_error, load_model_api_key_from_cache,
-        model_keyring_persists_until_delete, rename_markdown_file,
-        resolve_existing_file_inside_root, resolve_inside_root, scan_markdown_directory,
-        store_model_api_key_in_cache, trash_markdown_file, validate_folder_name,
-        validate_markdown_file_name, validate_new_markdown_file_name,
+        create_stable_note_id, ensure_persistent_model_keyring, format_local_datetime_from_millis,
+        hash_content, is_missing_keyring_entry_error, load_model_api_key_from_cache,
+        model_keyring_persists_until_delete, normalize_audit_log_created_at,
+        normalize_session_created_at, rename_markdown_file, resolve_existing_file_inside_root,
+        resolve_inside_root, scan_markdown_directory, store_model_api_key_in_cache,
+        trash_markdown_file, validate_folder_name, validate_markdown_file_name,
+        validate_new_markdown_file_name,
     };
-    use crate::domain::KnowledgeBaseSelection;
+    use crate::domain::{AgentSession, KnowledgeBaseSelection, RequestAuditLog};
     use std::fs;
     use tempfile::tempdir;
 
@@ -1862,6 +1942,49 @@ mod tests {
             load_model_api_key_from_cache().unwrap(),
             Some("test-key-from-cache".to_owned())
         );
+    }
+
+    /** 旧版会话如果把创建时间保存成“刚刚”，应优先从前端会话 ID 的时间戳恢复。 */
+    #[test]
+    fn normalize_session_created_at_uses_timestamp_from_frontend_id() {
+        let timestamp_millis = 1_700_000_000_000;
+        let mut session = AgentSession {
+            id: format!("session-task-{timestamp_millis}-abc123"),
+            title: "旧版占位时间会话".to_owned(),
+            r#type: "task".to_owned(),
+            knowledge_base_ids: vec!["kb-a".to_owned()],
+            active_note_id: None,
+            pinned_note_ids: Vec::new(),
+            messages: Vec::new(),
+            pending_change: None,
+            created_at: "刚刚".to_owned(),
+            updated_at: "刚刚".to_owned(),
+            deleted_at: None,
+        };
+        let expected_created_at = format_local_datetime_from_millis(timestamp_millis).unwrap();
+
+        normalize_session_created_at(&mut session);
+
+        assert_eq!(session.created_at, expected_created_at);
+    }
+
+    /** 旧版审计日志如果保存成“刚刚”，读取或写入前应改成具体本地时间。 */
+    #[test]
+    fn normalize_audit_log_created_at_replaces_placeholder() {
+        let mut log = RequestAuditLog {
+            id: "audit-a".to_owned(),
+            kind: "model_turn".to_owned(),
+            session_id: Some("session-a".to_owned()),
+            scope_summary: "测试知识库".to_owned(),
+            content_summary: "模型请求".to_owned(),
+            tool_summary: "model_request".to_owned(),
+            created_at: "刚刚".to_owned(),
+        };
+
+        normalize_audit_log_created_at(&mut log);
+
+        assert_ne!(log.created_at, "刚刚");
+        assert!(!log.created_at.trim().is_empty());
     }
 
     /** 路径穿越必须被阻止，防止 Agent 写出知识库根目录。 */
