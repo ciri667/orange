@@ -1,4 +1,5 @@
 mod agent;
+mod agent_tools;
 mod commands;
 mod domain;
 mod runtime;
