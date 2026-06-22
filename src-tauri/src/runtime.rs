@@ -1,9 +1,10 @@
 use crate::agent;
+use crate::agent_tools::{AgentToolContext, ToolRegistry};
 use crate::domain::{
     AgentMessage, AgentSession, AgentToolCall, AgentTurnRequest, AgentTurnResult, Citation,
-    ProposedChange, RequestAuditLog, UserSettings, WorkspaceSnapshot,
+    RequestAuditLog, UserSettings, WorkspaceSnapshot,
 };
-use crate::storage::{create_id, hash_content};
+use crate::storage::create_id;
 use reqwest::Client;
 use serde_json::{json, Value};
 use std::collections::HashSet;
@@ -15,12 +16,6 @@ const MAX_MODEL_HISTORY_MESSAGES: usize = 8;
 
 /** 单条历史消息进入模型前的最大字符数。 */
 const MAX_HISTORY_MESSAGE_CHARS: usize = 1200;
-
-/** 单次 read_note 工具最多发送给模型的正文字符数。 */
-const MAX_READ_NOTE_CHARS: usize = 6000;
-
-/** list_tree 工具最多发送的目录和笔记摘要数量。 */
-const MAX_TREE_ITEMS: usize = 120;
 
 /** 工具结果回填给模型时的最大 JSON 字符数。 */
 const MAX_TOOL_RESULT_CHARS: usize = 9000;
@@ -150,6 +145,7 @@ async fn run_model_loop(
     let client = build_http_client()?;
     let mut model_messages = build_model_messages(&snapshot, session_index, &request);
     let endpoint = chat_completions_endpoint(&settings.model_config.api_base);
+    let tool_registry = ToolRegistry::default();
     let mut tool_calls = vec![model_request_tool_call(&settings, &endpoint, "completed")];
 
     snapshot.sessions[session_index].messages.push(user_message);
@@ -185,13 +181,6 @@ async fn run_model_loop(
                 .unwrap_or("模型未返回可展示内容。")
                 .to_owned();
 
-            apply_write_action_fallback(
-                &mut snapshot,
-                session_index,
-                &request,
-                &content,
-                &mut tool_calls,
-            );
             push_assistant_message(
                 &mut snapshot,
                 session_index,
@@ -218,18 +207,22 @@ async fn run_model_loop(
         model_messages.push(message);
 
         for model_tool_call in model_tool_calls {
-            let (tool_call, tool_result, tool_citations, audit_fragment) = execute_model_tool(
-                app,
-                &mut snapshot,
-                session_index,
-                &request,
-                &model_tool_call,
-            );
-            let tool_result_text = truncate_chars(&tool_result.to_string(), MAX_TOOL_RESULT_CHARS);
+            let tool_outcome = {
+                let mut tool_context = AgentToolContext {
+                    app: Some(app),
+                    snapshot: &mut snapshot,
+                    session_index,
+                    request: &request,
+                };
 
-            audit_trail.record_sent_fragment(audit_fragment);
-            citations.extend(tool_citations);
-            tool_calls.push(tool_call);
+                tool_registry.execute_model_tool_call(&mut tool_context, &model_tool_call)
+            };
+            let tool_result_text =
+                truncate_chars(&tool_outcome.payload.to_string(), MAX_TOOL_RESULT_CHARS);
+
+            audit_trail.record_sent_fragment(tool_outcome.audit_fragment);
+            citations.extend(tool_outcome.citations);
+            tool_calls.push(tool_outcome.call);
             model_messages.push(json!({
                 "role": "tool",
                 "tool_call_id": model_tool_call.get("id").and_then(Value::as_str).unwrap_or("tool-call"),
@@ -258,13 +251,6 @@ async fn run_model_loop(
         .unwrap_or("我已经完成工具调用，但模型没有返回最终说明。")
         .to_owned();
 
-    apply_write_action_fallback(
-        &mut snapshot,
-        session_index,
-        &request,
-        &content,
-        &mut tool_calls,
-    );
     push_assistant_message(
         &mut snapshot,
         session_index,
@@ -370,7 +356,8 @@ async fn send_chat_completion(
     });
 
     if include_tools {
-        payload["tools"] = build_tool_schemas();
+        // 工具 schema 统一来自 ToolRegistry，避免模型 loop 和本地兜底各维护一份列表。
+        payload["tools"] = ToolRegistry::default().schemas();
         payload["tool_choice"] = json!("auto");
     }
 
@@ -392,543 +379,6 @@ async fn send_chat_completion(
     }
 
     serde_json::from_str(&body).map_err(|error| format!("无法解析模型响应：{error}"))
-}
-
-/** 声明首版工具 schema，所有工具都会在后端再次做 scope 校验。 */
-fn build_tool_schemas() -> Value {
-    json!([
-        function_tool(
-            "search_notes",
-            "Search Markdown notes in the selected session scope.",
-            json!({
-                "type": "object",
-                "properties": { "query": { "type": "string" } },
-                "required": ["query"]
-            })
-        ),
-        function_tool(
-            "read_note",
-            "Read one note by id if it is inside the selected scope.",
-            json!({
-                "type": "object",
-                "properties": { "noteId": { "type": "string" } },
-                "required": ["noteId"]
-            })
-        ),
-        function_tool(
-            "list_tree",
-            "List folders and notes inside the selected scope.",
-            json!({
-                "type": "object",
-                "properties": {}
-            })
-        ),
-        function_tool(
-            "get_current_note",
-            "Read the current active note if it is inside the selected scope.",
-            json!({
-                "type": "object",
-                "properties": {}
-            })
-        ),
-        function_tool(
-            "propose_note_change",
-            "Create a pending rewrite diff for an existing note.",
-            json!({
-                "type": "object",
-                "properties": {
-                    "noteId": { "type": "string" },
-                    "title": { "type": "string" },
-                    "original": { "type": "string" },
-                    "next": { "type": "string" }
-                },
-                "required": ["noteId", "next"]
-            })
-        ),
-        function_tool(
-            "create_note_draft",
-            "Create a pending new Markdown draft diff.",
-            json!({
-                "type": "object",
-                "properties": {
-                    "knowledgeBaseId": { "type": "string" },
-                    "targetPath": { "type": "string" },
-                    "title": { "type": "string" },
-                    "content": { "type": "string" }
-                },
-                "required": ["targetPath", "content"]
-            })
-        ),
-        function_tool(
-            "suggest_organization",
-            "Suggest tags, title, folder or related notes without writing files.",
-            json!({
-                "type": "object",
-                "properties": {
-                    "noteId": { "type": "string" },
-                    "suggestion": { "type": "string" }
-                }
-            })
-        )
-    ])
-}
-
-/** 构造 OpenAI-compatible function tool 描述。 */
-fn function_tool(name: &str, description: &str, parameters: Value) -> Value {
-    json!({
-        "type": "function",
-        "function": {
-            "name": name,
-            "description": description,
-            "parameters": parameters
-        }
-    })
-}
-
-/** 执行模型请求的工具调用，并返回可展示轨迹、模型可读结果和引用。 */
-fn execute_model_tool(
-    app: &AppHandle,
-    snapshot: &mut WorkspaceSnapshot,
-    session_index: usize,
-    request: &AgentTurnRequest,
-    model_tool_call: &Value,
-) -> (AgentToolCall, Value, Vec<Citation>, Option<String>) {
-    let name = model_tool_call
-        .get("function")
-        .and_then(|function| function.get("name"))
-        .and_then(Value::as_str)
-        .unwrap_or("unknown_tool");
-    let args = parse_tool_args(model_tool_call);
-    let result = match name {
-        "search_notes" => execute_search_notes(app, snapshot, session_index, &args),
-        "read_note" => execute_read_note(snapshot, session_index, &args),
-        "list_tree" => execute_list_tree(snapshot, session_index),
-        "get_current_note" => execute_get_current_note(snapshot, session_index, request),
-        "propose_note_change" => execute_propose_note_change(snapshot, session_index, &args),
-        "create_note_draft" => execute_create_note_draft(snapshot, session_index, request, &args),
-        "suggest_organization" => execute_suggest_organization(&args),
-        _ => ToolExecutionResult::failed("未知工具，已拒绝执行。"),
-    };
-    let tool_call = AgentToolCall {
-        id: create_id("tool"),
-        name: name.to_owned(),
-        status: if result.success {
-            "completed".to_owned()
-        } else {
-            "failed".to_owned()
-        },
-        summary: result.summary,
-        args,
-    };
-
-    (
-        tool_call,
-        result.payload,
-        result.citations,
-        result.audit_fragment,
-    )
-}
-
-/** 单个工具执行的中间结果。 */
-struct ToolExecutionResult {
-    success: bool,
-    summary: String,
-    payload: Value,
-    citations: Vec<Citation>,
-    audit_fragment: Option<String>,
-}
-
-impl ToolExecutionResult {
-    /** 构造失败工具结果，模型会收到同一份错误摘要。 */
-    fn failed(message: &str) -> Self {
-        Self {
-            success: false,
-            summary: message.to_owned(),
-            payload: json!({ "error": message }),
-            citations: Vec::new(),
-            audit_fragment: Some(format!("工具失败：{message}")),
-        }
-    }
-}
-
-/** 解析模型 tool_call 的 arguments JSON 字符串。 */
-fn parse_tool_args(model_tool_call: &Value) -> Value {
-    model_tool_call
-        .get("function")
-        .and_then(|function| function.get("arguments"))
-        .and_then(|raw_args| {
-            if let Some(raw_args) = raw_args.as_str() {
-                serde_json::from_str(raw_args).ok()
-            } else if raw_args.is_object() {
-                Some(raw_args.clone())
-            } else {
-                None
-            }
-        })
-        .unwrap_or_else(|| json!({}))
-}
-
-/** 执行 search_notes，并把引用同步给前端消息展示。 */
-fn execute_search_notes(
-    app: &AppHandle,
-    snapshot: &WorkspaceSnapshot,
-    session_index: usize,
-    args: &Value,
-) -> ToolExecutionResult {
-    let query = args
-        .get("query")
-        .and_then(Value::as_str)
-        .unwrap_or_default();
-
-    match crate::storage::search_notes(
-        app,
-        snapshot,
-        &snapshot.sessions[session_index].knowledge_base_ids,
-        query,
-    ) {
-        Ok(citations) => {
-            let bounded_citations: Vec<Citation> =
-                citations.into_iter().map(budget_citation).collect();
-            let audit_titles = bounded_citations
-                .iter()
-                .take(4)
-                .map(|citation| format!("《{}》", citation.title))
-                .collect::<Vec<_>>()
-                .join("、");
-
-            ToolExecutionResult {
-                success: true,
-                summary: format!(
-                    "在会话允许范围内检索到 {} 条候选引用",
-                    bounded_citations.len()
-                ),
-                payload: json!({ "citations": &bounded_citations }),
-                citations: bounded_citations,
-                audit_fragment: Some(format!(
-                    "search_notes 查询「{}」，返回 {}",
-                    truncate_chars(query, 80),
-                    if audit_titles.is_empty() {
-                        "空结果".to_owned()
-                    } else {
-                        audit_titles
-                    }
-                )),
-            }
-        }
-        Err(error) => ToolExecutionResult::failed(&format!("检索失败：{error}")),
-    }
-}
-
-/** 执行 read_note，后端校验目标笔记必须属于会话 scope。 */
-fn execute_read_note(
-    snapshot: &WorkspaceSnapshot,
-    session_index: usize,
-    args: &Value,
-) -> ToolExecutionResult {
-    let note_id = args
-        .get("noteId")
-        .or_else(|| args.get("note_id"))
-        .and_then(Value::as_str)
-        .unwrap_or_default();
-    let Some(note) = scoped_note(snapshot, session_index, note_id) else {
-        return ToolExecutionResult::failed("目标笔记不在当前会话允许范围内。");
-    };
-    let knowledge_base = snapshot
-        .knowledge_bases
-        .iter()
-        .find(|knowledge_base| knowledge_base.id == note.knowledge_base_id);
-    let citation = Citation {
-        knowledge_base_id: note.knowledge_base_id.clone(),
-        knowledge_base_name: knowledge_base
-            .map(|knowledge_base| knowledge_base.name.clone())
-            .unwrap_or_else(|| "未知知识库".to_owned()),
-        note_id: note.id.clone(),
-        title: note.title.clone(),
-        path: note.path.clone(),
-        snippet: note
-            .content
-            .lines()
-            .map(str::trim)
-            .find(|line| !line.is_empty() && !line.starts_with('#'))
-            .unwrap_or("已读取该笔记。")
-            .to_owned(),
-        score: 1.0,
-    };
-
-    let note_content_chars = note.content.chars().count();
-    let bounded_content = truncate_chars(&note.content, MAX_READ_NOTE_CHARS);
-
-    ToolExecutionResult {
-        success: true,
-        summary: format!("已读取笔记《{}》", note.title),
-        payload: json!({
-            "note": {
-                "id": &note.id,
-                "knowledgeBaseId": &note.knowledge_base_id,
-                "title": &note.title,
-                "path": &note.path,
-                "tags": &note.tags,
-                "updatedAt": &note.updated_at,
-                "contentHash": &note.content_hash,
-                "content": bounded_content,
-                "contentChars": note_content_chars,
-                "contentTruncated": note_content_chars > MAX_READ_NOTE_CHARS
-            }
-        }),
-        citations: vec![citation],
-        audit_fragment: Some(format!(
-            "read_note 发送《{}》{}，{} 字符{}",
-            note.title,
-            note.path,
-            note_content_chars.min(MAX_READ_NOTE_CHARS),
-            if note_content_chars > MAX_READ_NOTE_CHARS {
-                "（已截断）"
-            } else {
-                ""
-            }
-        )),
-    }
-}
-
-/** 执行 list_tree，只返回当前 scope 内的目录和笔记摘要。 */
-fn execute_list_tree(snapshot: &WorkspaceSnapshot, session_index: usize) -> ToolExecutionResult {
-    let scope_ids = scope_id_set(&snapshot.sessions[session_index]);
-    let scoped_folders: Vec<_> = snapshot
-        .folders
-        .iter()
-        .filter(|folder| scope_ids.contains(folder.knowledge_base_id.as_str()))
-        .collect();
-    let scoped_notes: Vec<_> = snapshot
-        .notes
-        .iter()
-        .filter(|note| scope_ids.contains(note.knowledge_base_id.as_str()))
-        .collect();
-    let folders: Vec<_> = scoped_folders
-        .iter()
-        .take(MAX_TREE_ITEMS)
-        .map(|folder| json!({ "id": folder.id, "name": folder.name, "path": folder.path, "knowledgeBaseId": folder.knowledge_base_id }))
-        .collect();
-    let notes: Vec<_> = scoped_notes
-        .iter()
-        .take(MAX_TREE_ITEMS)
-        .map(|note| json!({ "id": note.id, "title": note.title, "path": note.path, "knowledgeBaseId": note.knowledge_base_id }))
-        .collect();
-    let truncated = scoped_folders.len() > MAX_TREE_ITEMS || scoped_notes.len() > MAX_TREE_ITEMS;
-
-    ToolExecutionResult {
-        success: true,
-        summary: format!(
-            "已列出 {} 个目录和 {} 篇笔记{}",
-            scoped_folders.len(),
-            scoped_notes.len(),
-            if truncated {
-                "，结果已按预算截断"
-            } else {
-                ""
-            }
-        ),
-        payload: json!({
-            "folders": folders,
-            "notes": notes,
-            "totalFolders": scoped_folders.len(),
-            "totalNotes": scoped_notes.len(),
-            "truncated": truncated
-        }),
-        citations: Vec::new(),
-        audit_fragment: Some(format!(
-            "list_tree 发送 {} 个目录摘要、{} 篇笔记摘要{}",
-            scoped_folders.len().min(MAX_TREE_ITEMS),
-            scoped_notes.len().min(MAX_TREE_ITEMS),
-            if truncated { "（已截断）" } else { "" }
-        )),
-    }
-}
-
-/** 执行 get_current_note，仍按 session scope 做权限校验。 */
-fn execute_get_current_note(
-    snapshot: &WorkspaceSnapshot,
-    session_index: usize,
-    request: &AgentTurnRequest,
-) -> ToolExecutionResult {
-    let args = json!({ "noteId": request.active_note_id });
-
-    execute_read_note(snapshot, session_index, &args)
-}
-
-/** 执行 propose_note_change，只创建待确认 diff，不直接写文件。 */
-fn execute_propose_note_change(
-    snapshot: &mut WorkspaceSnapshot,
-    session_index: usize,
-    args: &Value,
-) -> ToolExecutionResult {
-    let note_id = args
-        .get("noteId")
-        .or_else(|| args.get("note_id"))
-        .and_then(Value::as_str)
-        .unwrap_or_default();
-    let Some(note) = scoped_note(snapshot, session_index, note_id).cloned() else {
-        return ToolExecutionResult::failed("目标笔记不在当前会话允许范围内。");
-    };
-    let original = args
-        .get("original")
-        .and_then(Value::as_str)
-        .filter(|value| !value.trim().is_empty())
-        .map(str::to_owned)
-        .unwrap_or_else(|| first_body_paragraph(&note.content));
-    let next = args
-        .get("next")
-        .and_then(Value::as_str)
-        .unwrap_or_default()
-        .trim()
-        .to_owned();
-
-    if original.is_empty() || next.is_empty() {
-        return ToolExecutionResult::failed("改写工具缺少 original 或 next 内容。");
-    }
-
-    if !note.content.contains(&original) {
-        return ToolExecutionResult::failed(
-            "改写工具的 original 未命中目标笔记，已拒绝生成不可应用 diff。",
-        );
-    }
-
-    let change = ProposedChange {
-        id: create_id("change"),
-        knowledge_base_id: note.knowledge_base_id.clone(),
-        note_id: Some(note.id.clone()),
-        r#type: "rewrite".to_owned(),
-        title: args
-            .get("title")
-            .and_then(Value::as_str)
-            .map(str::to_owned)
-            .unwrap_or_else(|| format!("改写《{}》", note.title)),
-        target_path: note.path.clone(),
-        original,
-        next,
-        original_hash: note.content_hash.clone(),
-        status: "pending".to_owned(),
-    };
-
-    snapshot.sessions[session_index].pending_change = Some(change.clone());
-    let audit_fragment = Some(format!(
-        "propose_note_change 为《{}》生成 diff，原文 {} 字符，建议 {} 字符",
-        note.title,
-        change.original.chars().count(),
-        change.next.chars().count()
-    ));
-
-    ToolExecutionResult {
-        success: true,
-        summary: format!("已为《{}》生成待确认改写 diff", note.title),
-        payload: json!({ "change": &change }),
-        citations: Vec::new(),
-        audit_fragment,
-    }
-}
-
-/** 执行 create_note_draft，只创建待确认新建 diff。 */
-fn execute_create_note_draft(
-    snapshot: &mut WorkspaceSnapshot,
-    session_index: usize,
-    request: &AgentTurnRequest,
-    args: &Value,
-) -> ToolExecutionResult {
-    let scope_ids = scope_id_set(&snapshot.sessions[session_index]);
-    let requested_knowledge_base_id = args
-        .get("knowledgeBaseId")
-        .or_else(|| args.get("knowledge_base_id"))
-        .and_then(Value::as_str)
-        .map(str::to_owned);
-    let knowledge_base_id = if let Some(requested_knowledge_base_id) = requested_knowledge_base_id {
-        if !scope_ids.contains(requested_knowledge_base_id.as_str()) {
-            return ToolExecutionResult::failed(
-                "目标知识库不在当前会话允许范围内，已拒绝创建草稿。",
-            );
-        }
-
-        requested_knowledge_base_id
-    } else if scope_ids.contains(request.active_knowledge_base_id.as_str()) {
-        request.active_knowledge_base_id.clone()
-    } else {
-        snapshot.sessions[session_index]
-            .knowledge_base_ids
-            .first()
-            .cloned()
-            .unwrap_or_default()
-    };
-    let target_path = args
-        .get("targetPath")
-        .or_else(|| args.get("target_path"))
-        .and_then(Value::as_str)
-        .unwrap_or("00-Inbox/Agent 草稿.md")
-        .trim()
-        .to_owned();
-    let content = args
-        .get("content")
-        .and_then(Value::as_str)
-        .unwrap_or_default()
-        .trim()
-        .to_owned();
-
-    if knowledge_base_id.is_empty() || content.is_empty() {
-        return ToolExecutionResult::failed("新建草稿工具缺少目标知识库或正文内容。");
-    }
-
-    if !snapshot
-        .knowledge_bases
-        .iter()
-        .any(|knowledge_base| knowledge_base.id == knowledge_base_id)
-    {
-        return ToolExecutionResult::failed("目标知识库不存在，已拒绝创建草稿。");
-    }
-
-    let change = ProposedChange {
-        id: create_id("change"),
-        knowledge_base_id,
-        note_id: None,
-        r#type: "create".to_owned(),
-        title: args
-            .get("title")
-            .and_then(Value::as_str)
-            .map(str::to_owned)
-            .unwrap_or_else(|| "创建 Agent 草稿".to_owned()),
-        target_path,
-        original: String::new(),
-        next: content,
-        original_hash: hash_content(""),
-        status: "pending".to_owned(),
-    };
-
-    snapshot.sessions[session_index].pending_change = Some(change.clone());
-    let audit_fragment = Some(format!(
-        "create_note_draft 生成 {}，正文 {} 字符",
-        change.target_path,
-        change.next.chars().count()
-    ));
-
-    ToolExecutionResult {
-        success: true,
-        summary: format!("已生成 {} 的待确认新建 diff", change.target_path),
-        payload: json!({ "change": &change }),
-        citations: Vec::new(),
-        audit_fragment,
-    }
-}
-
-/** 执行 organize 建议工具，该工具首版不写入文件。 */
-fn execute_suggest_organization(args: &Value) -> ToolExecutionResult {
-    let suggestion = args
-        .get("suggestion")
-        .and_then(Value::as_str)
-        .unwrap_or("建议补充稳定标签、标题层级和相关链接。");
-
-    ToolExecutionResult {
-        success: true,
-        summary: "已生成整理建议；该工具不会直接写入文件".to_owned(),
-        payload: json!({ "suggestion": suggestion }),
-        citations: Vec::new(),
-        audit_fragment: Some("suggest_organization 未发送笔记正文".to_owned()),
-    }
 }
 
 /** 在模型未配置或失败时运行本地规则 Agent，并生成对应审计。 */
@@ -1112,118 +562,6 @@ fn deduplicate_citations(citations: Vec<Citation>) -> Vec<Citation> {
     next_citations
 }
 
-/** write action 未显式调用写入工具时，用模型最终正文补齐 pending diff。 */
-fn apply_write_action_fallback(
-    snapshot: &mut WorkspaceSnapshot,
-    session_index: usize,
-    request: &AgentTurnRequest,
-    model_content: &str,
-    tool_calls: &mut Vec<AgentToolCall>,
-) {
-    if snapshot.sessions[session_index].pending_change.is_some() {
-        return;
-    }
-
-    match request.action.as_str() {
-        "rewrite" => {
-            let Some(note) = scoped_note(snapshot, session_index, &request.active_note_id).cloned()
-            else {
-                return;
-            };
-            let original = first_body_paragraph(&note.content);
-
-            if original.is_empty() || model_content.trim().is_empty() {
-                return;
-            }
-
-            snapshot.sessions[session_index].pending_change = Some(ProposedChange {
-                id: create_id("change"),
-                knowledge_base_id: note.knowledge_base_id.clone(),
-                note_id: Some(note.id.clone()),
-                r#type: "rewrite".to_owned(),
-                title: format!("改写《{}》", note.title),
-                target_path: note.path.clone(),
-                original,
-                next: model_content.trim().to_owned(),
-                original_hash: note.content_hash.clone(),
-                status: "pending".to_owned(),
-            });
-            tool_calls.push(AgentToolCall {
-                id: create_id("tool"),
-                name: "propose_note_change".to_owned(),
-                status: "completed".to_owned(),
-                summary: format!("已基于模型回复为《{}》生成待确认改写 diff", note.title),
-                args: json!({ "noteId": note.id }),
-            });
-        }
-        "create" => {
-            let knowledge_base_id = snapshot.sessions[session_index]
-                .knowledge_base_ids
-                .first()
-                .cloned()
-                .unwrap_or_else(|| request.active_knowledge_base_id.clone());
-
-            if model_content.trim().is_empty() {
-                return;
-            }
-
-            snapshot.sessions[session_index].pending_change = Some(ProposedChange {
-                id: create_id("change"),
-                knowledge_base_id,
-                note_id: None,
-                r#type: "create".to_owned(),
-                title: "创建 Agent 草稿".to_owned(),
-                target_path: "00-Inbox/Agent 草稿.md".to_owned(),
-                original: String::new(),
-                next: model_content.trim().to_owned(),
-                original_hash: hash_content(""),
-                status: "pending".to_owned(),
-            });
-            tool_calls.push(AgentToolCall {
-                id: create_id("tool"),
-                name: "create_note_draft".to_owned(),
-                status: "completed".to_owned(),
-                summary: "已基于模型回复生成待确认新建 diff".to_owned(),
-                args: json!({ "targetPath": "00-Inbox/Agent 草稿.md" }),
-            });
-        }
-        _ => {}
-    }
-}
-
-/** 获取会话 scope 内的笔记。 */
-fn scoped_note<'a>(
-    snapshot: &'a WorkspaceSnapshot,
-    session_index: usize,
-    note_id: &str,
-) -> Option<&'a crate::domain::Note> {
-    let scope_ids = scope_id_set(&snapshot.sessions[session_index]);
-
-    snapshot
-        .notes
-        .iter()
-        .find(|note| note.id == note_id && scope_ids.contains(note.knowledge_base_id.as_str()))
-}
-
-/** 把会话知识库范围转成 HashSet，统一工具权限校验。 */
-fn scope_id_set(session: &AgentSession) -> HashSet<&str> {
-    session
-        .knowledge_base_ids
-        .iter()
-        .map(String::as_str)
-        .collect()
-}
-
-/** 提取首个可改写正文段落。 */
-fn first_body_paragraph(content: &str) -> String {
-    content
-        .lines()
-        .map(str::trim)
-        .find(|line| line.len() > 18 && !line.starts_with('#') && !line.starts_with('-'))
-        .unwrap_or("")
-        .to_owned()
-}
-
 /** 判断本轮是否很可能需要本地知识库上下文，用于提示模型必须先调用工具。 */
 fn should_expect_local_context(request: &AgentTurnRequest) -> bool {
     let normalized_prompt = request.prompt.to_lowercase();
@@ -1262,12 +600,6 @@ fn truncate_chars(value: &str, max_chars: usize) -> String {
     let truncated = value.chars().take(max_chars).collect::<String>();
 
     format!("{truncated}\n\n[内容已按上下文预算截断]")
-}
-
-/** 裁剪引用片段，避免单条引用把模型上下文撑大。 */
-fn budget_citation(mut citation: Citation) -> Citation {
-    citation.snippet = truncate_chars(&citation.snippet, 500);
-    citation
 }
 
 /** 汇总会话允许的知识库名称，用于 system prompt 和请求审计。 */
@@ -1333,6 +665,7 @@ fn build_audit_log(
 mod tests {
     use super::*;
     use crate::domain::{FolderEntry, KnowledgeBase, Note};
+    use crate::storage::hash_content;
 
     /** 构造 Runtime 单元测试使用的最小工作台快照。 */
     fn runtime_test_snapshot(note_content: String) -> WorkspaceSnapshot {
@@ -1434,70 +767,6 @@ mod tests {
         settings
     }
 
-    /** 未授权知识库不能成为 create_note_draft 的目标。 */
-    #[test]
-    fn create_note_draft_rejects_knowledge_base_outside_scope() {
-        let mut snapshot = runtime_test_snapshot("正文内容足够用于测试。".to_owned());
-        let request = runtime_test_request("create", "生成草稿");
-        let result = execute_create_note_draft(
-            &mut snapshot,
-            0,
-            &request,
-            &json!({
-                "knowledgeBaseId": "kb-b",
-                "targetPath": "Private/草稿.md",
-                "content": "# 草稿"
-            }),
-        );
-
-        assert!(!result.success);
-        assert!(snapshot.sessions[0].pending_change.is_none());
-    }
-
-    /** read_note 必须拒绝读取当前会话 scope 外的笔记。 */
-    #[test]
-    fn read_note_rejects_note_outside_scope() {
-        let snapshot = runtime_test_snapshot("正文内容足够用于测试。".to_owned());
-        let result = execute_read_note(&snapshot, 0, &json!({ "noteId": "note-b" }));
-
-        assert!(!result.success);
-        assert!(result.payload.get("error").is_some());
-    }
-
-    /** read_note 会按上下文预算截断长正文并保留截断标记。 */
-    #[test]
-    fn read_note_truncates_large_content_for_model_context() {
-        let long_content = "段落内容。".repeat(MAX_READ_NOTE_CHARS);
-        let snapshot = runtime_test_snapshot(long_content);
-        let result = execute_read_note(&snapshot, 0, &json!({ "noteId": "note-a" }));
-        let content = result.payload["note"]["content"]
-            .as_str()
-            .unwrap_or_default()
-            .to_owned();
-
-        assert!(result.success);
-        assert_eq!(result.payload["note"]["contentTruncated"], true);
-        assert!(content.contains("内容已按上下文预算截断"));
-    }
-
-    /** rewrite 工具会拒绝无法命中原文的 diff，避免生成不可应用变更。 */
-    #[test]
-    fn propose_note_change_rejects_original_not_found() {
-        let mut snapshot = runtime_test_snapshot("这是一段可以被改写的正文内容。".to_owned());
-        let result = execute_propose_note_change(
-            &mut snapshot,
-            0,
-            &json!({
-                "noteId": "note-a",
-                "original": "不存在的原文",
-                "next": "新的建议"
-            }),
-        );
-
-        assert!(!result.success);
-        assert!(snapshot.sessions[0].pending_change.is_none());
-    }
-
     /** 本地知识库意图会进入必须调用工具的 system prompt 分支。 */
     #[test]
     fn model_messages_mark_local_context_requests() {
@@ -1527,5 +796,23 @@ mod tests {
         assert_eq!(tool_call.status, "failed");
         assert_eq!(tool_call.args["model"], "test-model");
         assert!(tool_call.args.get("apiKey").is_none());
+    }
+
+    /** 模型最终回答不能绕过工具系统自动生成 pending diff。 */
+    #[test]
+    fn assistant_message_without_write_tool_does_not_create_pending_change() {
+        let mut snapshot = runtime_test_snapshot("这是一段可以被改写的正文内容。".to_owned());
+        let request = runtime_test_request("rewrite", "请改写当前笔记");
+
+        push_assistant_message(
+            &mut snapshot,
+            0,
+            &request.action,
+            "模型直接返回的改写正文".to_owned(),
+            Vec::new(),
+            Vec::new(),
+        );
+
+        assert!(snapshot.sessions[0].pending_change.is_none());
     }
 }
