@@ -1,14 +1,15 @@
 use crate::domain::{
     AgentSession, AgentTurnPayload, AgentTurnResult, ChangePayload, CreateFolderPayload,
     CreateNotePayload, DeleteNotePayload, DeleteSessionPayload, FolderEntry,
-    KnowledgeBaseSelection, LoadSessionsPayload, ModelApiKeyStatus, RemoveKnowledgeBasePayload,
-    RenameNotePayload, RequestAuditLog, RescanKnowledgeBasePayload, RestoreSessionContextPayload,
-    SaveModelApiKeyPayload, SaveNoteContentPayload, SaveSessionPayload, SaveUserSettingsPayload,
-    ScanKnowledgeBasePayload, ScanReport, UpdateSessionScopePayload, UserSettings,
-    WorkspaceSnapshot,
+    KnowledgeBaseSelection, LoadSessionsPayload, ModelApiKeyStatus, ProposedChange,
+    RemoveKnowledgeBasePayload, RenameNotePayload, RequestAuditLog, RescanKnowledgeBasePayload,
+    RestoreSessionContextPayload, SaveModelApiKeyPayload, SaveNoteContentPayload,
+    SaveSessionPayload, SaveUserSettingsPayload, ScanKnowledgeBasePayload, ScanReport,
+    UpdateSessionScopePayload, UserSettings, WorkspaceSnapshot,
 };
 use crate::runtime;
 use crate::storage;
+use crate::text_edit::{replace_unique, UniqueReplacementError};
 use std::fs;
 use std::path::{Path, PathBuf};
 use tauri::AppHandle;
@@ -721,14 +722,12 @@ pub async fn apply_proposed_change(
         .await?;
         let current_hash = storage::hash_content(&current_content);
 
-        // hash 不一致说明文件可能被外部修改，必须阻止写入并要求用户重新生成 diff。
-        if current_hash != change.original_hash
-            && snapshot.notes[note_index].content_hash != change.original_hash
-        {
-            return Err("目标文件已变化，已阻止写入。请重新生成 diff。".to_owned());
-        }
-
-        let next_content = current_content.replace(&change.original, &change.next);
+        let next_content = apply_rewrite_change(
+            &current_content,
+            &current_hash,
+            &snapshot.notes[note_index].content_hash,
+            &change,
+        )?;
         let write_path = target_path.clone();
         let write_content = next_content.clone();
 
@@ -748,6 +747,38 @@ pub async fn apply_proposed_change(
     index_snapshot_in_background(app, &snapshot).await?;
 
     Ok(snapshot)
+}
+
+/** 在落盘前执行 hash 冲突检测和唯一片段替换，确保一次确认只改一处。 */
+fn apply_rewrite_change(
+    current_content: &str,
+    current_hash: &str,
+    snapshot_hash: &str,
+    change: &ProposedChange,
+) -> Result<String, String> {
+    // hash 不一致说明文件可能被外部修改，必须阻止写入并要求用户重新生成 diff。
+    if current_hash != change.original_hash && snapshot_hash != change.original_hash {
+        return Err("目标文件已变化，已阻止写入。请重新生成 diff。".to_owned());
+    }
+
+    replace_unique(current_content, &change.original, &change.next)
+        .map_err(rewrite_apply_error_message)
+}
+
+/** 将单处改写定位失败转换为用户可理解的写入错误。 */
+fn rewrite_apply_error_message(error: UniqueReplacementError) -> String {
+    match error {
+        UniqueReplacementError::EmptyOriginal => {
+            "待写入 diff 缺少原文片段，已阻止写入。请重新生成 diff。".to_owned()
+        }
+        UniqueReplacementError::NotFound => {
+            "待写入 diff 的原文片段未命中当前文件，已阻止写入。请重新生成 diff。".to_owned()
+        }
+        UniqueReplacementError::Ambiguous { .. } => {
+            "待写入 diff 的原文片段在当前文件中出现多次，已阻止写入。请重新生成更精确的 diff。"
+                .to_owned()
+        }
+    }
 }
 
 /** 拒绝待写入 diff，只更新会话状态，不修改任何 Markdown 文件。 */
@@ -1068,7 +1099,7 @@ fn normalize_sessions_after_rescan(snapshot: &mut WorkspaceSnapshot, knowledge_b
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::domain::{AgentSession, KnowledgeBase, Note, ProposedChange};
+    use crate::domain::{AgentSession, KnowledgeBase, Note};
 
     /** 构造 commands 单元测试使用的最小知识库。 */
     fn test_knowledge_base(id: &str) -> KnowledgeBase {
@@ -1133,6 +1164,22 @@ mod tests {
         }
     }
 
+    /** 构造可直接喂给 apply_rewrite_change 的待确认改写。 */
+    fn test_rewrite_change(original: &str, next: &str, original_hash: &str) -> ProposedChange {
+        ProposedChange {
+            id: "change-test".to_owned(),
+            knowledge_base_id: "kb-a".to_owned(),
+            note_id: Some("note-a".to_owned()),
+            r#type: "rewrite".to_owned(),
+            title: "改写 note-a".to_owned(),
+            target_path: "note-a.md".to_owned(),
+            original: original.to_owned(),
+            next: next.to_owned(),
+            original_hash: original_hash.to_owned(),
+            status: "pending".to_owned(),
+        }
+    }
+
     /** 重扫单个知识库不能误删多知识库会话中仍然有效的其他知识库笔记引用。 */
     #[test]
     fn rescan_preserves_valid_references_from_other_scoped_knowledge_bases() {
@@ -1162,6 +1209,54 @@ mod tests {
                 .as_ref()
                 .and_then(|change| change.note_id.as_deref()),
             Some("note-b")
+        );
+    }
+
+    /** 应用 rewrite 时必须只替换唯一命中的那一处。 */
+    #[test]
+    fn apply_rewrite_change_replaces_single_match_once() {
+        let current_content = "开头\n旧段落\n结尾";
+        let current_hash = storage::hash_content(current_content);
+        let change = test_rewrite_change("旧段落", "新段落", &current_hash);
+
+        let next_content =
+            apply_rewrite_change(current_content, &current_hash, &current_hash, &change).unwrap();
+
+        assert_eq!(next_content, "开头\n新段落\n结尾");
+    }
+
+    /** 当前文件中原文片段出现多次时必须拒绝写入，避免一次确认误改多处。 */
+    #[test]
+    fn apply_rewrite_change_rejects_ambiguous_original() {
+        let current_content = "旧段落\n中间\n旧段落";
+        let current_hash = storage::hash_content(current_content);
+        let change = test_rewrite_change("旧段落", "新段落", &current_hash);
+
+        let result = apply_rewrite_change(current_content, &current_hash, &current_hash, &change);
+
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("出现多次"));
+    }
+
+    /** hash 冲突必须优先拒绝，避免基于过期 diff 写入外部已修改文件。 */
+    #[test]
+    fn apply_rewrite_change_rejects_hash_mismatch_before_replacement() {
+        let current_content = "旧段落\n旧段落";
+        let current_hash = storage::hash_content(current_content);
+        let stale_hash = storage::hash_content("旧段落");
+        let change = test_rewrite_change("旧段落", "新段落", &stale_hash);
+
+        let result = apply_rewrite_change(
+            current_content,
+            &current_hash,
+            &storage::hash_content("snapshot changed"),
+            &change,
+        );
+
+        assert!(result.is_err());
+        assert_eq!(
+            result.unwrap_err(),
+            "目标文件已变化，已阻止写入。请重新生成 diff。"
         );
     }
 }

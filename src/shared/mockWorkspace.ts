@@ -618,7 +618,7 @@ export function acceptMockProposedChange(snapshot: WorkspaceSnapshot): Workspace
         return note;
       }
 
-      const nextContent = note.content.replace(pendingChange.original, pendingChange.next);
+      const nextContent = replaceUniqueForMock(note.content, pendingChange.original, pendingChange.next);
 
       return {
         ...note,
@@ -643,6 +643,48 @@ export function acceptMockProposedChange(snapshot: WorkspaceSnapshot): Workspace
   });
 
   return nextSnapshot;
+}
+
+/** 浏览器开发态执行单处替换，保持与 Tauri 层 rewrite 写入规则一致。 */
+function replaceUniqueForMock(content: string, original: string, next: string) {
+  const matchCount = countNonOverlappingMatches(content, original);
+
+  if (!original) {
+    throw new Error("待写入 diff 缺少原文片段，已阻止写入。请重新生成 diff。");
+  }
+
+  if (matchCount === 0) {
+    throw new Error("待写入 diff 的原文片段未命中当前文件，已阻止写入。请重新生成 diff。");
+  }
+
+  if (matchCount > 1) {
+    throw new Error("待写入 diff 的原文片段在当前文件中出现多次，已阻止写入。请重新生成更精确的 diff。");
+  }
+
+  return content.replace(original, next);
+}
+
+/** 统计非重叠文本命中次数，用于 mock 写入前发现模糊定位。 */
+function countNonOverlappingMatches(content: string, needle: string) {
+  if (!needle) {
+    return 0;
+  }
+
+  let count = 0;
+  let fromIndex = 0;
+
+  while (fromIndex <= content.length) {
+    const matchIndex = content.indexOf(needle, fromIndex);
+
+    if (matchIndex < 0) {
+      break;
+    }
+
+    count += 1;
+    fromIndex = matchIndex + needle.length;
+  }
+
+  return count;
 }
 
 /** 拒绝待确认变更，保留原始 Markdown 内容不变。 */

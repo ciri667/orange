@@ -17,7 +17,7 @@ export function DiffPanel({
     <aside className="diff-panel" aria-label="Agent 变更预览">
       <div className="diff-header">
         <div>
-          <p className="section-label">Agent 建议写入</p>
+          <p className="section-label">{change.type === "create" ? "Agent 建议写入" : "Agent 单处改写建议"}</p>
           <h3>{change.title}</h3>
           <span>{change.targetPath}</span>
         </div>

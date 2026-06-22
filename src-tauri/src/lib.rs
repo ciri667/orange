@@ -4,6 +4,7 @@ mod commands;
 mod domain;
 mod runtime;
 mod storage;
+mod text_edit;
 
 /** 桌面端应用入口，注册本地文件、索引、Agent loop 和写入确认命令。 */
 pub fn run() {

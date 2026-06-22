@@ -2,6 +2,7 @@ use crate::domain::{
     AgentSession, AgentToolCall, AgentTurnRequest, Citation, ProposedChange, WorkspaceSnapshot,
 };
 use crate::storage::{create_id, hash_content};
+use crate::text_edit::{count_non_overlapping_matches, UniqueReplacementError};
 use serde_json::{json, Value};
 use std::collections::HashSet;
 use tauri::AppHandle;
@@ -588,10 +589,21 @@ fn execute_propose_note_change(
         return ToolExecutionResult::failed("改写工具缺少 original 或 next 内容。");
     }
 
-    if !note.content.contains(&original) {
-        return ToolExecutionResult::failed(
-            "改写工具的 original 未命中目标笔记，已拒绝生成不可应用 diff。",
-        );
+    match validate_unique_original(&note.content, &original) {
+        Ok(()) => {}
+        Err(UniqueReplacementError::NotFound) => {
+            return ToolExecutionResult::failed(
+                "改写工具的 original 未命中目标笔记，已拒绝生成不可应用 diff。",
+            );
+        }
+        Err(UniqueReplacementError::Ambiguous { .. }) => {
+            return ToolExecutionResult::failed(
+                "改写工具的 original 在目标笔记中出现多次，已拒绝生成模糊 diff。请提供更长、更唯一的原文片段。",
+            );
+        }
+        Err(UniqueReplacementError::EmptyOriginal) => {
+            return ToolExecutionResult::failed("改写工具缺少 original 或 next 内容。");
+        }
     }
 
     let change = ProposedChange {
@@ -625,6 +637,19 @@ fn execute_propose_note_change(
         payload: json!({ "change": &change }),
         citations: Vec::new(),
         audit_fragment,
+    }
+}
+
+/** 校验原文片段是否能唯一定位到一处待改写内容。 */
+fn validate_unique_original(content: &str, original: &str) -> Result<(), UniqueReplacementError> {
+    if original.is_empty() {
+        return Err(UniqueReplacementError::EmptyOriginal);
+    }
+
+    match count_non_overlapping_matches(content, original) {
+        0 => Err(UniqueReplacementError::NotFound),
+        1 => Ok(()),
+        count => Err(UniqueReplacementError::Ambiguous { count }),
     }
 }
 
@@ -971,6 +996,55 @@ mod tests {
 
         assert_eq!(outcome.call.status, "failed");
         assert!(context.snapshot.sessions[0].pending_change.is_none());
+    }
+
+    /** rewrite 工具必须拒绝重复出现的 original，避免生成模糊 diff。 */
+    #[test]
+    fn propose_note_change_rejects_ambiguous_original() {
+        let registry = ToolRegistry::default();
+        let mut snapshot = tool_test_snapshot("重复段落\n其他内容\n重复段落".to_owned());
+        let request = tool_test_request("rewrite", "改写当前笔记");
+        let mut context = tool_test_context(&mut snapshot, &request);
+        let outcome = registry.execute_named(
+            &mut context,
+            "propose_note_change",
+            json!({
+                "noteId": "note-a",
+                "original": "重复段落",
+                "next": "新的建议"
+            }),
+        );
+
+        assert_eq!(outcome.call.status, "failed");
+        assert!(outcome.call.summary.contains("出现多次"));
+        assert!(context.snapshot.sessions[0].pending_change.is_none());
+    }
+
+    /** rewrite 工具在 original 恰好命中一次时生成待确认 diff。 */
+    #[test]
+    fn propose_note_change_accepts_unique_original() {
+        let registry = ToolRegistry::default();
+        let mut snapshot = tool_test_snapshot("第一段\n唯一段落\n第三段".to_owned());
+        let request = tool_test_request("rewrite", "改写当前笔记");
+        let mut context = tool_test_context(&mut snapshot, &request);
+        let outcome = registry.execute_named(
+            &mut context,
+            "propose_note_change",
+            json!({
+                "noteId": "note-a",
+                "original": "唯一段落",
+                "next": "新的建议"
+            }),
+        );
+
+        assert_eq!(outcome.call.status, "completed");
+        assert_eq!(
+            context.snapshot.sessions[0]
+                .pending_change
+                .as_ref()
+                .map(|change| change.original.as_str()),
+            Some("唯一段落")
+        );
     }
 
     /** propose_note_change 必须拒绝 scope 外笔记。 */
