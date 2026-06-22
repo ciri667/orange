@@ -956,13 +956,24 @@ textarea:disabled {
 }
 
 .agent-panel {
-  position: relative;
-  display: grid;
-  grid-template-rows: auto auto auto 1fr auto;
+  display: flex;
+  min-width: 0;
   gap: 12px;
+  flex-direction: column;
   border-right: 0;
   border-left: 1px solid var(--border);
   padding: 18px;
+  overflow: hidden;
+}
+
+.agent-header > div:first-child {
+  min-width: 0;
+}
+
+.agent-header h2 {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .session-summary {
@@ -991,20 +1002,15 @@ textarea:disabled {
 .session-popover,
 .context-popover,
 .scope-popover {
-  position: absolute;
-  z-index: 4;
-  right: 18px;
-  left: 18px;
-  top: 108px;
+  flex: 0 1 auto;
+  min-width: 0;
+  max-height: min(42vh, 360px);
+  overflow: auto;
   border: 1px solid var(--border);
   border-radius: 8px;
   padding: 14px;
   background: var(--surface);
   box-shadow: var(--shadow);
-}
-
-.scope-popover {
-  top: 186px;
 }
 
 .session-list,
@@ -1019,6 +1025,7 @@ textarea:disabled {
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto;
   align-items: center;
+  min-width: 0;
   gap: 8px;
   border: 1px solid var(--border);
   border-radius: 7px;
@@ -1040,26 +1047,50 @@ textarea:disabled {
 
 .session-row-title,
 .session-row-meta {
-  display: flex;
   min-width: 0;
   align-items: center;
+}
+
+.session-row-title {
+  display: flex;
   gap: 6px;
 }
 
-.session-row-title strong,
-.session-row-meta {
+.session-row-title svg {
+  flex: 0 0 auto;
+}
+
+.session-row-title strong {
+  min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
 .session-row-meta {
+  display: grid;
+  grid-template-columns: minmax(0, max-content) minmax(0, 1fr);
+  gap: 3px 6px;
   color: var(--text-muted);
   font-size: 12px;
 }
 
+.session-row-meta span,
+.session-row-meta time {
+  min-width: 0;
+  overflow: hidden;
+  line-height: 1.35;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.session-row-meta time {
+  grid-column: 1 / -1;
+}
+
 .session-delete-button {
   width: 30px;
+  flex: 0 0 auto;
   min-height: 30px;
 }
 
@@ -1093,10 +1124,27 @@ textarea:disabled {
 .scope-selector {
   display: flex;
   align-items: center;
+  min-width: 0;
   gap: 10px;
   border-color: var(--border);
   padding: 10px;
   background: #ffffff;
+}
+
+.scope-selector > svg {
+  flex: 0 0 auto;
+}
+
+.scope-selector > span {
+  min-width: 0;
+}
+
+.scope-selector strong {
+  display: block;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .scope-selector.active {
@@ -1141,12 +1189,14 @@ textarea:disabled {
 }
 
 .message-list {
+  flex: 1 1 auto;
   min-height: 0;
   overflow: auto;
   padding-right: 4px;
 }
 
 .message {
+  min-width: 0;
   border: 1px solid var(--border);
   border-radius: 8px;
   padding: 12px;
@@ -1311,7 +1361,7 @@ textarea:disabled {
 }
 
 .tool-call-toggle svg {
-  flex: 0 0 auto;
+  min-width: 13px;
 }
 
 .tool-call-toggle-title {
@@ -1413,6 +1463,8 @@ textarea:disabled {
 
 .agent-input {
   display: grid;
+  flex: 0 0 auto;
+  min-width: 0;
   grid-template-columns: 1fr auto;
   gap: 8px;
 }

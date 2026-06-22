@@ -15,3 +15,19 @@ export function createContentHash(content: string) {
 
   return `mock-${Math.abs(hash)}`;
 }
+
+/** 生成界面可读的本地日期时间，用于会话创建时间等需要长期辨认的记录。 */
+export function formatLocalDateTime(date = new Date()) {
+  const datePart = new Intl.DateTimeFormat("zh-CN", {
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  }).format(date);
+  const timePart = new Intl.DateTimeFormat("zh-CN", {
+    hour: "2-digit",
+    minute: "2-digit",
+    hour12: false,
+  }).format(date);
+
+  return `${datePart} ${timePart}`;
+}

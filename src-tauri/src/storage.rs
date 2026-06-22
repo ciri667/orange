@@ -3,6 +3,7 @@ use crate::domain::{
     ModelApiKeyStatus, ModelConfig, Note, RequestAuditLog, ScanReport, UserSettings,
     WorkspaceSnapshot,
 };
+use chrono::Local;
 use rusqlite::{params, Connection};
 use sha2::{Digest, Sha256};
 use std::collections::HashSet;
@@ -61,6 +62,11 @@ pub fn hash_content(content: &str) -> String {
 /** 生成本地唯一 ID，Rust 层用于新知识库、新笔记和工具调用记录。 */
 pub fn create_id(prefix: &str) -> String {
     format!("{prefix}-{}", Uuid::new_v4())
+}
+
+/** 生成本地可读日期时间，用于长期展示的会话创建时间。 */
+fn format_local_datetime() -> String {
+    Local::now().format("%Y/%m/%d %H:%M").to_string()
 }
 
 /** 返回用户设置默认值；模型默认关闭，直到用户显式保存 BYOK 配置。 */
@@ -1016,6 +1022,7 @@ pub fn load_workspace_snapshot(app: &AppHandle) -> Result<WorkspaceSnapshot, Str
 /** 为恢复或新增知识库创建默认 Agent 会话，绑定单个知识库作为工具范围。 */
 pub fn create_default_agent_session(knowledge_base: &KnowledgeBase) -> AgentSession {
     let title = format!("{}问答助手", knowledge_base.name);
+    let created_at = format_local_datetime();
 
     AgentSession {
         id: create_id("session-knowledge-base"),
@@ -1036,8 +1043,8 @@ pub fn create_default_agent_session(knowledge_base: &KnowledgeBase) -> AgentSess
             tool_calls: Some(Vec::new()),
         }],
         pending_change: None,
-        created_at: "刚刚".to_owned(),
-        updated_at: "刚刚".to_owned(),
+        created_at: created_at.clone(),
+        updated_at: created_at,
         deleted_at: None,
     }
 }

@@ -129,7 +129,9 @@ export function AgentPanel({
                     <strong>{session.title}</strong>
                   </span>
                   <span className="session-row-meta">
-                    {getSessionTypeLabel(session.type)} · {getSessionKnowledgeBaseLabel(session, knowledgeBases)}
+                    <span>{getSessionTypeLabel(session.type)}</span>
+                    <span>{getSessionKnowledgeBaseLabel(session, knowledgeBases)}</span>
+                    <time dateTime={session.createdAt}>创建：{session.createdAt}</time>
                   </span>
                   {session.pendingChange?.status === "pending" && <span className="session-pending">待确认 diff</span>}
                 </button>

@@ -1,5 +1,5 @@
 import { invoke, isTauri } from "@tauri-apps/api/core";
-import { createContentHash, createLocalId } from "./id";
+import { createContentHash, createLocalId, formatLocalDateTime } from "./id";
 import {
   acceptMockProposedChange,
   cloneWorkspaceSnapshot,
@@ -835,6 +835,8 @@ function ensureMockVisibleSession(snapshot: WorkspaceSnapshot) {
   const knowledgeBase =
     snapshot.knowledgeBases.find((item) => item.id === snapshot.activeKnowledgeBaseId) ?? snapshot.knowledgeBases[0];
   const title = `${knowledgeBase.name}问答助手`;
+  /** 默认会话也需要具体创建时间，方便删除最后一条会话后继续辨认历史。 */
+  const createdAt = formatLocalDateTime();
   const session: AgentSession = {
     id: createLocalId("session-knowledge-base"),
     title,
@@ -850,8 +852,8 @@ function ensureMockVisibleSession(snapshot: WorkspaceSnapshot) {
         toolCalls: [],
       },
     ],
-    createdAt: "刚刚",
-    updatedAt: "刚刚",
+    createdAt,
+    updatedAt: createdAt,
   };
 
   snapshot.sessions = [session];

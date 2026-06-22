@@ -4,7 +4,7 @@ import { EditorPane } from "../editor/EditorPane";
 import { buildFileTree } from "../knowledge-base/treeUtils";
 import { KnowledgeBaseSidebar } from "../knowledge-base/KnowledgeBaseSidebar";
 import { SettingsDrawer } from "../settings/SettingsDrawer";
-import { createContentHash, createLocalId } from "../shared/id";
+import { createContentHash, createLocalId, formatLocalDateTime } from "../shared/id";
 import {
   getActiveKnowledgeBase,
   getActiveNote,
@@ -90,6 +90,8 @@ function buildAgentSession({
   note?: Note;
 }): AgentSession {
   const title = buildSessionTitle(type, knowledgeBase, note);
+  /** 会话创建时间需要长期可辨认，避免历史列表里多个“刚刚”无法区分。 */
+  const createdAt = formatLocalDateTime();
 
   return {
     id: createLocalId(`session-${type}`),
@@ -99,8 +101,8 @@ function buildAgentSession({
     activeNoteId: note?.id,
     pinnedNoteIds: note ? [note.id] : [],
     messages: [buildSessionIntroMessage(title, knowledgeBase, note)],
-    createdAt: "刚刚",
-    updatedAt: "刚刚",
+    createdAt,
+    updatedAt: createdAt,
   };
 }
 
