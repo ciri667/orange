@@ -1268,28 +1268,101 @@ textarea:disabled {
 
 .tool-call-list {
   display: grid;
+  min-width: 0;
   gap: 6px;
   margin-top: 10px;
 }
 
-.tool-call {
+.tool-call-toggle {
+  display: grid;
+  min-width: 0;
+  grid-template-columns: auto auto minmax(0, max-content) minmax(0, 1fr);
+  align-items: center;
   gap: 6px;
   border: 1px solid #cfe2df;
   border-radius: 7px;
   padding: 7px 8px;
   background: #f6fbfa;
   color: var(--accent-strong);
+  text-align: left;
+}
+
+.tool-call-toggle svg {
+  flex: 0 0 auto;
+}
+
+.tool-call-toggle-title {
+  min-width: 0;
+  font-size: 12px;
+  font-weight: 700;
+  overflow-wrap: anywhere;
+}
+
+.tool-call-toggle-meta {
+  min-width: 0;
+  color: #42605b;
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+
+.tool-call-items {
+  display: grid;
+  min-width: 0;
+  gap: 6px;
+}
+
+.tool-call {
+  display: grid;
+  min-width: 0;
+  grid-template-columns: auto minmax(0, 9.5rem) minmax(0, 1fr);
+  align-items: start;
+  gap: 6px;
+  border: 1px solid #cfe2df;
+  border-radius: 7px;
+  padding: 7px 8px;
+  background: #f6fbfa;
+  color: var(--accent-strong);
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+
+.tool-call.failed {
+  border-color: #f2b8a8;
+  background: var(--danger-soft);
+  color: var(--danger);
+}
+
+.tool-call.running {
+  border-color: #b8d9d4;
+  background: var(--accent-soft);
+}
+
+.tool-call svg {
+  flex: 0 0 auto;
+  margin-top: 2px;
 }
 
 .tool-call span {
+  min-width: 0;
+  font-family: "SF Mono", "Roboto Mono", ui-monospace, monospace;
   font-size: 12px;
   font-weight: 700;
+  line-height: 1.45;
+  overflow-wrap: anywhere;
 }
 
 .tool-call p {
+  min-width: 0;
   margin: 0;
   color: #42605b;
   font-size: 12px;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+
+.tool-call.failed p {
+  color: #7f1d1d;
 }
 
 .citation-list {
