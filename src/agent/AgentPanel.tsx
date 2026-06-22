@@ -8,6 +8,7 @@ import {
   PanelRightOpen,
   Plus,
   Sparkles,
+  Trash2,
   X,
 } from "lucide-react";
 import ReactMarkdown from "react-markdown";
@@ -40,6 +41,7 @@ export function AgentPanel({
   onToggleScopeSelector,
   onCreateSession,
   onSelectSession,
+  onDeleteSession,
   onToggleScopeKnowledgeBase,
   onPromptChange,
   onSubmitPrompt,
@@ -59,6 +61,7 @@ export function AgentPanel({
   onToggleScopeSelector: () => void;
   onCreateSession: () => void;
   onSelectSession: (sessionId: string) => void;
+  onDeleteSession: (sessionId: string) => void;
   onToggleScopeKnowledgeBase: (knowledgeBaseId: string) => void;
   onPromptChange: (value: string) => void;
   onSubmitPrompt: () => void;
@@ -116,21 +119,29 @@ export function AgentPanel({
           </div>
           <div className="session-list">
             {sessions.map((session) => (
-              <button
+              <div
                 className={`session-row ${session.id === activeSession.id ? "active" : ""}`}
                 key={session.id}
-                type="button"
-                onClick={() => onSelectSession(session.id)}
               >
-                <span className="session-row-title">
-                  <MessageSquareText size={14} />
-                  <strong>{session.title}</strong>
-                </span>
-                <span className="session-row-meta">
-                  {getSessionTypeLabel(session.type)} · {getSessionKnowledgeBaseLabel(session, knowledgeBases)}
-                </span>
-                {session.pendingChange?.status === "pending" && <span className="session-pending">待确认 diff</span>}
-              </button>
+                <button className="session-row-main" type="button" onClick={() => onSelectSession(session.id)}>
+                  <span className="session-row-title">
+                    <MessageSquareText size={14} />
+                    <strong>{session.title}</strong>
+                  </span>
+                  <span className="session-row-meta">
+                    {getSessionTypeLabel(session.type)} · {getSessionKnowledgeBaseLabel(session, knowledgeBases)}
+                  </span>
+                  {session.pendingChange?.status === "pending" && <span className="session-pending">待确认 diff</span>}
+                </button>
+                <button
+                  className="icon-button danger session-delete-button"
+                  type="button"
+                  title="删除会话"
+                  onClick={() => onDeleteSession(session.id)}
+                >
+                  <Trash2 size={14} />
+                </button>
+              </div>
             ))}
           </div>
         </section>

@@ -291,7 +291,7 @@ textarea:disabled {
 .kb-row,
 .add-kb-button,
 .file-tree-row,
-.session-row,
+.session-row-main,
 .scope-selector {
   width: 100%;
   border: 1px solid transparent;
@@ -1017,9 +1017,12 @@ textarea:disabled {
 
 .session-row {
   display: grid;
-  gap: 4px;
-  border-color: var(--border);
-  padding: 10px;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 8px;
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  padding: 6px;
   background: #ffffff;
 }
 
@@ -1028,16 +1031,36 @@ textarea:disabled {
   background: var(--accent-soft);
 }
 
+.session-row-main {
+  display: grid;
+  min-width: 0;
+  gap: 4px;
+  padding: 4px;
+}
+
 .session-row-title,
 .session-row-meta {
   display: flex;
+  min-width: 0;
   align-items: center;
   gap: 6px;
+}
+
+.session-row-title strong,
+.session-row-meta {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .session-row-meta {
   color: var(--text-muted);
   font-size: 12px;
+}
+
+.session-delete-button {
+  width: 30px;
+  min-height: 30px;
 }
 
 .context-matrix {

@@ -16,6 +16,7 @@ import {
   createFolder,
   createNote,
   deleteNote,
+  deleteSession,
   loadModelApiKeyStatus,
   loadRequestAuditLogs,
   loadUserSettings,
@@ -698,6 +699,36 @@ export function WorkspaceShell() {
     }
   }
 
+  /** 逻辑删除 Agent 会话；删除当前会话时由后端选择下一条可用会话。 */
+  async function handleDeleteSession(sessionId: string) {
+    const session = currentSnapshot.sessions.find((item) => item.id === sessionId);
+
+    if (!session) {
+      return;
+    }
+
+    // 会话删除只隐藏历史记录和上下文，不删除本地 Markdown 文件或审计日志。
+    if (!window.confirm(`删除会话「${session.title}」？本地笔记不会被删除。`)) {
+      return;
+    }
+
+    beginBusy("正在删除 Agent 会话...");
+
+    try {
+      const nextSnapshot = await deleteSession(currentSnapshot, sessionId);
+
+      commitSnapshot(nextSnapshot);
+      setIsSessionListOpen(true);
+      setIsSessionContextOpen(false);
+      setIsScopeSelectorOpen(false);
+      setNotice("已删除会话。");
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : String(error));
+    } finally {
+      endBusy();
+    }
+  }
+
   /** 为当前会话勾选或取消额外知识库，当前激活知识库始终保留。 */
   async function handleToggleScopeKnowledgeBase(knowledgeBaseId: string) {
     const selectedIds = new Set(activeSession.knowledgeBaseIds.length ? activeSession.knowledgeBaseIds : [activeKnowledgeBase.id]);
@@ -960,6 +991,7 @@ export function WorkspaceShell() {
           }}
           onCreateSession={handleCreateSession}
           onSelectSession={handleSelectSession}
+          onDeleteSession={handleDeleteSession}
           onToggleScopeKnowledgeBase={handleToggleScopeKnowledgeBase}
           onPromptChange={setAgentPrompt}
           onSubmitPrompt={() => handleSubmitPrompt("ask")}
