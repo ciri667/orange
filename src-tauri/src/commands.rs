@@ -1,17 +1,20 @@
 use crate::domain::{
-    AgentSession, AgentTurnPayload, AgentTurnResult, ChangePayload, CreateFolderPayload,
-    CreateNotePayload, DeleteNotePayload, DeleteSessionPayload, FolderEntry,
-    KnowledgeBaseSelection, LoadSessionsPayload, ModelApiKeyStatus, ProposedChange,
-    RemoveKnowledgeBasePayload, RenameNotePayload, RequestAuditLog, RescanKnowledgeBasePayload,
-    RestoreSessionContextPayload, SaveModelApiKeyPayload, SaveNoteContentPayload,
-    SaveSessionPayload, SaveUserSettingsPayload, ScanKnowledgeBasePayload, ScanReport,
+    AgentSession, AgentSkill, AgentTurnPayload, AgentTurnResult, ChangePayload,
+    CreateFolderPayload, CreateNotePayload, DeleteAgentSkillPayload, DeleteNotePayload,
+    DeleteSessionPayload, FolderEntry, KnowledgeBaseSelection, LoadSessionsPayload,
+    ModelApiKeyStatus, ProposedChange, RemoveKnowledgeBasePayload, RenameNotePayload,
+    RequestAuditLog, RescanKnowledgeBasePayload, RestoreSessionContextPayload,
+    SaveAgentSkillPayload, SaveModelApiKeyPayload, SaveNoteContentPayload, SaveSessionPayload,
+    SaveUserSettingsPayload, ScanKnowledgeBasePayload, ScanReport, ToggleAgentSkillPayload,
     UpdateSessionScopePayload, UserSettings, WorkspaceSnapshot,
 };
 use crate::runtime;
+use crate::skills;
 use crate::storage;
 use crate::text_edit::{replace_unique, UniqueReplacementError};
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::process::Command;
 use tauri::AppHandle;
 use tauri_plugin_dialog::DialogExt;
 
@@ -123,6 +126,79 @@ pub async fn save_user_settings(
     run_blocking("保存用户设置", move || {
         storage::save_user_settings(&app, &saved_settings)?;
         Ok(saved_settings)
+    })
+    .await
+}
+
+/** 读取内置和用户自建 skills，内置定义会合并用户保存的启停偏好。 */
+#[tauri::command]
+pub async fn load_agent_skills(app: AppHandle) -> Result<Vec<AgentSkill>, String> {
+    run_blocking("读取 Skills", move || {
+        let connection = storage::open_database(&app)?;
+
+        skills::load_agent_skills(&app, &connection)
+    })
+    .await
+}
+
+/** 打开 Cici Note 用户 Skills 文件夹，浏览器开发态由前端 mock 只展示路径。 */
+#[tauri::command]
+pub async fn open_user_skills_folder(app: AppHandle) -> Result<String, String> {
+    run_blocking("打开用户 Skills 文件夹", move || {
+        let skills_root = skills::user_skills_root(&app)?;
+
+        open_folder_in_system(&skills_root)?;
+
+        Ok(skills_root.to_string_lossy().to_string())
+    })
+    .await
+}
+
+/** 新增或编辑用户自建 skill；内置 skill 只能通过启停入口修改状态。 */
+#[tauri::command]
+pub async fn save_agent_skill(
+    app: AppHandle,
+    payload: SaveAgentSkillPayload,
+) -> Result<AgentSkill, String> {
+    run_blocking("保存 Skill", move || {
+        let connection = storage::open_database(&app)?;
+
+        skills::save_user_skill(&app, &connection, payload.skill)
+    })
+    .await
+}
+
+/** 启停 skill，并可同步修改是否允许自动触发。 */
+#[tauri::command]
+pub async fn toggle_agent_skill(
+    app: AppHandle,
+    payload: ToggleAgentSkillPayload,
+) -> Result<AgentSkill, String> {
+    run_blocking("更新 Skill 状态", move || {
+        let connection = storage::open_database(&app)?;
+
+        skills::toggle_agent_skill(
+            &app,
+            &connection,
+            &payload.skill_id,
+            payload.enabled,
+            payload.allow_auto_invoke,
+        )
+    })
+    .await
+}
+
+/** 删除用户自建 skill；内置 skill 必须保留供用户重新启用。 */
+#[tauri::command]
+pub async fn delete_agent_skill(
+    app: AppHandle,
+    payload: DeleteAgentSkillPayload,
+) -> Result<Vec<AgentSkill>, String> {
+    run_blocking("删除 Skill", move || {
+        let connection = storage::open_database(&app)?;
+
+        skills::delete_user_skill(&app, &connection, &payload.skill_id)?;
+        skills::load_agent_skills(&app, &connection)
     })
     .await
 }
@@ -629,6 +705,13 @@ pub async fn run_agent_turn(
         storage::load_user_settings(&settings_app)
     })
     .await?;
+    let skills_app = app.clone();
+    let available_skills = run_blocking("读取 Agent Skills", move || {
+        let connection = storage::open_database(&skills_app)?;
+
+        skills::load_agent_skills(&skills_app, &connection)
+    })
+    .await?;
 
     // request 中的 active 信息来自 UI 当前焦点；会话 scope 已由 SQLite 中恢复的 session 决定。
     snapshot.active_knowledge_base_id = request.active_knowledge_base_id.clone();
@@ -641,7 +724,8 @@ pub async fn run_agent_turn(
         snapshot.active_session_id = request.session_id.clone();
     }
 
-    let runtime_result = runtime::run_agent_turn(&app, snapshot, request, settings).await;
+    let runtime_result =
+        runtime::run_agent_turn(&app, snapshot, request, settings, available_skills).await;
     let audit_app = app.clone();
     let audit_log = runtime_result.audit_log.clone();
 
@@ -849,6 +933,33 @@ where
     tauri::async_runtime::spawn_blocking(task)
         .await
         .map_err(|error| format!("{label}后台任务失败：{error}"))?
+}
+
+/** 使用系统文件管理器打开目录；失败时返回命令层错误，前端可展示路径供用户手动访问。 */
+fn open_folder_in_system(path: &Path) -> Result<(), String> {
+    let mut command = if cfg!(target_os = "macos") {
+        let mut command = Command::new("open");
+
+        command.arg(path);
+        command
+    } else if cfg!(target_os = "windows") {
+        let mut command = Command::new("explorer");
+
+        command.arg(path);
+        command
+    } else {
+        let mut command = Command::new("xdg-open");
+
+        command.arg(path);
+        command
+    };
+
+    // 只拉起系统文件管理器，不等待窗口生命周期，避免阻塞 Tauri 后台任务。
+    command
+        .spawn()
+        .map_err(|error| format!("无法打开目录 {}：{error}", path.display()))?;
+
+    Ok(())
 }
 
 /** 在后台刷新 SQLite/FTS5 索引，确保大知识库写索引时界面仍可响应。 */

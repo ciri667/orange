@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 
 /** 知识库扫描与索引状态，对应前端 KnowledgeBaseStatus。 */
 #[allow(dead_code)]
@@ -59,6 +60,34 @@ pub enum ModelProvider {
 pub enum PrivacyPolicy {
     LocalOnly,
     AllowSelectedScope,
+}
+
+/** Skill 启用状态类型，前端用它派生列表筛选和状态标签。 */
+#[allow(dead_code)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum AgentSkillStatus {
+    Enabled,
+    Disabled,
+}
+
+/** Skill 来源类型，内置 skill 和文件 skill 只能禁用，用户 skill 才允许编辑或删除。 */
+#[allow(dead_code)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum AgentSkillSource {
+    BuiltIn,
+    File,
+    User,
+}
+
+/** Skill 触发模式，用于设置默认是自动匹配还是仅显式选择。 */
+#[allow(dead_code)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum AgentSkillActivationMode {
+    Auto,
+    Manual,
 }
 
 /** 用户选择的本地 Markdown 知识库元信息。 */
@@ -195,6 +224,44 @@ pub struct ModelConfig {
     pub enabled: bool,
 }
 
+/** Agent skill 是可启停的指令型工作流包，首版不携带脚本或外部命令。 */
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentSkill {
+    pub id: String,
+    pub name: String,
+    pub display_name: String,
+    pub description: String,
+    pub instructions: String,
+    pub tags: Vec<String>,
+    pub triggers: Vec<String>,
+    pub enabled: bool,
+    pub source: String,
+    pub allow_auto_invoke: bool,
+    pub created_at: String,
+    pub updated_at: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub relative_path: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub metadata: Option<HashMap<String, String>>,
+}
+
+/** Skill 全局设置，控制未显式选择时是否允许 Runtime 自动匹配。 */
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SkillSettings {
+    pub activation_mode: String,
+}
+
+/** 旧版用户设置缺少 skillSettings 时使用自动匹配作为首版默认行为。 */
+pub fn default_skill_settings() -> SkillSettings {
+    SkillSettings {
+        activation_mode: "auto".to_owned(),
+    }
+}
+
 /** 用户设置聚合模型、隐私和写入确认策略，供 M3 Runtime 读取。 */
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -202,6 +269,8 @@ pub struct UserSettings {
     pub model_config: ModelConfig,
     pub privacy_policy: String,
     pub write_confirmation_required: bool,
+    #[serde(default = "default_skill_settings")]
+    pub skill_settings: SkillSettings,
 }
 
 /** 模型密钥保存状态，只暴露是否可读取，不返回明文密钥。 */
@@ -260,6 +329,8 @@ pub struct AgentTurnRequest {
     pub session_id: String,
     pub active_knowledge_base_id: String,
     pub active_note_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub selected_skill_id: Option<String>,
 }
 
 /** Agent 单轮返回结果。 */
@@ -411,4 +482,28 @@ pub struct SaveUserSettingsPayload {
 #[serde(rename_all = "camelCase")]
 pub struct SaveModelApiKeyPayload {
     pub api_key: String,
+}
+
+/** 保存用户自建 skill 的命令入参；内置 skill 不能通过该入口修改。 */
+#[derive(Clone, Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SaveAgentSkillPayload {
+    pub skill: AgentSkill,
+}
+
+/** 启停 skill 的命令入参，allowAutoInvoke 缺省时保留当前自动触发配置。 */
+#[derive(Clone, Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ToggleAgentSkillPayload {
+    pub skill_id: String,
+    pub enabled: bool,
+    #[serde(default)]
+    pub allow_auto_invoke: Option<bool>,
+}
+
+/** 删除用户自建 skill 的命令入参；内置 skill 只能禁用不能删除。 */
+#[derive(Clone, Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DeleteAgentSkillPayload {
+    pub skill_id: String,
 }

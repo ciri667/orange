@@ -132,6 +132,7 @@ pub fn default_user_settings() -> UserSettings {
         },
         privacy_policy: "allow-selected-scope".to_owned(),
         write_confirmation_required: true,
+        skill_settings: crate::domain::default_skill_settings(),
     }
 }
 
@@ -247,6 +248,13 @@ pub fn open_database(app: &AppHandle) -> Result<Connection, String> {
 
             CREATE TABLE IF NOT EXISTS user_settings (
               key TEXT PRIMARY KEY,
+              payload_json TEXT NOT NULL,
+              updated_at TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS agent_skills (
+              id TEXT PRIMARY KEY,
+              source TEXT NOT NULL,
               payload_json TEXT NOT NULL,
               updated_at TEXT NOT NULL
             );

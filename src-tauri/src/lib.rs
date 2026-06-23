@@ -3,6 +3,7 @@ mod agent_tools;
 mod commands;
 mod domain;
 mod runtime;
+mod skills;
 mod storage;
 mod text_edit;
 
@@ -21,6 +22,11 @@ pub fn run() {
             commands::restore_session_context,
             commands::load_user_settings,
             commands::save_user_settings,
+            commands::load_agent_skills,
+            commands::open_user_skills_folder,
+            commands::save_agent_skill,
+            commands::toggle_agent_skill,
+            commands::delete_agent_skill,
             commands::save_model_api_key,
             commands::load_model_api_key_status,
             commands::load_request_audit_logs,

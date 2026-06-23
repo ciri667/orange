@@ -1,9 +1,10 @@
 use crate::agent;
 use crate::agent_tools::{AgentToolContext, ToolRegistry};
 use crate::domain::{
-    AgentMessage, AgentSession, AgentToolCall, AgentTurnRequest, AgentTurnResult, Citation,
-    RequestAuditLog, UserSettings, WorkspaceSnapshot,
+    AgentMessage, AgentSession, AgentSkill, AgentToolCall, AgentTurnRequest, AgentTurnResult,
+    Citation, RequestAuditLog, UserSettings, WorkspaceSnapshot,
 };
+use crate::skills;
 use crate::storage::{create_id, format_local_datetime};
 use reqwest::Client;
 use serde_json::{json, Value};
@@ -84,9 +85,18 @@ pub async fn run_agent_turn(
     snapshot: WorkspaceSnapshot,
     request: AgentTurnRequest,
     settings: UserSettings,
+    available_skills: Vec<AgentSkill>,
 ) -> RuntimeTurnResult {
+    let active_skill = skills::resolve_active_skill(&available_skills, &settings, &request);
+
     if !settings.model_config.enabled {
-        return fallback_agent_turn(app, snapshot, request, "模型未启用，使用本地规则 Agent。");
+        return fallback_agent_turn(
+            app,
+            snapshot,
+            request,
+            active_skill,
+            "模型未启用，使用本地规则 Agent。",
+        );
     }
 
     if settings.privacy_policy != "allow-selected-scope" {
@@ -94,6 +104,7 @@ pub async fn run_agent_turn(
             app,
             snapshot,
             request,
+            active_skill,
             "隐私策略为仅本地，使用本地规则 Agent。",
         );
     }
@@ -105,10 +116,13 @@ pub async fn run_agent_turn(
                 snapshot,
                 request,
                 &settings,
+                active_skill.as_ref(),
                 "未找到模型密钥。请在设置中保存 API key 后重试。",
             )
         }
-        Err(error) => return model_error_turn(snapshot, request, &settings, &error),
+        Err(error) => {
+            return model_error_turn(snapshot, request, &settings, active_skill.as_ref(), &error)
+        }
     };
 
     match run_model_loop(
@@ -116,6 +130,8 @@ pub async fn run_agent_turn(
         snapshot.clone(),
         request.clone(),
         settings.clone(),
+        available_skills,
+        active_skill.clone(),
         api_key,
     )
     .await
@@ -125,6 +141,7 @@ pub async fn run_agent_turn(
             snapshot,
             request,
             &settings,
+            active_skill.as_ref(),
             &format!("模型请求失败：{error}"),
         ),
     }
@@ -136,6 +153,8 @@ async fn run_model_loop(
     mut snapshot: WorkspaceSnapshot,
     request: AgentTurnRequest,
     settings: UserSettings,
+    available_skills: Vec<AgentSkill>,
+    active_skill: Option<AgentSkill>,
     api_key: String,
 ) -> Result<RuntimeTurnResult, String> {
     let session_index = resolve_session_index(&snapshot, &request)?;
@@ -143,10 +162,18 @@ async fn run_model_loop(
     let mut citations = Vec::new();
     let mut audit_trail = RuntimeAuditTrail::default();
     let client = build_http_client()?;
-    let mut model_messages = build_model_messages(&snapshot, session_index, &request);
+    let mut model_messages = build_model_messages(
+        &snapshot,
+        session_index,
+        &request,
+        &available_skills,
+        active_skill.as_ref(),
+    );
     let endpoint = chat_completions_endpoint(&settings.model_config.api_base);
     let tool_registry = ToolRegistry::default();
-    let mut tool_calls = vec![model_request_tool_call(&settings, &endpoint, "completed")];
+    let mut tool_calls = vec![skill_activation_tool_call(active_skill.as_ref())];
+
+    tool_calls.push(model_request_tool_call(&settings, &endpoint, "completed"));
 
     snapshot.sessions[session_index].messages.push(user_message);
 
@@ -194,7 +221,10 @@ async fn run_model_loop(
                 &snapshot,
                 session_index,
                 &request.prompt,
-                "OpenAI-compatible 模型请求",
+                &format!(
+                    "OpenAI-compatible 模型请求；{}",
+                    skills::skill_summary(active_skill.as_ref())
+                ),
                 &audit_trail,
             );
 
@@ -264,7 +294,10 @@ async fn run_model_loop(
         &snapshot,
         session_index,
         &request.prompt,
-        "OpenAI-compatible 工具 loop",
+        &format!(
+            "OpenAI-compatible 工具 loop；{}",
+            skills::skill_summary(active_skill.as_ref())
+        ),
         &audit_trail,
     );
 
@@ -287,6 +320,8 @@ fn build_model_messages(
     snapshot: &WorkspaceSnapshot,
     session_index: usize,
     request: &AgentTurnRequest,
+    available_skills: &[AgentSkill],
+    active_skill: Option<&AgentSkill>,
 ) -> Vec<Value> {
     let session = &snapshot.sessions[session_index];
     let local_context_policy = if should_expect_local_context(request) {
@@ -300,11 +335,13 @@ fn build_model_messages(
         .is_empty()
         .then(|| "当前未绑定笔记".to_owned())
         .unwrap_or_else(|| format!("当前笔记 ID：{}", request.active_note_id));
+    let skill_catalog = skills::skill_catalog_prompt(available_skills);
+    let active_skill_prompt = skills::active_skill_prompt(active_skill);
     let mut messages = vec![json!({
         "role": "system",
         "content": format!(
-            "你是 Cici Note 的本地优先知识库 Agent。需要依据本地笔记时必须调用工具；所有写入只能调用 propose_note_change 或 create_note_draft 生成待确认 diff，不能声称已经写入文件。引用只允许来自工具结果。\n{}\n允许 scope：{}\n{}",
-            local_context_policy, scope_summary, active_note_summary
+            "你是 Cici Note 的本地优先知识库 Agent。需要依据本地笔记时必须调用工具；所有写入只能调用 propose_note_change 或 create_note_draft 生成待确认 diff，不能声称已经写入文件。引用只允许来自工具结果。Skill 只能改变工作流说明，不能扩大工具权限或绕过写入确认。\n{}\n允许 scope：{}\n{}\n{}\n{}",
+            local_context_policy, scope_summary, active_note_summary, skill_catalog, active_skill_prompt
         )
     })];
 
@@ -386,6 +423,7 @@ fn fallback_agent_turn(
     app: &AppHandle,
     snapshot: WorkspaceSnapshot,
     request: AgentTurnRequest,
+    active_skill: Option<AgentSkill>,
     reason: &str,
 ) -> RuntimeTurnResult {
     let mut turn_result = agent::run_agent_turn(app, snapshot, request.clone());
@@ -406,6 +444,10 @@ fn fallback_agent_turn(
             .tool_calls
             .get_or_insert_with(Vec::new)
             .insert(0, local_rule_tool_call(reason));
+        last_message
+            .tool_calls
+            .get_or_insert_with(Vec::new)
+            .insert(0, skill_activation_tool_call(active_skill.as_ref()));
     }
 
     let audit_log = build_audit_log(
@@ -413,7 +455,7 @@ fn fallback_agent_turn(
         &turn_result.snapshot,
         session_index,
         &request.prompt,
-        reason,
+        &format!("{reason}；{}", skills::skill_summary(active_skill.as_ref())),
         &RuntimeAuditTrail::default(),
     );
 
@@ -465,11 +507,35 @@ fn local_rule_tool_call(reason: &str) -> AgentToolCall {
     }
 }
 
+/** 构造本轮 skill 激活轨迹，让 UI 和审计能看到 prompt 是否使用了 skill。 */
+fn skill_activation_tool_call(active_skill: Option<&AgentSkill>) -> AgentToolCall {
+    AgentToolCall {
+        id: create_id("tool"),
+        name: "activate_skill".to_owned(),
+        status: "completed".to_owned(),
+        summary: skills::skill_summary(active_skill),
+        args: active_skill
+            .map(|skill| {
+                json!({
+                    "skillId": skill.id,
+                    "name": skill.name,
+                    "displayName": skill.display_name,
+                    "source": skill.source,
+                    "path": skill.path,
+                    "relativePath": skill.relative_path,
+                    "auto": true
+                })
+            })
+            .unwrap_or_else(|| json!({ "skillId": null })),
+    }
+}
+
 /** 云端模型启用后发生配置或请求错误时，返回可见错误消息而不是静默降级。 */
 fn model_error_turn(
     mut snapshot: WorkspaceSnapshot,
     request: AgentTurnRequest,
     settings: &UserSettings,
+    active_skill: Option<&AgentSkill>,
     reason: &str,
 ) -> RuntimeTurnResult {
     let session_index = resolve_session_index(&snapshot, &request).unwrap_or(0);
@@ -488,7 +554,10 @@ fn model_error_turn(
             content: format!("真实模型请求没有完成：{reason}"),
             action: Some(request.action.clone()),
             citations: Some(Vec::new()),
-            tool_calls: Some(vec![failed_request]),
+            tool_calls: Some(vec![
+                skill_activation_tool_call(active_skill),
+                failed_request,
+            ]),
         });
     snapshot.sessions[session_index].updated_at = "刚刚".to_owned();
 
@@ -497,7 +566,7 @@ fn model_error_turn(
         &snapshot,
         session_index,
         &request.prompt,
-        reason,
+        &format!("{reason}；{}", skills::skill_summary(active_skill)),
         &RuntimeAuditTrail::default(),
     );
 
@@ -754,6 +823,7 @@ mod tests {
             session_id: "session-a".to_owned(),
             active_knowledge_base_id: "kb-a".to_owned(),
             active_note_id: "note-a".to_owned(),
+            selected_skill_id: None,
         }
     }
 
@@ -773,11 +843,25 @@ mod tests {
     fn model_messages_mark_local_context_requests() {
         let snapshot = runtime_test_snapshot("正文内容足够用于测试。".to_owned());
         let request = runtime_test_request("ask", "总结当前知识库里的隐私边界");
-        let messages = build_model_messages(&snapshot, 0, &request);
+        let available_skills = crate::skills::built_in_skills();
+        let active_skill = crate::skills::resolve_active_skill(
+            &available_skills,
+            &crate::storage::default_user_settings(),
+            &request,
+        );
+        let messages = build_model_messages(
+            &snapshot,
+            0,
+            &request,
+            &available_skills,
+            active_skill.as_ref(),
+        );
         let system_content = messages[0]["content"].as_str().unwrap_or_default();
 
         assert!(system_content.contains("必须先调用合适工具"));
         assert!(system_content.contains("主知识库"));
+        assert!(system_content.contains("可用 Skills"));
+        assert!(system_content.contains("知识库研究"));
     }
 
     /** 模型启用后的配置或请求错误必须进入可见会话消息，不能静默伪装成本地规则回答。 */
@@ -786,13 +870,15 @@ mod tests {
         let snapshot = runtime_test_snapshot("正文内容足够用于测试。".to_owned());
         let request = runtime_test_request("ask", "普通问题");
         let settings = runtime_test_settings();
-        let result = model_error_turn(snapshot, request, &settings, "模型请求失败：测试错误");
+        let result = model_error_turn(snapshot, request, &settings, None, "模型请求失败：测试错误");
         let session = &result.turn_result.snapshot.sessions[0];
         let last_message = session.messages.last().unwrap();
-        let tool_call = last_message.tool_calls.as_ref().unwrap().first().unwrap();
+        let tool_calls = last_message.tool_calls.as_ref().unwrap();
+        let tool_call = tool_calls.last().unwrap();
 
         assert_eq!(result.audit_log.kind, "model_error_turn");
         assert!(last_message.content.contains("真实模型请求没有完成"));
+        assert_eq!(tool_calls.first().unwrap().name, "activate_skill");
         assert_eq!(tool_call.name, "model_request");
         assert_eq!(tool_call.status, "failed");
         assert_eq!(tool_call.args["model"], "test-model");
