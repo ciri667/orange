@@ -22,7 +22,7 @@ import {
   getSessionNoteLabel,
   getSessionTypeLabel,
 } from "../shared/selectors";
-import type { AgentSession, KnowledgeBase, Note } from "../shared/types";
+import type { AgentSession, AgentSkill, KnowledgeBase, Note } from "../shared/types";
 
 /** 右侧 Agent 侧栏，承载会话、工具调用、检索范围、引用和输入框。 */
 export function AgentPanel({
@@ -32,6 +32,8 @@ export function AgentPanel({
   knowledgeBases,
   notes,
   prompt,
+  skills,
+  selectedSkillId,
   isBusy,
   isSessionListOpen,
   isSessionContextOpen,
@@ -44,6 +46,7 @@ export function AgentPanel({
   onDeleteSession,
   onToggleScopeKnowledgeBase,
   onPromptChange,
+  onSelectedSkillChange,
   onSubmitPrompt,
 }: {
   sessions: AgentSession[];
@@ -52,6 +55,8 @@ export function AgentPanel({
   knowledgeBases: KnowledgeBase[];
   notes: Note[];
   prompt: string;
+  skills: AgentSkill[];
+  selectedSkillId: string;
   isBusy: boolean;
   isSessionListOpen: boolean;
   isSessionContextOpen: boolean;
@@ -64,6 +69,7 @@ export function AgentPanel({
   onDeleteSession: (sessionId: string) => void;
   onToggleScopeKnowledgeBase: (knowledgeBaseId: string) => void;
   onPromptChange: (value: string) => void;
+  onSelectedSkillChange: (skillId: string) => void;
   onSubmitPrompt: () => void;
 }) {
   /** 当前会话选中的知识库 ID，用于驱动范围摘要和多选列表。 */
@@ -76,6 +82,8 @@ export function AgentPanel({
   const selectedScopeLabel = getScopeSummaryLabel(activeSession, knowledgeBases);
   /** 当前会话的写入状态，用不可点击标签展示，避免和上下文弹窗入口混淆。 */
   const writeStatus = activeSession.pendingChange?.status === "pending" ? "待确认 diff" : "写入需确认";
+  /** 只有已启用 skill 可以显式参与本轮；禁用项不会出现在输入区选择器中。 */
+  const enabledSkills = skills.filter((skill) => skill.enabled);
 
   return (
     <aside className="agent-panel" aria-label="AI 侧栏">
@@ -249,6 +257,25 @@ export function AgentPanel({
       </div>
 
       <footer className="agent-input">
+        <div className="agent-input-toolbar">
+          <label className="skill-select">
+            <Sparkles size={14} />
+            <span>Skill</span>
+            <select
+              value={selectedSkillId}
+              onChange={(event) => onSelectedSkillChange(event.target.value)}
+              disabled={isBusy}
+              aria-label="选择本轮 Agent Skill"
+            >
+              <option value="">自动</option>
+              {enabledSkills.map((skill) => (
+                <option key={skill.id} value={skill.id}>
+                  {skill.displayName}
+                </option>
+              ))}
+            </select>
+          </label>
+        </div>
         <textarea
           value={prompt}
           onChange={(event) => onPromptChange(event.target.value)}

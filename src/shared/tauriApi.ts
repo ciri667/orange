@@ -10,6 +10,7 @@ import {
 } from "./mockWorkspace";
 import type {
   AgentActionType,
+  AgentSkill,
   AgentSession,
   AgentTurnRequest,
   AgentTurnResult,
@@ -35,6 +36,9 @@ const defaultBrowserUserSettings: UserSettings = {
   },
   privacyPolicy: "allow-selected-scope",
   writeConfirmationRequired: true,
+  skillSettings: {
+    activationMode: "auto",
+  },
 };
 
 /** 浏览器 fallback 的临时用户设置，仅用于 Vite 开发态模拟设置页交互。 */
@@ -42,6 +46,97 @@ let browserUserSettings: UserSettings = defaultBrowserUserSettings;
 
 /** 浏览器 fallback 的临时审计日志，模拟桌面端模型和工具边界展示。 */
 let browserAuditLogs: RequestAuditLog[] = [];
+
+/** 浏览器开发态内置 skills，与 Rust 内置定义保持同名同 ID，便于前后端切换验证。 */
+const browserBuiltInSkills: AgentSkill[] = [
+  {
+    id: "skill-note-research",
+    name: "note-research",
+    displayName: "知识库研究",
+    description: "基于已选知识库检索、阅读笔记，并给出带引用的回答。",
+    instructions:
+      "当用户要求查找、总结、对比或引用本地笔记时，先调用 search_notes、read_note 或 list_tree 获取依据。回答中只引用工具返回的材料；如果工具没有结果，明确说明未找到依据，不要编造来源。",
+    tags: ["研究", "检索", "引用"],
+    triggers: ["查找", "搜索", "检索", "引用", "来源", "总结", "知识库", "笔记", "资料"],
+    enabled: true,
+    source: "built-in",
+    allowAutoInvoke: true,
+    createdAt: "内置",
+    updatedAt: "内置",
+  },
+  {
+    id: "skill-note-rewrite",
+    name: "note-rewrite",
+    displayName: "笔记改写",
+    description: "改写当前笔记内容，并通过待确认 diff 交给用户决定是否写入。",
+    instructions:
+      "当用户要求润色、改写、压缩或扩写当前笔记时，先读取当前笔记或目标笔记。只能调用 propose_note_change 生成待确认 diff；不能声称已经修改文件，也不能绕过 original 唯一命中校验。",
+    tags: ["写作", "改写", "diff"],
+    triggers: ["改写", "润色", "重写", "优化", "扩写", "压缩", "rewrite"],
+    enabled: true,
+    source: "built-in",
+    allowAutoInvoke: true,
+    createdAt: "内置",
+    updatedAt: "内置",
+  },
+  {
+    id: "skill-draft-from-context",
+    name: "draft-from-context",
+    displayName: "上下文草稿",
+    description: "基于已选 scope 创建新的 Markdown 草稿，写入前仍需用户确认。",
+    instructions:
+      "当用户要求生成新笔记、清单、总结稿或草稿时，可以先检索或读取相关笔记，再调用 create_note_draft。目标路径必须在当前会话允许的知识库内，正文应是完整 Markdown。",
+    tags: ["草稿", "生成", "Markdown"],
+    triggers: ["创建", "新建", "草稿", "生成", "清单", "draft", "markdown"],
+    enabled: true,
+    source: "built-in",
+    allowAutoInvoke: true,
+    createdAt: "内置",
+    updatedAt: "内置",
+  },
+  {
+    id: "skill-organize-knowledge",
+    name: "organize-knowledge",
+    displayName: "知识整理",
+    description: "给出标签、标题、目录和关联笔记建议，不直接移动或改写文件。",
+    instructions:
+      "当用户要求整理知识库、补标签、规划目录或建立关联时，优先调用 list_tree、search_notes 或 read_note 获取结构与内容，再调用 suggest_organization 输出建议。该 skill 不执行文件移动或直接写入。",
+    tags: ["整理", "标签", "目录"],
+    triggers: ["整理", "归档", "标签", "目录", "分类", "关联", "组织", "organize"],
+    enabled: true,
+    source: "built-in",
+    allowAutoInvoke: true,
+    createdAt: "内置",
+    updatedAt: "内置",
+  },
+];
+
+/** 浏览器开发态模拟的文件式 skill，验证 UI 能展示 SKILL.md 来源和路径。 */
+const browserFileSkills: AgentSkill[] = [
+  {
+    id: "skill-file-browser-demo",
+    name: "meeting-note-polish",
+    displayName: "会议纪要润色",
+    description: "来自 ~/.cici-note/skills 的示例 SKILL.md，用于模拟文件式 skill 扫描结果。",
+    instructions:
+      "读取当前会议纪要上下文，保持事实和行动项不变，输出更清晰的 Markdown 结构。涉及写入时必须生成待确认 diff。",
+    tags: ["文件", "会议", "写作"],
+    triggers: ["会议", "纪要", "行动项", "meeting"],
+    enabled: true,
+    source: "file",
+    allowAutoInvoke: true,
+    createdAt: "文件",
+    updatedAt: "文件",
+    path: "~/.cici-note/skills/meeting-note-polish/SKILL.md",
+    relativePath: "meeting-note-polish/SKILL.md",
+    metadata: {
+      frontmatterName: "meeting-note-polish",
+    },
+  },
+];
+
+/** 浏览器 fallback 的临时 skills 状态，模拟桌面端 SQLite 持久化结果。 */
+let browserAgentSkills: AgentSkill[] = cloneAgentSkills([...browserBuiltInSkills, ...browserFileSkills]);
 
 declare global {
   interface Window {
@@ -196,12 +291,111 @@ export async function loadUserSettings(): Promise<UserSettings> {
 /** 保存用户模型、隐私和写入设置；API key 由单独入口处理。 */
 export async function saveUserSettings(settings: UserSettings): Promise<UserSettings> {
   if (!isTauriRuntime()) {
-    browserUserSettings = { ...settings, modelConfig: { ...settings.modelConfig } };
+    browserUserSettings = cloneUserSettings(settings);
 
     return loadUserSettings();
   }
 
   return invoke<UserSettings>("save_user_settings", { payload: { settings } });
+}
+
+/** 读取 Agent skills，桌面端来自 SQLite，浏览器开发态来自内存模拟状态。 */
+export async function loadAgentSkills(): Promise<AgentSkill[]> {
+  if (!isTauriRuntime()) {
+    return cloneAgentSkills(browserAgentSkills);
+  }
+
+  return invoke<AgentSkill[]>("load_agent_skills");
+}
+
+/** 打开 Cici Note 用户 Skills 文件夹；浏览器开发态只返回提示路径。 */
+export async function openUserSkillsFolder(): Promise<string> {
+  if (!isTauriRuntime()) {
+    return "~/.cici-note/skills";
+  }
+
+  return invoke<string>("open_user_skills_folder");
+}
+
+/** 新增或编辑用户自建 skill；桌面端会写入 ~/.cici-note/skills/<name>/SKILL.md。 */
+export async function saveAgentSkill(skill: AgentSkill): Promise<AgentSkill> {
+  if (!isTauriRuntime()) {
+    const isBuiltInSkill = browserBuiltInSkills.some((builtInSkill) => builtInSkill.id === skill.id) || skill.source === "built-in";
+
+    if (isBuiltInSkill) {
+      throw new Error("内置 skill 不能编辑，只能启用或禁用。");
+    }
+
+    const normalizedSkill = normalizeBrowserFileSkill(skill);
+    const existingIndex = browserAgentSkills.findIndex((item) => item.id === normalizedSkill.id);
+    const hasNameConflict = existingIndex >= 0 && browserAgentSkills[existingIndex].id !== skill.id;
+    const skillsWithoutPrevious = browserAgentSkills.filter((item) => item.id !== skill.id);
+
+    if (hasNameConflict) {
+      throw new Error("目标 Skill 目录已存在，请换一个 name。");
+    }
+
+    if (existingIndex >= 0) {
+      browserAgentSkills = browserAgentSkills.map((item) => (item.id === normalizedSkill.id ? normalizedSkill : item));
+    } else {
+      browserAgentSkills = [...skillsWithoutPrevious, normalizedSkill];
+    }
+
+    return cloneAgentSkills([normalizedSkill])[0];
+  }
+
+  return invoke<AgentSkill>("save_agent_skill", { payload: { skill } });
+}
+
+/** 启停任意 skill；allowAutoInvoke 不传时保留原自动触发设置。 */
+export async function toggleAgentSkill(
+  skillId: string,
+  enabled: boolean,
+  allowAutoInvoke?: boolean,
+): Promise<AgentSkill> {
+  if (!isTauriRuntime()) {
+    const skillIndex = browserAgentSkills.findIndex((skill) => skill.id === skillId);
+
+    if (skillIndex < 0) {
+      throw new Error("找不到要更新的 skill。");
+    }
+
+    const nextSkill: AgentSkill = {
+      ...browserAgentSkills[skillIndex],
+      enabled,
+      allowAutoInvoke: allowAutoInvoke ?? browserAgentSkills[skillIndex].allowAutoInvoke,
+      updatedAt: formatLocalDateTime(),
+    };
+
+    browserAgentSkills[skillIndex] = nextSkill;
+
+    return cloneAgentSkills([nextSkill])[0];
+  }
+
+  return invoke<AgentSkill>("toggle_agent_skill", {
+    payload: { skillId, enabled, allowAutoInvoke },
+  });
+}
+
+/** 删除用户自建 skill；文件式 skill 会移除对应 SKILL.md 目录。 */
+export async function deleteAgentSkill(skillId: string): Promise<AgentSkill[]> {
+  if (!isTauriRuntime()) {
+    const skill = browserAgentSkills.find((item) => item.id === skillId);
+
+    if (!skill) {
+      throw new Error("找不到可删除的用户 skill。");
+    }
+
+    if (skill.source === "built-in") {
+      throw new Error("内置 skill 不能删除，请改为禁用。");
+    }
+
+    browserAgentSkills = browserAgentSkills.filter((item) => item.id !== skillId);
+
+    return loadAgentSkills();
+  }
+
+  return invoke<AgentSkill[]>("delete_agent_skill", { payload: { skillId } });
 }
 
 /** 保存 BYOK 模型密钥；桌面端写入系统安全存储并返回读回校验状态。 */
@@ -591,6 +785,7 @@ export async function runAgentTurn(
   snapshot: WorkspaceSnapshot,
   prompt: string,
   action: AgentActionType,
+  selectedSkillId?: string,
 ): Promise<AgentTurnResult> {
   const request: AgentTurnRequest = {
     prompt,
@@ -598,10 +793,12 @@ export async function runAgentTurn(
     sessionId: snapshot.activeSessionId,
     activeKnowledgeBaseId: snapshot.activeKnowledgeBaseId,
     activeNoteId: snapshot.activeNoteId,
+    selectedSkillId,
   };
 
   if (!isTauriRuntime()) {
-    const nextSnapshot = runMockAgentTurn(snapshot, prompt, action);
+    const activeSkill = resolveBrowserActiveSkill(browserAgentSkills, browserUserSettings, request);
+    const nextSnapshot = runMockAgentTurn(snapshot, prompt, action, activeSkill);
 
     browserAuditLogs = [createBrowserAuditLog(nextSnapshot, prompt), ...browserAuditLogs].slice(0, 20);
 
@@ -799,6 +996,142 @@ function removeNoteReferencesAfterDelete(snapshot: WorkspaceSnapshot, noteId: st
   }));
 }
 
+/** 深拷贝 skill 列表，避免浏览器 mock 状态被 React 组件直接修改。 */
+function cloneAgentSkills(skills: AgentSkill[]) {
+  return skills.map((skill) => ({
+    ...skill,
+    tags: [...skill.tags],
+    triggers: [...skill.triggers],
+    metadata: skill.metadata ? { ...skill.metadata } : undefined,
+  }));
+}
+
+/** 深拷贝用户设置，保证浏览器开发态保存和读取行为接近桌面端持久化。 */
+function cloneUserSettings(settings: UserSettings): UserSettings {
+  return {
+    ...settings,
+    modelConfig: { ...settings.modelConfig },
+    skillSettings: settings.skillSettings ? { ...settings.skillSettings } : { activationMode: "auto" },
+  };
+}
+
+/** 归一化浏览器开发态用户 skill，并模拟桌面端写入 SKILL.md 后返回 file 来源。 */
+function normalizeBrowserFileSkill(skill: AgentSkill): AgentSkill {
+  const now = formatLocalDateTime();
+  const normalizedName = normalizeBrowserSkillName(skill.name || skill.displayName || skill.id);
+  const relativePath = `${normalizedName}/SKILL.md`;
+  const nextId = `skill-file-browser-${normalizedName || createLocalId("skill")}`;
+  const normalizedSkill: AgentSkill = {
+    ...skill,
+    id: nextId,
+    name: normalizedName,
+    displayName: skill.displayName.trim(),
+    description: skill.description.trim(),
+    instructions: skill.instructions.trim(),
+    tags: normalizeBrowserTerms(skill.tags),
+    triggers: normalizeBrowserTerms(skill.triggers),
+    enabled: skill.enabled,
+    source: "file",
+    allowAutoInvoke: skill.allowAutoInvoke,
+    createdAt: skill.createdAt.trim() || now,
+    updatedAt: now,
+    path: `~/.cici-note/skills/${relativePath}`,
+    relativePath,
+    metadata: {
+      frontmatterName: normalizedName,
+      ...(skill.metadata ?? {}),
+    },
+  };
+
+  if (!normalizedSkill.displayName) {
+    throw new Error("Skill 名称不能为空。");
+  }
+
+  if (!normalizedSkill.description) {
+    throw new Error("Skill 描述不能为空。");
+  }
+
+  if (!normalizedSkill.instructions) {
+    throw new Error("Skill 执行说明不能为空。");
+  }
+
+  return normalizedSkill;
+}
+
+/** 把用户输入的 skill name 转成稳定标识，便于 selector 和 prompt 识别。 */
+function normalizeBrowserSkillName(name: string) {
+  return name
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9_-]+/g, "-")
+    .split("-")
+    .filter(Boolean)
+    .join("-");
+}
+
+/** 清理标签和触发词，去重并限制数量，避免 mock prompt 摘要失控。 */
+function normalizeBrowserTerms(terms: string[]) {
+  const seenTerms = new Set<string>();
+
+  return terms
+    .map((term) => term.trim())
+    .filter(Boolean)
+    .filter((term) => {
+      const key = term.toLowerCase();
+
+      if (seenTerms.has(key)) {
+        return false;
+      }
+
+      seenTerms.add(key);
+      return true;
+    })
+    .slice(0, 16);
+}
+
+/** 浏览器 mock 中根据显式选择或自动规则解析本轮激活 skill。 */
+function resolveBrowserActiveSkill(
+  skills: AgentSkill[],
+  settings: UserSettings,
+  request: AgentTurnRequest,
+): AgentSkill | undefined {
+  if (request.selectedSkillId) {
+    return skills.find((skill) => skill.enabled && skill.id === request.selectedSkillId);
+  }
+
+  if (settings.skillSettings.activationMode !== "auto") {
+    return undefined;
+  }
+
+  const normalizedPrompt = request.prompt.toLowerCase();
+  const normalizedAction = request.action.toLowerCase();
+  const enabledAutoSkills = skills.filter((skill) => skill.enabled && skill.allowAutoInvoke);
+  const actionMatchedSkill = enabledAutoSkills.find((skill) => browserActionMatchesSkill(skill.name, normalizedAction));
+
+  if (actionMatchedSkill) {
+    return actionMatchedSkill;
+  }
+
+  return enabledAutoSkills.find((skill) => browserSkillMatches(skill, normalizedPrompt, normalizedAction));
+}
+
+/** 首版 mock 自动匹配规则与 Rust 保持一致：触发词、标签、描述和 action 映射都可命中。 */
+function browserSkillMatches(skill: AgentSkill, prompt: string, action: string) {
+  const candidateTerms = [...skill.triggers, ...skill.tags, skill.name, skill.description].map((term) => term.toLowerCase());
+
+  return candidateTerms.some((term) => term.trim() && (prompt.includes(term) || action.includes(term)));
+}
+
+/** 固定 Agent action 到内置 skill 的映射，降低纯按钮触发时的漏匹配。 */
+function browserActionMatchesSkill(skillName: string, action: string) {
+  return (
+    (skillName === "note-research" && (action === "ask" || action === "find")) ||
+    (skillName === "note-rewrite" && action === "rewrite") ||
+    (skillName === "draft-from-context" && action === "create") ||
+    (skillName === "organize-knowledge" && action === "organize")
+  );
+}
+
 /** 浏览器 fallback 清理会话中的失效知识库和笔记引用，模拟后端持久化入口的归一化。 */
 function normalizeMockSnapshotSessions(snapshot: WorkspaceSnapshot): WorkspaceSnapshot {
   const knowledgeBaseIds = new Set(snapshot.knowledgeBases.map((knowledgeBase) => knowledgeBase.id));
@@ -903,13 +1236,18 @@ function createBrowserAuditLog(snapshot: WorkspaceSnapshot, prompt: string): Req
       .at(-1)
       ?.toolCalls?.map((toolCall) => toolCall.name)
       .join(", ") || "未调用工具";
+  const skillSummary =
+    session?.messages
+      .at(-1)
+      ?.toolCalls?.find((toolCall) => toolCall.name === "activate_skill")
+      ?.summary ?? "未激活 Skill";
 
   return {
     id: createLocalId("audit"),
     kind: "browser_mock_turn",
     sessionId: session?.id,
     scopeSummary,
-    contentSummary: `浏览器 mock；输入长度 ${prompt.length} 字符`,
+    contentSummary: `浏览器 mock；${skillSummary}；输入长度 ${prompt.length} 字符`,
     toolSummary,
     createdAt: formatLocalDateTime(),
   };

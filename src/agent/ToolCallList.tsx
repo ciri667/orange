@@ -1,4 +1,4 @@
-import { BrainCircuit, CheckCircle2, ChevronDown, ChevronRight, Search, Wrench } from "lucide-react";
+import { BrainCircuit, CheckCircle2, ChevronDown, ChevronRight, Search, Sparkles, Wrench } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
 import type { AgentToolCall } from "../shared/types";
 
@@ -52,7 +52,9 @@ export function ToolCallList({ toolCalls }: { toolCalls?: AgentToolCall[] }) {
           {toolCalls.map((toolCall) => {
             /** 根据调用类型选择轨迹图标，让模型请求和本地工具一眼可分辨。 */
             const Icon =
-              toolCall.name === "model_request"
+              toolCall.name === "activate_skill"
+                ? Sparkles
+                : toolCall.name === "model_request"
                 ? BrainCircuit
                 : toolCall.name === "search_notes"
                   ? Search

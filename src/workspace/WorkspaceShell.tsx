@@ -15,27 +15,33 @@ import {
   attachKnowledgeBase,
   createFolder,
   createNote,
+  deleteAgentSkill,
   deleteNote,
   deleteSession,
+  loadAgentSkills,
   loadModelApiKeyStatus,
   loadRequestAuditLogs,
   loadUserSettings,
   loadWorkspaceState,
+  openUserSkillsFolder,
   removeKnowledgeBase,
   renameNote,
   rejectProposedChange,
   rescanKnowledgeBase,
   restoreSessionContext,
   runAgentTurn,
+  saveAgentSkill,
   saveNoteContent,
   saveModelApiKey,
   saveSession,
   saveUserSettings,
   selectKnowledgeBaseDirectory,
+  toggleAgentSkill,
   updateSessionScope,
 } from "../shared/tauriApi";
 import type {
   AgentActionType,
+  AgentSkill,
   AgentSession,
   AgentSessionType,
   KnowledgeBase,
@@ -110,6 +116,8 @@ function buildAgentSession({
 export function WorkspaceShell() {
   const [snapshot, setSnapshot] = useState<WorkspaceSnapshot | null>(null);
   const [userSettings, setUserSettings] = useState<UserSettings | null>(null);
+  /** Agent skills 列表由后端合并内置与用户自建定义，前端只保存展示状态。 */
+  const [agentSkills, setAgentSkills] = useState<AgentSkill[]>([]);
   /** 模型密钥状态只保存是否可读，不包含明文 API key。 */
   const [modelApiKeyStatus, setModelApiKeyStatus] = useState<ModelApiKeyStatus | null>(null);
   /** 首屏初始化是否仍在进行，用于区分加载中和加载失败。 */
@@ -119,6 +127,8 @@ export function WorkspaceShell() {
   const [auditLogs, setAuditLogs] = useState<RequestAuditLog[]>([]);
   const [searchTerm, setSearchTerm] = useState("");
   const [agentPrompt, setAgentPrompt] = useState("");
+  /** 当前输入区显式选择的 skill；空字符串表示交给 Runtime 自动匹配。 */
+  const [selectedSkillId, setSelectedSkillId] = useState("");
   const [collapsedFolderPaths, setCollapsedFolderPaths] = useState<Set<string>>(new Set());
   const [isSessionListOpen, setIsSessionListOpen] = useState(false);
   const [isSessionContextOpen, setIsSessionContextOpen] = useState(false);
@@ -156,9 +166,10 @@ export function WorkspaceShell() {
 
     try {
       // 工作台快照和用户设置是首屏必需数据，必须同时成功后才能进入主界面。
-      const [nextSnapshot, nextUserSettings, nextModelApiKeyStatus] = await Promise.all([
+      const [nextSnapshot, nextUserSettings, nextAgentSkills, nextModelApiKeyStatus] = await Promise.all([
         loadWorkspaceState(),
         loadUserSettings(),
+        loadAgentSkills(),
         loadModelApiKeyStatus().catch((error) => ({
           keyReference: "cici-note-openai-compatible-api-key",
           configured: false,
@@ -172,6 +183,7 @@ export function WorkspaceShell() {
 
       setSnapshot(nextSnapshot);
       setUserSettings(nextUserSettings);
+      setAgentSkills(nextAgentSkills);
       setModelApiKeyStatus(nextModelApiKeyStatus);
       setEditingBaseHashes(buildNoteHashMap(nextSnapshot.notes));
       setIsBooting(false);
@@ -181,6 +193,7 @@ export function WorkspaceShell() {
       if (shouldCommit()) {
         setSnapshot(null);
         setUserSettings(null);
+        setAgentSkills([]);
         setAuditLogs([]);
         setBootError(formatErrorMessage(error));
       }
@@ -771,7 +784,7 @@ export function WorkspaceShell() {
     beginBusy("Agent 正在处理...");
 
     try {
-      const result = await runAgentTurn(currentSnapshot, prompt, action);
+      const result = await runAgentTurn(currentSnapshot, prompt, action, selectedSkillId || undefined);
       commitSnapshot(result.snapshot);
       setAuditLogs(await loadRequestAuditLogs());
       setAgentPrompt("");
@@ -881,6 +894,84 @@ export function WorkspaceShell() {
     }
   }
 
+  /** 保存用户自建 skill 后刷新列表，保证后端归一化后的 ID、name 和时间进入 UI。 */
+  async function handleSaveSkill(skill: AgentSkill) {
+    beginBusy("正在保存 Skill...");
+
+    try {
+      const savedSkill = await saveAgentSkill(skill);
+      const nextSkills = await loadAgentSkills();
+
+      setAgentSkills(nextSkills);
+      setSelectedSkillId((currentSkillId) => (currentSkillId === skill.id ? savedSkill.id : currentSkillId));
+      setNotice("已保存 Skill。");
+
+      return savedSkill;
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : String(error));
+      throw error;
+    } finally {
+      endBusy();
+    }
+  }
+
+  /** 启停 skill 或切换自动触发状态，禁用后也会清除输入区的显式选择。 */
+  async function handleToggleSkill(skillId: string, enabled: boolean, allowAutoInvoke?: boolean) {
+    beginBusy("正在更新 Skill...");
+
+    try {
+      await toggleAgentSkill(skillId, enabled, allowAutoInvoke);
+      const nextSkills = await loadAgentSkills();
+
+      setAgentSkills(nextSkills);
+      if (!enabled && selectedSkillId === skillId) {
+        setSelectedSkillId("");
+      }
+      setNotice("已更新 Skill。");
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : String(error));
+      throw error;
+    } finally {
+      endBusy();
+    }
+  }
+
+  /** 删除用户自建 skill；内置 skill 由后端拒绝删除并保留为可禁用项。 */
+  async function handleDeleteSkill(skillId: string) {
+    beginBusy("正在删除 Skill...");
+
+    try {
+      const nextSkills = await deleteAgentSkill(skillId);
+
+      setAgentSkills(nextSkills);
+      if (selectedSkillId === skillId) {
+        setSelectedSkillId("");
+      }
+      setNotice("已删除 Skill。");
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : String(error));
+      throw error;
+    } finally {
+      endBusy();
+    }
+  }
+
+  /** 打开 Cici Note 用户 Skills 文件夹；浏览器开发态只展示 mock 路径。 */
+  async function handleOpenUserSkillsFolder() {
+    beginBusy("正在打开用户 Skills 文件夹...");
+
+    try {
+      const skillsFolderPath = await openUserSkillsFolder();
+
+      setNotice(`用户 Skills 文件夹：${skillsFolderPath}`);
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : String(error));
+      throw error;
+    } finally {
+      endBusy();
+    }
+  }
+
   /** 保存 BYOK API key；桌面端写入系统 keyring，避免明文进入 SQLite。 */
   async function handleSaveApiKey(apiKey: string) {
     const trimmedApiKey = apiKey.trim();
@@ -972,6 +1063,8 @@ export function WorkspaceShell() {
           knowledgeBases={currentSnapshot.knowledgeBases}
           notes={currentSnapshot.notes}
           prompt={agentPrompt}
+          skills={agentSkills}
+          selectedSkillId={selectedSkillId}
           isBusy={isBusy}
           isSessionListOpen={isSessionListOpen}
           isSessionContextOpen={isSessionContextOpen}
@@ -996,6 +1089,7 @@ export function WorkspaceShell() {
           onDeleteSession={handleDeleteSession}
           onToggleScopeKnowledgeBase={handleToggleScopeKnowledgeBase}
           onPromptChange={setAgentPrompt}
+          onSelectedSkillChange={setSelectedSkillId}
           onSubmitPrompt={() => handleSubmitPrompt("ask")}
         />
       </main>
@@ -1004,6 +1098,7 @@ export function WorkspaceShell() {
           knowledgeBases={currentSnapshot.knowledgeBases}
           activeKnowledgeBaseId={activeKnowledgeBase.id}
           settings={userSettings}
+          skills={agentSkills}
           modelApiKeyStatus={modelApiKeyStatus}
           auditLogs={auditLogs}
           isBusy={isBusy}
@@ -1012,6 +1107,10 @@ export function WorkspaceShell() {
           onRescanKnowledgeBase={handleRescanKnowledgeBase}
           onRemoveKnowledgeBase={handleRemoveKnowledgeBase}
           onSaveSettings={handleSaveSettings}
+          onSaveSkill={handleSaveSkill}
+          onToggleSkill={handleToggleSkill}
+          onDeleteSkill={handleDeleteSkill}
+          onOpenUserSkillsFolder={handleOpenUserSkillsFolder}
           onSaveApiKey={handleSaveApiKey}
           onRefreshAuditLogs={handleRefreshAuditLogs}
           onClose={() => setIsSettingsOpen(false)}

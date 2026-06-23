@@ -12,6 +12,7 @@ export type MarkdownViewMode = "edit" | "preview" | "split";
 
 /** Agent 工具名称，检索是可选择工具而不是固定前置流程。 */
 export type AgentToolName =
+  | "activate_skill"
   | "model_request"
   | "local_rule_agent"
   | "search_notes"
@@ -43,6 +44,42 @@ export interface KnowledgeBase {
   isDefault: boolean;
   semanticIndexEnabled: boolean;
   scanReport?: ScanReport;
+}
+
+/** Skill 启用状态，供设置页筛选和展示启用数量。 */
+export type AgentSkillStatus = "enabled" | "disabled";
+
+/** Skill 来源，内置和文件能力只能禁用，用户自建能力允许编辑和删除。 */
+export type AgentSkillSource = "built-in" | "file" | "user";
+
+/** Skill 默认触发模式，auto 允许 Runtime 根据输入轻量匹配。 */
+export type AgentSkillActivationMode = "auto" | "manual";
+
+/** Agent skill 是可启停、可显式选择、可自动匹配的指令型工作流。 */
+export interface AgentSkill {
+  id: string;
+  name: string;
+  displayName: string;
+  description: string;
+  instructions: string;
+  tags: string[];
+  triggers: string[];
+  enabled: boolean;
+  source: AgentSkillSource;
+  allowAutoInvoke: boolean;
+  createdAt: string;
+  updatedAt: string;
+  /** 文件式 skill 的 SKILL.md 绝对路径，内置和表单式用户 skill 为空。 */
+  path?: string;
+  /** 文件式 skill 相对用户 skills 根目录的路径，用于列表展示和排序。 */
+  relativePath?: string;
+  /** 文件式 skill 的解析元数据，首版只记录覆盖来源等轻量信息。 */
+  metadata?: Record<string, string>;
+}
+
+/** Skill 全局设置，控制未显式选择时是否自动匹配。 */
+export interface SkillSettings {
+  activationMode: AgentSkillActivationMode;
 }
 
 /** 单次知识库扫描报告，用于展示成功、失败、跳过目录和错误信息。 */
@@ -149,6 +186,7 @@ export interface UserSettings {
   modelConfig: ModelConfig;
   privacyPolicy: PrivacyPolicy;
   writeConfirmationRequired: boolean;
+  skillSettings: SkillSettings;
 }
 
 /** 模型密钥状态只说明是否可读取，不包含明文密钥。 */
@@ -198,6 +236,7 @@ export interface AgentTurnRequest {
   sessionId: string;
   activeKnowledgeBaseId: string;
   activeNoteId: string;
+  selectedSkillId?: string;
 }
 
 /** Agent 单轮返回结果，包含更新后的完整工作台状态。 */

@@ -2,6 +2,7 @@ import { createContentHash, createLocalId } from "./id";
 import type {
   AgentActionType,
   AgentMessage,
+  AgentSkill,
   AgentSession,
   AgentToolCall,
   Citation,
@@ -466,6 +467,7 @@ export function runMockAgentTurn(
   snapshot: WorkspaceSnapshot,
   prompt: string,
   action: AgentActionType,
+  activeSkill?: AgentSkill,
 ): WorkspaceSnapshot {
   const nextSnapshot = cloneWorkspaceSnapshot(snapshot);
   const session = nextSnapshot.sessions.find((item) => item.id === nextSnapshot.activeSessionId) ?? nextSnapshot.sessions[0];
@@ -479,7 +481,22 @@ export function runMockAgentTurn(
     content: prompt,
     action,
   };
-  const toolCalls: AgentToolCall[] = [];
+  const toolCalls: AgentToolCall[] = [
+    createToolCall(
+      "activate_skill",
+      activeSkill ? `已激活 Skill：${activeSkill.displayName}` : "未激活 Skill",
+      activeSkill
+        ? {
+            skillId: activeSkill.id,
+            name: activeSkill.name,
+            displayName: activeSkill.displayName,
+            source: activeSkill.source,
+            path: activeSkill.path,
+            relativePath: activeSkill.relativePath,
+          }
+        : { skillId: null },
+    ),
+  ];
   let citations: Citation[] = [];
   let content = "";
 
