@@ -47,6 +47,30 @@ let browserUserSettings: UserSettings = defaultBrowserUserSettings;
 /** 浏览器 fallback 的临时审计日志，模拟桌面端模型和工具边界展示。 */
 let browserAuditLogs: RequestAuditLog[] = [];
 
+/** 从前端本地 ID 中提取创建毫秒时间戳，用于同一分钟内的新会话稳定倒序。 */
+function getTimestampMillisFromLocalId(id: string) {
+  return id
+    .split("-")
+    .map((part) => Number(part))
+    .find((timestampMillis) => timestampMillis >= 946_684_800_000 && timestampMillis <= 4_102_444_800_000);
+}
+
+/** 将浏览器 fallback 会话时间转成排序值，无法解析时排到列表末尾。 */
+function getSessionCreatedSortKey(session: AgentSession) {
+  const parsedCreatedAt = Date.parse(session.createdAt.replace(/\//g, "-"));
+
+  return (getTimestampMillisFromLocalId(session.id) ?? parsedCreatedAt) || 0;
+}
+
+/** 按创建时间倒序排列会话历史，保持浏览器开发态与 Tauri 持久化层一致。 */
+function sortSessionsByCreatedAtDesc(sessions: AgentSession[]) {
+  sessions.sort((left, right) => {
+    const timeDelta = getSessionCreatedSortKey(right) - getSessionCreatedSortKey(left);
+
+    return timeDelta || right.createdAt.localeCompare(left.createdAt);
+  });
+}
+
 /** 浏览器开发态内置 skills，与 Rust 内置定义保持同名同 ID，便于前后端切换验证。 */
 const browserBuiltInSkills: AgentSkill[] = [
   {
@@ -1151,6 +1175,7 @@ function normalizeMockSnapshotSessions(snapshot: WorkspaceSnapshot): WorkspaceSn
         session.pendingChange?.noteId && !noteIds.has(session.pendingChange.noteId) ? undefined : session.pendingChange,
     }))
     .filter((session) => session.knowledgeBaseIds.length > 0);
+  sortSessionsByCreatedAtDesc(snapshot.sessions);
 
   if (!snapshot.sessions.some((session) => session.id === snapshot.activeSessionId)) {
     snapshot.activeSessionId = snapshot.sessions[0]?.id ?? "";

@@ -3,7 +3,7 @@ use crate::domain::{
     ModelApiKeyStatus, ModelConfig, Note, RequestAuditLog, ScanReport, UserSettings,
     WorkspaceSnapshot,
 };
-use chrono::{Local, TimeZone};
+use chrono::{Local, NaiveDateTime, TimeZone};
 use rusqlite::{params, Connection, TransactionBehavior};
 use sha2::{Digest, Sha256};
 use std::collections::HashSet;
@@ -97,16 +97,19 @@ fn is_created_at_placeholder(created_at: &str) -> bool {
 }
 
 /** 从前端 createLocalId 生成的 session ID 中提取 Date.now 毫秒时间戳。 */
-fn created_at_from_session_id(session_id: &str) -> Option<String> {
+fn timestamp_millis_from_session_id(session_id: &str) -> Option<i64> {
     session_id
         .split('-')
         .filter_map(|part| part.parse::<i64>().ok())
-        .find_map(|timestamp_millis| {
-            // 只接受常见 Unix 毫秒时间戳范围，避免把会话类型或随机片段误当时间。
-            (timestamp_millis >= 946_684_800_000 && timestamp_millis <= 4_102_444_800_000)
-                .then(|| format_local_datetime_from_millis(timestamp_millis))
-                .flatten()
+        // 只接受常见 Unix 毫秒时间戳范围，避免把会话类型或随机片段误当时间。
+        .find(|timestamp_millis| {
+            *timestamp_millis >= 946_684_800_000 && *timestamp_millis <= 4_102_444_800_000
         })
+}
+
+/** 从前端 createLocalId 生成的 session ID 中恢复可展示创建时间。 */
+fn created_at_from_session_id(session_id: &str) -> Option<String> {
+    timestamp_millis_from_session_id(session_id).and_then(format_local_datetime_from_millis)
 }
 
 /** 归一化会话创建时间，避免历史列表永久显示旧版“刚刚”占位值。 */
@@ -121,6 +124,33 @@ fn normalize_session_created_at(session: &mut AgentSession) {
             (!is_created_at_placeholder(&session.updated_at)).then(|| session.updated_at.clone())
         })
         .unwrap_or_else(format_local_datetime);
+}
+
+/** 将会话创建时间转换为可排序时间戳，无法解析时放到列表末尾。 */
+fn session_created_sort_key(session: &AgentSession) -> i64 {
+    if let Some(timestamp_millis) = timestamp_millis_from_session_id(&session.id) {
+        return timestamp_millis;
+    }
+
+    NaiveDateTime::parse_from_str(&session.created_at, "%Y/%m/%d %H:%M")
+        .ok()
+        .and_then(|created_at| {
+            // 按本地时区解释 UI 展示时间，保证与 format_local_datetime 的来源一致。
+            Local
+                .from_local_datetime(&created_at)
+                .single()
+                .map(|datetime| datetime.timestamp_millis())
+        })
+        .unwrap_or(0)
+}
+
+/** 按创建时间倒序整理会话历史，避免 SQLite rowid 或数组插入顺序影响展示。 */
+fn sort_sessions_by_created_at_desc(sessions: &mut [AgentSession]) {
+    sessions.sort_by(|left, right| {
+        session_created_sort_key(right)
+            .cmp(&session_created_sort_key(left))
+            .then_with(|| right.created_at.cmp(&left.created_at))
+    });
 }
 
 /** 归一化请求审计创建时间，避免设置页永久显示旧版“刚刚”占位值。 */
@@ -670,7 +700,7 @@ pub fn load_sessions_for_snapshot(
 ) -> Result<Vec<AgentSession>, String> {
     let connection = open_database(app)?;
     let mut statement = connection
-        .prepare("SELECT payload_json FROM agent_sessions ORDER BY rowid DESC")
+        .prepare("SELECT payload_json FROM agent_sessions")
         .map_err(|error| format!("无法准备会话读取：{error}"))?;
     let rows = statement
         .query_map([], |row| row.get::<_, String>(0))
@@ -692,6 +722,8 @@ pub fn load_sessions_for_snapshot(
             sessions.push(session);
         }
     }
+
+    sort_sessions_by_created_at_desc(&mut sessions);
 
     Ok(sessions)
 }
@@ -795,6 +827,7 @@ pub fn normalize_sessions_for_snapshot(snapshot: &mut WorkspaceSnapshot) {
     snapshot
         .sessions
         .retain_mut(|session| normalize_session_for_snapshot(session, &snapshot_view));
+    sort_sessions_by_created_at_desc(&mut snapshot.sessions);
 }
 
 /** 清理单个会话引用，返回 false 表示该会话已没有可访问知识库。 */
@@ -2036,13 +2069,30 @@ mod tests {
         hash_content, is_missing_keyring_entry_error, load_model_api_key_from_cache,
         model_keyring_persists_until_delete, normalize_audit_log_created_at,
         normalize_session_created_at, rename_markdown_file, resolve_existing_file_inside_root,
-        resolve_inside_root, scan_markdown_directory, store_model_api_key_in_cache,
-        trash_markdown_file, validate_folder_name, validate_markdown_file_name,
-        validate_new_markdown_file_name,
+        resolve_inside_root, scan_markdown_directory, sort_sessions_by_created_at_desc,
+        store_model_api_key_in_cache, trash_markdown_file, validate_folder_name,
+        validate_markdown_file_name, validate_new_markdown_file_name,
     };
     use crate::domain::{AgentSession, KnowledgeBaseSelection, RequestAuditLog};
     use std::fs;
     use tempfile::tempdir;
+
+    /** 构造测试用 Agent 会话，避免排序和迁移测试重复铺开完整结构。 */
+    fn test_agent_session(id: &str, created_at: &str) -> AgentSession {
+        AgentSession {
+            id: id.to_owned(),
+            title: "测试会话".to_owned(),
+            r#type: "task".to_owned(),
+            knowledge_base_ids: vec!["kb-a".to_owned()],
+            active_note_id: None,
+            pinned_note_ids: Vec::new(),
+            messages: Vec::new(),
+            pending_change: None,
+            created_at: created_at.to_owned(),
+            updated_at: created_at.to_owned(),
+            deleted_at: None,
+        }
+    }
 
     /** hash 内容变化时必须变化，用于写入冲突检测。 */
     #[test]
@@ -2086,24 +2136,39 @@ mod tests {
     #[test]
     fn normalize_session_created_at_uses_timestamp_from_frontend_id() {
         let timestamp_millis = 1_700_000_000_000;
-        let mut session = AgentSession {
-            id: format!("session-task-{timestamp_millis}-abc123"),
-            title: "旧版占位时间会话".to_owned(),
-            r#type: "task".to_owned(),
-            knowledge_base_ids: vec!["kb-a".to_owned()],
-            active_note_id: None,
-            pinned_note_ids: Vec::new(),
-            messages: Vec::new(),
-            pending_change: None,
-            created_at: "刚刚".to_owned(),
-            updated_at: "刚刚".to_owned(),
-            deleted_at: None,
-        };
+        let mut session =
+            test_agent_session(&format!("session-task-{timestamp_millis}-abc123"), "刚刚");
         let expected_created_at = format_local_datetime_from_millis(timestamp_millis).unwrap();
 
         normalize_session_created_at(&mut session);
 
         assert_eq!(session.created_at, expected_created_at);
+    }
+
+    /** 会话历史必须按创建时间倒序展示，同一分钟内依赖 ID 毫秒时间戳保持稳定。 */
+    #[test]
+    fn sort_sessions_by_created_at_desc_uses_id_timestamp() {
+        let mut sessions = vec![
+            test_agent_session("session-task-1700000000000-old", "2023/11/14 22:13"),
+            test_agent_session("session-task-1700000030000-new", "2023/11/14 22:13"),
+            test_agent_session("session-task-1699999940000-earliest", "2023/11/14 22:12"),
+        ];
+
+        sort_sessions_by_created_at_desc(&mut sessions);
+
+        let session_ids = sessions
+            .iter()
+            .map(|session| session.id.as_str())
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            session_ids,
+            vec![
+                "session-task-1700000030000-new",
+                "session-task-1700000000000-old",
+                "session-task-1699999940000-earliest",
+            ]
+        );
     }
 
     /** 旧版审计日志如果保存成“刚刚”，读取或写入前应改成具体本地时间。 */
