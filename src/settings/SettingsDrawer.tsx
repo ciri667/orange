@@ -1,12 +1,14 @@
-import { Check, KeyRound, Plus, RotateCw, Save, Trash2, X } from "lucide-react";
+import { Check, KeyRound, Plus, RotateCw, Save, Sparkles, Trash2, X } from "lucide-react";
 import { useEffect, useState } from "react";
-import type { KnowledgeBase, ModelApiKeyStatus, RequestAuditLog, UserSettings } from "../shared/types";
+import type { AgentSkill, KnowledgeBase, ModelApiKeyStatus, RequestAuditLog, UserSettings } from "../shared/types";
+import { SkillsModal } from "./SkillsModal";
 
 /** 设置抽屉，展示多知识库管理、模型策略和写入权限。 */
 export function SettingsDrawer({
   knowledgeBases,
   activeKnowledgeBaseId,
   settings,
+  skills,
   modelApiKeyStatus,
   auditLogs,
   isBusy,
@@ -15,6 +17,10 @@ export function SettingsDrawer({
   onRescanKnowledgeBase,
   onRemoveKnowledgeBase,
   onSaveSettings,
+  onSaveSkill,
+  onToggleSkill,
+  onDeleteSkill,
+  onOpenUserSkillsFolder,
   onSaveApiKey,
   onRefreshAuditLogs,
   onClose,
@@ -22,6 +28,7 @@ export function SettingsDrawer({
   knowledgeBases: KnowledgeBase[];
   activeKnowledgeBaseId: string;
   settings: UserSettings;
+  skills: AgentSkill[];
   modelApiKeyStatus: ModelApiKeyStatus | null;
   auditLogs: RequestAuditLog[];
   isBusy: boolean;
@@ -30,6 +37,10 @@ export function SettingsDrawer({
   onRescanKnowledgeBase: (knowledgeBaseId: string) => void;
   onRemoveKnowledgeBase: (knowledgeBaseId: string) => void;
   onSaveSettings: (settings: UserSettings) => Promise<void> | void;
+  onSaveSkill: (skill: AgentSkill) => Promise<AgentSkill | void> | AgentSkill | void;
+  onToggleSkill: (skillId: string, enabled: boolean, allowAutoInvoke?: boolean) => Promise<void> | void;
+  onDeleteSkill: (skillId: string) => Promise<void> | void;
+  onOpenUserSkillsFolder: () => Promise<void> | void;
   onSaveApiKey: (apiKey: string) => Promise<void> | void;
   onRefreshAuditLogs: () => Promise<void> | void;
   onClose: () => void;
@@ -38,6 +49,14 @@ export function SettingsDrawer({
   const [settingsDraft, setSettingsDraft] = useState<UserSettings>(settings);
   /** API key 草稿只保留在输入框中，保存后由外层写入系统安全存储。 */
   const [apiKeyDraft, setApiKeyDraft] = useState("");
+  /** Skills 管理弹窗状态，避免设置抽屉内一次性铺开完整管理页。 */
+  const [isSkillsModalOpen, setIsSkillsModalOpen] = useState(false);
+  /** 已启用 skill 数量，用于设置摘要快速说明能力状态。 */
+  const enabledSkillCount = skills.filter((skill) => skill.enabled).length;
+  /** 允许自动触发的已启用 skill 数量，用于提示自动匹配覆盖范围。 */
+  const autoSkillCount = skills.filter((skill) => skill.enabled && skill.allowAutoInvoke).length;
+  /** 文件式 skill 数量用于确认用户目录扫描是否已生效。 */
+  const fileSkillCount = skills.filter((skill) => skill.source === "file").length;
 
   useEffect(() => {
     setSettingsDraft(settings);
@@ -210,6 +229,47 @@ export function SettingsDrawer({
         </div>
 
         <div className="settings-section">
+          <div className="settings-section-title">
+            <h3>Skills 能力</h3>
+            <button className="ghost-button" type="button" onClick={() => setIsSkillsModalOpen(true)}>
+              <Sparkles size={14} />
+              管理 Skills
+            </button>
+          </div>
+          <div className="skills-summary">
+            <div>
+              <span>启用</span>
+              <strong>
+                {enabledSkillCount} / {skills.length}
+              </strong>
+            </div>
+            <div>
+              <span>自动触发</span>
+              <strong>{settings.skillSettings.activationMode === "auto" ? `${autoSkillCount} 个` : "已关闭"}</strong>
+            </div>
+            <div>
+              <span>文件 Skills</span>
+              <strong>{fileSkillCount} 个</strong>
+            </div>
+          </div>
+          <label className="toggle-row">
+            <input
+              checked={settingsDraft.skillSettings.activationMode === "auto"}
+              onChange={(event) =>
+                setSettingsDraft((currentSettings) => ({
+                  ...currentSettings,
+                  skillSettings: {
+                    activationMode: event.target.checked ? "auto" : "manual",
+                  },
+                }))
+              }
+              type="checkbox"
+            />
+            <span>允许未显式选择时自动匹配 skill</span>
+          </label>
+        </div>
+
+        <div className="settings-section">
           <h3>写入策略</h3>
           <div className="policy-row">
             <Check size={16} />
@@ -233,6 +293,17 @@ export function SettingsDrawer({
             )}
           </div>
         </div>
+        {isSkillsModalOpen && (
+          <SkillsModal
+            skills={skills}
+            isBusy={isBusy}
+            onSaveSkill={onSaveSkill}
+            onToggleSkill={onToggleSkill}
+            onDeleteSkill={onDeleteSkill}
+            onOpenUserSkillsFolder={onOpenUserSkillsFolder}
+            onClose={() => setIsSkillsModalOpen(false)}
+          />
+        )}
       </aside>
     </div>
   );
