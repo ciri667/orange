@@ -4,13 +4,13 @@ use crate::domain::{
     WorkspaceSnapshot,
 };
 use chrono::{Local, TimeZone};
-use rusqlite::{params, Connection};
+use rusqlite::{params, Connection, TransactionBehavior};
 use sha2::{Digest, Sha256};
 use std::collections::HashSet;
 use std::fs;
 use std::io::Write;
 use std::path::{Component, Path, PathBuf};
-use std::sync::{Mutex, OnceLock};
+use std::sync::{Mutex, MutexGuard, OnceLock};
 use std::time::Duration;
 use tauri::{AppHandle, Manager};
 use tempfile::NamedTempFile;
@@ -37,11 +37,23 @@ const IGNORED_DIRECTORY_NAMES: &[&str] = &[
 /** 用户设置表中的默认记录 key，首版只有一个本机用户配置。 */
 const USER_SETTINGS_KEY: &str = "default";
 
+/** SQLite 被其他连接占用时的等待时长，覆盖大知识库索引重建的正常耗时窗口。 */
+const DATABASE_BUSY_TIMEOUT: Duration = Duration::from_secs(30);
+
 /** 系统安全存储中的模型密钥引用，SQLite 只保存这个引用而不保存明文 key。 */
 pub const MODEL_KEY_REFERENCE: &str = "cici-note-openai-compatible-api-key";
 
 /** 当前桌面进程内的模型密钥缓存，用于减少同一会话内反复访问系统安全存储。 */
 static MODEL_API_KEY_CACHE: OnceLock<Mutex<Option<String>>> = OnceLock::new();
+
+/** 当前桌面进程内的 SQLite 写锁，串行化索引刷新、会话保存和轻量迁移。 */
+static DATABASE_WRITE_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+
+/** 已完成 schema 初始化的 SQLite 文件路径，避免每次读命令都重复执行 DDL。 */
+static INITIALIZED_DATABASE_PATHS: OnceLock<Mutex<HashSet<PathBuf>>> = OnceLock::new();
+
+/** 最近一次已完成的 FTS 快照签名，用于跳过 StrictMode/reload 的重复索引任务。 */
+static COMPLETED_INDEX_SIGNATURE: OnceLock<Mutex<Option<String>>> = OnceLock::new();
 
 /** SQLite 中持久化的知识库授权记录，用于启动时重新扫描真实目录。 */
 struct StoredKnowledgeBase {
@@ -191,17 +203,51 @@ fn database_path(app: &AppHandle) -> Result<PathBuf, String> {
 
 /** 打开 SQLite 连接并确保 FTS5、向量缓存和会话表存在。 */
 pub fn open_database(app: &AppHandle) -> Result<Connection, String> {
-    let connection = Connection::open(database_path(app)?)
-        .map_err(|error| format!("无法打开 SQLite：{error}"))?;
+    let database_path = database_path(app)?;
+    let connection =
+        Connection::open(&database_path).map_err(|error| format!("无法打开 SQLite：{error}"))?;
 
-    // 启动阶段多个命令可能同时打开 SQLite；短暂等待可降低索引写入导致的偶发锁冲突。
+    // 启动阶段多个命令可能同时打开 SQLite；等待窗口覆盖首次大知识库索引重建。
     connection
-        .busy_timeout(Duration::from_secs(5))
+        .busy_timeout(DATABASE_BUSY_TIMEOUT)
         .map_err(|error| format!("无法配置 SQLite 忙等待：{error}"))?;
+
+    ensure_database_schema(&connection, &database_path)?;
+
+    Ok(connection)
+}
+
+/** 确保 SQLite schema 只在每个进程和数据库文件上初始化一次，减少启动并发 DDL 锁竞争。 */
+fn ensure_database_schema(connection: &Connection, database_path: &Path) -> Result<(), String> {
+    let initialized_paths = INITIALIZED_DATABASE_PATHS.get_or_init(|| Mutex::new(HashSet::new()));
+    {
+        let initialized_paths = initialized_paths
+            .lock()
+            .map_err(|_| "SQLite 初始化状态锁已损坏。".to_owned())?;
+
+        if initialized_paths.contains(database_path) {
+            return Ok(());
+        }
+    }
+
+    let _write_guard = lock_database_writer()?;
+
+    {
+        let initialized_paths = initialized_paths
+            .lock()
+            .map_err(|_| "SQLite 初始化状态锁已损坏。".to_owned())?;
+
+        if initialized_paths.contains(database_path) {
+            return Ok(());
+        }
+    }
 
     connection
         .execute_batch(
             r#"
+            PRAGMA journal_mode = WAL;
+            PRAGMA synchronous = NORMAL;
+
             CREATE TABLE IF NOT EXISTS knowledge_bases (
               id TEXT PRIMARY KEY,
               name TEXT NOT NULL,
@@ -270,7 +316,53 @@ pub fn open_database(app: &AppHandle) -> Result<Connection, String> {
         .map_err(|error| format!("无法初始化 SQLite schema：{error}"))?;
     ensure_audit_log_columns(&connection)?;
 
-    Ok(connection)
+    let mut initialized_paths = initialized_paths
+        .lock()
+        .map_err(|_| "SQLite 初始化状态锁已损坏。".to_owned())?;
+    initialized_paths.insert(database_path.to_path_buf());
+
+    Ok(())
+}
+
+/** 获取 SQLite 写锁，避免同一 Tauri 进程内多个连接同时升级写事务导致 database is locked。 */
+pub fn lock_database_writer() -> Result<MutexGuard<'static, ()>, String> {
+    DATABASE_WRITE_LOCK
+        .get_or_init(|| Mutex::new(()))
+        .lock()
+        .map_err(|_| "SQLite 写入锁已损坏。".to_owned())
+}
+
+/** 构造 FTS 索引快照签名，用于识别内容完全相同的重复后台刷新。 */
+fn build_index_signature(snapshot: &WorkspaceSnapshot) -> String {
+    let mut hasher = Sha256::new();
+
+    for knowledge_base in &snapshot.knowledge_bases {
+        hasher.update(knowledge_base.id.as_bytes());
+        hasher.update(b"\0");
+        hasher.update(knowledge_base.path.as_bytes());
+        hasher.update(b"\0");
+        hasher.update(if knowledge_base.semantic_index_enabled {
+            b"1"
+        } else {
+            b"0"
+        });
+        hasher.update(b"\0");
+    }
+
+    for note in &snapshot.notes {
+        hasher.update(note.id.as_bytes());
+        hasher.update(b"\0");
+        hasher.update(note.knowledge_base_id.as_bytes());
+        hasher.update(b"\0");
+        hasher.update(note.title.as_bytes());
+        hasher.update(b"\0");
+        hasher.update(note.path.as_bytes());
+        hasher.update(b"\0");
+        hasher.update(note.content_hash.as_bytes());
+        hasher.update(b"\0");
+    }
+
+    format!("{:x}", hasher.finalize())
 }
 
 /** 为旧版审计表补齐 M3 需要的结构化列，避免已有用户数据阻塞启动。 */
@@ -300,56 +392,79 @@ fn ensure_audit_log_columns(connection: &Connection) -> Result<(), String> {
 
 /** 将当前快照写入 SQLite FTS5 索引，供后续真实工具检索使用。 */
 pub fn index_snapshot(app: &AppHandle, snapshot: &WorkspaceSnapshot) -> Result<(), String> {
-    let connection = open_database(app)?;
+    let index_signature = build_index_signature(snapshot);
+    let mut connection = open_database(app)?;
+    let _write_guard = lock_database_writer()?;
+    let should_rebuild_index = {
+        let completed_signature = COMPLETED_INDEX_SIGNATURE
+            .get_or_init(|| Mutex::new(None))
+            .lock()
+            .map_err(|_| "FTS 索引签名锁已损坏。".to_owned())?;
+
+        completed_signature.as_deref() != Some(index_signature.as_str())
+    };
     let transaction = connection
-        .unchecked_transaction()
+        .transaction_with_behavior(TransactionBehavior::Immediate)
         .map_err(|error| format!("无法启动索引事务：{error}"))?;
 
-    transaction
-        .execute("DELETE FROM note_fts", [])
-        .map_err(|error| format!("无法清理 FTS 索引：{error}"))?;
-    transaction
-        .execute("DELETE FROM notes", [])
-        .map_err(|error| format!("无法清理笔记索引：{error}"))?;
-    transaction
-        .execute("DELETE FROM knowledge_bases", [])
-        .map_err(|error| format!("无法清理知识库索引：{error}"))?;
+    if should_rebuild_index {
+        transaction
+            .execute("DELETE FROM note_fts", [])
+            .map_err(|error| format!("无法清理 FTS 索引：{error}"))?;
+        transaction
+            .execute("DELETE FROM notes", [])
+            .map_err(|error| format!("无法清理笔记索引：{error}"))?;
+        transaction
+            .execute("DELETE FROM knowledge_bases", [])
+            .map_err(|error| format!("无法清理知识库索引：{error}"))?;
 
-    for knowledge_base in &snapshot.knowledge_bases {
-        transaction
-            .execute(
-                "INSERT OR REPLACE INTO knowledge_bases (id, name, path, semantic_index_enabled, updated_at) VALUES (?1, ?2, ?3, ?4, ?5)",
-                params![
-                    &knowledge_base.id,
-                    &knowledge_base.name,
-                    &knowledge_base.path,
-                    if knowledge_base.semantic_index_enabled { 1 } else { 0 },
-                    &knowledge_base.updated_at
-                ],
-            )
-            .map_err(|error| format!("无法写入知识库索引：{error}"))?;
-    }
+        for knowledge_base in &snapshot.knowledge_bases {
+            transaction
+                .execute(
+                    "INSERT OR REPLACE INTO knowledge_bases (id, name, path, semantic_index_enabled, updated_at) VALUES (?1, ?2, ?3, ?4, ?5)",
+                    params![
+                        &knowledge_base.id,
+                        &knowledge_base.name,
+                        &knowledge_base.path,
+                        if knowledge_base.semantic_index_enabled { 1 } else { 0 },
+                        &knowledge_base.updated_at
+                    ],
+                )
+                .map_err(|error| format!("无法写入知识库索引：{error}"))?;
+        }
 
-    for note in &snapshot.notes {
-        transaction
-            .execute(
-                "INSERT OR REPLACE INTO notes (id, knowledge_base_id, title, path, content_hash, updated_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-                params![&note.id, &note.knowledge_base_id, &note.title, &note.path, &note.content_hash, &note.updated_at],
-            )
-            .map_err(|error| format!("无法写入笔记索引：{error}"))?;
-        transaction
-            .execute(
-                "INSERT INTO note_fts (note_id, knowledge_base_id, title, path, body) VALUES (?1, ?2, ?3, ?4, ?5)",
-                params![&note.id, &note.knowledge_base_id, &note.title, &note.path, &note.content],
-            )
-            .map_err(|error| format!("无法写入 FTS 索引：{error}"))?;
+        for note in &snapshot.notes {
+            transaction
+                .execute(
+                    "INSERT OR REPLACE INTO notes (id, knowledge_base_id, title, path, content_hash, updated_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                    params![&note.id, &note.knowledge_base_id, &note.title, &note.path, &note.content_hash, &note.updated_at],
+                )
+                .map_err(|error| format!("无法写入笔记索引：{error}"))?;
+            transaction
+                .execute(
+                    "INSERT INTO note_fts (note_id, knowledge_base_id, title, path, body) VALUES (?1, ?2, ?3, ?4, ?5)",
+                    params![&note.id, &note.knowledge_base_id, &note.title, &note.path, &note.content],
+                )
+                .map_err(|error| format!("无法写入 FTS 索引：{error}"))?;
+        }
     }
 
     persist_sessions_in_transaction(&transaction, snapshot)?;
 
     transaction
         .commit()
-        .map_err(|error| format!("无法提交索引事务：{error}"))
+        .map_err(|error| format!("无法提交索引事务：{error}"))?;
+
+    if should_rebuild_index {
+        let mut completed_signature = COMPLETED_INDEX_SIGNATURE
+            .get_or_init(|| Mutex::new(None))
+            .lock()
+            .map_err(|_| "FTS 索引签名锁已损坏。".to_owned())?;
+
+        *completed_signature = Some(index_signature);
+    }
+
+    Ok(())
 }
 
 /** 在已有 SQLite 事务中读取已逻辑删除会话，供后续保存保留历史 payload。 */
@@ -443,9 +558,10 @@ fn persist_sessions_in_transaction(
 
 /** 保存当前快照的完整会话列表，供前端会话操作和 Agent loop 后同步状态。 */
 pub fn save_sessions(app: &AppHandle, snapshot: &WorkspaceSnapshot) -> Result<(), String> {
-    let connection = open_database(app)?;
+    let mut connection = open_database(app)?;
+    let _write_guard = lock_database_writer()?;
     let transaction = connection
-        .unchecked_transaction()
+        .transaction_with_behavior(TransactionBehavior::Immediate)
         .map_err(|error| format!("无法启动会话事务：{error}"))?;
 
     persist_sessions_in_transaction(&transaction, snapshot)?;
@@ -768,6 +884,7 @@ pub fn load_user_settings(app: &AppHandle) -> Result<UserSettings, String> {
 /** 保存用户模型和隐私设置；密钥本身由单独命令写入系统安全存储。 */
 pub fn save_user_settings(app: &AppHandle, settings: &UserSettings) -> Result<(), String> {
     let connection = open_database(app)?;
+    let _write_guard = lock_database_writer()?;
     let payload_json =
         serde_json::to_string(settings).map_err(|error| format!("无法序列化用户设置：{error}"))?;
 
@@ -909,6 +1026,7 @@ fn is_missing_keyring_entry_error(message: &str) -> bool {
 /** 追加一次模型请求或本地工具执行审计摘要。 */
 pub fn append_request_audit_log(app: &AppHandle, log: &RequestAuditLog) -> Result<(), String> {
     let connection = open_database(app)?;
+    let _write_guard = lock_database_writer()?;
     let mut log = log.clone();
 
     normalize_audit_log_created_at(&mut log);
@@ -947,13 +1065,17 @@ pub fn load_request_audit_logs(
     let connection = open_database(app)?;
     let bounded_limit = limit.clamp(1, 50);
 
-    // 读取前迁移旧版占位时间，避免设置页每次打开都继续看到“刚刚”。
-    connection
-        .execute(
-            "UPDATE request_audit_logs SET created_at = ?1 WHERE TRIM(created_at) = '' OR created_at = '刚刚'",
-            params![format_local_datetime()],
-        )
-        .map_err(|error| format!("无法迁移请求审计时间：{error}"))?;
+    {
+        let _write_guard = lock_database_writer()?;
+
+        // 读取前迁移旧版占位时间，避免设置页每次打开都继续看到“刚刚”。
+        connection
+            .execute(
+                "UPDATE request_audit_logs SET created_at = ?1 WHERE TRIM(created_at) = '' OR created_at = '刚刚'",
+                params![format_local_datetime()],
+            )
+            .map_err(|error| format!("无法迁移请求审计时间：{error}"))?;
+    }
 
     let mut statement = connection
         .prepare(
@@ -1005,13 +1127,21 @@ pub fn load_workspace_snapshot(app: &AppHandle) -> Result<WorkspaceSnapshot, Str
             })
         })
         .map_err(|error| format!("无法查询知识库列表：{error}"))?;
+    let mut stored_knowledge_bases = Vec::new();
+
+    for stored_row in stored_rows {
+        stored_knowledge_bases
+            .push(stored_row.map_err(|error| format!("无法解析知识库记录：{error}"))?);
+    }
+
+    // 文件系统扫描可能耗时较长，必须先释放 SQLite statement，避免长读锁阻塞后台 FTS 重建。
+    drop(statement);
+
     let mut knowledge_bases = Vec::new();
     let mut folders = Vec::new();
     let mut notes = Vec::new();
 
-    for stored_row in stored_rows {
-        let stored_knowledge_base =
-            stored_row.map_err(|error| format!("无法解析知识库记录：{error}"))?;
+    for stored_knowledge_base in stored_knowledge_bases {
         let selection = KnowledgeBaseSelection {
             id: stored_knowledge_base.id.clone(),
             name: stored_knowledge_base.name.clone(),

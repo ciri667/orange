@@ -1,5 +1,5 @@
 use crate::domain::{AgentSkill, AgentTurnRequest, UserSettings};
-use crate::storage::{create_id, format_local_datetime};
+use crate::storage::{create_id, format_local_datetime, lock_database_writer};
 use rusqlite::{params, Connection};
 use sha2::{Digest, Sha256};
 use std::collections::{HashMap, HashSet};
@@ -248,6 +248,7 @@ pub fn delete_user_skill_from_root(
         return Ok(());
     }
 
+    let _write_guard = lock_database_writer()?;
     let affected = connection
         .execute(
             "DELETE FROM agent_skills WHERE id = ?1 AND source = ?2",
@@ -950,6 +951,8 @@ fn delete_file_skill_directory(skills_root: &Path, skill: &AgentSkill) -> Result
 
 /** 删除 SQLite 中的 skill 状态覆盖；文件正文不存数据库。 */
 fn delete_skill_override(connection: &Connection, skill_id: &str) -> Result<(), String> {
+    let _write_guard = lock_database_writer()?;
+
     connection
         .execute("DELETE FROM agent_skills WHERE id = ?1", params![skill_id])
         .map_err(|error| format!("无法清理 skill 状态覆盖：{error}"))?;
@@ -1107,6 +1110,7 @@ fn read_persisted_skills(connection: &Connection) -> Result<HashMap<String, Agen
 fn upsert_skill(connection: &Connection, skill: &AgentSkill) -> Result<(), String> {
     let payload_json =
         serde_json::to_string(skill).map_err(|error| format!("无法序列化 skill：{error}"))?;
+    let _write_guard = lock_database_writer()?;
 
     connection
         .execute(
