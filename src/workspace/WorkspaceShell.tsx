@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { AgentPanel } from "../agent/AgentPanel";
+import { DocumentPane } from "../editor/DocumentPane";
 import { EditorPane } from "../editor/EditorPane";
 import { buildFileTree } from "../knowledge-base/treeUtils";
 import { KnowledgeBaseSidebar } from "../knowledge-base/KnowledgeBaseSidebar";
@@ -7,17 +8,21 @@ import { SettingsDrawer } from "../settings/SettingsDrawer";
 import { createContentHash, createLocalId, formatLocalDateTime } from "../shared/id";
 import {
   getActiveKnowledgeBase,
+  getActiveDocument,
   getActiveNote,
   getActiveSession,
 } from "../shared/selectors";
 import {
   acceptProposedChange,
   attachKnowledgeBase,
+  createDocument,
   createFolder,
   createNote,
   deleteAgentSkill,
+  deleteDocument,
   deleteNote,
   deleteSession,
+  loadDocumentPreview,
   loadAgentSkills,
   loadModelApiKeyStatus,
   loadRequestAuditLogs,
@@ -25,12 +30,14 @@ import {
   loadWorkspaceState,
   openUserSkillsFolder,
   removeKnowledgeBase,
+  renameDocument,
   renameNote,
   rejectProposedChange,
   rescanKnowledgeBase,
   restoreSessionContext,
   runAgentTurn,
   saveAgentSkill,
+  saveDocumentContent,
   saveNoteContent,
   saveModelApiKey,
   saveSession,
@@ -44,12 +51,14 @@ import type {
   AgentSkill,
   AgentSession,
   AgentSessionType,
+  DocumentPreview,
   KnowledgeBase,
   MarkdownViewMode,
   ModelApiKeyStatus,
   Note,
   RequestAuditLog,
   UserSettings,
+  WorkspaceDocument,
   WorkspaceSnapshot,
 } from "../shared/types";
 import { TopBar } from "./TopBar";
@@ -139,11 +148,16 @@ export function WorkspaceShell() {
   const [busyLabel, setBusyLabel] = useState("");
   const [notice, setNotice] = useState("");
   const [editingBaseHashes, setEditingBaseHashes] = useState<Record<string, string>>({});
+  const [editingBaseDocumentHashes, setEditingBaseDocumentHashes] = useState<Record<string, string>>({});
   const [dirtyNoteIds, setDirtyNoteIds] = useState<Set<string>>(new Set());
+  const [dirtyDocumentIds, setDirtyDocumentIds] = useState<Set<string>>(new Set());
   const [markdownViewMode, setMarkdownViewMode] = useState<MarkdownViewMode>("edit");
-  const [renameDialog, setRenameDialog] = useState<{ noteId: string; fileName: string } | null>(null);
+  const [documentPreview, setDocumentPreview] = useState<DocumentPreview | null>(null);
+  const [documentPreviewError, setDocumentPreviewError] = useState("");
+  const [isDocumentPreviewLoading, setIsDocumentPreviewLoading] = useState(false);
+  const [renameDialog, setRenameDialog] = useState<{ kind: "note" | "document"; id: string; fileName: string } | null>(null);
   const [createDialog, setCreateDialog] = useState<{
-    kind: "document" | "folder";
+    kind: "markdown" | "text" | "folder";
     knowledgeBaseId: string;
     parentPath: string;
     name: string;
@@ -160,6 +174,51 @@ export function WorkspaceShell() {
       isMounted = false;
     };
   }, []);
+
+  useEffect(() => {
+    if (!snapshot?.activeDocumentId) {
+      setDocumentPreview(null);
+      setDocumentPreviewError("");
+      setIsDocumentPreviewLoading(false);
+      return;
+    }
+
+    const activeDocument = snapshot.documents.find((document) => document.id === snapshot.activeDocumentId);
+
+    if (!activeDocument || activeDocument.fileType === "txt") {
+      setDocumentPreview(null);
+      setDocumentPreviewError("");
+      setIsDocumentPreviewLoading(false);
+      return;
+    }
+
+    let isMounted = true;
+
+    setDocumentPreview(null);
+    setDocumentPreviewError("");
+    setIsDocumentPreviewLoading(true);
+
+    void loadDocumentPreview(snapshot, activeDocument.id)
+      .then((preview) => {
+        if (isMounted) {
+          setDocumentPreview(preview);
+        }
+      })
+      .catch((error) => {
+        if (isMounted) {
+          setDocumentPreviewError(formatErrorMessage(error));
+        }
+      })
+      .finally(() => {
+        if (isMounted) {
+          setIsDocumentPreviewLoading(false);
+        }
+      });
+
+    return () => {
+      isMounted = false;
+    };
+  }, [snapshot?.activeDocumentId, snapshot?.documents]);
 
   /** 加载首屏必需数据；审计日志失败不阻断进入工作台。 */
   async function loadInitialData(shouldCommit: () => boolean = () => true) {
@@ -189,6 +248,7 @@ export function WorkspaceShell() {
       setAgentSkills(nextAgentSkills);
       setModelApiKeyStatus(nextModelApiKeyStatus);
       setEditingBaseHashes(buildNoteHashMap(nextSnapshot.notes));
+      setEditingBaseDocumentHashes(buildDocumentHashMap(nextSnapshot.documents));
       setIsBooting(false);
 
       void loadInitialAuditLogs(shouldCommit);
@@ -256,8 +316,8 @@ export function WorkspaceShell() {
         <div className="brand-mark">
           <img className="brand-logo" src="/cici-note-logo.svg" alt="" />
         </div>
-        <h1>连接一个 Markdown 目录，开始使用知识库 Agent 助手。</h1>
-        <p>Agent 只能通过受控工具访问你选择的本地目录；写入会先生成 diff，确认后才落盘。</p>
+        <h1>连接一个支持文档目录，开始使用知识库 Agent 助手。</h1>
+        <p>目录树会展示 Markdown、TXT、DOCX 和 PDF；Agent 写入仍只作用于确认后的 Markdown diff。</p>
         {(busyLabel || notice) && (
           <p className={`operation-notice ${notice.includes("失败") || notice.includes("阻止") ? "error" : ""}`}>
             {busyLabel || notice}
@@ -272,12 +332,15 @@ export function WorkspaceShell() {
 
   const activeKnowledgeBase = getActiveKnowledgeBase(currentSnapshot);
   const activeSession = getActiveSession(currentSnapshot);
+  const activeDocument = getActiveDocument(currentSnapshot);
   const activeNote = getActiveNote(currentSnapshot);
   const isActiveNoteDirty = activeNote ? dirtyNoteIds.has(activeNote.id) : false;
+  const isActiveDocumentDirty = activeDocument ? dirtyDocumentIds.has(activeDocument.id) : false;
   const fileTree = buildFileTree({
     knowledgeBase: activeKnowledgeBase,
     folders: currentSnapshot.folders,
     notes: currentSnapshot.notes,
+    documents: currentSnapshot.documents,
     searchTerm,
   });
 
@@ -295,9 +358,17 @@ export function WorkspaceShell() {
   }
 
   /** 写入新快照时同步保存基准 hash，清理已经不存在的草稿标记。 */
-  function commitSnapshot(nextSnapshot: WorkspaceSnapshot, dirtyNotesToKeep = dirtyNoteIds) {
+  function commitSnapshot(
+    nextSnapshot: WorkspaceSnapshot,
+    dirtyNotesToKeep = dirtyNoteIds,
+    dirtyDocumentsToKeep = dirtyDocumentIds,
+  ) {
     const nextNoteIds = new Set(nextSnapshot.notes.map((note) => note.id));
     const nextDirtyNoteIds = new Set(Array.from(dirtyNotesToKeep).filter((noteId) => nextNoteIds.has(noteId)));
+    const nextDocumentIds = new Set(nextSnapshot.documents.map((document) => document.id));
+    const nextDirtyDocumentIds = new Set(
+      Array.from(dirtyDocumentsToKeep).filter((documentId) => nextDocumentIds.has(documentId)),
+    );
 
     setSnapshot(nextSnapshot);
     setEditingBaseHashes((currentHashes) => {
@@ -320,13 +391,35 @@ export function WorkspaceShell() {
 
       return nextHashes;
     });
+    setEditingBaseDocumentHashes((currentHashes) => {
+      const nextHashes = { ...currentHashes };
+
+      // TXT 文档保存成功或重扫后更新基准 hash；仍在编辑的文档保留原始 hash 做冲突检测。
+      nextSnapshot.documents.forEach((document) => {
+        if (!nextDirtyDocumentIds.has(document.id)) {
+          nextHashes[document.id] = document.contentHash;
+        } else if (!nextHashes[document.id]) {
+          nextHashes[document.id] = document.contentHash;
+        }
+      });
+
+      Object.keys(nextHashes).forEach((documentId) => {
+        if (!nextDocumentIds.has(documentId)) {
+          delete nextHashes[documentId];
+        }
+      });
+
+      return nextHashes;
+    });
     setDirtyNoteIds(nextDirtyNoteIds);
+    setDirtyDocumentIds(nextDirtyDocumentIds);
   }
 
   /** 选择知识库时同步收窄 Agent 工具范围，避免跨库误检索。 */
   async function handleSelectKnowledgeBase(knowledgeBaseId: string) {
     const nextKnowledgeBase = currentSnapshot.knowledgeBases.find((knowledgeBase) => knowledgeBase.id === knowledgeBaseId);
     const nextNotes = currentSnapshot.notes.filter((note) => note.knowledgeBaseId === knowledgeBaseId);
+    const nextDocuments = currentSnapshot.documents.filter((document) => document.knowledgeBaseId === knowledgeBaseId);
 
     if (!nextKnowledgeBase) {
       return;
@@ -344,6 +437,7 @@ export function WorkspaceShell() {
       sessions: existingSession ? currentSnapshot.sessions : [nextSession, ...currentSnapshot.sessions],
       activeKnowledgeBaseId: knowledgeBaseId,
       activeNoteId: nextNotes[0]?.id ?? "",
+      activeDocumentId: nextNotes[0] ? "" : nextDocuments[0]?.id ?? "",
       activeSessionId: nextSession.id,
     };
 
@@ -371,7 +465,7 @@ export function WorkspaceShell() {
 
     try {
       const selection = await selectKnowledgeBaseDirectory(currentSnapshot.knowledgeBases.length);
-      setNotice(`正在扫描「${selection.name}」中的 Markdown 文件...`);
+      setNotice(`正在扫描「${selection.name}」中的支持文档...`);
       const nextSnapshot = await attachKnowledgeBase(currentSnapshot, selection);
       commitSnapshot(nextSnapshot);
       setSearchTerm("");
@@ -432,6 +526,7 @@ export function WorkspaceShell() {
       sessions: existingSession ? currentSnapshot.sessions : [nextSession, ...currentSnapshot.sessions],
       activeKnowledgeBaseId: nextKnowledgeBase.id,
       activeNoteId: noteId,
+      activeDocumentId: "",
       activeSessionId: nextSession.id,
     };
 
@@ -444,6 +539,48 @@ export function WorkspaceShell() {
         : await saveSession(activatedSnapshot, nextSession);
 
       commitSnapshot(nextSnapshot);
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : String(error));
+    } finally {
+      endBusy();
+    }
+  }
+
+  /** 打开普通文档时切换到知识库级 Agent 会话，避免旧 Markdown 笔记上下文继续生效。 */
+  async function handleSelectDocument(documentId: string) {
+    const nextDocument = currentSnapshot.documents.find((document) => document.id === documentId);
+
+    if (!nextDocument) {
+      return;
+    }
+
+    const nextKnowledgeBase =
+      currentSnapshot.knowledgeBases.find((knowledgeBase) => knowledgeBase.id === nextDocument.knowledgeBaseId) ??
+      activeKnowledgeBase;
+    const existingSession = currentSnapshot.sessions.find(
+      (session) =>
+        session.type === "knowledge-base" &&
+        session.knowledgeBaseIds.length === 1 &&
+        session.knowledgeBaseIds[0] === nextKnowledgeBase.id,
+    );
+    const nextSession = existingSession ?? buildAgentSession({ type: "knowledge-base", knowledgeBase: nextKnowledgeBase });
+    const activatedSnapshot = {
+      ...currentSnapshot,
+      sessions: existingSession ? currentSnapshot.sessions : [nextSession, ...currentSnapshot.sessions],
+      activeKnowledgeBaseId: nextKnowledgeBase.id,
+      activeNoteId: "",
+      activeDocumentId: documentId,
+      activeSessionId: nextSession.id,
+    };
+
+    beginBusy("正在打开文档...");
+
+    try {
+      const nextSnapshot = existingSession
+        ? await restoreSessionContext(activatedSnapshot, nextSession.id)
+        : await saveSession(activatedSnapshot, nextSession);
+
+      commitSnapshot({ ...nextSnapshot, activeNoteId: "", activeDocumentId: documentId });
     } catch (error) {
       setNotice(error instanceof Error ? error.message : String(error));
     } finally {
@@ -466,12 +603,31 @@ export function WorkspaceShell() {
     setDirtyNoteIds((currentNoteIds) => new Set(currentNoteIds).add(activeNote.id));
   }
 
+  /** 更新当前 txt 文档正文，只修改内存草稿；保存时才写回本地文件。 */
+  function handleDocumentContentChange(content: string) {
+    if (!activeDocument || activeDocument.fileType !== "txt") {
+      return;
+    }
+
+    setSnapshot({
+      ...currentSnapshot,
+      documents: currentSnapshot.documents.map((document) =>
+        document.id === activeDocument.id
+          ? { ...document, content, updatedAt: "刚刚", contentHash: createContentHash(content) }
+          : document,
+      ),
+    });
+    setDirtyDocumentIds((currentDocumentIds) => new Set(currentDocumentIds).add(activeDocument.id));
+  }
+
   /** 打开目录树新建弹窗；创建位置完全由被点击的目录节点决定。 */
-  function openCreateDialog(kind: "document" | "folder", parentPath: string) {
+  function openCreateDialog(kind: "markdown" | "text" | "folder", parentPath: string) {
     const defaultName =
-      kind === "document"
-        ? getNextAvailableDocumentName(currentSnapshot, activeKnowledgeBase.id, parentPath)
-        : getNextAvailableFolderName(currentSnapshot, activeKnowledgeBase.id, parentPath);
+      kind === "markdown"
+        ? getNextAvailableMarkdownName(currentSnapshot, activeKnowledgeBase.id, parentPath)
+        : kind === "text"
+          ? getNextAvailableTextDocumentName(currentSnapshot, activeKnowledgeBase.id, parentPath)
+          : getNextAvailableFolderName(currentSnapshot, activeKnowledgeBase.id, parentPath);
 
     setRenameDialog(null);
     setCreateDialog({
@@ -494,10 +650,16 @@ export function WorkspaceShell() {
       return;
     }
 
-    beginBusy(createDialog.kind === "document" ? "正在新建 Markdown..." : "正在新建目录...");
+    beginBusy(
+      createDialog.kind === "markdown"
+        ? "正在新建 Markdown..."
+        : createDialog.kind === "text"
+          ? "正在新建 TXT..."
+          : "正在新建目录...",
+    );
 
     try {
-      if (createDialog.kind === "document") {
+      if (createDialog.kind === "markdown") {
         const nextSnapshot = await createNote(
           currentSnapshot,
           createDialog.knowledgeBaseId,
@@ -519,6 +681,7 @@ export function WorkspaceShell() {
                 sessions: existingSession ? nextSnapshot.sessions : [nextSession, ...nextSnapshot.sessions],
                 activeKnowledgeBaseId: nextKnowledgeBase.id,
                 activeNoteId: nextNote.id,
+                activeDocumentId: "",
                 activeSessionId: nextSession.id,
               }
             : nextSnapshot;
@@ -530,6 +693,23 @@ export function WorkspaceShell() {
         setMarkdownViewMode("edit");
         setCreateDialog(null);
         setNotice(nextNote ? `已新建「${nextNote.title}」。` : "已新建 Markdown。");
+        return;
+      }
+
+      if (createDialog.kind === "text") {
+        const nextSnapshot = await createDocument(
+          currentSnapshot,
+          createDialog.knowledgeBaseId,
+          createDialog.parentPath,
+          nextName,
+        );
+        const nextDocument = getActiveDocument(nextSnapshot);
+
+        commitSnapshot(nextSnapshot);
+        setSearchTerm("");
+        expandFolderPaths([createDialog.parentPath]);
+        setCreateDialog(null);
+        setNotice(nextDocument ? `已新建「${nextDocument.title}」。` : "已新建 TXT。");
         return;
       }
 
@@ -577,6 +757,35 @@ export function WorkspaceShell() {
     }
   }
 
+  /** 保存当前 txt 草稿，后端会用开始编辑时的 hash 检测外部编辑器冲突。 */
+  async function handleSaveActiveDocument() {
+    if (!activeDocument || activeDocument.fileType !== "txt" || !isActiveDocumentDirty) {
+      return;
+    }
+
+    const expectedHash = editingBaseDocumentHashes[activeDocument.id] ?? activeDocument.contentHash;
+
+    beginBusy("正在保存当前 TXT...");
+
+    try {
+      const nextSnapshot = await saveDocumentContent(
+        currentSnapshot,
+        activeDocument.id,
+        activeDocument.content ?? "",
+        expectedHash,
+      );
+      const nextDirtyDocumentIds = new Set(dirtyDocumentIds);
+
+      nextDirtyDocumentIds.delete(activeDocument.id);
+      commitSnapshot(nextSnapshot, dirtyNoteIds, nextDirtyDocumentIds);
+      setNotice(`已保存「${activeDocument.title}」。`);
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : String(error));
+    } finally {
+      endBusy();
+    }
+  }
+
   /** 打开重命名弹窗；存在未保存草稿时先阻止，避免本地文件版本语义不清。 */
   function openRenameDialog(noteId = activeNote?.id ?? "") {
     const note = currentSnapshot.notes.find((item) => item.id === noteId);
@@ -585,21 +794,42 @@ export function WorkspaceShell() {
       return;
     }
 
-    if (dirtyNoteIds.size > 0) {
+    if (dirtyNoteIds.size > 0 || dirtyDocumentIds.size > 0) {
       setNotice("请先保存当前草稿，再重命名。");
       return;
     }
 
-    setRenameDialog({ noteId: note.id, fileName: getFileNameFromPath(note.path) });
+    setRenameDialog({ kind: "note", id: note.id, fileName: getFileNameFromPath(note.path) });
+  }
+
+  /** 打开 txt 重命名弹窗；存在未保存草稿时先阻止，避免本地文件版本语义不清。 */
+  function openRenameDocumentDialog(documentId = activeDocument?.id ?? "") {
+    const document = currentSnapshot.documents.find((item) => item.id === documentId);
+
+    if (!document || document.fileType !== "txt") {
+      return;
+    }
+
+    if (dirtyNoteIds.size > 0 || dirtyDocumentIds.size > 0) {
+      setNotice("请先保存当前草稿，再重命名。");
+      return;
+    }
+
+    setRenameDialog({ kind: "document", id: document.id, fileName: getFileNameFromPath(document.path) });
   }
 
   /** 提交重命名弹窗中的新文件名，真实桌面端最终由 Tauri 校验并执行 fs::rename。 */
-  async function handleSubmitRenameNote() {
+  async function handleSubmitRename() {
     if (!renameDialog) {
       return;
     }
 
-    const note = currentSnapshot.notes.find((item) => item.id === renameDialog.noteId);
+    if (renameDialog.kind === "document") {
+      await handleSubmitRenameDocument();
+      return;
+    }
+
+    const note = currentSnapshot.notes.find((item) => item.id === renameDialog.id);
 
     if (!note) {
       setRenameDialog(null);
@@ -630,6 +860,43 @@ export function WorkspaceShell() {
     }
   }
 
+  /** 提交 txt 文档重命名，后端会拒绝非 txt、越界路径和重名目标。 */
+  async function handleSubmitRenameDocument() {
+    if (!renameDialog || renameDialog.kind !== "document") {
+      return;
+    }
+
+    const document = currentSnapshot.documents.find((item) => item.id === renameDialog.id);
+
+    if (!document) {
+      setRenameDialog(null);
+      return;
+    }
+
+    const currentFileName = getFileNameFromPath(document.path);
+    const nextFileName = renameDialog.fileName.trim();
+
+    if (!nextFileName || nextFileName === currentFileName) {
+      setRenameDialog(null);
+      return;
+    }
+
+    beginBusy("正在重命名 TXT...");
+
+    try {
+      const nextSnapshot = await renameDocument(currentSnapshot, document.id, nextFileName);
+
+      commitSnapshot(nextSnapshot, dirtyNoteIds, new Set());
+      setCollapsedFolderPaths(new Set());
+      setRenameDialog(null);
+      setNotice(`已重命名为「${nextFileName}」。`);
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : String(error));
+    } finally {
+      endBusy();
+    }
+  }
+
   /** 删除指定 Markdown 文件到系统回收站；删除前二次确认并携带保存基准 hash。 */
   async function handleDeleteNote(noteId = activeNote?.id ?? "") {
     const note = currentSnapshot.notes.find((item) => item.id === noteId);
@@ -638,7 +905,7 @@ export function WorkspaceShell() {
       return;
     }
 
-    if (dirtyNoteIds.size > 0) {
+    if (dirtyNoteIds.size > 0 || dirtyDocumentIds.size > 0) {
       setNotice("请先保存当前草稿，再删除。");
       return;
     }
@@ -655,7 +922,41 @@ export function WorkspaceShell() {
     try {
       const nextSnapshot = await deleteNote(currentSnapshot, note.id, expectedHash);
 
-      commitSnapshot(nextSnapshot, new Set());
+      commitSnapshot(nextSnapshot, new Set(), dirtyDocumentIds);
+      setNotice("已移入系统回收站。");
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : String(error));
+    } finally {
+      endBusy();
+    }
+  }
+
+  /** 删除指定 txt 文档到系统回收站；删除前二次确认并携带保存基准 hash。 */
+  async function handleDeleteDocument(documentId = activeDocument?.id ?? "") {
+    const document = currentSnapshot.documents.find((item) => item.id === documentId);
+
+    if (!document || document.fileType !== "txt") {
+      return;
+    }
+
+    if (dirtyNoteIds.size > 0 || dirtyDocumentIds.size > 0) {
+      setNotice("请先保存当前草稿，再删除。");
+      return;
+    }
+
+    // TXT 删除同样会修改本地文件系统，即使进入回收站也需要用户确认。
+    if (!window.confirm(`将「${document.title}」移入系统回收站？`)) {
+      return;
+    }
+
+    const expectedHash = editingBaseDocumentHashes[document.id] ?? document.contentHash;
+
+    beginBusy("正在删除 TXT...");
+
+    try {
+      const nextSnapshot = await deleteDocument(currentSnapshot, document.id, expectedHash);
+
+      commitSnapshot(nextSnapshot, dirtyNoteIds, new Set());
       setNotice("已移入系统回收站。");
     } catch (error) {
       setNotice(error instanceof Error ? error.message : String(error));
@@ -725,8 +1026,8 @@ export function WorkspaceShell() {
       return;
     }
 
-    // 会话删除只隐藏历史记录和上下文，不删除本地 Markdown 文件或审计日志。
-    if (!window.confirm(`删除会话「${session.title}」？本地笔记不会被删除。`)) {
+    // 会话删除只隐藏历史记录和上下文，不删除本地文档或审计日志。
+    if (!window.confirm(`删除会话「${session.title}」？本地文档不会被删除。`)) {
       return;
     }
 
@@ -798,9 +1099,9 @@ export function WorkspaceShell() {
     }
   }
 
-  /** 重新扫描指定知识库，使用本地 Markdown 文件刷新目录树和 FTS 索引。 */
+  /** 重新扫描指定知识库，使用本地支持文档刷新目录树和 Markdown FTS 索引。 */
   async function handleRescanKnowledgeBase(knowledgeBaseId: string) {
-    if (dirtyNoteIds.size > 0) {
+    if (dirtyNoteIds.size > 0 || dirtyDocumentIds.size > 0) {
       setNotice("请先保存当前草稿，再刷新目录树。");
       return;
     }
@@ -810,7 +1111,7 @@ export function WorkspaceShell() {
     try {
       const nextSnapshot = await rescanKnowledgeBase(currentSnapshot, knowledgeBaseId);
 
-      commitSnapshot(nextSnapshot, new Set());
+      commitSnapshot(nextSnapshot, new Set(), new Set());
       setCollapsedFolderPaths(new Set());
       setNotice(buildScanNotice(nextSnapshot, knowledgeBaseId));
     } catch (error) {
@@ -820,7 +1121,7 @@ export function WorkspaceShell() {
     }
   }
 
-  /** 移除知识库授权和索引缓存，不删除用户选择目录中的 Markdown 文件。 */
+  /** 移除知识库授权和索引缓存，不删除用户选择目录中的本地文件。 */
   async function handleRemoveKnowledgeBase(knowledgeBaseId: string) {
     const knowledgeBase = currentSnapshot.knowledgeBases.find((item) => item.id === knowledgeBaseId);
 
@@ -828,8 +1129,8 @@ export function WorkspaceShell() {
       return;
     }
 
-    // 移除授权会清理本地索引和会话范围，虽然不删除 Markdown 文件，仍需要用户明确确认。
-    if (!window.confirm(`移除「${knowledgeBase.name}」的知识库授权？本地 Markdown 文件不会被删除。`)) {
+    // 移除授权会清理本地索引和会话范围，虽然不删除用户文档，仍需要用户明确确认。
+    if (!window.confirm(`移除「${knowledgeBase.name}」的知识库授权？本地文件不会被删除。`)) {
       return;
     }
 
@@ -838,9 +1139,9 @@ export function WorkspaceShell() {
     try {
       const nextSnapshot = await removeKnowledgeBase(currentSnapshot, knowledgeBaseId);
 
-      commitSnapshot(nextSnapshot, new Set());
+      commitSnapshot(nextSnapshot, new Set(), new Set());
       setCollapsedFolderPaths(new Set());
-      setNotice(`已移除「${knowledgeBase.name}」授权，本地 Markdown 文件未被删除。`);
+      setNotice(`已移除「${knowledgeBase.name}」授权，本地文件未被删除。`);
 
       if (!nextSnapshot.knowledgeBases.length) {
         setSearchTerm("");
@@ -1031,6 +1332,7 @@ export function WorkspaceShell() {
           activeKnowledgeBase={activeKnowledgeBase}
           fileTree={fileTree}
           activeNoteId={activeNote?.id ?? ""}
+          activeDocumentId={activeDocument?.id ?? ""}
           collapsedFolderPaths={collapsedFolderPaths}
           searchTerm={searchTerm}
           isBusy={isBusy}
@@ -1041,9 +1343,13 @@ export function WorkspaceShell() {
           onAddKnowledgeBase={handleAddKnowledgeBase}
           onToggleFolder={handleToggleFolder}
           onSelectNote={handleSelectNote}
+          onSelectDocument={handleSelectDocument}
           onRenameNote={openRenameDialog}
           onDeleteNote={handleDeleteNote}
-          onCreateDocument={(parentPath) => openCreateDialog("document", parentPath)}
+          onRenameDocument={openRenameDocumentDialog}
+          onDeleteDocument={handleDeleteDocument}
+          onCreateMarkdown={(parentPath) => openCreateDialog("markdown", parentPath)}
+          onCreateText={(parentPath) => openCreateDialog("text", parentPath)}
           onCreateFolder={(parentPath) => openCreateDialog("folder", parentPath)}
           onRefreshKnowledgeBase={handleRescanKnowledgeBase}
         />
@@ -1051,22 +1357,38 @@ export function WorkspaceShell() {
           className={`workspace-resizer ${resizingPane === "sidebar" ? "active" : ""}`}
           {...getSeparatorProps("sidebar")}
         />
-        <EditorPane
-          note={activeNote}
-          knowledgeBase={activeKnowledgeBase}
-          proposedChange={activeSession.pendingChange?.status === "pending" ? activeSession.pendingChange : undefined}
-          isBusy={isBusy}
-          isDirty={isActiveNoteDirty}
-          viewMode={markdownViewMode}
-          onViewModeChange={setMarkdownViewMode}
-          onSaveNote={handleSaveActiveNote}
-          onContentChange={handleContentChange}
-          onRequestRewrite={() => handleSubmitPrompt("rewrite", "改写当前笔记的核心段落")}
-          onRenameNote={() => openRenameDialog()}
-          onDeleteNote={() => handleDeleteNote()}
-          onAcceptChange={handleAcceptChange}
-          onRejectChange={handleRejectChange}
-        />
+        {activeDocument ? (
+          <DocumentPane
+            document={activeDocument}
+            knowledgeBase={activeKnowledgeBase}
+            preview={documentPreview ?? undefined}
+            previewError={documentPreviewError}
+            isPreviewLoading={isDocumentPreviewLoading}
+            isBusy={isBusy}
+            isDirty={isActiveDocumentDirty}
+            onSaveDocument={handleSaveActiveDocument}
+            onContentChange={handleDocumentContentChange}
+            onRenameDocument={() => openRenameDocumentDialog()}
+            onDeleteDocument={() => handleDeleteDocument()}
+          />
+        ) : (
+          <EditorPane
+            note={activeNote}
+            knowledgeBase={activeKnowledgeBase}
+            proposedChange={activeSession.pendingChange?.status === "pending" ? activeSession.pendingChange : undefined}
+            isBusy={isBusy}
+            isDirty={isActiveNoteDirty}
+            viewMode={markdownViewMode}
+            onViewModeChange={setMarkdownViewMode}
+            onSaveNote={handleSaveActiveNote}
+            onContentChange={handleContentChange}
+            onRequestRewrite={() => handleSubmitPrompt("rewrite", "改写当前笔记的核心段落")}
+            onRenameNote={() => openRenameDialog()}
+            onDeleteNote={() => handleDeleteNote()}
+            onAcceptChange={handleAcceptChange}
+            onRejectChange={handleRejectChange}
+          />
+        )}
         <div
           className={`workspace-resizer ${resizingPane === "agent" ? "active" : ""}`}
           {...getSeparatorProps("agent")}
@@ -1135,16 +1457,16 @@ export function WorkspaceShell() {
         <div className="modal-backdrop" role="presentation" onMouseDown={() => setRenameDialog(null)}>
           <form
             className="rename-dialog"
-            aria-label="重命名 Markdown 文件"
+            aria-label={renameDialog.kind === "note" ? "重命名 Markdown 文件" : "重命名 TXT 文件"}
             onMouseDown={(event) => event.stopPropagation()}
             onSubmit={(event) => {
               event.preventDefault();
-              handleSubmitRenameNote();
+              handleSubmitRename();
             }}
           >
             <div className="modal-header">
               <div>
-                <p className="section-label">Markdown 文件</p>
+                <p className="section-label">{renameDialog.kind === "note" ? "Markdown 文件" : "TXT 文件"}</p>
                 <h2>重命名</h2>
               </div>
             </div>
@@ -1172,7 +1494,7 @@ export function WorkspaceShell() {
         <div className="modal-backdrop" role="presentation" onMouseDown={() => setCreateDialog(null)}>
           <form
             className="rename-dialog"
-            aria-label={createDialog.kind === "document" ? "新建 Markdown 文档" : "新建目录"}
+            aria-label={getCreateDialogAriaLabel(createDialog.kind)}
             onMouseDown={(event) => event.stopPropagation()}
             onSubmit={(event) => {
               event.preventDefault();
@@ -1182,16 +1504,16 @@ export function WorkspaceShell() {
             <div className="modal-header">
               <div>
                 <p className="section-label">{getCreateParentLabel(createDialog.parentPath)}</p>
-                <h2>{createDialog.kind === "document" ? "新建文档" : "新建目录"}</h2>
+                <h2>{getCreateDialogTitle(createDialog.kind)}</h2>
               </div>
             </div>
             <label className="rename-field">
-              <span>{createDialog.kind === "document" ? "文件名" : "目录名"}</span>
+              <span>{createDialog.kind === "folder" ? "目录名" : "文件名"}</span>
               <input
                 autoFocus
                 value={createDialog.name}
                 onChange={(event) => setCreateDialog({ ...createDialog, name: event.target.value })}
-                placeholder={createDialog.kind === "document" ? "例如：会议记录" : "例如：Projects"}
+                placeholder={getCreatePlaceholder(createDialog.kind)}
               />
             </label>
             <div className="modal-actions">
@@ -1199,7 +1521,7 @@ export function WorkspaceShell() {
                 取消
               </button>
               <button className="primary-button compact" type="submit" disabled={isBusy || !createDialog.name.trim()}>
-                {createDialog.kind === "document" ? "创建文档" : "创建目录"}
+                {getCreateSubmitLabel(createDialog.kind)}
               </button>
             </div>
           </form>
@@ -1214,16 +1536,27 @@ function buildNoteHashMap(notes: Note[]) {
   return Object.fromEntries(notes.map((note) => [note.id, note.contentHash]));
 }
 
+/** 为普通文档建立当前文件 hash 映射，保存 txt 草稿时用于外部修改冲突校验。 */
+function buildDocumentHashMap(documents: WorkspaceDocument[]) {
+  return Object.fromEntries(documents.map((document) => [document.id, document.contentHash]));
+}
+
 /** 从知识库相对路径中取最后一级文件名，用于重命名弹窗默认值。 */
 function getFileNameFromPath(relativePath: string) {
   return relativePath.split("/").filter(Boolean).pop() ?? relativePath;
 }
 
-/** 为新建文档生成当前父目录下不冲突的默认名称。 */
-function getNextAvailableDocumentName(snapshot: WorkspaceSnapshot, knowledgeBaseId: string, parentPath: string) {
-  const existingPaths = new Set(
-    snapshot.notes.filter((note) => note.knowledgeBaseId === knowledgeBaseId).map((note) => note.path),
-  );
+/** 收集当前知识库中已经被文件占用的路径，覆盖 Markdown 和普通文档。 */
+function getExistingFilePaths(snapshot: WorkspaceSnapshot, knowledgeBaseId: string) {
+  return new Set([
+    ...snapshot.notes.filter((note) => note.knowledgeBaseId === knowledgeBaseId).map((note) => note.path),
+    ...snapshot.documents.filter((document) => document.knowledgeBaseId === knowledgeBaseId).map((document) => document.path),
+  ]);
+}
+
+/** 为新建 Markdown 生成当前父目录下不冲突的默认名称。 */
+function getNextAvailableMarkdownName(snapshot: WorkspaceSnapshot, knowledgeBaseId: string, parentPath: string) {
+  const existingPaths = getExistingFilePaths(snapshot, knowledgeBaseId);
 
   for (let index = 1; index <= 999; index += 1) {
     const fileName = index === 1 ? "未命名.md" : `未命名 ${index}.md`;
@@ -1237,11 +1570,28 @@ function getNextAvailableDocumentName(snapshot: WorkspaceSnapshot, knowledgeBase
   return "未命名.md";
 }
 
+/** 为新建 TXT 生成当前父目录下不冲突的默认名称。 */
+function getNextAvailableTextDocumentName(snapshot: WorkspaceSnapshot, knowledgeBaseId: string, parentPath: string) {
+  const existingPaths = getExistingFilePaths(snapshot, knowledgeBaseId);
+
+  for (let index = 1; index <= 999; index += 1) {
+    const fileName = index === 1 ? "未命名.txt" : `未命名 ${index}.txt`;
+
+    // 默认名称只看当前目标目录，真正文件系统冲突仍由 Tauri 后端最终校验。
+    if (!existingPaths.has(joinRelativePath(parentPath, fileName))) {
+      return fileName;
+    }
+  }
+
+  return "未命名.txt";
+}
+
 /** 为新建目录生成当前父目录下不冲突的默认名称。 */
 function getNextAvailableFolderName(snapshot: WorkspaceSnapshot, knowledgeBaseId: string, parentPath: string) {
-  const existingPaths = new Set(
-    snapshot.folders.filter((folder) => folder.knowledgeBaseId === knowledgeBaseId).map((folder) => folder.path),
-  );
+  const existingPaths = new Set([
+    ...snapshot.folders.filter((folder) => folder.knowledgeBaseId === knowledgeBaseId).map((folder) => folder.path),
+    ...getExistingFilePaths(snapshot, knowledgeBaseId),
+  ]);
 
   for (let index = 1; index <= 999; index += 1) {
     const folderName = index === 1 ? "新建文件夹" : `新建文件夹 ${index}`;
@@ -1265,6 +1615,58 @@ function getCreateParentLabel(parentPath: string) {
   return parentPath ? `创建位置：${parentPath}` : "创建位置：根目录";
 }
 
+/** 返回新建弹窗标题。 */
+function getCreateDialogTitle(kind: "markdown" | "text" | "folder") {
+  if (kind === "markdown") {
+    return "新建 Markdown";
+  }
+
+  if (kind === "text") {
+    return "新建 TXT";
+  }
+
+  return "新建目录";
+}
+
+/** 返回新建弹窗无障碍标签。 */
+function getCreateDialogAriaLabel(kind: "markdown" | "text" | "folder") {
+  if (kind === "markdown") {
+    return "新建 Markdown 文档";
+  }
+
+  if (kind === "text") {
+    return "新建 TXT 文档";
+  }
+
+  return "新建目录";
+}
+
+/** 返回新建输入框占位文案。 */
+function getCreatePlaceholder(kind: "markdown" | "text" | "folder") {
+  if (kind === "markdown") {
+    return "例如：会议记录";
+  }
+
+  if (kind === "text") {
+    return "例如：灵感草稿";
+  }
+
+  return "例如：Projects";
+}
+
+/** 返回新建提交按钮文案。 */
+function getCreateSubmitLabel(kind: "markdown" | "text" | "folder") {
+  if (kind === "markdown") {
+    return "创建 Markdown";
+  }
+
+  if (kind === "text") {
+    return "创建 TXT";
+  }
+
+  return "创建目录";
+}
+
 /** 根据扫描报告生成状态提示，让空目录、失败文件和跳过目录都有可读反馈。 */
 function buildScanNotice(snapshot: WorkspaceSnapshot, knowledgeBaseId: string) {
   const knowledgeBase = snapshot.knowledgeBases.find((item) => item.id === knowledgeBaseId);
@@ -1279,15 +1681,15 @@ function buildScanNotice(snapshot: WorkspaceSnapshot, knowledgeBaseId: string) {
   }
 
   if (!report) {
-    return `已扫描「${knowledgeBase.name}」，发现 ${knowledgeBase.noteCount} 篇 Markdown。`;
+    return `已扫描「${knowledgeBase.name}」，发现 ${knowledgeBase.noteCount} 篇 Markdown、${knowledgeBase.documentCount} 个普通文档。`;
   }
 
   const skippedText = report.skippedDirectories.length ? `，跳过 ${report.skippedDirectories.length} 个依赖或隐藏目录` : "";
   const errorText = report.failedFileCount ? `，${report.failedFileCount} 个文件读取失败` : "";
 
   if (report.scannedFileCount === 0 && !report.failedFileCount) {
-    return `「${knowledgeBase.name}」暂未发现 Markdown 文件${skippedText}。`;
+    return `「${knowledgeBase.name}」暂未发现支持文档${skippedText}。`;
   }
 
-  return `已扫描「${knowledgeBase.name}」：${report.scannedFileCount} 篇 Markdown${errorText}${skippedText}。`;
+  return `已扫描「${knowledgeBase.name}」：${report.scannedFileCount} 个支持文档${errorText}${skippedText}。`;
 }

@@ -885,6 +885,71 @@ textarea:disabled {
   color: var(--text-muted);
 }
 
+.plain-text-editor {
+  background: #ffffff;
+}
+
+.document-preview-state {
+  display: grid;
+  min-width: 0;
+  min-height: 0;
+  place-items: center;
+  border: 1px dashed var(--border-strong);
+  border-radius: 8px;
+  padding: 24px;
+  background: #ffffff;
+  color: var(--text-muted);
+  font-size: 13px;
+  line-height: 1.55;
+  text-align: center;
+}
+
+.document-preview-state.error {
+  border-color: #f2b8a8;
+  background: var(--danger-soft);
+  color: var(--danger);
+}
+
+.document-pdf-preview {
+  width: 100%;
+  min-width: 0;
+  height: 100%;
+  min-height: 0;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: #ffffff;
+}
+
+.document-docx-preview {
+  min-width: 0;
+  min-height: 0;
+  overflow: auto;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 22px;
+  background: #ffffff;
+  color: #1d2a33;
+  font-size: 14px;
+  line-height: 1.75;
+  scrollbar-gutter: stable;
+}
+
+.document-docx-preview h3 {
+  margin: 0 0 12px;
+  color: #111b21;
+  font-size: 19px;
+  line-height: 1.35;
+}
+
+.document-docx-preview p {
+  margin: 0 0 12px;
+  white-space: pre-wrap;
+}
+
+.document-docx-preview > :last-child {
+  margin-bottom: 0;
+}
+
 .modal-backdrop {
   position: fixed;
   z-index: 20;

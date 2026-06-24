@@ -14,6 +14,7 @@ import type {
   AgentSession,
   AgentTurnRequest,
   AgentTurnResult,
+  DocumentPreview,
   FolderEntry,
   KnowledgeBase,
   KnowledgeBaseSelection,
@@ -22,6 +23,7 @@ import type {
   ProposedChange,
   RequestAuditLog,
   UserSettings,
+  WorkspaceDocument,
   WorkspaceSnapshot,
 } from "./types";
 
@@ -272,7 +274,7 @@ export async function updateSessionScope(
   });
 }
 
-/** 恢复历史会话绑定的知识库、笔记和会话焦点。 */
+/** 恢复历史会话绑定的知识库、Markdown 笔记和会话焦点；无笔记时展示同库普通文档。 */
 export async function restoreSessionContext(snapshot: WorkspaceSnapshot, sessionId: string): Promise<WorkspaceSnapshot> {
   if (!isTauriRuntime()) {
     const nextSnapshot = normalizeMockSnapshotSessions(cloneWorkspaceSnapshot(snapshot));
@@ -288,14 +290,12 @@ export async function restoreSessionContext(snapshot: WorkspaceSnapshot, session
       ) ??
       nextSnapshot.knowledgeBases[0]?.id ??
       "";
-    const nextNoteId =
-      session.activeNoteId && nextSnapshot.notes.some((note) => note.id === session.activeNoteId)
-        ? session.activeNoteId
-        : nextSnapshot.notes.find((note) => note.knowledgeBaseId === nextKnowledgeBaseId)?.id ?? "";
+    const nextNoteId = getSessionNoteId(nextSnapshot, session.activeNoteId, nextKnowledgeBaseId);
 
     nextSnapshot.activeSessionId = session.id;
     nextSnapshot.activeKnowledgeBaseId = nextKnowledgeBaseId;
     nextSnapshot.activeNoteId = nextNoteId;
+    nextSnapshot.activeDocumentId = getFallbackDocumentId(nextSnapshot, nextKnowledgeBaseId, nextNoteId);
 
     return nextSnapshot;
   }
@@ -462,7 +462,7 @@ export async function selectKnowledgeBaseDirectory(currentCount: number): Promis
   return invoke<KnowledgeBaseSelection>("select_knowledge_base");
 }
 
-/** 扫描新知识库并把它合并进当前快照，浏览器中使用模拟笔记。 */
+/** 扫描新知识库并把它合并进当前快照，浏览器中使用模拟文档。 */
 export async function attachKnowledgeBase(
   snapshot: WorkspaceSnapshot,
   selection: KnowledgeBaseSelection,
@@ -473,14 +473,21 @@ export async function attachKnowledgeBase(
       id: selection.id,
       name: selection.name,
       path: selection.path,
-      description: "模拟新增的本地 Markdown 目录，正式版本由 Tauri 扫描真实文件。",
+      description: "模拟新增的本地支持文档目录，正式版本由 Tauri 扫描真实文件。",
       status: "ready",
       noteCount: selection.noteCount,
+      documentCount: 1,
       updatedAt: "刚刚",
       isDefault: false,
       semanticIndexEnabled: false,
       scanReport: {
-        scannedFileCount: 1,
+        scannedFileCount: 2,
+        scannedByType: {
+          markdown: 1,
+          txt: 1,
+          docx: 0,
+          pdf: 0,
+        },
         failedFileCount: 0,
         skippedDirectories: ["node_modules"],
         errors: [],
@@ -496,7 +503,7 @@ export async function attachKnowledgeBase(
       backlinks: [],
       content: `# 知识库索引
 
-这是一个浏览器开发态模拟知识库。正式桌面版会扫描 ${selection.path} 下的 Markdown 文件。`,
+这是一个浏览器开发态模拟知识库。正式桌面版会扫描 ${selection.path} 下的支持文档。`,
       contentHash: "mock-new-note",
     };
     const newFolder: FolderEntry = {
@@ -506,12 +513,25 @@ export async function attachKnowledgeBase(
       path: "Index",
       updatedAt: "刚刚",
     };
+    const newDocument: WorkspaceDocument = {
+      id: `document-${selection.id}-readme`,
+      knowledgeBaseId: selection.id,
+      title: "资料说明",
+      path: "Index/资料说明.txt",
+      fileType: "txt",
+      updatedAt: "刚刚",
+      content: "这是一个浏览器开发态模拟 TXT 文档。",
+      contentHash: createContentHash("这是一个浏览器开发态模拟 TXT 文档。"),
+      previewAvailable: false,
+    };
 
     nextSnapshot.knowledgeBases = [...nextSnapshot.knowledgeBases, newKnowledgeBase];
     nextSnapshot.folders = [...nextSnapshot.folders, newFolder];
     nextSnapshot.notes = [newNote, ...nextSnapshot.notes];
+    nextSnapshot.documents = [newDocument, ...nextSnapshot.documents];
     nextSnapshot.activeKnowledgeBaseId = newKnowledgeBase.id;
     nextSnapshot.activeNoteId = newNote.id;
+    nextSnapshot.activeDocumentId = "";
 
     return nextSnapshot;
   }
@@ -552,9 +572,10 @@ export async function createNote(
     const safeFileName = validateNewMarkdownFileNameForMock(fileName);
     const normalizedParentPath = normalizeFolderPath(parentPath);
     ensureParentFolderExistsForMock(nextSnapshot, knowledgeBaseId, normalizedParentPath);
-    const existingPaths = new Set(
-      nextSnapshot.notes.filter((note) => note.knowledgeBaseId === knowledgeBaseId).map((note) => note.path),
-    );
+    const existingPaths = new Set([
+      ...nextSnapshot.notes.filter((note) => note.knowledgeBaseId === knowledgeBaseId).map((note) => note.path),
+      ...nextSnapshot.documents.filter((document) => document.knowledgeBaseId === knowledgeBaseId).map((document) => document.path),
+    ]);
     const nextPath = joinRelativePath(normalizedParentPath, safeFileName);
 
     // 浏览器 fallback 只模拟正式桌面行为，仍然不能覆盖已有 Markdown。
@@ -582,18 +603,99 @@ export async function createNote(
             noteCount: item.noteCount + 1,
             updatedAt: "刚刚",
             scanReport: item.scanReport
-              ? { ...item.scanReport, scannedFileCount: item.scanReport.scannedFileCount + 1 }
+              ? {
+                  ...item.scanReport,
+                  scannedFileCount: item.scanReport.scannedFileCount + 1,
+                  scannedByType: {
+                    ...item.scanReport.scannedByType,
+                    markdown: item.scanReport.scannedByType.markdown + 1,
+                  },
+                }
               : item.scanReport,
           }
         : item,
     );
     nextSnapshot.activeKnowledgeBaseId = knowledgeBaseId;
     nextSnapshot.activeNoteId = newNote.id;
+    nextSnapshot.activeDocumentId = "";
 
     return nextSnapshot;
   }
 
   return invoke<WorkspaceSnapshot>("create_note", {
+    payload: { snapshot, knowledgeBaseId, parentPath, fileName },
+  });
+}
+
+/** 在用户点击的目录下新建空白 TXT；桌面端会立即创建真实文件。 */
+export async function createDocument(
+  snapshot: WorkspaceSnapshot,
+  knowledgeBaseId: string,
+  parentPath: string,
+  fileName: string,
+): Promise<WorkspaceSnapshot> {
+  if (!isTauriRuntime()) {
+    const nextSnapshot = cloneWorkspaceSnapshot(snapshot);
+    const knowledgeBase = nextSnapshot.knowledgeBases.find((item) => item.id === knowledgeBaseId);
+
+    if (!knowledgeBase) {
+      return nextSnapshot;
+    }
+
+    const safeFileName = validateNewTextDocumentFileNameForMock(fileName);
+    const normalizedParentPath = normalizeFolderPath(parentPath);
+    ensureParentFolderExistsForMock(nextSnapshot, knowledgeBaseId, normalizedParentPath);
+    const existingPaths = new Set([
+      ...nextSnapshot.notes.filter((note) => note.knowledgeBaseId === knowledgeBaseId).map((note) => note.path),
+      ...nextSnapshot.documents.filter((document) => document.knowledgeBaseId === knowledgeBaseId).map((document) => document.path),
+    ]);
+    const nextPath = joinRelativePath(normalizedParentPath, safeFileName);
+
+    // 浏览器 fallback 也模拟桌面文件系统的同目录不可覆盖规则。
+    if (existingPaths.has(nextPath)) {
+      throw new Error("目标文件已存在，已阻止覆盖。");
+    }
+
+    const newDocument: WorkspaceDocument = {
+      id: createLocalId("document"),
+      knowledgeBaseId,
+      title: safeFileName.replace(/\.txt$/i, ""),
+      path: nextPath,
+      fileType: "txt",
+      content: "",
+      contentHash: createContentHash(""),
+      updatedAt: "刚刚",
+      previewAvailable: false,
+    };
+
+    nextSnapshot.documents = [newDocument, ...nextSnapshot.documents];
+    nextSnapshot.knowledgeBases = nextSnapshot.knowledgeBases.map((item) =>
+      item.id === knowledgeBaseId
+        ? {
+            ...item,
+            documentCount: item.documentCount + 1,
+            updatedAt: "刚刚",
+            scanReport: item.scanReport
+              ? {
+                  ...item.scanReport,
+                  scannedFileCount: item.scanReport.scannedFileCount + 1,
+                  scannedByType: {
+                    ...item.scanReport.scannedByType,
+                    txt: item.scanReport.scannedByType.txt + 1,
+                  },
+                }
+              : item.scanReport,
+          }
+        : item,
+    );
+    nextSnapshot.activeKnowledgeBaseId = knowledgeBaseId;
+    nextSnapshot.activeNoteId = "";
+    nextSnapshot.activeDocumentId = newDocument.id;
+
+    return nextSnapshot;
+  }
+
+  return invoke<WorkspaceSnapshot>("create_document", {
     payload: { snapshot, knowledgeBaseId, parentPath, fileName },
   });
 }
@@ -615,7 +717,8 @@ export async function createFolder(
 
     const isPathTaken =
       nextSnapshot.folders.some((folder) => folder.knowledgeBaseId === knowledgeBaseId && folder.path === nextFolderPath) ||
-      nextSnapshot.notes.some((note) => note.knowledgeBaseId === knowledgeBaseId && note.path === nextFolderPath);
+      nextSnapshot.notes.some((note) => note.knowledgeBaseId === knowledgeBaseId && note.path === nextFolderPath) ||
+      nextSnapshot.documents.some((document) => document.knowledgeBaseId === knowledgeBaseId && document.path === nextFolderPath);
 
     // 文件和目录共用同一命名空间，模拟桌面文件系统不能同名覆盖的规则。
     if (isPathTaken) {
@@ -664,6 +767,41 @@ export async function saveNoteContent(
   return invoke<WorkspaceSnapshot>("save_note_content", { payload: { snapshot, noteId, content, expectedHash } });
 }
 
+/** 保存当前 TXT 文档正文；桌面端会执行 hash 冲突检测和原子写入。 */
+export async function saveDocumentContent(
+  snapshot: WorkspaceSnapshot,
+  documentId: string,
+  content: string,
+  expectedHash: string,
+): Promise<WorkspaceSnapshot> {
+  if (!isTauriRuntime()) {
+    const nextSnapshot = cloneWorkspaceSnapshot(snapshot);
+    const document = nextSnapshot.documents.find((item) => item.id === documentId);
+
+    if (!document) {
+      throw new Error("找不到要保存的文档。");
+    }
+
+    if (document.fileType !== "txt") {
+      throw new Error("只有 TXT 文档支持保存。");
+    }
+
+    if (document.contentHash !== expectedHash) {
+      throw new Error("目标文件已被外部修改，已阻止保存。请重新扫描后再编辑。");
+    }
+
+    nextSnapshot.documents = nextSnapshot.documents.map((item) =>
+      item.id === documentId ? { ...item, content, contentHash: createContentHash(content), updatedAt: "刚刚" } : item,
+    );
+    nextSnapshot.activeNoteId = "";
+    nextSnapshot.activeDocumentId = documentId;
+
+    return nextSnapshot;
+  }
+
+  return invoke<WorkspaceSnapshot>("save_document_content", { payload: { snapshot, documentId, content, expectedHash } });
+}
+
 /** 重命名当前 Markdown 文件；桌面端调用真实 Tauri 文件系统能力，浏览器仅做开发态内存 fallback。 */
 export async function renameNote(
   snapshot: WorkspaceSnapshot,
@@ -680,9 +818,11 @@ export async function renameNote(
 
     const safeFileName = validateMarkdownFileNameForMock(nextFileName);
     const nextPath = replaceFileNameInPath(note.path, safeFileName);
-    const isPathTaken = nextSnapshot.notes.some(
-      (item) => item.knowledgeBaseId === note.knowledgeBaseId && item.id !== note.id && item.path === nextPath,
-    );
+    const isPathTaken =
+      nextSnapshot.notes.some(
+        (item) => item.knowledgeBaseId === note.knowledgeBaseId && item.id !== note.id && item.path === nextPath,
+      ) ||
+      nextSnapshot.documents.some((item) => item.knowledgeBaseId === note.knowledgeBaseId && item.path === nextPath);
 
     // 浏览器 fallback 只模拟正式桌面行为，仍然不能覆盖同目录已有 Markdown。
     if (isPathTaken) {
@@ -703,11 +843,68 @@ export async function renameNote(
         : item,
     );
     migrateNoteReferencesAfterRename(nextSnapshot, note.id, nextNoteId, nextPath);
+    nextSnapshot.activeDocumentId = "";
 
     return nextSnapshot;
   }
 
   return invoke<WorkspaceSnapshot>("rename_note", { payload: { snapshot, noteId, nextFileName } });
+}
+
+/** 重命名当前 TXT 文档；桌面端调用真实 Tauri 文件系统能力。 */
+export async function renameDocument(
+  snapshot: WorkspaceSnapshot,
+  documentId: string,
+  nextFileName: string,
+): Promise<WorkspaceSnapshot> {
+  if (!isTauriRuntime()) {
+    const nextSnapshot = cloneWorkspaceSnapshot(snapshot);
+    const document = nextSnapshot.documents.find((item) => item.id === documentId);
+
+    if (!document) {
+      throw new Error("找不到要重命名的文档。");
+    }
+
+    if (document.fileType !== "txt") {
+      throw new Error("只有 TXT 文档支持重命名。");
+    }
+
+    const safeFileName = validateTextDocumentFileNameForMock(nextFileName);
+    const nextPath = replaceFileNameInPath(document.path, safeFileName);
+    const isPathTaken =
+      nextSnapshot.notes.some((item) => item.knowledgeBaseId === document.knowledgeBaseId && item.path === nextPath) ||
+      nextSnapshot.documents.some(
+        (item) => item.knowledgeBaseId === document.knowledgeBaseId && item.id !== document.id && item.path === nextPath,
+      );
+
+    // 文件系统同目录不能出现同名文件，不区分它属于 note 还是 document 模型。
+    if (isPathTaken) {
+      throw new Error("目标文件名已存在，已阻止覆盖。");
+    }
+
+    const nextDocumentId = createLocalId("document-renamed");
+
+    nextSnapshot.documents = nextSnapshot.documents.map((item) =>
+      item.id === document.id
+        ? {
+            ...item,
+            id: nextDocumentId,
+            path: nextPath,
+            title: safeFileName.replace(/\.txt$/i, ""),
+            updatedAt: "刚刚",
+          }
+        : item,
+    );
+
+    if (nextSnapshot.activeDocumentId === document.id) {
+      nextSnapshot.activeDocumentId = nextDocumentId;
+      nextSnapshot.activeNoteId = "";
+    }
+
+    return nextSnapshot;
+  }
+
+  return invoke<WorkspaceSnapshot>("rename_document", { payload: { snapshot, documentId, nextFileName } });
 }
 
 /** 删除当前 Markdown 文件到系统回收站；浏览器 fallback 只移除内存快照中的模拟笔记。 */
@@ -740,6 +937,10 @@ export async function deleteNote(
               ? {
                   ...knowledgeBase.scanReport,
                   scannedFileCount: Math.max(0, knowledgeBase.scanReport.scannedFileCount - 1),
+                  scannedByType: {
+                    ...knowledgeBase.scanReport.scannedByType,
+                    markdown: Math.max(0, knowledgeBase.scanReport.scannedByType.markdown - 1),
+                  },
                 }
               : knowledgeBase.scanReport,
           }
@@ -752,6 +953,7 @@ export async function deleteNote(
     if (nextSnapshot.activeNoteId === noteId || !nextSnapshot.notes.some((item) => item.id === nextSnapshot.activeNoteId)) {
       nextSnapshot.activeNoteId = sameKnowledgeBaseFallback?.id ?? "";
     }
+    nextSnapshot.activeDocumentId = "";
 
     return nextSnapshot;
   }
@@ -759,7 +961,94 @@ export async function deleteNote(
   return invoke<WorkspaceSnapshot>("delete_note", { payload: { snapshot, noteId, expectedHash } });
 }
 
-/** 移除知识库授权和索引缓存；不会删除用户本地 Markdown 文件。 */
+/** 删除当前 TXT 文档到系统回收站；浏览器 fallback 只移除内存快照中的模拟文档。 */
+export async function deleteDocument(
+  snapshot: WorkspaceSnapshot,
+  documentId: string,
+  expectedHash: string,
+): Promise<WorkspaceSnapshot> {
+  if (!isTauriRuntime()) {
+    const nextSnapshot = cloneWorkspaceSnapshot(snapshot);
+    const document = nextSnapshot.documents.find((item) => item.id === documentId);
+
+    if (!document) {
+      throw new Error("找不到要删除的文档。");
+    }
+
+    if (document.fileType !== "txt") {
+      throw new Error("只有 TXT 文档支持删除。");
+    }
+
+    // 与桌面 Tauri command 保持一致：删除前必须确认操作基于同一份文件版本。
+    if (document.contentHash !== expectedHash) {
+      throw new Error("目标文件已被外部修改，已阻止删除。请重新扫描后再操作。");
+    }
+
+    nextSnapshot.documents = nextSnapshot.documents.filter((item) => item.id !== documentId);
+    nextSnapshot.knowledgeBases = nextSnapshot.knowledgeBases.map((knowledgeBase) =>
+      knowledgeBase.id === document.knowledgeBaseId
+        ? {
+            ...knowledgeBase,
+            documentCount: Math.max(0, knowledgeBase.documentCount - 1),
+            updatedAt: "刚刚",
+            scanReport: knowledgeBase.scanReport
+              ? {
+                  ...knowledgeBase.scanReport,
+                  scannedFileCount: Math.max(0, knowledgeBase.scanReport.scannedFileCount - 1),
+                  scannedByType: {
+                    ...knowledgeBase.scanReport.scannedByType,
+                    txt: Math.max(0, knowledgeBase.scanReport.scannedByType.txt - 1),
+                  },
+                }
+              : knowledgeBase.scanReport,
+          }
+        : knowledgeBase,
+    );
+
+    if (nextSnapshot.activeDocumentId === documentId) {
+      const sameKnowledgeBaseFallback = nextSnapshot.documents.find((item) => item.knowledgeBaseId === document.knowledgeBaseId);
+
+      nextSnapshot.activeDocumentId = sameKnowledgeBaseFallback?.id ?? "";
+      nextSnapshot.activeNoteId = sameKnowledgeBaseFallback ? "" : nextSnapshot.notes.find((item) => item.knowledgeBaseId === document.knowledgeBaseId)?.id ?? "";
+    }
+
+    return nextSnapshot;
+  }
+
+  return invoke<WorkspaceSnapshot>("delete_document", { payload: { snapshot, documentId, expectedHash } });
+}
+
+/** 加载 DOCX/PDF 只读预览；TXT 直接使用快照中的 content。 */
+export async function loadDocumentPreview(snapshot: WorkspaceSnapshot, documentId: string): Promise<DocumentPreview> {
+  const document = snapshot.documents.find((item) => item.id === documentId);
+
+  if (!document) {
+    throw new Error("找不到要预览的文档。");
+  }
+
+  if (!isTauriRuntime()) {
+    return {
+      documentId: document.id,
+      fileType: document.fileType,
+      title: document.title,
+      path: document.path,
+      updatedAt: document.updatedAt,
+      contentHash: document.contentHash,
+      assetPath: document.fileType === "pdf" ? document.path : undefined,
+      blocks:
+        document.fileType === "docx"
+          ? [
+              { type: "heading", text: document.title },
+              { type: "paragraph", text: "这是浏览器开发态模拟的 DOCX 只读预览正文。" },
+            ]
+          : undefined,
+    };
+  }
+
+  return invoke<DocumentPreview>("load_document_preview", { payload: { snapshot, documentId } });
+}
+
+/** 移除知识库授权和索引缓存；不会删除用户本地文档。 */
 export async function removeKnowledgeBase(snapshot: WorkspaceSnapshot, knowledgeBaseId: string): Promise<WorkspaceSnapshot> {
   if (!isTauriRuntime()) {
     const nextSnapshot = cloneWorkspaceSnapshot(snapshot);
@@ -767,6 +1056,7 @@ export async function removeKnowledgeBase(snapshot: WorkspaceSnapshot, knowledge
     nextSnapshot.knowledgeBases = nextSnapshot.knowledgeBases.filter((knowledgeBase) => knowledgeBase.id !== knowledgeBaseId);
     nextSnapshot.folders = nextSnapshot.folders.filter((folder) => folder.knowledgeBaseId !== knowledgeBaseId);
     nextSnapshot.notes = nextSnapshot.notes.filter((note) => note.knowledgeBaseId !== knowledgeBaseId);
+    nextSnapshot.documents = nextSnapshot.documents.filter((document) => document.knowledgeBaseId !== knowledgeBaseId);
     nextSnapshot.sessions = nextSnapshot.sessions
       .map((session) => ({
         ...session,
@@ -786,6 +1076,9 @@ export async function removeKnowledgeBase(snapshot: WorkspaceSnapshot, knowledge
     }));
     nextSnapshot.activeKnowledgeBaseId = fallbackKnowledgeBase?.id ?? "";
     nextSnapshot.activeNoteId = nextSnapshot.notes.find((note) => note.knowledgeBaseId === nextSnapshot.activeKnowledgeBaseId)?.id ?? "";
+    nextSnapshot.activeDocumentId = nextSnapshot.activeNoteId
+      ? ""
+      : nextSnapshot.documents.find((document) => document.knowledgeBaseId === nextSnapshot.activeKnowledgeBaseId)?.id ?? "";
     nextSnapshot.activeSessionId =
       nextSnapshot.sessions.find((session) => session.knowledgeBaseIds.includes(nextSnapshot.activeKnowledgeBaseId))?.id ??
       nextSnapshot.sessions[0]?.id ??
@@ -795,6 +1088,7 @@ export async function removeKnowledgeBase(snapshot: WorkspaceSnapshot, knowledge
       nextSnapshot.sessions = [];
       nextSnapshot.activeKnowledgeBaseId = "";
       nextSnapshot.activeNoteId = "";
+      nextSnapshot.activeDocumentId = "";
       nextSnapshot.activeSessionId = "";
     }
 
@@ -881,6 +1175,39 @@ function validateNewMarkdownFileNameForMock(fileName: string) {
   const normalizedFileName = /\.[^./\\]+$/.test(trimmedFileName) ? trimmedFileName : `${trimmedFileName}.md`;
 
   return validateMarkdownFileNameForMock(normalizedFileName);
+}
+
+/** 浏览器开发态的 TXT 文件名校验，只允许当前目录下的 .txt 文件。 */
+function validateTextDocumentFileNameForMock(fileName: string) {
+  const trimmedFileName = fileName.trim();
+
+  if (!trimmedFileName) {
+    throw new Error("文件名不能为空。");
+  }
+
+  // 重命名只改当前目录下的文件名，不能携带路径分隔符或上级目录。
+  if (trimmedFileName.includes("/") || trimmedFileName.includes("\\") || trimmedFileName === "." || trimmedFileName === "..") {
+    throw new Error("文件名不能包含路径或上级目录。");
+  }
+
+  if (!/\.txt$/i.test(trimmedFileName)) {
+    throw new Error("文件名必须以 .txt 结尾。");
+  }
+
+  return trimmedFileName;
+}
+
+/** 浏览器开发态的新建 TXT 文件名校验；允许省略扩展名并默认补 .txt。 */
+function validateNewTextDocumentFileNameForMock(fileName: string) {
+  const trimmedFileName = fileName.trim();
+
+  if (!trimmedFileName) {
+    throw new Error("文件名不能为空。");
+  }
+
+  const normalizedFileName = /\.[^./\\]+$/.test(trimmedFileName) ? trimmedFileName : `${trimmedFileName}.txt`;
+
+  return validateTextDocumentFileNameForMock(normalizedFileName);
 }
 
 /** 浏览器开发态的新建目录名校验，只允许单级普通目录名。 */
@@ -1158,8 +1485,11 @@ function browserActionMatchesSkill(skillName: string, action: string) {
 
 /** 浏览器 fallback 清理会话中的失效知识库和笔记引用，模拟后端持久化入口的归一化。 */
 function normalizeMockSnapshotSessions(snapshot: WorkspaceSnapshot): WorkspaceSnapshot {
+  snapshot.documents = snapshot.documents ?? [];
+
   const knowledgeBaseIds = new Set(snapshot.knowledgeBases.map((knowledgeBase) => knowledgeBase.id));
   const noteIds = new Set(snapshot.notes.map((note) => note.id));
+  const documentIds = new Set(snapshot.documents.map((document) => document.id));
 
   snapshot.sessions = snapshot.sessions
     .filter((session) => !session.deletedAt)
@@ -1179,6 +1509,10 @@ function normalizeMockSnapshotSessions(snapshot: WorkspaceSnapshot): WorkspaceSn
 
   if (!snapshot.sessions.some((session) => session.id === snapshot.activeSessionId)) {
     snapshot.activeSessionId = snapshot.sessions[0]?.id ?? "";
+  }
+
+  if (snapshot.activeDocumentId && !documentIds.has(snapshot.activeDocumentId)) {
+    snapshot.activeDocumentId = "";
   }
 
   return snapshot;
@@ -1218,7 +1552,7 @@ function ensureMockVisibleSession(snapshot: WorkspaceSnapshot) {
   snapshot.activeSessionId = session.id;
 }
 
-/** 浏览器 fallback 删除当前会话后同步恢复新 activeSession 绑定的知识库和笔记。 */
+/** 浏览器 fallback 删除当前会话后同步恢复新 activeSession 绑定的知识库、笔记或文档。 */
 function restoreMockActiveSessionContext(snapshot: WorkspaceSnapshot) {
   const session = snapshot.sessions.find((item) => item.id === snapshot.activeSessionId);
 
@@ -1232,13 +1566,32 @@ function restoreMockActiveSessionContext(snapshot: WorkspaceSnapshot) {
     ) ??
     snapshot.knowledgeBases[0]?.id ??
     "";
-  const nextNoteId =
-    session.activeNoteId && snapshot.notes.some((note) => note.id === session.activeNoteId)
-      ? session.activeNoteId
-      : snapshot.notes.find((note) => note.knowledgeBaseId === nextKnowledgeBaseId)?.id ?? "";
+  const nextNoteId = getSessionNoteId(snapshot, session.activeNoteId, nextKnowledgeBaseId);
 
   snapshot.activeKnowledgeBaseId = nextKnowledgeBaseId;
   snapshot.activeNoteId = nextNoteId;
+  snapshot.activeDocumentId = getFallbackDocumentId(snapshot, nextKnowledgeBaseId, nextNoteId);
+}
+
+/** 按会话引用恢复同知识库 Markdown；引用无效时回退到该知识库第一篇 Markdown。 */
+function getSessionNoteId(snapshot: WorkspaceSnapshot, activeNoteId: string | undefined, knowledgeBaseId: string) {
+  if (
+    activeNoteId &&
+    snapshot.notes.some((note) => note.id === activeNoteId && note.knowledgeBaseId === knowledgeBaseId)
+  ) {
+    return activeNoteId;
+  }
+
+  return snapshot.notes.find((note) => note.knowledgeBaseId === knowledgeBaseId)?.id ?? "";
+}
+
+/** 无可激活 Markdown 时，用同知识库第一个普通文档填充中间面板。 */
+function getFallbackDocumentId(snapshot: WorkspaceSnapshot, knowledgeBaseId: string, activeNoteId: string) {
+  if (activeNoteId) {
+    return "";
+  }
+
+  return snapshot.documents.find((document) => document.knowledgeBaseId === knowledgeBaseId)?.id ?? "";
 }
 
 /** 按知识库列表顺序整理范围 ID，避免 UI 多选顺序随点击行为抖动。 */
