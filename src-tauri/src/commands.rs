@@ -15,7 +15,7 @@ use crate::text_edit::{replace_unique, UniqueReplacementError};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use tauri::AppHandle;
+use tauri::{AppHandle, Manager};
 use tauri_plugin_dialog::DialogExt;
 
 /** 加载工作台初始状态；从 SQLite 恢复已连接知识库并重新扫描真实 Markdown。 */
@@ -29,6 +29,8 @@ pub async fn load_workspace_state(app: AppHandle) -> Result<WorkspaceSnapshot, S
     })
     .await?;
     let index_snapshot = snapshot.clone();
+
+    allow_asset_protocol_for_knowledge_bases(&app, &snapshot)?;
 
     // 启动索引只影响后续检索，不阻塞首屏进入；失败时写 stderr 供桌面日志排查。
     tauri::async_runtime::spawn(async move {
@@ -283,6 +285,8 @@ pub async fn scan_knowledge_base(
     .await?;
     let knowledge_base_id = knowledge_base.id.clone();
 
+    allow_asset_protocol_directory(&app, Path::new(&knowledge_base.path))?;
+
     snapshot.active_knowledge_base_id = knowledge_base.id.clone();
     snapshot.active_note_id = notes
         .first()
@@ -361,6 +365,7 @@ pub async fn rescan_knowledge_base(
     rescanned_knowledge_base.is_default = previous_knowledge_base.is_default;
     rescanned_knowledge_base.updated_at = "刚刚".to_owned();
     rescanned_knowledge_base.note_count = rescanned_notes.len();
+    allow_asset_protocol_directory(&app, Path::new(&rescanned_knowledge_base.path))?;
     snapshot.knowledge_bases[knowledge_base_index] = rescanned_knowledge_base.clone();
 
     // 重扫只替换目标知识库的笔记，其他知识库和会话消息保持不变。
@@ -396,6 +401,29 @@ pub async fn rescan_knowledge_base(
     index_snapshot_in_background(app, &snapshot).await?;
 
     Ok(snapshot)
+}
+
+/** 将当前已连接知识库目录加入 Tauri asset 协议 scope，供 Markdown 预览加载本地图片。 */
+fn allow_asset_protocol_for_knowledge_bases(
+    app: &AppHandle,
+    snapshot: &WorkspaceSnapshot,
+) -> Result<(), String> {
+    for knowledge_base in &snapshot.knowledge_bases {
+        if knowledge_base.status != "ready" {
+            continue;
+        }
+
+        allow_asset_protocol_directory(app, Path::new(&knowledge_base.path))?;
+    }
+
+    Ok(())
+}
+
+/** 允许 asset 协议递归读取单个知识库目录；失败时返回可展示的 Tauri scope 错误。 */
+fn allow_asset_protocol_directory(app: &AppHandle, path: &Path) -> Result<(), String> {
+    app.asset_protocol_scope()
+        .allow_directory(path, true)
+        .map_err(|error| format!("无法授权 Markdown 图片预览目录 {}：{error}", path.display()))
 }
 
 /** 用户主动新建空白 Markdown，直接落盘并打开为当前可编辑笔记。 */

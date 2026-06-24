@@ -830,6 +830,14 @@ textarea:disabled {
   text-underline-offset: 2px;
 }
 
+.markdown-preview img {
+  display: block;
+  max-width: 100%;
+  height: auto;
+  margin: 0 0 1em;
+  border-radius: 6px;
+}
+
 .markdown-preview code {
   border-radius: 5px;
   padding: 2px 5px;
