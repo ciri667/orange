@@ -100,6 +100,8 @@ pub struct KnowledgeBase {
     pub description: String,
     pub status: String,
     pub note_count: usize,
+    #[serde(default)]
+    pub document_count: usize,
     pub updated_at: String,
     pub is_default: bool,
     pub semantic_index_enabled: bool,
@@ -107,11 +109,23 @@ pub struct KnowledgeBase {
     pub scan_report: Option<ScanReport>,
 }
 
+/** 支持文档类型的扫描计数，默认补齐四类避免旧快照缺字段时报错。 */
+pub fn default_scanned_by_type() -> HashMap<String, usize> {
+    HashMap::from([
+        ("markdown".to_owned(), 0),
+        ("txt".to_owned(), 0),
+        ("docx".to_owned(), 0),
+        ("pdf".to_owned(), 0),
+    ])
+}
+
 /** 单次知识库扫描报告，用于向前端说明成功、失败和跳过目录。 */
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ScanReport {
     pub scanned_file_count: usize,
+    #[serde(default = "default_scanned_by_type")]
+    pub scanned_by_type: HashMap<String, usize>,
     pub failed_file_count: usize,
     pub skipped_directories: Vec<String>,
     pub errors: Vec<String>,
@@ -130,6 +144,46 @@ pub struct Note {
     pub updated_at: String,
     pub backlinks: Vec<String>,
     pub content_hash: String,
+}
+
+/** 非 Markdown 文档，txt 带正文，docx/pdf 只存只读预览所需元数据。 */
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkspaceDocument {
+    pub id: String,
+    pub knowledge_base_id: String,
+    pub title: String,
+    pub path: String,
+    pub file_type: String,
+    pub updated_at: String,
+    pub content_hash: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub content: Option<String>,
+    pub preview_available: bool,
+}
+
+/** docx 只读预览的段落级文本块。 */
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DocumentPreviewBlock {
+    pub r#type: String,
+    pub text: String,
+}
+
+/** 非 Markdown 文档预览返回值，pdf 使用 assetPath，docx 使用 blocks。 */
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DocumentPreview {
+    pub document_id: String,
+    pub file_type: String,
+    pub title: String,
+    pub path: String,
+    pub updated_at: String,
+    pub content_hash: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub asset_path: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub blocks: Option<Vec<DocumentPreviewBlock>>,
 }
 
 /** 本地知识库中的真实目录，用于让空文件夹也能出现在目录树中。 */
@@ -304,9 +358,13 @@ pub struct WorkspaceSnapshot {
     #[serde(default)]
     pub folders: Vec<FolderEntry>,
     pub notes: Vec<Note>,
+    #[serde(default)]
+    pub documents: Vec<WorkspaceDocument>,
     pub sessions: Vec<AgentSession>,
     pub active_knowledge_base_id: String,
     pub active_note_id: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub active_document_id: String,
     pub active_session_id: String,
 }
 
@@ -366,10 +424,32 @@ pub struct SaveNoteContentPayload {
     pub expected_hash: String,
 }
 
+/** 保存 txt 文档正文的命令入参，expectedHash 用于发现外部编辑器冲突。 */
+#[derive(Clone, Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SaveDocumentContentPayload {
+    pub snapshot: WorkspaceSnapshot,
+    pub document_id: String,
+    pub content: String,
+    pub expected_hash: String,
+}
+
 /** 用户从目录树指定目录新建 Markdown 文档的命令入参。 */
 #[derive(Clone, Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CreateNotePayload {
+    pub snapshot: WorkspaceSnapshot,
+    pub knowledge_base_id: String,
+    #[serde(default)]
+    pub parent_path: Option<String>,
+    #[serde(default)]
+    pub file_name: Option<String>,
+}
+
+/** 用户从目录树指定目录新建 txt 文档的命令入参。 */
+#[derive(Clone, Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CreateDocumentPayload {
     pub snapshot: WorkspaceSnapshot,
     pub knowledge_base_id: String,
     #[serde(default)]
@@ -397,6 +477,15 @@ pub struct RenameNotePayload {
     pub next_file_name: String,
 }
 
+/** 重命名 txt 文档的命令入参，只改文件名，不改变正文。 */
+#[derive(Clone, Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RenameDocumentPayload {
+    pub snapshot: WorkspaceSnapshot,
+    pub document_id: String,
+    pub next_file_name: String,
+}
+
 /** 删除 Markdown 文件的命令入参，expected_hash 用于删除前冲突检测。 */
 #[derive(Clone, Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -404,6 +493,23 @@ pub struct DeleteNotePayload {
     pub snapshot: WorkspaceSnapshot,
     pub note_id: String,
     pub expected_hash: String,
+}
+
+/** 删除 txt 文档的命令入参，expectedHash 用于删除前冲突检测。 */
+#[derive(Clone, Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DeleteDocumentPayload {
+    pub snapshot: WorkspaceSnapshot,
+    pub document_id: String,
+    pub expected_hash: String,
+}
+
+/** 加载 docx/pdf 只读预览的命令入参。 */
+#[derive(Clone, Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LoadDocumentPreviewPayload {
+    pub snapshot: WorkspaceSnapshot,
+    pub document_id: String,
 }
 
 /** 移除知识库授权记录的命令入参，不会删除用户 Markdown 文件。 */

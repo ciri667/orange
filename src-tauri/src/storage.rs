@@ -1,14 +1,16 @@
 use crate::domain::{
-    AgentMessage, AgentSession, FolderEntry, KnowledgeBase, KnowledgeBaseSelection,
-    ModelApiKeyStatus, ModelConfig, Note, RequestAuditLog, ScanReport, UserSettings,
-    WorkspaceSnapshot,
+    AgentMessage, AgentSession, DocumentPreview, DocumentPreviewBlock, FolderEntry, KnowledgeBase,
+    KnowledgeBaseSelection, ModelApiKeyStatus, ModelConfig, Note, RequestAuditLog, ScanReport,
+    UserSettings, WorkspaceDocument, WorkspaceSnapshot,
 };
 use chrono::{Local, NaiveDateTime, TimeZone};
+use quick_xml::events::Event;
+use quick_xml::Reader;
 use rusqlite::{params, Connection, TransactionBehavior};
 use sha2::{Digest, Sha256};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::fs;
-use std::io::Write;
+use std::io::{Read, Write};
 use std::path::{Component, Path, PathBuf};
 use std::sync::{Mutex, MutexGuard, OnceLock};
 use std::time::Duration;
@@ -16,6 +18,7 @@ use tauri::{AppHandle, Manager};
 use tempfile::NamedTempFile;
 use uuid::Uuid;
 use walkdir::{DirEntry, WalkDir};
+use zip::ZipArchive;
 
 /** 扫描时跳过的大型或生成目录，避免用户选到项目根目录后长时间遍历依赖和构建产物。 */
 const IGNORED_DIRECTORY_NAMES: &[&str] = &[
@@ -68,6 +71,13 @@ struct StoredKnowledgeBase {
 pub fn hash_content(content: &str) -> String {
     let mut hasher = Sha256::new();
     hasher.update(content.as_bytes());
+    format!("{:x}", hasher.finalize())
+}
+
+/** 计算二进制文件 hash，用于 pdf/docx/txt 扫描后识别外部修改。 */
+pub fn hash_bytes(bytes: &[u8]) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(bytes);
     format!("{:x}", hasher.finalize())
 }
 
@@ -190,6 +200,20 @@ pub fn create_stable_note_id(knowledge_base_id: &str, relative_path: &str) -> St
     let digest = format!("{:x}", hasher.finalize());
 
     format!("note-{}", &digest[..24])
+}
+
+/** 根据知识库和相对路径生成稳定普通文档 ID，避免与 Markdown note ID 混淆。 */
+pub fn create_stable_document_id(knowledge_base_id: &str, relative_path: &str) -> String {
+    let mut hasher = Sha256::new();
+
+    // 非 Markdown 文档不进入 Agent note 模型，使用独立前缀可以避免旧会话引用误配。
+    hasher.update(knowledge_base_id.as_bytes());
+    hasher.update(b":document:");
+    hasher.update(relative_path.as_bytes());
+
+    let digest = format!("{:x}", hasher.finalize());
+
+    format!("document-{}", &digest[..24])
 }
 
 /** 根据知识库和相对目录路径生成稳定目录 ID，让空目录在重扫后仍能保持稳定节点。 */
@@ -371,6 +395,8 @@ fn build_index_signature(snapshot: &WorkspaceSnapshot) -> String {
         hasher.update(b"\0");
         hasher.update(knowledge_base.path.as_bytes());
         hasher.update(b"\0");
+        hasher.update(knowledge_base.updated_at.as_bytes());
+        hasher.update(b"\0");
         hasher.update(if knowledge_base.semantic_index_enabled {
             b"1"
         } else {
@@ -389,6 +415,17 @@ fn build_index_signature(snapshot: &WorkspaceSnapshot) -> String {
         hasher.update(note.path.as_bytes());
         hasher.update(b"\0");
         hasher.update(note.content_hash.as_bytes());
+        hasher.update(b"\0");
+    }
+
+    for document in &snapshot.documents {
+        hasher.update(document.id.as_bytes());
+        hasher.update(b"\0");
+        hasher.update(document.knowledge_base_id.as_bytes());
+        hasher.update(b"\0");
+        hasher.update(document.path.as_bytes());
+        hasher.update(b"\0");
+        hasher.update(document.content_hash.as_bytes());
         hasher.update(b"\0");
     }
 
@@ -680,16 +717,20 @@ fn ensure_visible_session_after_delete(snapshot: &mut WorkspaceSnapshot) {
             .first()
             .cloned()
             .unwrap_or_else(|| snapshot.active_knowledge_base_id.clone());
-        snapshot.active_note_id = session.active_note_id.clone().unwrap_or_else(|| {
-            snapshot
-                .notes
-                .iter()
-                .find(|note| note.knowledge_base_id == snapshot.active_knowledge_base_id)
-                .map(|note| note.id.clone())
-                .unwrap_or_default()
-        });
+        snapshot.active_note_id = resolve_session_note_id(
+            snapshot,
+            session.active_note_id.as_deref(),
+            &snapshot.active_knowledge_base_id,
+        );
+        snapshot.active_document_id = resolve_fallback_document_id(
+            snapshot,
+            &snapshot.active_knowledge_base_id,
+            &snapshot.active_note_id,
+        );
     } else {
         snapshot.active_session_id.clear();
+        snapshot.active_note_id.clear();
+        snapshot.active_document_id.clear();
     }
 }
 
@@ -760,7 +801,7 @@ pub fn update_session_scope(
     Ok(snapshot)
 }
 
-/** 恢复历史会话绑定的知识库和笔记上下文。 */
+/** 恢复历史会话绑定的知识库和 Markdown 笔记上下文；普通文档只作为无笔记时的展示兜底。 */
 pub fn restore_session_context(
     app: &AppHandle,
     mut snapshot: WorkspaceSnapshot,
@@ -790,26 +831,63 @@ pub fn restore_session_context(
                 .map(|knowledge_base| knowledge_base.id.clone())
         })
         .unwrap_or_default();
-    let next_note_id = session
-        .active_note_id
-        .as_ref()
-        .filter(|note_id| snapshot.notes.iter().any(|note| &note.id == *note_id))
-        .cloned()
-        .or_else(|| {
-            snapshot
-                .notes
-                .iter()
-                .find(|note| note.knowledge_base_id == next_knowledge_base_id)
-                .map(|note| note.id.clone())
-        })
-        .unwrap_or_default();
+    let next_note_id = resolve_session_note_id(
+        &snapshot,
+        session.active_note_id.as_deref(),
+        &next_knowledge_base_id,
+    );
+    let next_document_id =
+        resolve_fallback_document_id(&snapshot, &next_knowledge_base_id, &next_note_id);
 
     snapshot.active_session_id = session.id;
     snapshot.active_knowledge_base_id = next_knowledge_base_id;
     snapshot.active_note_id = next_note_id;
+    snapshot.active_document_id = next_document_id;
     save_sessions(app, &snapshot)?;
 
     Ok(snapshot)
+}
+
+/** 根据会话里的 note 引用恢复同知识库 Markdown；无有效引用时使用该知识库第一篇 Markdown。 */
+fn resolve_session_note_id(
+    snapshot: &WorkspaceSnapshot,
+    session_note_id: Option<&str>,
+    knowledge_base_id: &str,
+) -> String {
+    if let Some(note_id) = session_note_id {
+        if snapshot
+            .notes
+            .iter()
+            .any(|note| note.id == note_id && note.knowledge_base_id == knowledge_base_id)
+        {
+            return note_id.to_owned();
+        }
+    }
+
+    snapshot
+        .notes
+        .iter()
+        .find(|note| note.knowledge_base_id == knowledge_base_id)
+        .map(|note| note.id.clone())
+        .unwrap_or_default()
+}
+
+/** 当当前知识库没有可激活 Markdown 时，选择第一个普通文档作为中间面板展示对象。 */
+fn resolve_fallback_document_id(
+    snapshot: &WorkspaceSnapshot,
+    knowledge_base_id: &str,
+    active_note_id: &str,
+) -> String {
+    if !active_note_id.is_empty() {
+        return String::new();
+    }
+
+    snapshot
+        .documents
+        .iter()
+        .find(|document| document.knowledge_base_id == knowledge_base_id)
+        .map(|document| document.id.clone())
+        .unwrap_or_default()
 }
 
 /** 按当前快照清理所有会话，删除已经失去有效知识库范围的会话。 */
@@ -818,9 +896,11 @@ pub fn normalize_sessions_for_snapshot(snapshot: &mut WorkspaceSnapshot) {
         knowledge_bases: snapshot.knowledge_bases.clone(),
         folders: snapshot.folders.clone(),
         notes: snapshot.notes.clone(),
+        documents: snapshot.documents.clone(),
         sessions: Vec::new(),
         active_knowledge_base_id: snapshot.active_knowledge_base_id.clone(),
         active_note_id: snapshot.active_note_id.clone(),
+        active_document_id: snapshot.active_document_id.clone(),
         active_session_id: snapshot.active_session_id.clone(),
     };
 
@@ -1143,7 +1223,7 @@ pub fn load_request_audit_logs(
     Ok(logs)
 }
 
-/** 从 SQLite 恢复已连接知识库，并重新扫描 Markdown 文件生成可用工作台快照。 */
+/** 从 SQLite 恢复已连接知识库，并重新扫描支持文档生成可用工作台快照。 */
 pub fn load_workspace_snapshot(app: &AppHandle) -> Result<WorkspaceSnapshot, String> {
     let connection = open_database(app)?;
     let mut statement = connection
@@ -1173,6 +1253,7 @@ pub fn load_workspace_snapshot(app: &AppHandle) -> Result<WorkspaceSnapshot, Str
     let mut knowledge_bases = Vec::new();
     let mut folders = Vec::new();
     let mut notes = Vec::new();
+    let mut documents = Vec::new();
 
     for stored_knowledge_base in stored_knowledge_bases {
         let selection = KnowledgeBaseSelection {
@@ -1182,16 +1263,18 @@ pub fn load_workspace_snapshot(app: &AppHandle) -> Result<WorkspaceSnapshot, Str
             note_count: 0,
         };
 
-        // 启动时以本地 Markdown 文件为准重新扫描，避免 SQLite 缓存覆盖用户在外部编辑器中的修改。
-        match scan_markdown_directory(&selection) {
-            Ok((mut knowledge_base, scanned_folders, scanned_notes)) => {
+        // 启动时以本地文件为准重新扫描，避免 SQLite 缓存覆盖用户在外部编辑器中的修改。
+        match scan_supported_documents_directory(&selection) {
+            Ok((mut knowledge_base, scanned_folders, scanned_notes, scanned_documents)) => {
                 knowledge_base.semantic_index_enabled =
                     stored_knowledge_base.semantic_index_enabled;
                 knowledge_base.updated_at = stored_knowledge_base.updated_at;
                 knowledge_base.is_default = knowledge_bases.is_empty();
                 knowledge_base.note_count = scanned_notes.len();
+                knowledge_base.document_count = scanned_documents.len();
                 folders.extend(scanned_folders);
                 notes.extend(scanned_notes);
+                documents.extend(scanned_documents);
                 knowledge_bases.push(knowledge_base);
             }
             Err(error) => {
@@ -1204,11 +1287,13 @@ pub fn load_workspace_snapshot(app: &AppHandle) -> Result<WorkspaceSnapshot, Str
                     description: error_message.clone(),
                     status: "error".to_owned(),
                     note_count: 0,
+                    document_count: 0,
                     updated_at: stored_knowledge_base.updated_at,
                     is_default: knowledge_bases.is_empty(),
                     semantic_index_enabled: stored_knowledge_base.semantic_index_enabled,
                     scan_report: Some(ScanReport {
                         scanned_file_count: 0,
+                        scanned_by_type: create_scanned_by_type_counter(),
                         failed_file_count: 1,
                         skipped_directories: Vec::new(),
                         errors: vec![error_message],
@@ -1228,13 +1313,25 @@ pub fn load_workspace_snapshot(app: &AppHandle) -> Result<WorkspaceSnapshot, Str
         .or_else(|| notes.first())
         .map(|note| note.id.clone())
         .unwrap_or_default();
+    let active_document_id = if active_note_id.is_empty() {
+        documents
+            .iter()
+            .find(|document| document.knowledge_base_id == active_knowledge_base_id)
+            .or_else(|| documents.first())
+            .map(|document| document.id.clone())
+            .unwrap_or_default()
+    } else {
+        String::new()
+    };
     let mut snapshot = WorkspaceSnapshot {
         knowledge_bases,
         folders,
         notes,
+        documents,
         sessions: Vec::new(),
         active_knowledge_base_id,
         active_note_id,
+        active_document_id,
         active_session_id: String::new(),
     };
     snapshot.sessions = load_sessions_for_snapshot(app, &snapshot)?;
@@ -1264,6 +1361,16 @@ pub fn load_workspace_snapshot(app: &AppHandle) -> Result<WorkspaceSnapshot, Str
                 .map(|note| note.id.clone())
                 .unwrap_or_default()
         });
+        snapshot.active_document_id = if snapshot.active_note_id.is_empty() {
+            snapshot
+                .documents
+                .iter()
+                .find(|document| document.knowledge_base_id == snapshot.active_knowledge_base_id)
+                .map(|document| document.id.clone())
+                .unwrap_or_default()
+        } else {
+            String::new()
+        };
     }
 
     Ok(snapshot)
@@ -1553,15 +1660,105 @@ fn extract_tags(content: &str) -> Vec<String> {
     tags
 }
 
-/** 扫描用户选择的 Markdown 目录，并生成知识库、真实目录与笔记快照。 */
-pub fn scan_markdown_directory(
+/** 本地扫描支持的文件类型，Markdown 进入 Agent note，其余进入普通文档模型。 */
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum SupportedDocumentKind {
+    Markdown,
+    Txt,
+    Docx,
+    Pdf,
+}
+
+impl SupportedDocumentKind {
+    /** 返回扫描报告中的稳定类型 key，对应前端 scannedByType。 */
+    fn scan_key(self) -> &'static str {
+        match self {
+            SupportedDocumentKind::Markdown => "markdown",
+            SupportedDocumentKind::Txt => "txt",
+            SupportedDocumentKind::Docx => "docx",
+            SupportedDocumentKind::Pdf => "pdf",
+        }
+    }
+
+    /** 返回前端 WorkspaceDocument.fileType 使用的非 Markdown 类型。 */
+    fn document_file_type(self) -> Option<&'static str> {
+        match self {
+            SupportedDocumentKind::Markdown => None,
+            SupportedDocumentKind::Txt => Some("txt"),
+            SupportedDocumentKind::Docx => Some("docx"),
+            SupportedDocumentKind::Pdf => Some("pdf"),
+        }
+    }
+
+    /** 返回用户可读类型名称，用于扫描错误提示。 */
+    fn label(self) -> &'static str {
+        match self {
+            SupportedDocumentKind::Markdown => "Markdown",
+            SupportedDocumentKind::Txt => "TXT",
+            SupportedDocumentKind::Docx => "DOCX",
+            SupportedDocumentKind::Pdf => "PDF",
+        }
+    }
+}
+
+/** 根据扩展名识别首版支持的文档类型。 */
+fn supported_document_kind(path: &Path) -> Option<SupportedDocumentKind> {
+    match path
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .map(str::to_ascii_lowercase)
+        .as_deref()
+    {
+        Some("md") | Some("markdown") => Some(SupportedDocumentKind::Markdown),
+        Some("txt") => Some(SupportedDocumentKind::Txt),
+        Some("docx") => Some(SupportedDocumentKind::Docx),
+        Some("pdf") => Some(SupportedDocumentKind::Pdf),
+        _ => None,
+    }
+}
+
+/** 从文件名提取普通文档标题，避免 docx/pdf 预览前还要读取二进制正文。 */
+fn document_title_from_path(path: &Path) -> String {
+    path.file_stem()
+        .and_then(|value| value.to_str())
+        .unwrap_or("未命名文档")
+        .to_owned()
+}
+
+/** 生成扫描报告的类型计数容器，所有支持类型都预置为 0。 */
+fn create_scanned_by_type_counter() -> HashMap<String, usize> {
+    crate::domain::default_scanned_by_type()
+}
+
+/** 记录一次成功扫描的支持文件类型。 */
+fn increment_scanned_by_type(
+    scanned_by_type: &mut HashMap<String, usize>,
+    kind: SupportedDocumentKind,
+) {
+    *scanned_by_type
+        .entry(kind.scan_key().to_owned())
+        .or_insert(0) += 1;
+}
+
+/** 扫描用户选择的支持文档目录，并生成知识库、目录、Markdown 笔记与普通文档快照。 */
+pub fn scan_supported_documents_directory(
     selection: &KnowledgeBaseSelection,
-) -> Result<(KnowledgeBase, Vec<FolderEntry>, Vec<Note>), String> {
+) -> Result<
+    (
+        KnowledgeBase,
+        Vec<FolderEntry>,
+        Vec<Note>,
+        Vec<WorkspaceDocument>,
+    ),
+    String,
+> {
     let root = fs::canonicalize(&selection.path)
         .map_err(|error| format!("无法访问知识库目录：{error}"))?;
     let mut folders = Vec::new();
     let mut notes = Vec::new();
+    let mut documents = Vec::new();
     let mut errors = Vec::new();
+    let mut scanned_by_type = create_scanned_by_type_counter();
     let mut skipped_directory_set = HashSet::new();
     let root_for_filter = root.clone();
 
@@ -1613,49 +1810,110 @@ pub fn scan_markdown_directory(
             continue;
         }
 
-        // 只索引 Markdown 文件，目录已经作为真实目录节点记录，其他格式暂不进入工作区。
-        if !path.is_file() || !is_markdown_file(path) {
+        let Some(document_kind) = path
+            .is_file()
+            .then(|| supported_document_kind(path))
+            .flatten()
+        else {
             continue;
-        }
-
-        let content = match fs::read_to_string(path) {
-            Ok(content) => content,
-            Err(error) => {
-                errors.push(format!(
-                    "无法读取 Markdown 文件 {}：{error}",
-                    path.display()
-                ));
-                continue;
-            }
         };
         let relative_path = path
             .strip_prefix(&root)
             .map_err(|error| format!("无法计算相对路径：{error}"))?
             .to_string_lossy()
             .replace('\\', "/");
-        let title = extract_markdown_title(path, &content);
-        let tags = extract_tags(&content);
 
-        notes.push(Note {
-            id: create_stable_note_id(&selection.id, &relative_path),
-            knowledge_base_id: selection.id.clone(),
-            title,
-            path: relative_path,
-            content_hash: hash_content(&content),
-            content,
-            tags,
-            updated_at: "刚刚".to_owned(),
-            backlinks: Vec::new(),
-        });
+        match document_kind {
+            SupportedDocumentKind::Markdown => {
+                let content = match fs::read_to_string(path) {
+                    Ok(content) => content,
+                    Err(error) => {
+                        errors.push(format!(
+                            "无法读取 Markdown 文件 {}：{error}",
+                            path.display()
+                        ));
+                        continue;
+                    }
+                };
+                let title = extract_markdown_title(path, &content);
+                let tags = extract_tags(&content);
+
+                notes.push(Note {
+                    id: create_stable_note_id(&selection.id, &relative_path),
+                    knowledge_base_id: selection.id.clone(),
+                    title,
+                    path: relative_path,
+                    content_hash: hash_content(&content),
+                    content,
+                    tags,
+                    updated_at: "刚刚".to_owned(),
+                    backlinks: Vec::new(),
+                });
+            }
+            SupportedDocumentKind::Txt => {
+                let content = match fs::read_to_string(path) {
+                    Ok(content) => content,
+                    Err(error) => {
+                        errors.push(format!("无法读取 TXT 文件 {}：{error}", path.display()));
+                        continue;
+                    }
+                };
+
+                documents.push(WorkspaceDocument {
+                    id: create_stable_document_id(&selection.id, &relative_path),
+                    knowledge_base_id: selection.id.clone(),
+                    title: document_title_from_path(path),
+                    path: relative_path,
+                    file_type: "txt".to_owned(),
+                    updated_at: "刚刚".to_owned(),
+                    content_hash: hash_content(&content),
+                    content: Some(content),
+                    preview_available: false,
+                });
+            }
+            SupportedDocumentKind::Docx | SupportedDocumentKind::Pdf => {
+                let bytes = match fs::read(path) {
+                    Ok(bytes) => bytes,
+                    Err(error) => {
+                        errors.push(format!(
+                            "无法读取 {} 文件 {}：{error}",
+                            document_kind.label(),
+                            path.display()
+                        ));
+                        continue;
+                    }
+                };
+                let file_type = document_kind
+                    .document_file_type()
+                    .expect("非 Markdown 文档必须有 fileType");
+
+                documents.push(WorkspaceDocument {
+                    id: create_stable_document_id(&selection.id, &relative_path),
+                    knowledge_base_id: selection.id.clone(),
+                    title: document_title_from_path(path),
+                    path: relative_path,
+                    file_type: file_type.to_owned(),
+                    updated_at: "刚刚".to_owned(),
+                    content_hash: hash_bytes(&bytes),
+                    content: None,
+                    preview_available: true,
+                });
+            }
+        }
+
+        increment_scanned_by_type(&mut scanned_by_type, document_kind);
     }
 
     folders.sort_by(|left, right| left.path.cmp(&right.path));
     notes.sort_by(|left, right| left.path.cmp(&right.path));
+    documents.sort_by(|left, right| left.path.cmp(&right.path));
 
     let mut skipped_directories: Vec<String> = skipped_directory_set.into_iter().collect();
     skipped_directories.sort();
+    let scanned_file_count = notes.len() + documents.len();
     let scan_report = ScanReport {
-        scanned_file_count: notes.len(),
+        scanned_file_count,
+        scanned_by_type,
         failed_file_count: errors.len(),
         skipped_directories,
         errors,
@@ -1667,29 +1925,53 @@ pub fn scan_markdown_directory(
         path: root.to_string_lossy().to_string(),
         description: if scan_report.failed_file_count > 0 {
             format!(
-                "已扫描 {} 篇 Markdown，{} 个文件失败。",
+                "已扫描 {} 个支持文档，{} 个文件失败。",
                 scan_report.scanned_file_count, scan_report.failed_file_count
             )
         } else {
-            "通过 Tauri 扫描的本地 Markdown 知识库。".to_owned()
+            "通过 Tauri 扫描的本地支持文档知识库。".to_owned()
         },
         status: "ready".to_owned(),
         note_count: notes.len(),
+        document_count: documents.len(),
         updated_at: "刚刚".to_owned(),
         is_default: false,
         semantic_index_enabled: false,
         scan_report: Some(scan_report),
     };
 
+    Ok((knowledge_base, folders, notes, documents))
+}
+
+/** 兼容旧调用方的 Markdown-only 扫描包装，普通文档会被扫描报告统计但不返回。 */
+#[allow(dead_code)]
+pub fn scan_markdown_directory(
+    selection: &KnowledgeBaseSelection,
+) -> Result<(KnowledgeBase, Vec<FolderEntry>, Vec<Note>), String> {
+    let (knowledge_base, folders, notes, _documents) =
+        scan_supported_documents_directory(selection)?;
+
     Ok((knowledge_base, folders, notes))
 }
 
 /** 判断路径是否为 Markdown 文件。 */
 pub fn is_markdown_file(path: &Path) -> bool {
-    matches!(
-        path.extension().and_then(|extension| extension.to_str()),
-        Some("md") | Some("markdown") | Some("MD") | Some("MARKDOWN")
-    )
+    supported_document_kind(path) == Some(SupportedDocumentKind::Markdown)
+}
+
+/** 判断路径是否为可编辑 txt 文档。 */
+pub fn is_text_document_file(path: &Path) -> bool {
+    supported_document_kind(path) == Some(SupportedDocumentKind::Txt)
+}
+
+/** 判断路径是否为只读预览 pdf 文档。 */
+fn is_pdf_document_file(path: &Path) -> bool {
+    supported_document_kind(path) == Some(SupportedDocumentKind::Pdf)
+}
+
+/** 判断路径是否为只读预览 docx 文档。 */
+fn is_docx_document_file(path: &Path) -> bool {
+    supported_document_kind(path) == Some(SupportedDocumentKind::Docx)
 }
 
 /** 校验用户输入的新文件名，只允许当前目录下的 Markdown 文件名。 */
@@ -1743,6 +2025,59 @@ pub fn validate_new_markdown_file_name(file_name: &str) -> Result<String, String
     };
 
     validate_markdown_file_name(&normalized_file_name)
+}
+
+/** 校验用户输入的新文件名，只允许当前目录下的 txt 文件名。 */
+pub fn validate_text_document_file_name(file_name: &str) -> Result<String, String> {
+    let trimmed_file_name = file_name.trim();
+
+    if trimmed_file_name.is_empty() {
+        return Err("文件名不能为空。".to_owned());
+    }
+
+    let requested_path = Path::new(trimmed_file_name);
+
+    // txt 重命名同样只允许改当前文件名，防止把普通文档操作变成移动或越权写入。
+    if requested_path.components().count() != 1
+        || trimmed_file_name.contains('/')
+        || trimmed_file_name.contains('\\')
+        || requested_path.components().any(|component| {
+            matches!(
+                component,
+                Component::ParentDir | Component::RootDir | Component::Prefix(_)
+            )
+        })
+    {
+        return Err("文件名不能包含路径或上级目录。".to_owned());
+    }
+
+    let extension = requested_path
+        .extension()
+        .and_then(|value| value.to_str())
+        .map(str::to_ascii_lowercase);
+
+    if !matches!(extension.as_deref(), Some("txt")) {
+        return Err("文件名必须以 .txt 结尾。".to_owned());
+    }
+
+    Ok(trimmed_file_name.to_owned())
+}
+
+/** 校验新建 txt 文件名；允许省略扩展名，省略时默认补 .txt。 */
+pub fn validate_new_text_document_file_name(file_name: &str) -> Result<String, String> {
+    let trimmed_file_name = file_name.trim();
+
+    if trimmed_file_name.is_empty() {
+        return Err("文件名不能为空。".to_owned());
+    }
+
+    let normalized_file_name = if Path::new(trimmed_file_name).extension().is_none() {
+        format!("{trimmed_file_name}.txt")
+    } else {
+        trimmed_file_name.to_owned()
+    };
+
+    validate_text_document_file_name(&normalized_file_name)
 }
 
 /** 校验新建文件夹名，只允许单级普通目录名，并拒绝扫描忽略目录。 */
@@ -1832,7 +2167,7 @@ pub fn resolve_existing_file_inside_root(
     let canonical_root =
         fs::canonicalize(root).map_err(|error| format!("无法解析知识库根目录：{error}"))?;
     let canonical_target = fs::canonicalize(canonical_root.join(requested_path))
-        .map_err(|error| format!("无法解析目标 Markdown 文件：{error}"))?;
+        .map_err(|error| format!("无法解析目标文件：{error}"))?;
 
     // canonicalize 目标文件可以拦截指向根目录外的符号链接，确保保存不会越权。
     if !canonical_target.starts_with(&canonical_root) || !canonical_target.is_file() {
@@ -1907,6 +2242,37 @@ pub fn create_blank_markdown_file(
         .map(|path| path.to_string_lossy().replace('\\', "/"))
 }
 
+/** 在指定目录创建不覆盖已有文件的空白 txt 文档，并返回相对路径。 */
+pub fn create_blank_text_document_file(
+    root: &Path,
+    parent_relative_path: &str,
+    requested_file_name: Option<&str>,
+) -> Result<String, String> {
+    let canonical_root =
+        fs::canonicalize(root).map_err(|error| format!("无法解析知识库根目录：{error}"))?;
+    let parent_path =
+        resolve_existing_directory_inside_root(&canonical_root, parent_relative_path)?;
+    let file_name = match requested_file_name {
+        Some(file_name) => validate_new_text_document_file_name(file_name)?,
+        None => next_available_text_document_file_name(&parent_path)?,
+    };
+    let target_path = parent_path.join(file_name);
+
+    if target_path.exists() {
+        return Err("目标文件已存在，已阻止覆盖。".to_owned());
+    }
+
+    atomic_write_text_document(&target_path, "")?;
+
+    let canonical_target =
+        fs::canonicalize(&target_path).map_err(|error| format!("无法解析新建文件：{error}"))?;
+
+    canonical_target
+        .strip_prefix(&canonical_root)
+        .map_err(|error| format!("无法计算新建文件相对路径：{error}"))
+        .map(|path| path.to_string_lossy().replace('\\', "/"))
+}
+
 /** 在指定目录创建单级文件夹，并返回相对路径。 */
 pub fn create_folder(
     root: &Path,
@@ -1955,6 +2321,26 @@ fn next_available_markdown_file_name(parent_path: &Path) -> Result<String, Strin
     Err("无法生成未命名笔记路径，请清理过多未命名文件后重试。".to_owned())
 }
 
+/** 生成指定目录下可用的默认 txt 文件名。 */
+fn next_available_text_document_file_name(parent_path: &Path) -> Result<String, String> {
+    for index in 1..=999 {
+        let file_name = if index == 1 {
+            "未命名.txt".to_owned()
+        } else {
+            format!("未命名 {index}.txt")
+        };
+
+        // txt 新建不能覆盖任何同名文件，包含 docx/pdf/Markdown 等其他类型。
+        if parent_path.join(&file_name).exists() {
+            continue;
+        }
+
+        return Ok(file_name);
+    }
+
+    Err("无法生成未命名 TXT 路径，请清理过多未命名文件后重试。".to_owned())
+}
+
 /** 重命名已有 Markdown 文件，只修改文件名并返回新相对路径、当前正文和 hash。 */
 pub fn rename_markdown_file(
     root: &Path,
@@ -1991,6 +2377,54 @@ pub fn rename_markdown_file(
 
     let current_content = fs::read_to_string(&target_path)
         .map_err(|error| format!("无法读取重命名后的 Markdown 文件：{error}"))?;
+    let canonical_target = fs::canonicalize(&target_path)
+        .map_err(|error| format!("无法解析重命名后的文件：{error}"))?;
+    let next_relative_path = canonical_target
+        .strip_prefix(&canonical_root)
+        .map_err(|error| format!("无法计算重命名后的相对路径：{error}"))?
+        .to_string_lossy()
+        .replace('\\', "/");
+    let current_hash = hash_content(&current_content);
+
+    Ok((next_relative_path, current_content, current_hash))
+}
+
+/** 重命名已有 txt 文档，只修改文件名并返回新相对路径、当前正文和 hash。 */
+pub fn rename_text_document_file(
+    root: &Path,
+    current_relative_path: &str,
+    next_file_name: &str,
+) -> Result<(String, String, String), String> {
+    let canonical_root =
+        fs::canonicalize(root).map_err(|error| format!("无法解析知识库根目录：{error}"))?;
+    let current_path = resolve_existing_file_inside_root(&canonical_root, current_relative_path)?;
+
+    if !is_text_document_file(&current_path) {
+        return Err("只能重命名 TXT 文件。".to_owned());
+    }
+
+    let safe_file_name = validate_text_document_file_name(next_file_name)?;
+    let target_path = current_path.with_file_name(safe_file_name);
+    let target_parent = target_path
+        .parent()
+        .ok_or_else(|| "目标路径缺少父目录".to_owned())?;
+    let canonical_target_parent =
+        fs::canonicalize(target_parent).map_err(|error| format!("无法解析目标父目录：{error}"))?;
+
+    // 目标父目录必须仍在知识库内，防止通过异常路径或符号链接逃逸。
+    if !canonical_target_parent.starts_with(&canonical_root) {
+        return Err("目标路径超出知识库根目录，已阻止重命名。".to_owned());
+    }
+
+    if target_path.exists() {
+        return Err("目标文件名已存在，已阻止覆盖。".to_owned());
+    }
+
+    fs::rename(&current_path, &target_path)
+        .map_err(|error| format!("无法重命名 TXT 文件：{error}"))?;
+
+    let current_content = fs::read_to_string(&target_path)
+        .map_err(|error| format!("无法读取重命名后的 TXT 文件：{error}"))?;
     let canonical_target = fs::canonicalize(&target_path)
         .map_err(|error| format!("无法解析重命名后的文件：{error}"))?;
     let next_relative_path = canonical_target
@@ -2042,6 +2476,45 @@ where
     delete_file(&target_path)
 }
 
+/** 将 txt 文档移入系统回收站，删除前用 hash 确认没有外部修改。 */
+pub fn trash_text_document_file(
+    root: &Path,
+    relative_path: &str,
+    expected_hash: &str,
+) -> Result<(), String> {
+    trash_text_document_file_with(root, relative_path, expected_hash, |target_path| {
+        trash::delete(target_path).map_err(|error| format!("无法移入系统回收站：{error}"))
+    })
+}
+
+/** 执行 txt 删除前统一校验，测试中可注入可控删除器。 */
+fn trash_text_document_file_with<F>(
+    root: &Path,
+    relative_path: &str,
+    expected_hash: &str,
+    delete_file: F,
+) -> Result<(), String>
+where
+    F: FnOnce(&Path) -> Result<(), String>,
+{
+    let target_path = resolve_existing_file_inside_root(root, relative_path)?;
+
+    if !is_text_document_file(&target_path) {
+        return Err("只能删除 TXT 文件。".to_owned());
+    }
+
+    let current_content = fs::read_to_string(&target_path)
+        .map_err(|error| format!("无法读取待删除 TXT 文件：{error}"))?;
+    let current_hash = hash_content(&current_content);
+
+    // 删除是破坏性操作，即使进入回收站也要先确认文件版本没有被外部编辑器改动。
+    if current_hash != expected_hash {
+        return Err("目标文件已被外部修改，已阻止删除。请重新扫描后再操作。".to_owned());
+    }
+
+    delete_file(&target_path)
+}
+
 /** 原子写入 Markdown 文件，避免写到一半时破坏用户数据。 */
 pub fn atomic_write_markdown(path: &Path, content: &str) -> Result<(), String> {
     let parent = path
@@ -2060,22 +2533,247 @@ pub fn atomic_write_markdown(path: &Path, content: &str) -> Result<(), String> {
     Ok(())
 }
 
+/** 原子写入 txt 文档，保持和 Markdown 保存相同的本地数据安全语义。 */
+pub fn atomic_write_text_document(path: &Path, content: &str) -> Result<(), String> {
+    let parent = path
+        .parent()
+        .ok_or_else(|| "目标路径缺少父目录".to_owned())?;
+    let mut temp_file =
+        NamedTempFile::new_in(parent).map_err(|error| format!("无法创建临时文件：{error}"))?;
+
+    temp_file
+        .write_all(content.as_bytes())
+        .map_err(|error| format!("无法写入临时文件：{error}"))?;
+    temp_file
+        .persist(path)
+        .map_err(|error| format!("无法替换 TXT 文件：{}", error.error))?;
+
+    Ok(())
+}
+
+/** 加载 docx/pdf 的只读预览数据，txt 不走该接口。 */
+pub fn load_document_preview(
+    root: &Path,
+    document: &WorkspaceDocument,
+) -> Result<DocumentPreview, String> {
+    let target_path = resolve_existing_file_inside_root(root, &document.path)?;
+
+    match document.file_type.as_str() {
+        "pdf" => {
+            if !is_pdf_document_file(&target_path) {
+                return Err("只能预览 PDF 文件。".to_owned());
+            }
+
+            let bytes = fs::read(&target_path)
+                .map_err(|error| format!("无法读取 PDF 文件 {}：{error}", target_path.display()))?;
+
+            Ok(DocumentPreview {
+                document_id: document.id.clone(),
+                file_type: "pdf".to_owned(),
+                title: document.title.clone(),
+                path: document.path.clone(),
+                updated_at: "刚刚".to_owned(),
+                content_hash: hash_bytes(&bytes),
+                asset_path: Some(target_path.to_string_lossy().to_string()),
+                blocks: None,
+            })
+        }
+        "docx" => {
+            if !is_docx_document_file(&target_path) {
+                return Err("只能预览 DOCX 文件。".to_owned());
+            }
+
+            let bytes = fs::read(&target_path).map_err(|error| {
+                format!("无法读取 DOCX 文件 {}：{error}", target_path.display())
+            })?;
+            let blocks = extract_docx_preview_blocks(&target_path)?;
+
+            Ok(DocumentPreview {
+                document_id: document.id.clone(),
+                file_type: "docx".to_owned(),
+                title: document.title.clone(),
+                path: document.path.clone(),
+                updated_at: "刚刚".to_owned(),
+                content_hash: hash_bytes(&bytes),
+                asset_path: None,
+                blocks: Some(blocks),
+            })
+        }
+        _ => Err("该文档类型不支持只读预览。".to_owned()),
+    }
+}
+
+/** 从 docx 的 word/document.xml 中抽取段落级文本块。 */
+pub fn extract_docx_preview_blocks(path: &Path) -> Result<Vec<DocumentPreviewBlock>, String> {
+    let file = fs::File::open(path).map_err(|error| format!("无法打开 DOCX 文件：{error}"))?;
+    let mut archive =
+        ZipArchive::new(file).map_err(|error| format!("DOCX 文件结构无效：{error}"))?;
+    let mut document_xml = String::new();
+
+    archive
+        .by_name("word/document.xml")
+        .map_err(|error| format!("DOCX 缺少正文 XML：{error}"))?
+        .read_to_string(&mut document_xml)
+        .map_err(|error| format!("无法读取 DOCX 正文 XML：{error}"))?;
+
+    parse_docx_document_xml(&document_xml)
+}
+
+/** 解析 WordprocessingML 正文；todo: 后续补充表格、图片、批注和样式的高保真还原。 */
+fn parse_docx_document_xml(document_xml: &str) -> Result<Vec<DocumentPreviewBlock>, String> {
+    let mut reader = Reader::from_str(document_xml);
+    let mut blocks = Vec::new();
+    let mut buffer = Vec::new();
+    let mut in_paragraph = false;
+    let mut in_text = false;
+    let mut paragraph_text = String::new();
+    let mut paragraph_style = String::new();
+
+    reader.config_mut().trim_text(true);
+
+    loop {
+        match reader.read_event_into(&mut buffer) {
+            Ok(Event::Start(element)) => {
+                let name = element.name();
+                let name_bytes = name.as_ref();
+
+                if xml_name_matches(name_bytes, b"p") {
+                    in_paragraph = true;
+                    paragraph_text.clear();
+                    paragraph_style.clear();
+                } else if in_paragraph && xml_name_matches(name_bytes, b"t") {
+                    in_text = true;
+                } else if in_paragraph && xml_name_matches(name_bytes, b"pStyle") {
+                    if let Some(style) = read_xml_attribute(&element, b"val") {
+                        paragraph_style = style;
+                    }
+                }
+            }
+            Ok(Event::Empty(element)) => {
+                let name = element.name();
+                let name_bytes = name.as_ref();
+
+                if in_paragraph && xml_name_matches(name_bytes, b"pStyle") {
+                    if let Some(style) = read_xml_attribute(&element, b"val") {
+                        paragraph_style = style;
+                    }
+                } else if in_paragraph && xml_name_matches(name_bytes, b"tab") {
+                    paragraph_text.push('\t');
+                } else if in_paragraph && xml_name_matches(name_bytes, b"br") {
+                    paragraph_text.push('\n');
+                }
+            }
+            Ok(Event::Text(text)) => {
+                if in_text {
+                    let raw_text = std::str::from_utf8(text.as_ref())
+                        .map_err(|error| format!("DOCX 文本编码无效：{error}"))?;
+                    let unescaped_text = quick_xml::escape::unescape(raw_text)
+                        .map_err(|error| format!("DOCX 文本转义无效：{error}"))?;
+
+                    paragraph_text.push_str(&unescaped_text);
+                }
+            }
+            Ok(Event::End(element)) => {
+                let name = element.name();
+                let name_bytes = name.as_ref();
+
+                if xml_name_matches(name_bytes, b"t") {
+                    in_text = false;
+                } else if xml_name_matches(name_bytes, b"p") {
+                    let trimmed_text = paragraph_text.trim();
+
+                    if !trimmed_text.is_empty() {
+                        blocks.push(DocumentPreviewBlock {
+                            r#type: if is_docx_heading_style(&paragraph_style) {
+                                "heading".to_owned()
+                            } else {
+                                "paragraph".to_owned()
+                            },
+                            text: trimmed_text.to_owned(),
+                        });
+                    }
+
+                    in_paragraph = false;
+                    in_text = false;
+                    paragraph_text.clear();
+                    paragraph_style.clear();
+                }
+            }
+            Ok(Event::Eof) => break,
+            Err(error) => return Err(format!("DOCX 正文 XML 解析失败：{error}")),
+            _ => {}
+        }
+
+        buffer.clear();
+    }
+
+    if blocks.is_empty() {
+        blocks.push(DocumentPreviewBlock {
+            r#type: "paragraph".to_owned(),
+            text: "该 DOCX 暂无可预览正文。".to_owned(),
+        });
+    }
+
+    Ok(blocks)
+}
+
+/** 判断带命名空间或不带命名空间的 XML 名称是否匹配目标本地名。 */
+fn xml_name_matches(name: &[u8], local_name: &[u8]) -> bool {
+    name == local_name
+        || name
+            .strip_prefix(b"w:")
+            .is_some_and(|stripped_name| stripped_name == local_name)
+        || name
+            .rsplit(|byte| *byte == b':')
+            .next()
+            .is_some_and(|stripped_name| stripped_name == local_name)
+}
+
+/** 读取 XML 属性，兼容 WordprocessingML 的 w:val 命名空间前缀。 */
+fn read_xml_attribute(
+    element: &quick_xml::events::BytesStart<'_>,
+    local_name: &[u8],
+) -> Option<String> {
+    element
+        .attributes()
+        .filter_map(Result::ok)
+        .find_map(|attribute| {
+            xml_name_matches(attribute.key.as_ref(), local_name)
+                .then(|| String::from_utf8_lossy(attribute.value.as_ref()).to_string())
+        })
+}
+
+/** 根据 docx 段落样式判断是否应作为标题展示。 */
+fn is_docx_heading_style(style: &str) -> bool {
+    let normalized_style = style.to_ascii_lowercase();
+
+    normalized_style.contains("heading") || normalized_style.contains("title")
+}
+
 #[cfg(test)]
 mod tests {
     use super::trash_markdown_file_with;
     use super::{
-        atomic_write_markdown, create_blank_markdown_file, create_folder, create_id,
-        create_stable_note_id, ensure_persistent_model_keyring, format_local_datetime_from_millis,
-        hash_content, is_missing_keyring_entry_error, load_model_api_key_from_cache,
+        atomic_write_markdown, atomic_write_text_document, create_blank_markdown_file,
+        create_blank_text_document_file, create_folder, create_id, create_stable_note_id,
+        ensure_persistent_model_keyring, extract_docx_preview_blocks,
+        format_local_datetime_from_millis, hash_bytes, hash_content,
+        is_missing_keyring_entry_error, load_document_preview, load_model_api_key_from_cache,
         model_keyring_persists_until_delete, normalize_audit_log_created_at,
-        normalize_session_created_at, rename_markdown_file, resolve_existing_file_inside_root,
-        resolve_inside_root, scan_markdown_directory, sort_sessions_by_created_at_desc,
-        store_model_api_key_in_cache, trash_markdown_file, validate_folder_name,
-        validate_markdown_file_name, validate_new_markdown_file_name,
+        normalize_session_created_at, rename_markdown_file, rename_text_document_file,
+        resolve_existing_file_inside_root, resolve_inside_root, scan_markdown_directory,
+        scan_supported_documents_directory, sort_sessions_by_created_at_desc,
+        store_model_api_key_in_cache, trash_markdown_file, trash_text_document_file_with,
+        validate_folder_name, validate_markdown_file_name, validate_new_markdown_file_name,
+        validate_new_text_document_file_name, validate_text_document_file_name,
     };
-    use crate::domain::{AgentSession, KnowledgeBaseSelection, RequestAuditLog};
+    use crate::domain::{AgentSession, KnowledgeBaseSelection, RequestAuditLog, WorkspaceDocument};
     use std::fs;
+    use std::io::Write;
+    use std::path::Path;
     use tempfile::tempdir;
+    use zip::write::SimpleFileOptions;
+    use zip::ZipWriter;
 
     /** 构造测试用 Agent 会话，避免排序和迁移测试重复铺开完整结构。 */
     fn test_agent_session(id: &str, created_at: &str) -> AgentSession {
@@ -2091,6 +2789,38 @@ mod tests {
             created_at: created_at.to_owned(),
             updated_at: created_at.to_owned(),
             deleted_at: None,
+        }
+    }
+
+    /** 写入最小 DOCX zip fixture，只包含预览命令首版会解析的 word/document.xml。 */
+    fn write_minimal_docx(path: &Path, document_xml: &str) {
+        let file = fs::File::create(path).unwrap();
+        let options = SimpleFileOptions::default();
+        let mut archive = ZipWriter::new(file);
+
+        archive.start_file("[Content_Types].xml", options).unwrap();
+        archive
+            .write_all(
+                br#"<?xml version="1.0" encoding="UTF-8"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"/>"#,
+            )
+            .unwrap();
+        archive.start_file("word/document.xml", options).unwrap();
+        archive.write_all(document_xml.as_bytes()).unwrap();
+        archive.finish().unwrap();
+    }
+
+    /** 构造预览测试所需的普通文档元数据，避免每个用例重复无关字段。 */
+    fn test_workspace_document(file_type: &str, path: &str) -> WorkspaceDocument {
+        WorkspaceDocument {
+            id: format!("document-{file_type}"),
+            knowledge_base_id: "kb-test".to_owned(),
+            title: "测试文档".to_owned(),
+            path: path.to_owned(),
+            file_type: file_type.to_owned(),
+            updated_at: "刚刚".to_owned(),
+            content_hash: String::new(),
+            content: None,
+            preview_available: file_type != "txt",
         }
     }
 
@@ -2289,6 +3019,26 @@ mod tests {
         assert!(create_blank_markdown_file(dir.path(), "../outside", Some("x.md")).is_err());
     }
 
+    /** 新建 TXT 文档应支持默认名、省略扩展名，并拒绝路径穿越、重复名称和非 txt 扩展名。 */
+    #[test]
+    fn create_text_document_validates_file_name_and_target() {
+        let dir = tempdir().unwrap();
+        let first_path = create_blank_text_document_file(dir.path(), "", None).unwrap();
+        let named_path = create_blank_text_document_file(dir.path(), "", Some("Draft")).unwrap();
+
+        assert_eq!(first_path, "未命名.txt");
+        assert_eq!(named_path, "Draft.txt");
+        assert_eq!(
+            fs::read_to_string(dir.path().join("Draft.txt")).unwrap(),
+            ""
+        );
+        assert!(validate_new_text_document_file_name("../x.txt").is_err());
+        assert!(validate_new_text_document_file_name("").is_err());
+        assert!(validate_new_text_document_file_name("note.md").is_err());
+        assert!(create_blank_text_document_file(dir.path(), "", Some("Draft.txt")).is_err());
+        assert!(create_blank_text_document_file(dir.path(), "../outside", Some("x.txt")).is_err());
+    }
+
     /** 根目录新建文件夹成功后返回相对于知识库根目录的路径。 */
     #[test]
     fn create_folder_in_root_directory() {
@@ -2333,6 +3083,9 @@ mod tests {
         assert!(validate_markdown_file_name("../x.md").is_err());
         assert!(validate_markdown_file_name("").is_err());
         assert!(validate_markdown_file_name("note.txt").is_err());
+        assert!(validate_text_document_file_name("../x.txt").is_err());
+        assert!(validate_text_document_file_name("").is_err());
+        assert!(validate_text_document_file_name("note.md").is_err());
     }
 
     /** 重命名不能覆盖同目录下已有 Markdown 文件。 */
@@ -2374,6 +3127,29 @@ mod tests {
         );
     }
 
+    /** TXT 重命名只改文件名，保留正文和 hash，并拒绝覆盖同目录已有文件。 */
+    #[test]
+    fn rename_text_document_preserves_content_and_rejects_existing_target() {
+        let dir = tempdir().unwrap();
+
+        fs::write(dir.path().join("old.txt"), "plain text").unwrap();
+        fs::write(dir.path().join("taken.txt"), "taken").unwrap();
+
+        assert!(rename_text_document_file(dir.path(), "old.txt", "taken.txt").is_err());
+
+        let (next_relative_path, content, content_hash) =
+            rename_text_document_file(dir.path(), "old.txt", "new.txt").unwrap();
+
+        assert_eq!(next_relative_path, "new.txt");
+        assert_eq!(content, "plain text");
+        assert_eq!(content_hash, hash_content("plain text"));
+        assert!(!dir.path().join("old.txt").exists());
+        assert_eq!(
+            fs::read_to_string(dir.path().join("new.txt")).unwrap(),
+            "plain text"
+        );
+    }
+
     /** 删除 hash 不一致时必须拒绝，避免误删外部编辑器刚改过的文件。 */
     #[test]
     fn delete_rejects_hash_mismatch() {
@@ -2409,6 +3185,39 @@ mod tests {
             dir.path(),
             "note.md",
             &hash_content(content),
+            |target_path| {
+                fs::remove_file(target_path).map_err(|error| format!("测试删除失败：{error}"))
+            },
+        )
+        .unwrap();
+
+        assert!(!path.exists());
+    }
+
+    /** TXT 保存走原子写入，删除前继续用 hash 冲突检测保护外部修改。 */
+    #[test]
+    fn text_document_save_and_delete_use_hash_guard() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("draft.txt");
+
+        atomic_write_text_document(&path, "初稿").unwrap();
+
+        assert_eq!(fs::read_to_string(&path).unwrap(), "初稿");
+        assert!(trash_text_document_file_with(
+            dir.path(),
+            "draft.txt",
+            &hash_content("旧版本"),
+            |target_path| {
+                fs::remove_file(target_path).map_err(|error| format!("测试删除失败：{error}"))
+            },
+        )
+        .is_err());
+        assert!(path.exists());
+
+        trash_text_document_file_with(
+            dir.path(),
+            "draft.txt",
+            &hash_content("初稿"),
             |target_path| {
                 fs::remove_file(target_path).map_err(|error| format!("测试删除失败：{error}"))
             },
@@ -2460,6 +3269,56 @@ mod tests {
         assert!(report.errors[0].contains("broken.md"));
     }
 
+    /** 支持文档扫描应区分 Markdown、TXT、DOCX、PDF，并忽略不支持的文件类型。 */
+    #[test]
+    fn scan_supported_documents_reports_documents_by_type() {
+        let dir = tempdir().unwrap();
+        let note_path = dir.path().join("notes").join("ok.md");
+        let txt_path = dir.path().join("notes").join("draft.txt");
+        let docx_path = dir.path().join("docs").join("brief.docx");
+        let pdf_path = dir.path().join("docs").join("spec.pdf");
+
+        fs::create_dir_all(note_path.parent().unwrap()).unwrap();
+        fs::create_dir_all(docx_path.parent().unwrap()).unwrap();
+        fs::write(&note_path, "# 可读笔记\n\n正文").unwrap();
+        fs::write(&txt_path, "纯文本正文").unwrap();
+        write_minimal_docx(
+            &docx_path,
+            r#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:p><w:r><w:t>DOCX 正文</w:t></w:r></w:p></w:body></w:document>"#,
+        );
+        fs::write(&pdf_path, b"%PDF-1.4\n").unwrap();
+        fs::write(dir.path().join("ignored.png"), b"png").unwrap();
+
+        let selection = KnowledgeBaseSelection {
+            id: "kb-docs".to_owned(),
+            name: "多类型测试库".to_owned(),
+            path: dir.path().to_string_lossy().to_string(),
+            note_count: 0,
+        };
+        let (knowledge_base, _folders, notes, documents) =
+            scan_supported_documents_directory(&selection).unwrap();
+        let report = knowledge_base.scan_report.unwrap();
+
+        assert_eq!(notes.len(), 1);
+        assert_eq!(documents.len(), 3);
+        assert_eq!(knowledge_base.note_count, 1);
+        assert_eq!(knowledge_base.document_count, 3);
+        assert_eq!(report.scanned_file_count, 4);
+        assert_eq!(report.scanned_by_type.get("markdown"), Some(&1));
+        assert_eq!(report.scanned_by_type.get("txt"), Some(&1));
+        assert_eq!(report.scanned_by_type.get("docx"), Some(&1));
+        assert_eq!(report.scanned_by_type.get("pdf"), Some(&1));
+        assert!(documents.iter().any(|document| document.file_type == "txt"
+            && document.content.as_deref() == Some("纯文本正文")
+            && !document.preview_available));
+        assert!(documents
+            .iter()
+            .any(|document| document.file_type == "docx" && document.preview_available));
+        assert!(documents
+            .iter()
+            .any(|document| document.file_type == "pdf" && document.preview_available));
+    }
+
     /** 扫描应返回没有 Markdown 文件的空目录，让前端目录树能显示真实空文件夹。 */
     #[test]
     fn scan_returns_empty_folder_nodes() {
@@ -2478,5 +3337,53 @@ mod tests {
         assert!(notes.is_empty());
         assert_eq!(folders.len(), 1);
         assert_eq!(folders[0].path, "Empty");
+    }
+
+    /** DOCX 预览应从最小 fixture 中抽取标题和段落，损坏 zip 应返回可展示错误。 */
+    #[test]
+    fn docx_preview_extracts_blocks_and_rejects_corrupt_file() {
+        let dir = tempdir().unwrap();
+        let docx_path = dir.path().join("preview.docx");
+        let corrupt_path = dir.path().join("corrupt.docx");
+
+        write_minimal_docx(
+            &docx_path,
+            r#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:p><w:pPr><w:pStyle w:val="Heading1"/></w:pPr><w:r><w:t>标题</w:t></w:r></w:p><w:p><w:r><w:t>第一段</w:t></w:r></w:p></w:body></w:document>"#,
+        );
+        fs::write(&corrupt_path, b"not a zip").unwrap();
+
+        let blocks = extract_docx_preview_blocks(&docx_path).unwrap();
+
+        assert_eq!(blocks.len(), 2);
+        assert_eq!(blocks[0].r#type, "heading");
+        assert_eq!(blocks[0].text, "标题");
+        assert_eq!(blocks[1].r#type, "paragraph");
+        assert_eq!(blocks[1].text, "第一段");
+        assert!(extract_docx_preview_blocks(&corrupt_path).is_err());
+    }
+
+    /** PDF 预览只允许返回知识库内文件的 asset 路径，拒绝越界相对路径。 */
+    #[test]
+    fn pdf_preview_returns_asset_path_and_rejects_outside_path() {
+        let dir = tempdir().unwrap();
+        let pdf_path = dir.path().join("spec.pdf");
+
+        fs::write(&pdf_path, b"%PDF-1.4\n").unwrap();
+
+        let preview =
+            load_document_preview(dir.path(), &test_workspace_document("pdf", "spec.pdf")).unwrap();
+        let canonical_pdf_path = fs::canonicalize(&pdf_path).unwrap();
+
+        assert_eq!(preview.file_type, "pdf");
+        assert_eq!(
+            preview.asset_path,
+            Some(canonical_pdf_path.to_string_lossy().to_string())
+        );
+        assert_eq!(preview.content_hash, hash_bytes(b"%PDF-1.4\n"));
+        assert!(load_document_preview(
+            dir.path(),
+            &test_workspace_document("pdf", "../outside.pdf")
+        )
+        .is_err());
     }
 }

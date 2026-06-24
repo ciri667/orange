@@ -21,6 +21,7 @@ chrono = { version = "0.4", features = ["serde"] }
 keyring = { version = "3", features = ["apple-native", "windows-native", "linux-native-sync-persistent"] }
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 rusqlite = { version = "0.32", features = ["bundled"] }
+quick-xml = "0.36"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha2 = "0.10"
@@ -32,3 +33,4 @@ thiserror = "1"
 trash = "5.2.6"
 uuid = { version = "1", features = ["v4"] }
 walkdir = "2"
+zip = { version = "2", default-features = false, features = ["deflate"] }

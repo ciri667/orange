@@ -1,12 +1,14 @@
 use crate::domain::{
     AgentSession, AgentSkill, AgentTurnPayload, AgentTurnResult, ChangePayload,
-    CreateFolderPayload, CreateNotePayload, DeleteAgentSkillPayload, DeleteNotePayload,
-    DeleteSessionPayload, FolderEntry, KnowledgeBaseSelection, LoadSessionsPayload,
-    ModelApiKeyStatus, ProposedChange, RemoveKnowledgeBasePayload, RenameNotePayload,
+    CreateDocumentPayload, CreateFolderPayload, CreateNotePayload, DeleteAgentSkillPayload,
+    DeleteDocumentPayload, DeleteNotePayload, DeleteSessionPayload, DocumentPreview, FolderEntry,
+    KnowledgeBaseSelection, LoadDocumentPreviewPayload, LoadSessionsPayload, ModelApiKeyStatus,
+    ProposedChange, RemoveKnowledgeBasePayload, RenameDocumentPayload, RenameNotePayload,
     RequestAuditLog, RescanKnowledgeBasePayload, RestoreSessionContextPayload,
-    SaveAgentSkillPayload, SaveModelApiKeyPayload, SaveNoteContentPayload, SaveSessionPayload,
-    SaveUserSettingsPayload, ScanKnowledgeBasePayload, ScanReport, ToggleAgentSkillPayload,
-    UpdateSessionScopePayload, UserSettings, WorkspaceSnapshot,
+    SaveAgentSkillPayload, SaveDocumentContentPayload, SaveModelApiKeyPayload,
+    SaveNoteContentPayload, SaveSessionPayload, SaveUserSettingsPayload, ScanKnowledgeBasePayload,
+    ScanReport, ToggleAgentSkillPayload, UpdateSessionScopePayload, UserSettings,
+    WorkspaceSnapshot,
 };
 use crate::runtime;
 use crate::skills;
@@ -18,7 +20,7 @@ use std::process::Command;
 use tauri::{AppHandle, Manager};
 use tauri_plugin_dialog::DialogExt;
 
-/** 加载工作台初始状态；从 SQLite 恢复已连接知识库并重新扫描真实 Markdown。 */
+/** 加载工作台初始状态；从 SQLite 恢复已连接知识库并重新扫描真实支持文档。 */
 #[tauri::command]
 pub async fn load_workspace_state(app: AppHandle) -> Result<WorkspaceSnapshot, String> {
     let load_app = app.clone();
@@ -231,14 +233,14 @@ pub async fn load_request_audit_logs(app: AppHandle) -> Result<Vec<RequestAuditL
     .await
 }
 
-/** 打开系统目录选择器，让用户连接一个本地 Markdown 知识库。 */
+/** 打开系统目录选择器，让用户连接一个本地支持文档知识库。 */
 #[tauri::command]
 pub async fn select_knowledge_base(app: AppHandle) -> Result<KnowledgeBaseSelection, String> {
     let (sender, mut receiver) = tauri::async_runtime::channel(1);
 
     app.dialog()
         .file()
-        .set_title("选择 Markdown 知识库目录")
+        .set_title("选择支持文档知识库目录")
         .pick_folder(move |selected_path| {
             let _ = sender.blocking_send(selected_path);
         });
@@ -271,7 +273,7 @@ pub async fn select_knowledge_base(app: AppHandle) -> Result<KnowledgeBaseSelect
     })
 }
 
-/** 扫描用户选择的 Markdown 目录，并合并进当前工作台快照。 */
+/** 扫描用户选择的支持文档目录，并合并进当前工作台快照。 */
 #[tauri::command]
 pub async fn scan_knowledge_base(
     app: AppHandle,
@@ -279,10 +281,11 @@ pub async fn scan_knowledge_base(
 ) -> Result<WorkspaceSnapshot, String> {
     let mut snapshot = payload.snapshot;
     let selection = payload.selection;
-    let (knowledge_base, folders, notes) = run_blocking("扫描 Markdown 知识库", move || {
-        storage::scan_markdown_directory(&selection)
-    })
-    .await?;
+    let (knowledge_base, folders, notes, documents) =
+        run_blocking("扫描支持文档知识库", move || {
+            storage::scan_supported_documents_directory(&selection)
+        })
+        .await?;
     let knowledge_base_id = knowledge_base.id.clone();
 
     allow_asset_protocol_directory(&app, Path::new(&knowledge_base.path))?;
@@ -292,10 +295,19 @@ pub async fn scan_knowledge_base(
         .first()
         .map(|note| note.id.clone())
         .unwrap_or_default();
+    snapshot.active_document_id = if snapshot.active_note_id.is_empty() {
+        documents
+            .first()
+            .map(|document| document.id.clone())
+            .unwrap_or_default()
+    } else {
+        String::new()
+    };
     snapshot.active_session_id = ensure_knowledge_base_session(&mut snapshot, &knowledge_base);
     snapshot.knowledge_bases.push(knowledge_base);
     snapshot.folders.extend(folders);
     snapshot.notes.extend(notes);
+    snapshot.documents.extend(documents);
     normalize_knowledge_base_flags(&mut snapshot);
     normalize_active_entities(&mut snapshot, Some(&knowledge_base_id));
 
@@ -304,7 +316,7 @@ pub async fn scan_knowledge_base(
     Ok(snapshot)
 }
 
-/** 重新扫描一个已连接知识库，用真实 Markdown 文件替换该知识库的缓存笔记。 */
+/** 重新扫描一个已连接知识库，用真实支持文档替换该知识库的缓存条目。 */
 #[tauri::command]
 pub async fn rescan_knowledge_base(
     app: AppHandle,
@@ -324,59 +336,71 @@ pub async fn rescan_knowledge_base(
         note_count: previous_knowledge_base.note_count,
     };
     let previous_active_note_id = snapshot.active_note_id.clone();
-    let scan_result = run_blocking("重新扫描 Markdown 知识库", move || {
-        storage::scan_markdown_directory(&selection)
+    let previous_active_document_id = snapshot.active_document_id.clone();
+    let scan_result = run_blocking("重新扫描支持文档知识库", move || {
+        storage::scan_supported_documents_directory(&selection)
     })
     .await;
-    let (mut rescanned_knowledge_base, rescanned_folders, rescanned_notes) = match scan_result {
-        Ok(result) => result,
-        Err(error) => {
-            let error_message = format!("无法访问已连接目录：{error}");
-            let mut failed_knowledge_base = previous_knowledge_base;
+    let (mut rescanned_knowledge_base, rescanned_folders, rescanned_notes, rescanned_documents) =
+        match scan_result {
+            Ok(result) => result,
+            Err(error) => {
+                let error_message = format!("无法访问已连接目录：{error}");
+                let mut failed_knowledge_base = previous_knowledge_base;
 
-            failed_knowledge_base.status = "error".to_owned();
-            failed_knowledge_base.description = error_message.clone();
-            failed_knowledge_base.note_count = 0;
-            failed_knowledge_base.updated_at = "刚刚".to_owned();
-            failed_knowledge_base.scan_report = Some(ScanReport {
-                scanned_file_count: 0,
-                failed_file_count: 1,
-                skipped_directories: Vec::new(),
-                errors: vec![error_message],
-            });
-            snapshot.knowledge_bases[knowledge_base_index] = failed_knowledge_base;
-            snapshot
-                .notes
-                .retain(|note| note.knowledge_base_id != payload.knowledge_base_id);
-            snapshot
-                .folders
-                .retain(|folder| folder.knowledge_base_id != payload.knowledge_base_id);
-            normalize_sessions_after_rescan(&mut snapshot, &payload.knowledge_base_id);
-            normalize_knowledge_base_flags(&mut snapshot);
-            normalize_active_entities(&mut snapshot, Some(&payload.knowledge_base_id));
-            index_snapshot_in_background(app, &snapshot).await?;
+                failed_knowledge_base.status = "error".to_owned();
+                failed_knowledge_base.description = error_message.clone();
+                failed_knowledge_base.note_count = 0;
+                failed_knowledge_base.document_count = 0;
+                failed_knowledge_base.updated_at = "刚刚".to_owned();
+                failed_knowledge_base.scan_report = Some(ScanReport {
+                    scanned_file_count: 0,
+                    scanned_by_type: crate::domain::default_scanned_by_type(),
+                    failed_file_count: 1,
+                    skipped_directories: Vec::new(),
+                    errors: vec![error_message],
+                });
+                snapshot.knowledge_bases[knowledge_base_index] = failed_knowledge_base;
+                snapshot
+                    .notes
+                    .retain(|note| note.knowledge_base_id != payload.knowledge_base_id);
+                snapshot
+                    .folders
+                    .retain(|folder| folder.knowledge_base_id != payload.knowledge_base_id);
+                snapshot
+                    .documents
+                    .retain(|document| document.knowledge_base_id != payload.knowledge_base_id);
+                normalize_sessions_after_rescan(&mut snapshot, &payload.knowledge_base_id);
+                normalize_knowledge_base_flags(&mut snapshot);
+                normalize_active_entities(&mut snapshot, Some(&payload.knowledge_base_id));
+                index_snapshot_in_background(app, &snapshot).await?;
 
-            return Ok(snapshot);
-        }
-    };
+                return Ok(snapshot);
+            }
+        };
 
     rescanned_knowledge_base.semantic_index_enabled =
         previous_knowledge_base.semantic_index_enabled;
     rescanned_knowledge_base.is_default = previous_knowledge_base.is_default;
     rescanned_knowledge_base.updated_at = "刚刚".to_owned();
     rescanned_knowledge_base.note_count = rescanned_notes.len();
+    rescanned_knowledge_base.document_count = rescanned_documents.len();
     allow_asset_protocol_directory(&app, Path::new(&rescanned_knowledge_base.path))?;
     snapshot.knowledge_bases[knowledge_base_index] = rescanned_knowledge_base.clone();
 
-    // 重扫只替换目标知识库的笔记，其他知识库和会话消息保持不变。
+    // 重扫只替换目标知识库的文件条目，其他知识库和会话消息保持不变。
     snapshot
         .notes
         .retain(|note| note.knowledge_base_id != payload.knowledge_base_id);
     snapshot
         .folders
         .retain(|folder| folder.knowledge_base_id != payload.knowledge_base_id);
+    snapshot
+        .documents
+        .retain(|document| document.knowledge_base_id != payload.knowledge_base_id);
     snapshot.folders.extend(rescanned_folders);
     snapshot.notes.extend(rescanned_notes);
+    snapshot.documents.extend(rescanned_documents);
     normalize_sessions_after_rescan(&mut snapshot, &payload.knowledge_base_id);
 
     if snapshot.active_knowledge_base_id == payload.knowledge_base_id {
@@ -392,6 +416,22 @@ pub async fn rescan_knowledge_base(
             })
             .map(|note| note.id.clone())
             .unwrap_or_default();
+        snapshot.active_document_id = if snapshot.active_note_id.is_empty() {
+            snapshot
+                .documents
+                .iter()
+                .find(|document| document.id == previous_active_document_id)
+                .or_else(|| {
+                    snapshot
+                        .documents
+                        .iter()
+                        .find(|document| document.knowledge_base_id == payload.knowledge_base_id)
+                })
+                .map(|document| document.id.clone())
+                .unwrap_or_default()
+        } else {
+            String::new()
+        };
         snapshot.active_session_id =
             ensure_knowledge_base_session(&mut snapshot, &rescanned_knowledge_base);
     }
@@ -469,9 +509,71 @@ pub async fn create_note(
     snapshot.knowledge_bases[knowledge_base_index].updated_at = "刚刚".to_owned();
     if let Some(scan_report) = &mut snapshot.knowledge_bases[knowledge_base_index].scan_report {
         scan_report.scanned_file_count += 1;
+        *scan_report
+            .scanned_by_type
+            .entry("markdown".to_owned())
+            .or_insert(0) += 1;
     }
     snapshot.active_knowledge_base_id = knowledge_base.id.clone();
     snapshot.active_note_id = note_id;
+    snapshot.active_document_id.clear();
+    normalize_active_entities(&mut snapshot, Some(&knowledge_base.id));
+    index_snapshot_in_background(app, &snapshot).await?;
+
+    Ok(snapshot)
+}
+
+/** 用户主动新建空白 txt 文档，直接落盘并打开为当前普通文档。 */
+#[tauri::command]
+pub async fn create_document(
+    app: AppHandle,
+    payload: CreateDocumentPayload,
+) -> Result<WorkspaceSnapshot, String> {
+    let mut snapshot = payload.snapshot;
+    let knowledge_base_index = snapshot
+        .knowledge_bases
+        .iter()
+        .position(|knowledge_base| knowledge_base.id == payload.knowledge_base_id)
+        .ok_or_else(|| "找不到要新建文档的知识库".to_owned())?;
+    let knowledge_base = snapshot.knowledge_bases[knowledge_base_index].clone();
+
+    if knowledge_base.status == "error" {
+        return Err("当前知识库目录不可访问，无法新建 TXT 文档。".to_owned());
+    }
+
+    let root_path = PathBuf::from(&knowledge_base.path);
+    let parent_path = payload.parent_path.unwrap_or_default();
+    let file_name = payload.file_name;
+    let relative_path = run_blocking("创建空白 TXT 文件", move || {
+        storage::create_blank_text_document_file(&root_path, &parent_path, file_name.as_deref())
+    })
+    .await?;
+    let document_id = storage::create_stable_document_id(&knowledge_base.id, &relative_path);
+    let new_document = crate::domain::WorkspaceDocument {
+        id: document_id.clone(),
+        knowledge_base_id: knowledge_base.id.clone(),
+        title: document_title_from_path(&relative_path),
+        path: relative_path,
+        file_type: "txt".to_owned(),
+        updated_at: "刚刚".to_owned(),
+        content_hash: storage::hash_content(""),
+        content: Some(String::new()),
+        preview_available: false,
+    };
+
+    snapshot.documents.insert(0, new_document);
+    snapshot.knowledge_bases[knowledge_base_index].document_count += 1;
+    snapshot.knowledge_bases[knowledge_base_index].updated_at = "刚刚".to_owned();
+    if let Some(scan_report) = &mut snapshot.knowledge_bases[knowledge_base_index].scan_report {
+        scan_report.scanned_file_count += 1;
+        *scan_report
+            .scanned_by_type
+            .entry("txt".to_owned())
+            .or_insert(0) += 1;
+    }
+    snapshot.active_knowledge_base_id = knowledge_base.id.clone();
+    snapshot.active_note_id.clear();
+    snapshot.active_document_id = document_id;
     normalize_active_entities(&mut snapshot, Some(&knowledge_base.id));
     index_snapshot_in_background(app, &snapshot).await?;
 
@@ -563,6 +665,7 @@ pub async fn rename_note(
     snapshot.notes[note_index].content = current_content;
     snapshot.notes[note_index].content_hash = current_hash;
     snapshot.notes[note_index].updated_at = "刚刚".to_owned();
+    snapshot.active_document_id.clear();
 
     replace_note_reference_after_rename(
         &mut snapshot,
@@ -570,6 +673,58 @@ pub async fn rename_note(
         &next_note_id,
         &next_relative_path,
     );
+    index_snapshot_in_background(app, &snapshot).await?;
+
+    Ok(snapshot)
+}
+
+/** 重命名 txt 文档，只修改文件名，并同步更新快照。 */
+#[tauri::command]
+pub async fn rename_document(
+    app: AppHandle,
+    payload: RenameDocumentPayload,
+) -> Result<WorkspaceSnapshot, String> {
+    let mut snapshot = payload.snapshot;
+    let document_index = snapshot
+        .documents
+        .iter()
+        .position(|document| document.id == payload.document_id)
+        .ok_or_else(|| "找不到要重命名的文档".to_owned())?;
+    let previous_document = snapshot.documents[document_index].clone();
+
+    if previous_document.file_type != "txt" {
+        return Err("只有 TXT 文档支持重命名。".to_owned());
+    }
+
+    let knowledge_base = snapshot
+        .knowledge_bases
+        .iter()
+        .find(|item| item.id == previous_document.knowledge_base_id)
+        .cloned()
+        .ok_or_else(|| "找不到文档所属知识库".to_owned())?;
+    let root_path = PathBuf::from(&knowledge_base.path);
+    let current_relative_path = previous_document.path.clone();
+    let next_file_name = payload.next_file_name;
+    let (next_relative_path, current_content, current_hash) =
+        run_blocking("重命名 TXT 文件", move || {
+            storage::rename_text_document_file(&root_path, &current_relative_path, &next_file_name)
+        })
+        .await?;
+    let next_document_id =
+        storage::create_stable_document_id(&knowledge_base.id, &next_relative_path);
+
+    snapshot.documents[document_index].id = next_document_id.clone();
+    snapshot.documents[document_index].title = document_title_from_path(&next_relative_path);
+    snapshot.documents[document_index].path = next_relative_path;
+    snapshot.documents[document_index].content = Some(current_content);
+    snapshot.documents[document_index].content_hash = current_hash;
+    snapshot.documents[document_index].updated_at = "刚刚".to_owned();
+
+    if snapshot.active_document_id == payload.document_id {
+        snapshot.active_document_id = next_document_id;
+        snapshot.active_note_id.clear();
+    }
+
     index_snapshot_in_background(app, &snapshot).await?;
 
     Ok(snapshot)
@@ -615,6 +770,63 @@ pub async fn delete_note(
     }
 
     remove_note_references_after_delete(&mut snapshot, &payload.note_id);
+    normalize_active_entities(&mut snapshot, Some(&knowledge_base.id));
+    index_snapshot_in_background(app, &snapshot).await?;
+
+    Ok(snapshot)
+}
+
+/** 删除 txt 文档到系统回收站，并从快照中移除普通文档引用。 */
+#[tauri::command]
+pub async fn delete_document(
+    app: AppHandle,
+    payload: DeleteDocumentPayload,
+) -> Result<WorkspaceSnapshot, String> {
+    let mut snapshot = payload.snapshot;
+    let document_index = snapshot
+        .documents
+        .iter()
+        .position(|document| document.id == payload.document_id)
+        .ok_or_else(|| "找不到要删除的文档".to_owned())?;
+    let document = snapshot.documents[document_index].clone();
+
+    if document.file_type != "txt" {
+        return Err("只有 TXT 文档支持删除。".to_owned());
+    }
+
+    let knowledge_base_index = snapshot
+        .knowledge_bases
+        .iter()
+        .position(|item| item.id == document.knowledge_base_id)
+        .ok_or_else(|| "找不到文档所属知识库".to_owned())?;
+    let knowledge_base = snapshot.knowledge_bases[knowledge_base_index].clone();
+    let root_path = PathBuf::from(&knowledge_base.path);
+    let relative_path = document.path.clone();
+    let expected_hash = payload.expected_hash;
+
+    run_blocking("删除 TXT 文件", move || {
+        storage::trash_text_document_file(&root_path, &relative_path, &expected_hash)
+    })
+    .await?;
+
+    snapshot.documents.remove(document_index);
+    snapshot.knowledge_bases[knowledge_base_index].document_count = snapshot.knowledge_bases
+        [knowledge_base_index]
+        .document_count
+        .saturating_sub(1);
+    snapshot.knowledge_bases[knowledge_base_index].updated_at = "刚刚".to_owned();
+
+    if let Some(scan_report) = &mut snapshot.knowledge_bases[knowledge_base_index].scan_report {
+        scan_report.scanned_file_count = scan_report.scanned_file_count.saturating_sub(1);
+        if let Some(txt_count) = scan_report.scanned_by_type.get_mut("txt") {
+            *txt_count = txt_count.saturating_sub(1);
+        }
+    }
+
+    if snapshot.active_document_id == payload.document_id {
+        snapshot.active_document_id.clear();
+    }
+
     normalize_active_entities(&mut snapshot, Some(&knowledge_base.id));
     index_snapshot_in_background(app, &snapshot).await?;
 
@@ -669,10 +881,99 @@ pub async fn save_note_content(
     snapshot.notes[note_index].content_hash = next_hash;
     snapshot.notes[note_index].updated_at = "刚刚".to_owned();
     snapshot.active_note_id = payload.note_id;
+    snapshot.active_document_id.clear();
     normalize_active_entities(&mut snapshot, None);
     index_snapshot_in_background(app, &snapshot).await?;
 
     Ok(snapshot)
+}
+
+/** 保存当前 txt 文档正文，校验知识库边界和文件 hash 后原子写回本地文件。 */
+#[tauri::command]
+pub async fn save_document_content(
+    app: AppHandle,
+    payload: SaveDocumentContentPayload,
+) -> Result<WorkspaceSnapshot, String> {
+    let mut snapshot = payload.snapshot;
+    let document_index = snapshot
+        .documents
+        .iter()
+        .position(|document| document.id == payload.document_id)
+        .ok_or_else(|| "找不到要保存的文档".to_owned())?;
+
+    if snapshot.documents[document_index].file_type != "txt" {
+        return Err("只有 TXT 文档支持保存。".to_owned());
+    }
+
+    let knowledge_base = snapshot
+        .knowledge_bases
+        .iter()
+        .find(|item| item.id == snapshot.documents[document_index].knowledge_base_id)
+        .ok_or_else(|| "找不到文档所属知识库".to_owned())?;
+    let target_path = storage::resolve_existing_file_inside_root(
+        PathBuf::from(&knowledge_base.path).as_path(),
+        &snapshot.documents[document_index].path,
+    )?;
+
+    let read_path = target_path.clone();
+    let current_content = run_blocking("读取待保存 TXT 文件", move || {
+        fs::read_to_string(&read_path).map_err(|error| format!("无法读取待保存 TXT 文件：{error}"))
+    })
+    .await?;
+    let current_hash = storage::hash_content(&current_content);
+
+    // expectedHash 来自用户开始编辑时的文件版本；不一致说明外部编辑器已改动，必须先重扫。
+    if current_hash != payload.expected_hash {
+        return Err("目标文件已被外部修改，已阻止保存。请重新扫描后再编辑。".to_owned());
+    }
+
+    let write_path = target_path.clone();
+    let write_content = payload.content.clone();
+
+    run_blocking("保存 TXT 文件", move || {
+        storage::atomic_write_text_document(&write_path, &write_content)
+    })
+    .await?;
+
+    let next_hash = storage::hash_content(&payload.content);
+    snapshot.documents[document_index].content = Some(payload.content);
+    snapshot.documents[document_index].content_hash = next_hash;
+    snapshot.documents[document_index].updated_at = "刚刚".to_owned();
+    snapshot.active_note_id.clear();
+    snapshot.active_document_id = payload.document_id;
+    normalize_active_entities(&mut snapshot, None);
+    index_snapshot_in_background(app, &snapshot).await?;
+
+    Ok(snapshot)
+}
+
+/** 加载 docx/pdf 文档预览，命令层负责定位知识库并把路径授权给 asset protocol。 */
+#[tauri::command]
+pub async fn load_document_preview(
+    app: AppHandle,
+    payload: LoadDocumentPreviewPayload,
+) -> Result<DocumentPreview, String> {
+    let snapshot = payload.snapshot;
+    let document = snapshot
+        .documents
+        .iter()
+        .find(|document| document.id == payload.document_id)
+        .cloned()
+        .ok_or_else(|| "找不到要预览的文档".to_owned())?;
+    let knowledge_base = snapshot
+        .knowledge_bases
+        .iter()
+        .find(|item| item.id == document.knowledge_base_id)
+        .cloned()
+        .ok_or_else(|| "找不到文档所属知识库".to_owned())?;
+    let root_path = PathBuf::from(&knowledge_base.path);
+
+    allow_asset_protocol_directory(&app, &root_path)?;
+
+    run_blocking("加载文档预览", move || {
+        storage::load_document_preview(&root_path, &document)
+    })
+    .await
 }
 
 /** 移除知识库授权记录和本地索引缓存，不删除用户目录中的 Markdown 文件。 */
@@ -692,6 +993,9 @@ pub async fn remove_knowledge_base(
     snapshot
         .folders
         .retain(|folder| folder.knowledge_base_id != payload.knowledge_base_id);
+    snapshot
+        .documents
+        .retain(|document| document.knowledge_base_id != payload.knowledge_base_id);
 
     // 会话只移除目标知识库范围；失去全部范围的会话同步删除，避免保留不可用上下文。
     snapshot.sessions.retain_mut(|session| {
@@ -1058,6 +1362,15 @@ fn note_title_from_path(relative_path: &str) -> String {
         .to_owned()
 }
 
+/** 从普通文档相对路径提取标题，txt/docx/pdf 首版都使用文件名 stem。 */
+fn document_title_from_path(relative_path: &str) -> String {
+    Path::new(relative_path)
+        .file_stem()
+        .and_then(|value| value.to_str())
+        .unwrap_or("未命名文档")
+        .to_owned()
+}
+
 /** 从目录相对路径取最后一级名称，用于 create_folder 后立即生成前端目录节点。 */
 fn folder_name_from_path(relative_path: &str) -> String {
     Path::new(relative_path)
@@ -1138,6 +1451,7 @@ fn normalize_active_entities(
     if snapshot.knowledge_bases.is_empty() {
         snapshot.active_knowledge_base_id.clear();
         snapshot.active_note_id.clear();
+        snapshot.active_document_id.clear();
         snapshot.active_session_id.clear();
         return;
     }
@@ -1165,18 +1479,37 @@ fn normalize_active_entities(
             .unwrap_or_default();
     }
 
-    let active_note_exists = snapshot
-        .notes
-        .iter()
-        .any(|note| note.id == snapshot.active_note_id);
+    let active_note_exists = snapshot.notes.iter().any(|note| {
+        note.id == snapshot.active_note_id
+            && note.knowledge_base_id == snapshot.active_knowledge_base_id
+    });
+    let active_document_exists = snapshot.documents.iter().any(|document| {
+        document.id == snapshot.active_document_id
+            && document.knowledge_base_id == snapshot.active_knowledge_base_id
+    });
 
-    if !active_note_exists {
+    if active_document_exists {
+        snapshot.active_note_id.clear();
+    } else if !active_note_exists {
         snapshot.active_note_id = snapshot
             .notes
             .iter()
             .find(|note| note.knowledge_base_id == snapshot.active_knowledge_base_id)
             .map(|note| note.id.clone())
             .unwrap_or_default();
+    }
+
+    if snapshot.active_note_id.is_empty() {
+        if !active_document_exists {
+            snapshot.active_document_id = snapshot
+                .documents
+                .iter()
+                .find(|document| document.knowledge_base_id == snapshot.active_knowledge_base_id)
+                .map(|document| document.id.clone())
+                .unwrap_or_default();
+        }
+    } else {
+        snapshot.active_document_id.clear();
     }
 
     let active_session_exists = snapshot
@@ -1249,6 +1582,7 @@ mod tests {
             description: "测试知识库".to_owned(),
             status: "ready".to_owned(),
             note_count: 1,
+            document_count: 0,
             updated_at: "刚刚".to_owned(),
             is_default: id == "kb-a",
             semantic_index_enabled: false,
@@ -1326,9 +1660,11 @@ mod tests {
             knowledge_bases: vec![test_knowledge_base("kb-a"), test_knowledge_base("kb-b")],
             folders: Vec::new(),
             notes: vec![test_note("note-a", "kb-a"), test_note("note-b", "kb-b")],
+            documents: Vec::new(),
             sessions: vec![test_session()],
             active_knowledge_base_id: "kb-a".to_owned(),
             active_note_id: "note-a".to_owned(),
+            active_document_id: String::new(),
             active_session_id: "session-a".to_owned(),
         };
 

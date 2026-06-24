@@ -824,6 +824,7 @@ mod tests {
                     description: "测试知识库".to_owned(),
                     status: "ready".to_owned(),
                     note_count: 1,
+                    document_count: 0,
                     updated_at: "刚刚".to_owned(),
                     is_default: true,
                     semantic_index_enabled: false,
@@ -836,6 +837,7 @@ mod tests {
                     description: "测试知识库".to_owned(),
                     status: "ready".to_owned(),
                     note_count: 1,
+                    document_count: 0,
                     updated_at: "刚刚".to_owned(),
                     is_default: false,
                     semantic_index_enabled: false,
@@ -873,6 +875,7 @@ mod tests {
                     backlinks: Vec::new(),
                 },
             ],
+            documents: Vec::new(),
             sessions: vec![AgentSession {
                 id: "session-a".to_owned(),
                 title: "测试会话".to_owned(),
@@ -888,6 +891,7 @@ mod tests {
             }],
             active_knowledge_base_id: "kb-a".to_owned(),
             active_note_id: "note-a".to_owned(),
+            active_document_id: String::new(),
             active_session_id: "session-a".to_owned(),
         }
     }
