@@ -309,6 +309,14 @@ textarea:disabled {
   gap: 12px;
 }
 
+.settings-title-actions {
+  display: flex;
+  flex: 0 1 auto;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 6px;
+}
+
 .section-label,
 .path-label {
   margin: 0;
@@ -968,6 +976,61 @@ textarea:disabled {
   padding: 16px;
   background: var(--surface);
   box-shadow: var(--shadow);
+}
+
+.confirm-backdrop {
+  z-index: 40;
+}
+
+.confirm-dialog {
+  display: grid;
+  width: min(430px, calc(100vw - 40px));
+  gap: 14px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 16px;
+  background: var(--surface);
+  box-shadow: var(--shadow);
+}
+
+.confirm-dialog.danger {
+  border-color: #f2b8a8;
+}
+
+.confirm-dialog-heading {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+}
+
+.confirm-dialog-icon {
+  display: inline-flex;
+  width: 34px;
+  height: 34px;
+  flex: 0 0 auto;
+  align-items: center;
+  justify-content: center;
+  border-radius: 8px;
+  background: var(--danger-soft);
+  color: var(--danger);
+}
+
+.confirm-dialog-heading h2 {
+  margin: 4px 0 0;
+  color: #111b21;
+  font-size: 18px;
+  line-height: 1.25;
+}
+
+.confirm-dialog-message {
+  margin: 0;
+  color: #344550;
+  font-size: 14px;
+  line-height: 1.55;
+}
+
+.confirm-dialog-confirm.danger {
+  background: var(--danger);
 }
 
 .modal-header h2 {
@@ -1758,6 +1821,17 @@ textarea:disabled {
   margin-top: 12px;
 }
 
+.event-log-filters {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+  margin-top: 12px;
+}
+
+.event-log-filters label {
+  margin-top: 0;
+}
+
 .settings-section input,
 .settings-section select {
   border: 1px solid var(--border);
@@ -1837,6 +1911,20 @@ textarea:disabled {
   border-radius: 8px;
   padding: 10px;
   background: #fbfcfd;
+}
+
+.event-log-card.error {
+  border-color: #f2b8a8;
+  background: var(--danger-soft);
+}
+
+.event-log-card.warn {
+  border-color: #e9c97d;
+  background: #fff8e6;
+}
+
+.event-log-card.debug {
+  background: #f5f7f9;
 }
 
 .audit-card-header {

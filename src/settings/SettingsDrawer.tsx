@@ -1,6 +1,15 @@
-import { Check, KeyRound, Plus, RotateCw, Save, Sparkles, Trash2, X } from "lucide-react";
+import { Check, FolderOpen, KeyRound, Plus, RotateCw, Save, Sparkles, Trash2, X } from "lucide-react";
 import { useEffect, useState } from "react";
-import type { AgentSkill, KnowledgeBase, ModelApiKeyStatus, RequestAuditLog, UserSettings } from "../shared/types";
+import type {
+  AgentSkill,
+  AppEventLog,
+  AppEventLogCategory,
+  AppEventLogLevel,
+  KnowledgeBase,
+  ModelApiKeyStatus,
+  RequestAuditLog,
+  UserSettings,
+} from "../shared/types";
 import { SkillsModal } from "./SkillsModal";
 
 /** 设置抽屉，展示多知识库管理、模型策略和写入权限。 */
@@ -11,6 +20,7 @@ export function SettingsDrawer({
   skills,
   modelApiKeyStatus,
   auditLogs,
+  appEventLogs,
   isBusy,
   onSelectKnowledgeBase,
   onAddKnowledgeBase,
@@ -23,6 +33,9 @@ export function SettingsDrawer({
   onOpenUserSkillsFolder,
   onSaveApiKey,
   onRefreshAuditLogs,
+  onRefreshAppEventLogs,
+  onClearAppEventLogs,
+  onOpenAppLogFolder,
   onClose,
 }: {
   knowledgeBases: KnowledgeBase[];
@@ -31,6 +44,7 @@ export function SettingsDrawer({
   skills: AgentSkill[];
   modelApiKeyStatus: ModelApiKeyStatus | null;
   auditLogs: RequestAuditLog[];
+  appEventLogs: AppEventLog[];
   isBusy: boolean;
   onSelectKnowledgeBase: (knowledgeBaseId: string) => void;
   onAddKnowledgeBase: () => void;
@@ -43,6 +57,9 @@ export function SettingsDrawer({
   onOpenUserSkillsFolder: () => Promise<void> | void;
   onSaveApiKey: (apiKey: string) => Promise<void> | void;
   onRefreshAuditLogs: () => Promise<void> | void;
+  onRefreshAppEventLogs: (filters?: { level?: AppEventLogLevel | ""; category?: AppEventLogCategory | "" }) => Promise<void> | void;
+  onClearAppEventLogs: (filters?: { level?: AppEventLogLevel | ""; category?: AppEventLogCategory | "" }) => Promise<void> | void;
+  onOpenAppLogFolder: () => Promise<void> | void;
   onClose: () => void;
 }) {
   /** 模型设置表单草稿，用户保存前不影响正在运行的 Agent Runtime。 */
@@ -51,6 +68,10 @@ export function SettingsDrawer({
   const [apiKeyDraft, setApiKeyDraft] = useState("");
   /** Skills 管理弹窗状态，避免设置抽屉内一次性铺开完整管理页。 */
   const [isSkillsModalOpen, setIsSkillsModalOpen] = useState(false);
+  /** 应用事件日志级别筛选，空字符串表示不过滤。 */
+  const [eventLogLevel, setEventLogLevel] = useState<AppEventLogLevel | "">("");
+  /** 应用事件日志分类筛选，空字符串表示不过滤。 */
+  const [eventLogCategory, setEventLogCategory] = useState<AppEventLogCategory | "">("");
   /** 已启用 skill 数量，用于设置摘要快速说明能力状态。 */
   const enabledSkillCount = skills.filter((skill) => skill.enabled).length;
   /** 允许自动触发的已启用 skill 数量，用于提示自动匹配覆盖范围。 */
@@ -89,6 +110,26 @@ export function SettingsDrawer({
         [field]: value,
       },
     }));
+  }
+
+  /** 返回当前运行日志筛选条件，供刷新和清空后重载列表复用。 */
+  function currentEventLogFilters() {
+    return {
+      level: eventLogLevel,
+      category: eventLogCategory,
+    };
+  }
+
+  /** 切换运行日志级别筛选，并立即向后端请求对应列表。 */
+  function handleEventLogLevelChange(level: AppEventLogLevel | "") {
+    setEventLogLevel(level);
+    void onRefreshAppEventLogs({ level, category: eventLogCategory });
+  }
+
+  /** 切换运行日志分类筛选，并立即向后端请求对应列表。 */
+  function handleEventLogCategoryChange(category: AppEventLogCategory | "") {
+    setEventLogCategory(category);
+    void onRefreshAppEventLogs({ level: eventLogLevel, category });
   }
 
   return (
@@ -279,6 +320,64 @@ export function SettingsDrawer({
 
         <div className="settings-section">
           <div className="settings-section-title">
+            <h3>运行日志与诊断</h3>
+            <div className="settings-title-actions">
+              <button className="ghost-button" type="button" onClick={onOpenAppLogFolder} disabled={isBusy}>
+                <FolderOpen size={14} />
+                文件日志
+              </button>
+              <button className="ghost-button" type="button" onClick={() => onRefreshAppEventLogs(currentEventLogFilters())} disabled={isBusy}>
+                <RotateCw size={14} />
+                刷新
+              </button>
+              <button className="ghost-button danger-action" type="button" onClick={() => onClearAppEventLogs(currentEventLogFilters())} disabled={isBusy}>
+                <Trash2 size={14} />
+                清空
+              </button>
+            </div>
+          </div>
+          <div className="event-log-filters">
+            <label>
+              <span>级别</span>
+              <select value={eventLogLevel} onChange={(event) => handleEventLogLevelChange(event.target.value as AppEventLogLevel | "")}>
+                <option value="">全部</option>
+                <option value="error">错误</option>
+                <option value="warn">警告</option>
+                <option value="info">信息</option>
+                <option value="debug">调试</option>
+              </select>
+            </label>
+            <label>
+              <span>分类</span>
+              <select
+                value={eventLogCategory}
+                onChange={(event) => handleEventLogCategoryChange(event.target.value as AppEventLogCategory | "")}
+              >
+                <option value="">全部</option>
+                <option value="app">应用</option>
+                <option value="storage">存储</option>
+                <option value="knowledge_base">知识库</option>
+                <option value="editor">编辑器</option>
+                <option value="agent">Agent</option>
+                <option value="model">模型</option>
+                <option value="skill">Skill</option>
+                <option value="settings">设置</option>
+                <option value="security">安全</option>
+                <option value="frontend">前端</option>
+              </select>
+            </label>
+          </div>
+          <div className="audit-list">
+            {appEventLogs.length ? (
+              appEventLogs.map((log) => <AppEventLogCard key={log.id} log={log} />)
+            ) : (
+              <p>暂无运行日志。</p>
+            )}
+          </div>
+        </div>
+
+        <div className="settings-section">
+          <div className="settings-section-title">
             <h3>请求审计</h3>
             <button className="ghost-button" type="button" onClick={onRefreshAuditLogs} disabled={isBusy}>
               <RotateCw size={14} />
@@ -343,6 +442,25 @@ function AuditLogCard({ log }: { log: RequestAuditLog }) {
   );
 }
 
+/** 单条应用事件日志卡片，展示运行级别、分类、状态和脱敏上下文。 */
+function AppEventLogCard({ log }: { log: AppEventLog }) {
+  return (
+    <article className={`audit-card event-log-card ${log.level}`}>
+      <div className="audit-card-header">
+        <strong>
+          {formatEventLogLevel(log.level)} · {formatEventLogCategory(log.category)}
+        </strong>
+        <span>{log.createdAt}</span>
+      </div>
+      <p>
+        {formatEventStatus(log.status)} / {log.event}
+      </p>
+      <p>{log.message}</p>
+      <code>{formatEventLogContext(log)}</code>
+    </article>
+  );
+}
+
 /** 把后端审计类型转成简短中文标签。 */
 function formatAuditKind(kind: string) {
   const labels: Record<string, string> = {
@@ -353,4 +471,60 @@ function formatAuditKind(kind: string) {
   };
 
   return labels[kind] ?? kind;
+}
+
+/** 把运行日志级别转成设置页中文标签。 */
+function formatEventLogLevel(level: AppEventLogLevel) {
+  const labels: Record<AppEventLogLevel, string> = {
+    debug: "调试",
+    info: "信息",
+    warn: "警告",
+    error: "错误",
+  };
+
+  return labels[level];
+}
+
+/** 把运行日志分类转成设置页中文标签。 */
+function formatEventLogCategory(category: AppEventLogCategory) {
+  const labels: Record<AppEventLogCategory, string> = {
+    app: "应用",
+    storage: "存储",
+    knowledge_base: "知识库",
+    editor: "编辑器",
+    agent: "Agent",
+    model: "模型",
+    skill: "Skill",
+    settings: "设置",
+    security: "安全",
+    frontend: "前端",
+  };
+
+  return labels[category];
+}
+
+/** 把后端事件状态转成简短中文标签，保留未知状态原文便于排查。 */
+function formatEventStatus(status: string) {
+  const labels: Record<string, string> = {
+    started: "开始",
+    completed: "完成",
+    failed: "失败",
+    blocked: "阻止",
+  };
+
+  return labels[status] ?? status;
+}
+
+/** 汇总事件日志的轻量上下文，避免卡片中散落过多字段。 */
+function formatEventLogContext(log: AppEventLog) {
+  const parts = [
+    log.operationId ? `op=${log.operationId}` : "",
+    log.sessionId ? `session=${log.sessionId}` : "",
+    log.knowledgeBaseId ? `kb=${log.knowledgeBaseId}` : "",
+    log.entityType && log.entityId ? `${log.entityType}=${log.entityId}` : "",
+    log.relativePath ? `path=${log.relativePath}` : "",
+    typeof log.durationMs === "number" ? `${log.durationMs}ms` : "",
+  ].filter(Boolean);
+
+  return parts.length ? parts.join(" · ") : "无额外上下文";
 }

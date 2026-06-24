@@ -246,6 +246,41 @@ export interface RequestAuditLog {
   createdAt: string;
 }
 
+/** 应用事件日志级别，用于设置页筛选运行诊断和关键操作。 */
+export type AppEventLogLevel = "debug" | "info" | "warn" | "error";
+
+/** 应用事件日志分类，和 Rust logging.rs 中的 AppLogCategory 保持一致。 */
+export type AppEventLogCategory =
+  | "app"
+  | "storage"
+  | "knowledge_base"
+  | "editor"
+  | "agent"
+  | "model"
+  | "skill"
+  | "settings"
+  | "security"
+  | "frontend";
+
+/** 用户可读应用事件日志，和 Agent 请求审计分开展示。 */
+export interface AppEventLog {
+  id: string;
+  level: AppEventLogLevel;
+  category: AppEventLogCategory;
+  event: string;
+  message: string;
+  status: string;
+  operationId?: string;
+  sessionId?: string;
+  knowledgeBaseId?: string;
+  entityType?: string;
+  entityId?: string;
+  relativePath?: string;
+  durationMs?: number;
+  metadataJson?: string;
+  createdAt: string;
+}
+
 /** 本地目录树节点，用于把 Markdown 路径还原成文件夹和文件层级。 */
 export interface FileTreeNode {
   id: string;

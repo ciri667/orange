@@ -1,5 +1,6 @@
 import { invoke, isTauri } from "@tauri-apps/api/core";
 import { createContentHash, createLocalId, formatLocalDateTime } from "./id";
+import { logDebug, logError } from "./logger";
 import {
   acceptMockProposedChange,
   cloneWorkspaceSnapshot,
@@ -14,6 +15,9 @@ import type {
   AgentSession,
   AgentTurnRequest,
   AgentTurnResult,
+  AppEventLog,
+  AppEventLogCategory,
+  AppEventLogLevel,
   DocumentPreview,
   FolderEntry,
   KnowledgeBase,
@@ -48,6 +52,46 @@ let browserUserSettings: UserSettings = defaultBrowserUserSettings;
 
 /** 浏览器 fallback 的临时审计日志，模拟桌面端模型和工具边界展示。 */
 let browserAuditLogs: RequestAuditLog[] = [];
+
+/** 浏览器 fallback 的临时应用事件日志，模拟桌面端设置页诊断列表。 */
+let browserAppEventLogs: AppEventLog[] = [];
+
+/** 带脱敏日志的 Tauri invoke 包装，只记录命令名、状态和耗时，不记录 payload。 */
+async function invokeLogged<T>(command: string, args?: Record<string, unknown>): Promise<T> {
+  const startedAt = performance.now();
+
+  logDebug("调用 Tauri 命令。", {
+    category: "frontend",
+    event: "tauri_invoke",
+    command,
+    status: "started",
+  });
+
+  try {
+    const result = await invoke<T>(command, args);
+
+    logDebug("Tauri 命令完成。", {
+      category: "frontend",
+      event: "tauri_invoke",
+      command,
+      status: "completed",
+      durationMs: performance.now() - startedAt,
+    });
+
+    return result;
+  } catch (error) {
+    logError("Tauri 命令失败。", {
+      category: "frontend",
+      event: "tauri_invoke",
+      command,
+      status: "failed",
+      durationMs: performance.now() - startedAt,
+      error,
+    });
+
+    throw error;
+  }
+}
 
 /** 从前端本地 ID 中提取创建毫秒时间戳，用于同一分钟内的新会话稳定倒序。 */
 function getTimestampMillisFromLocalId(id: string) {
@@ -184,7 +228,7 @@ export async function loadWorkspaceState(): Promise<WorkspaceSnapshot> {
     return createMockWorkspaceSnapshot();
   }
 
-  return invoke<WorkspaceSnapshot>("load_workspace_state");
+  return invokeLogged<WorkspaceSnapshot>("load_workspace_state");
 }
 
 /** 读取持久化 Agent 会话，浏览器中返回按当前快照清理后的会话列表。 */
@@ -193,7 +237,7 @@ export async function loadSessions(snapshot: WorkspaceSnapshot): Promise<AgentSe
     return normalizeMockSnapshotSessions(cloneWorkspaceSnapshot(snapshot)).sessions;
   }
 
-  return invoke<AgentSession[]>("load_sessions", { payload: { snapshot } });
+  return invokeLogged<AgentSession[]>("load_sessions", { payload: { snapshot } });
 }
 
 /** 保存单个 Agent 会话，并返回后端归一化后的工作台快照。 */
@@ -213,7 +257,7 @@ export async function saveSession(snapshot: WorkspaceSnapshot, session: AgentSes
     return normalizeMockSnapshotSessions(nextSnapshot);
   }
 
-  return invoke<WorkspaceSnapshot>("save_session", { payload: { snapshot, session } });
+  return invokeLogged<WorkspaceSnapshot>("save_session", { payload: { snapshot, session } });
 }
 
 /** 逻辑删除 Agent 会话；持久化记录保留 deletedAt，但普通会话列表不再展示。 */
@@ -240,7 +284,7 @@ export async function deleteSession(snapshot: WorkspaceSnapshot, sessionId: stri
     return normalizeMockSnapshotSessions(nextSnapshot);
   }
 
-  return invoke<WorkspaceSnapshot>("delete_session", { payload: { snapshot, sessionId } });
+  return invokeLogged<WorkspaceSnapshot>("delete_session", { payload: { snapshot, sessionId } });
 }
 
 /** 更新当前会话工具范围；桌面端会强制保留激活知识库。 */
@@ -269,7 +313,7 @@ export async function updateSessionScope(
     return normalizeMockSnapshotSessions(nextSnapshot);
   }
 
-  return invoke<WorkspaceSnapshot>("update_session_scope", {
+  return invokeLogged<WorkspaceSnapshot>("update_session_scope", {
     payload: { snapshot, sessionId, knowledgeBaseIds, activeKnowledgeBaseId },
   });
 }
@@ -300,7 +344,7 @@ export async function restoreSessionContext(snapshot: WorkspaceSnapshot, session
     return nextSnapshot;
   }
 
-  return invoke<WorkspaceSnapshot>("restore_session_context", { payload: { snapshot, sessionId } });
+  return invokeLogged<WorkspaceSnapshot>("restore_session_context", { payload: { snapshot, sessionId } });
 }
 
 /** 读取用户模型、隐私和写入设置；浏览器开发态返回内存默认值。 */
@@ -309,7 +353,7 @@ export async function loadUserSettings(): Promise<UserSettings> {
     return { ...browserUserSettings, modelConfig: { ...browserUserSettings.modelConfig } };
   }
 
-  return invoke<UserSettings>("load_user_settings");
+  return invokeLogged<UserSettings>("load_user_settings");
 }
 
 /** 保存用户模型、隐私和写入设置；API key 由单独入口处理。 */
@@ -320,7 +364,7 @@ export async function saveUserSettings(settings: UserSettings): Promise<UserSett
     return loadUserSettings();
   }
 
-  return invoke<UserSettings>("save_user_settings", { payload: { settings } });
+  return invokeLogged<UserSettings>("save_user_settings", { payload: { settings } });
 }
 
 /** 读取 Agent skills，桌面端来自 SQLite，浏览器开发态来自内存模拟状态。 */
@@ -329,7 +373,7 @@ export async function loadAgentSkills(): Promise<AgentSkill[]> {
     return cloneAgentSkills(browserAgentSkills);
   }
 
-  return invoke<AgentSkill[]>("load_agent_skills");
+  return invokeLogged<AgentSkill[]>("load_agent_skills");
 }
 
 /** 打开 Cici Note 用户 Skills 文件夹；浏览器开发态只返回提示路径。 */
@@ -338,7 +382,7 @@ export async function openUserSkillsFolder(): Promise<string> {
     return "~/.cici-note/skills";
   }
 
-  return invoke<string>("open_user_skills_folder");
+  return invokeLogged<string>("open_user_skills_folder");
 }
 
 /** 新增或编辑用户自建 skill；桌面端会写入 ~/.cici-note/skills/<name>/SKILL.md。 */
@@ -368,7 +412,7 @@ export async function saveAgentSkill(skill: AgentSkill): Promise<AgentSkill> {
     return cloneAgentSkills([normalizedSkill])[0];
   }
 
-  return invoke<AgentSkill>("save_agent_skill", { payload: { skill } });
+  return invokeLogged<AgentSkill>("save_agent_skill", { payload: { skill } });
 }
 
 /** 启停任意 skill；allowAutoInvoke 不传时保留原自动触发设置。 */
@@ -396,7 +440,7 @@ export async function toggleAgentSkill(
     return cloneAgentSkills([nextSkill])[0];
   }
 
-  return invoke<AgentSkill>("toggle_agent_skill", {
+  return invokeLogged<AgentSkill>("toggle_agent_skill", {
     payload: { skillId, enabled, allowAutoInvoke },
   });
 }
@@ -419,7 +463,7 @@ export async function deleteAgentSkill(skillId: string): Promise<AgentSkill[]> {
     return loadAgentSkills();
   }
 
-  return invoke<AgentSkill[]>("delete_agent_skill", { payload: { skillId } });
+  return invokeLogged<AgentSkill[]>("delete_agent_skill", { payload: { skillId } });
 }
 
 /** 保存 BYOK 模型密钥；桌面端写入系统安全存储并返回读回校验状态。 */
@@ -428,7 +472,7 @@ export async function saveModelApiKey(apiKey: string): Promise<ModelApiKeyStatus
     throw new Error("浏览器开发态不能保存模型密钥，请在 Tauri 桌面端配置。");
   }
 
-  return invoke<ModelApiKeyStatus>("save_model_api_key", { payload: { apiKey } });
+  return invokeLogged<ModelApiKeyStatus>("save_model_api_key", { payload: { apiKey } });
 }
 
 /** 读取 BYOK 模型密钥状态；不返回明文密钥。 */
@@ -441,7 +485,7 @@ export async function loadModelApiKeyStatus(): Promise<ModelApiKeyStatus> {
     };
   }
 
-  return invoke<ModelApiKeyStatus>("load_model_api_key_status");
+  return invokeLogged<ModelApiKeyStatus>("load_model_api_key_status");
 }
 
 /** 读取最近请求审计日志，用于展示模型发送范围和工具调用摘要。 */
@@ -450,7 +494,58 @@ export async function loadRequestAuditLogs(): Promise<RequestAuditLog[]> {
     return browserAuditLogs;
   }
 
-  return invoke<RequestAuditLog[]>("load_request_audit_logs");
+  return invokeLogged<RequestAuditLog[]>("load_request_audit_logs");
+}
+
+/** 读取最近应用事件日志，用于设置页展示运行诊断和关键操作。 */
+export async function loadAppEventLogs(filters: {
+  limit?: number;
+  level?: AppEventLogLevel | "";
+  category?: AppEventLogCategory | "";
+} = {}): Promise<AppEventLog[]> {
+  const payload = {
+    limit: filters.limit ?? 100,
+    level: filters.level || undefined,
+    category: filters.category || undefined,
+  };
+
+  if (!isTauriRuntime()) {
+    return browserAppEventLogs
+      .filter((log) => !payload.level || log.level === payload.level)
+      .filter((log) => !payload.category || log.category === payload.category)
+      .slice(0, payload.limit);
+  }
+
+  return invokeLogged<AppEventLog[]>("load_app_event_logs", { payload });
+}
+
+/** 清空用户可读应用事件日志；桌面端不会删除文件诊断日志。 */
+export async function clearAppEventLogs(): Promise<void> {
+  if (!isTauriRuntime()) {
+    browserAppEventLogs = [
+      {
+        id: createLocalId("event"),
+        level: "info",
+        category: "settings",
+        event: "clear_app_event_logs",
+        message: "已清空应用事件日志。",
+        status: "completed",
+        createdAt: formatLocalDateTime(),
+      },
+    ];
+    return;
+  }
+
+  return invokeLogged<void>("clear_app_event_logs");
+}
+
+/** 打开 Tauri app log 目录，方便用户附带文件日志排查。 */
+export async function openAppLogFolder(): Promise<string> {
+  if (!isTauriRuntime()) {
+    return "~/Library/Logs/app.cici-note.desktop";
+  }
+
+  return invokeLogged<string>("open_app_log_folder");
 }
 
 /** 通过 Tauri 目录选择器连接知识库，浏览器中创建 mock 目录。 */
@@ -459,7 +554,7 @@ export async function selectKnowledgeBaseDirectory(currentCount: number): Promis
     return createMockKnowledgeBaseSelection(currentCount);
   }
 
-  return invoke<KnowledgeBaseSelection>("select_knowledge_base");
+  return invokeLogged<KnowledgeBaseSelection>("select_knowledge_base");
 }
 
 /** 扫描新知识库并把它合并进当前快照，浏览器中使用模拟文档。 */
@@ -536,7 +631,7 @@ export async function attachKnowledgeBase(
     return nextSnapshot;
   }
 
-  return invoke<WorkspaceSnapshot>("scan_knowledge_base", { payload: { snapshot, selection } });
+  return invokeLogged<WorkspaceSnapshot>("scan_knowledge_base", { payload: { snapshot, selection } });
 }
 
 /** 重新扫描已连接知识库，Tauri 环境读取真实目录，浏览器中只刷新模拟状态。 */
@@ -551,7 +646,7 @@ export async function rescanKnowledgeBase(snapshot: WorkspaceSnapshot, knowledge
     return nextSnapshot;
   }
 
-  return invoke<WorkspaceSnapshot>("rescan_knowledge_base", { payload: { snapshot, knowledgeBaseId } });
+  return invokeLogged<WorkspaceSnapshot>("rescan_knowledge_base", { payload: { snapshot, knowledgeBaseId } });
 }
 
 /** 在用户点击的目录下新建空白 Markdown；桌面端会立即创建真实文件。 */
@@ -622,7 +717,7 @@ export async function createNote(
     return nextSnapshot;
   }
 
-  return invoke<WorkspaceSnapshot>("create_note", {
+  return invokeLogged<WorkspaceSnapshot>("create_note", {
     payload: { snapshot, knowledgeBaseId, parentPath, fileName },
   });
 }
@@ -695,7 +790,7 @@ export async function createDocument(
     return nextSnapshot;
   }
 
-  return invoke<WorkspaceSnapshot>("create_document", {
+  return invokeLogged<WorkspaceSnapshot>("create_document", {
     payload: { snapshot, knowledgeBaseId, parentPath, fileName },
   });
 }
@@ -742,7 +837,7 @@ export async function createFolder(
     return nextSnapshot;
   }
 
-  return invoke<WorkspaceSnapshot>("create_folder", {
+  return invokeLogged<WorkspaceSnapshot>("create_folder", {
     payload: { snapshot, knowledgeBaseId, parentPath, folderName },
   });
 }
@@ -764,7 +859,7 @@ export async function saveNoteContent(
     return nextSnapshot;
   }
 
-  return invoke<WorkspaceSnapshot>("save_note_content", { payload: { snapshot, noteId, content, expectedHash } });
+  return invokeLogged<WorkspaceSnapshot>("save_note_content", { payload: { snapshot, noteId, content, expectedHash } });
 }
 
 /** 保存当前 TXT 文档正文；桌面端会执行 hash 冲突检测和原子写入。 */
@@ -799,7 +894,7 @@ export async function saveDocumentContent(
     return nextSnapshot;
   }
 
-  return invoke<WorkspaceSnapshot>("save_document_content", { payload: { snapshot, documentId, content, expectedHash } });
+  return invokeLogged<WorkspaceSnapshot>("save_document_content", { payload: { snapshot, documentId, content, expectedHash } });
 }
 
 /** 重命名当前 Markdown 文件；桌面端调用真实 Tauri 文件系统能力，浏览器仅做开发态内存 fallback。 */
@@ -848,7 +943,7 @@ export async function renameNote(
     return nextSnapshot;
   }
 
-  return invoke<WorkspaceSnapshot>("rename_note", { payload: { snapshot, noteId, nextFileName } });
+  return invokeLogged<WorkspaceSnapshot>("rename_note", { payload: { snapshot, noteId, nextFileName } });
 }
 
 /** 重命名当前 TXT 文档；桌面端调用真实 Tauri 文件系统能力。 */
@@ -904,7 +999,7 @@ export async function renameDocument(
     return nextSnapshot;
   }
 
-  return invoke<WorkspaceSnapshot>("rename_document", { payload: { snapshot, documentId, nextFileName } });
+  return invokeLogged<WorkspaceSnapshot>("rename_document", { payload: { snapshot, documentId, nextFileName } });
 }
 
 /** 删除当前 Markdown 文件到系统回收站；浏览器 fallback 只移除内存快照中的模拟笔记。 */
@@ -958,7 +1053,7 @@ export async function deleteNote(
     return nextSnapshot;
   }
 
-  return invoke<WorkspaceSnapshot>("delete_note", { payload: { snapshot, noteId, expectedHash } });
+  return invokeLogged<WorkspaceSnapshot>("delete_note", { payload: { snapshot, noteId, expectedHash } });
 }
 
 /** 删除当前 TXT 文档到系统回收站；浏览器 fallback 只移除内存快照中的模拟文档。 */
@@ -1015,7 +1110,7 @@ export async function deleteDocument(
     return nextSnapshot;
   }
 
-  return invoke<WorkspaceSnapshot>("delete_document", { payload: { snapshot, documentId, expectedHash } });
+  return invokeLogged<WorkspaceSnapshot>("delete_document", { payload: { snapshot, documentId, expectedHash } });
 }
 
 /** 加载 DOCX/PDF 只读预览；TXT 直接使用快照中的 content。 */
@@ -1045,7 +1140,7 @@ export async function loadDocumentPreview(snapshot: WorkspaceSnapshot, documentI
     };
   }
 
-  return invoke<DocumentPreview>("load_document_preview", { payload: { snapshot, documentId } });
+  return invokeLogged<DocumentPreview>("load_document_preview", { payload: { snapshot, documentId } });
 }
 
 /** 移除知识库授权和索引缓存；不会删除用户本地文档。 */
@@ -1095,7 +1190,7 @@ export async function removeKnowledgeBase(snapshot: WorkspaceSnapshot, knowledge
     return nextSnapshot;
   }
 
-  return invoke<WorkspaceSnapshot>("remove_knowledge_base", { payload: { snapshot, knowledgeBaseId } });
+  return invokeLogged<WorkspaceSnapshot>("remove_knowledge_base", { payload: { snapshot, knowledgeBaseId } });
 }
 
 /** 运行 Agent 单轮 loop，模型可在内部自行选择是否调用检索工具。 */
@@ -1123,7 +1218,7 @@ export async function runAgentTurn(
     return { snapshot: nextSnapshot };
   }
 
-  return invoke<AgentTurnResult>("run_agent_turn", { payload: { snapshot, request } });
+  return invokeLogged<AgentTurnResult>("run_agent_turn", { payload: { snapshot, request } });
 }
 
 /** 接受当前会话的待确认变更，Tauri 环境中由本地层执行安全写入。 */
@@ -1132,7 +1227,7 @@ export async function acceptProposedChange(snapshot: WorkspaceSnapshot): Promise
     return normalizeMockSnapshotSessions(acceptMockProposedChange(snapshot));
   }
 
-  return invoke<WorkspaceSnapshot>("apply_proposed_change", { payload: { snapshot } });
+  return invokeLogged<WorkspaceSnapshot>("apply_proposed_change", { payload: { snapshot } });
 }
 
 /** 拒绝当前会话的待确认变更，Tauri 环境中只更新会话状态。 */
@@ -1141,7 +1236,7 @@ export async function rejectProposedChange(snapshot: WorkspaceSnapshot): Promise
     return normalizeMockSnapshotSessions(rejectMockProposedChange(snapshot));
   }
 
-  return invoke<WorkspaceSnapshot>("reject_proposed_change", { payload: { snapshot } });
+  return invokeLogged<WorkspaceSnapshot>("reject_proposed_change", { payload: { snapshot } });
 }
 
 /** 浏览器开发态使用的文件名校验，保持与 Rust 层正式规则一致。 */

@@ -5,6 +5,7 @@ import { EditorPane } from "../editor/EditorPane";
 import { buildFileTree } from "../knowledge-base/treeUtils";
 import { KnowledgeBaseSidebar } from "../knowledge-base/KnowledgeBaseSidebar";
 import { SettingsDrawer } from "../settings/SettingsDrawer";
+import { ConfirmDialog, type ConfirmDialogConfig } from "../shared/ConfirmDialog";
 import { createContentHash, createLocalId, formatLocalDateTime } from "../shared/id";
 import {
   getActiveKnowledgeBase,
@@ -15,6 +16,7 @@ import {
 import {
   acceptProposedChange,
   attachKnowledgeBase,
+  clearAppEventLogs,
   createDocument,
   createFolder,
   createNote,
@@ -23,12 +25,14 @@ import {
   deleteNote,
   deleteSession,
   loadDocumentPreview,
+  loadAppEventLogs,
   loadAgentSkills,
   loadModelApiKeyStatus,
   loadRequestAuditLogs,
   loadUserSettings,
   loadWorkspaceState,
   openUserSkillsFolder,
+  openAppLogFolder,
   removeKnowledgeBase,
   renameDocument,
   renameNote,
@@ -51,6 +55,9 @@ import type {
   AgentSkill,
   AgentSession,
   AgentSessionType,
+  AppEventLog,
+  AppEventLogCategory,
+  AppEventLogLevel,
   DocumentPreview,
   KnowledgeBase,
   MarkdownViewMode,
@@ -67,6 +74,11 @@ import { useResizableWorkspaceLayout } from "./useResizableWorkspaceLayout";
 /** 将未知异常统一转换为可展示文案，避免启动错误页渲染空对象。 */
 function formatErrorMessage(error: unknown) {
   return error instanceof Error ? error.message : String(error);
+}
+
+/** 等待用户确认的工作台操作，确认后才执行真实文件或会话变更。 */
+interface PendingConfirmation extends ConfirmDialogConfig {
+  onConfirm: () => Promise<void> | void;
 }
 
 /** 根据会话绑定范围生成标题，正式版本中可由用户重命名。 */
@@ -135,6 +147,8 @@ export function WorkspaceShell() {
   /** 首屏初始化失败原因，失败后展示重试入口而不是停留在 loading。 */
   const [bootError, setBootError] = useState("");
   const [auditLogs, setAuditLogs] = useState<RequestAuditLog[]>([]);
+  /** 用户可读运行事件日志，只在设置页展示，不阻塞首屏工作台。 */
+  const [appEventLogs, setAppEventLogs] = useState<AppEventLog[]>([]);
   const [searchTerm, setSearchTerm] = useState("");
   const [agentPrompt, setAgentPrompt] = useState("");
   /** 当前输入区显式选择的 skill；空字符串表示交给 Runtime 自动匹配。 */
@@ -162,6 +176,8 @@ export function WorkspaceShell() {
     parentPath: string;
     name: string;
   } | null>(null);
+  /** 待确认的危险操作，使用应用内弹窗替代 window.confirm，避免 Tauri dialog 权限依赖。 */
+  const [pendingConfirmation, setPendingConfirmation] = useState<PendingConfirmation | null>(null);
   /** 主工作台三栏布局偏好，负责拖拽分隔条、键盘调整和本机持久化。 */
   const { workspaceRef, gridTemplateColumns, resizingPane, getSeparatorProps } = useResizableWorkspaceLayout();
 
@@ -220,7 +236,7 @@ export function WorkspaceShell() {
     };
   }, [snapshot?.activeDocumentId, snapshot?.documents]);
 
-  /** 加载首屏必需数据；审计日志失败不阻断进入工作台。 */
+  /** 加载首屏必需数据；诊断日志失败不阻断进入工作台。 */
   async function loadInitialData(shouldCommit: () => boolean = () => true) {
     setIsBooting(true);
     setBootError("");
@@ -251,13 +267,14 @@ export function WorkspaceShell() {
       setEditingBaseDocumentHashes(buildDocumentHashMap(nextSnapshot.documents));
       setIsBooting(false);
 
-      void loadInitialAuditLogs(shouldCommit);
+      void loadInitialDiagnosticLogs(shouldCommit);
     } catch (error) {
       if (shouldCommit()) {
         setSnapshot(null);
         setUserSettings(null);
         setAgentSkills([]);
         setAuditLogs([]);
+        setAppEventLogs([]);
         setBootError(formatErrorMessage(error));
       }
     } finally {
@@ -267,14 +284,22 @@ export function WorkspaceShell() {
     }
   }
 
-  /** 后台加载非首屏必需的审计日志，失败时降级为空列表并提示用户。 */
-  async function loadInitialAuditLogs(shouldCommit: () => boolean = () => true) {
+  /** 后台加载非首屏必需的诊断日志，失败时降级为空列表并提示用户。 */
+  async function loadInitialDiagnosticLogs(shouldCommit: () => boolean = () => true) {
     try {
-      setAuditLogs(await loadRequestAuditLogs());
+      const [nextAuditLogs, nextAppEventLogs] = await Promise.all([loadRequestAuditLogs(), loadAppEventLogs()]);
+
+      if (!shouldCommit()) {
+        return;
+      }
+
+      setAuditLogs(nextAuditLogs);
+      setAppEventLogs(nextAppEventLogs);
     } catch (error) {
       if (shouldCommit()) {
         setAuditLogs([]);
-        setNotice(`审计日志加载失败：${formatErrorMessage(error)}`);
+        setAppEventLogs([]);
+        setNotice(`诊断日志加载失败：${formatErrorMessage(error)}`);
       }
     }
   }
@@ -355,6 +380,28 @@ export function WorkspaceShell() {
   function endBusy() {
     setIsBusy(false);
     setBusyLabel("");
+  }
+
+  /** 打开应用内确认弹窗，调用方只在用户确认后执行真实副作用。 */
+  function requestConfirmation(config: ConfirmDialogConfig, onConfirm: () => Promise<void> | void) {
+    setPendingConfirmation({
+      cancelLabel: "取消",
+      tone: "danger",
+      ...config,
+      onConfirm,
+    });
+  }
+
+  /** 执行确认动作并关闭弹窗；业务错误仍由原动作内部写入 notice。 */
+  async function handleConfirmDialogConfirm() {
+    const confirmation = pendingConfirmation;
+
+    if (!confirmation) {
+      return;
+    }
+
+    setPendingConfirmation(null);
+    await confirmation.onConfirm();
   }
 
   /** 写入新快照时同步保存基准 hash，清理已经不存在的草稿标记。 */
@@ -910,25 +957,29 @@ export function WorkspaceShell() {
       return;
     }
 
-    // 删除虽然使用系统回收站，但仍会从当前工作区移除索引和会话引用，需要用户确认。
-    if (!window.confirm(`将「${note.title}」移入系统回收站？`)) {
-      return;
-    }
+    requestConfirmation(
+      {
+        title: "移入回收站",
+        message: `将「${note.title}」移入系统回收站？这会从当前工作区移除索引和会话引用。`,
+        confirmLabel: "移入回收站",
+      },
+      async () => {
+        const expectedHash = editingBaseHashes[note.id] ?? note.contentHash;
 
-    const expectedHash = editingBaseHashes[note.id] ?? note.contentHash;
+        beginBusy("正在删除 Markdown...");
 
-    beginBusy("正在删除 Markdown...");
+        try {
+          const nextSnapshot = await deleteNote(currentSnapshot, note.id, expectedHash);
 
-    try {
-      const nextSnapshot = await deleteNote(currentSnapshot, note.id, expectedHash);
-
-      commitSnapshot(nextSnapshot, new Set(), dirtyDocumentIds);
-      setNotice("已移入系统回收站。");
-    } catch (error) {
-      setNotice(error instanceof Error ? error.message : String(error));
-    } finally {
-      endBusy();
-    }
+          commitSnapshot(nextSnapshot, new Set(), dirtyDocumentIds);
+          setNotice("已移入系统回收站。");
+        } catch (error) {
+          setNotice(error instanceof Error ? error.message : String(error));
+        } finally {
+          endBusy();
+        }
+      },
+    );
   }
 
   /** 删除指定 txt 文档到系统回收站；删除前二次确认并携带保存基准 hash。 */
@@ -944,25 +995,29 @@ export function WorkspaceShell() {
       return;
     }
 
-    // TXT 删除同样会修改本地文件系统，即使进入回收站也需要用户确认。
-    if (!window.confirm(`将「${document.title}」移入系统回收站？`)) {
-      return;
-    }
+    requestConfirmation(
+      {
+        title: "移入回收站",
+        message: `将「${document.title}」移入系统回收站？这会从当前工作区移除该 TXT 文档引用。`,
+        confirmLabel: "移入回收站",
+      },
+      async () => {
+        const expectedHash = editingBaseDocumentHashes[document.id] ?? document.contentHash;
 
-    const expectedHash = editingBaseDocumentHashes[document.id] ?? document.contentHash;
+        beginBusy("正在删除 TXT...");
 
-    beginBusy("正在删除 TXT...");
+        try {
+          const nextSnapshot = await deleteDocument(currentSnapshot, document.id, expectedHash);
 
-    try {
-      const nextSnapshot = await deleteDocument(currentSnapshot, document.id, expectedHash);
-
-      commitSnapshot(nextSnapshot, dirtyNoteIds, new Set());
-      setNotice("已移入系统回收站。");
-    } catch (error) {
-      setNotice(error instanceof Error ? error.message : String(error));
-    } finally {
-      endBusy();
-    }
+          commitSnapshot(nextSnapshot, dirtyNoteIds, new Set());
+          setNotice("已移入系统回收站。");
+        } catch (error) {
+          setNotice(error instanceof Error ? error.message : String(error));
+        } finally {
+          endBusy();
+        }
+      },
+    );
   }
 
   /** 新建一个任务会话，绑定当前笔记和当前知识库作为上下文起点。 */
@@ -1026,26 +1081,30 @@ export function WorkspaceShell() {
       return;
     }
 
-    // 会话删除只隐藏历史记录和上下文，不删除本地文档或审计日志。
-    if (!window.confirm(`删除会话「${session.title}」？本地文档不会被删除。`)) {
-      return;
-    }
+    requestConfirmation(
+      {
+        title: "删除 Agent 会话",
+        message: `删除会话「${session.title}」？本地文档和请求审计记录不会被删除。`,
+        confirmLabel: "删除会话",
+      },
+      async () => {
+        beginBusy("正在删除 Agent 会话...");
 
-    beginBusy("正在删除 Agent 会话...");
+        try {
+          const nextSnapshot = await deleteSession(currentSnapshot, sessionId);
 
-    try {
-      const nextSnapshot = await deleteSession(currentSnapshot, sessionId);
-
-      commitSnapshot(nextSnapshot);
-      setIsSessionListOpen(true);
-      setIsSessionContextOpen(false);
-      setIsScopeSelectorOpen(false);
-      setNotice("已删除会话。");
-    } catch (error) {
-      setNotice(error instanceof Error ? error.message : String(error));
-    } finally {
-      endBusy();
-    }
+          commitSnapshot(nextSnapshot);
+          setIsSessionListOpen(true);
+          setIsSessionContextOpen(false);
+          setIsScopeSelectorOpen(false);
+          setNotice("已删除会话。");
+        } catch (error) {
+          setNotice(error instanceof Error ? error.message : String(error));
+        } finally {
+          endBusy();
+        }
+      },
+    );
   }
 
   /** 为当前会话勾选或取消额外知识库，当前激活知识库始终保留。 */
@@ -1090,7 +1149,10 @@ export function WorkspaceShell() {
     try {
       const result = await runAgentTurn(currentSnapshot, prompt, action, selectedSkillId || undefined);
       commitSnapshot(result.snapshot);
-      setAuditLogs(await loadRequestAuditLogs());
+      const [nextAuditLogs, nextAppEventLogs] = await Promise.all([loadRequestAuditLogs(), loadAppEventLogs()]);
+
+      setAuditLogs(nextAuditLogs);
+      setAppEventLogs(nextAppEventLogs);
       setAgentPrompt("");
     } catch (error) {
       setNotice(error instanceof Error ? error.message : String(error));
@@ -1129,29 +1191,33 @@ export function WorkspaceShell() {
       return;
     }
 
-    // 移除授权会清理本地索引和会话范围，虽然不删除用户文档，仍需要用户明确确认。
-    if (!window.confirm(`移除「${knowledgeBase.name}」的知识库授权？本地文件不会被删除。`)) {
-      return;
-    }
+    requestConfirmation(
+      {
+        title: "移除知识库授权",
+        message: `移除「${knowledgeBase.name}」的知识库授权？本地文件不会被删除，但索引缓存和会话范围会同步清理。`,
+        confirmLabel: "移除授权",
+      },
+      async () => {
+        beginBusy("正在移除知识库授权...");
 
-    beginBusy("正在移除知识库授权...");
+        try {
+          const nextSnapshot = await removeKnowledgeBase(currentSnapshot, knowledgeBaseId);
 
-    try {
-      const nextSnapshot = await removeKnowledgeBase(currentSnapshot, knowledgeBaseId);
+          commitSnapshot(nextSnapshot, new Set(), new Set());
+          setCollapsedFolderPaths(new Set());
+          setNotice(`已移除「${knowledgeBase.name}」授权，本地文件未被删除。`);
 
-      commitSnapshot(nextSnapshot, new Set(), new Set());
-      setCollapsedFolderPaths(new Set());
-      setNotice(`已移除「${knowledgeBase.name}」授权，本地文件未被删除。`);
-
-      if (!nextSnapshot.knowledgeBases.length) {
-        setSearchTerm("");
-        setIsSettingsOpen(false);
-      }
-    } catch (error) {
-      setNotice(error instanceof Error ? error.message : String(error));
-    } finally {
-      endBusy();
-    }
+          if (!nextSnapshot.knowledgeBases.length) {
+            setSearchTerm("");
+            setIsSettingsOpen(false);
+          }
+        } catch (error) {
+          setNotice(error instanceof Error ? error.message : String(error));
+        } finally {
+          endBusy();
+        }
+      },
+    );
   }
 
   /** 接受 Agent diff，真实桌面版会在 Tauri 层做路径、hash 和原子写入校验。 */
@@ -1315,12 +1381,61 @@ export function WorkspaceShell() {
     }
   }
 
+  /** 打开设置抽屉时刷新非阻塞诊断信息，避免展示过旧的日志列表。 */
+  function handleOpenSettings() {
+    setIsSettingsOpen(true);
+    void loadInitialDiagnosticLogs();
+  }
+
+  /** 重新读取最近应用事件日志，支持设置页级别和分类筛选。 */
+  async function handleRefreshAppEventLogs(filters?: { level?: AppEventLogLevel | ""; category?: AppEventLogCategory | "" }) {
+    beginBusy("正在刷新运行日志...");
+
+    try {
+      setAppEventLogs(await loadAppEventLogs({ limit: 100, ...filters }));
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : String(error));
+    } finally {
+      endBusy();
+    }
+  }
+
+  /** 清空用户可读事件日志后立即重载列表，保留桌面端文件诊断日志。 */
+  async function handleClearAppEventLogs(filters?: { level?: AppEventLogLevel | ""; category?: AppEventLogCategory | "" }) {
+    beginBusy("正在清空运行日志...");
+
+    try {
+      await clearAppEventLogs();
+      setAppEventLogs(await loadAppEventLogs({ limit: 100, ...filters }));
+      setNotice("已清空应用事件日志。");
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : String(error));
+    } finally {
+      endBusy();
+    }
+  }
+
+  /** 打开系统 app log 目录，便于用户附带文件诊断日志排查问题。 */
+  async function handleOpenAppLogFolder() {
+    beginBusy("正在打开应用日志目录...");
+
+    try {
+      const logFolderPath = await openAppLogFolder();
+
+      setNotice(`应用日志目录：${logFolderPath}`);
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : String(error));
+    } finally {
+      endBusy();
+    }
+  }
+
   return (
     <div className="app-shell">
       <TopBar
         activeKnowledgeBase={activeKnowledgeBase}
         knowledgeBaseCount={currentSnapshot.knowledgeBases.length}
-        onOpenSettings={() => setIsSettingsOpen(true)}
+        onOpenSettings={handleOpenSettings}
       />
       <main
         className={`workspace-grid ${resizingPane ? "is-resizing" : ""}`}
@@ -1438,6 +1553,7 @@ export function WorkspaceShell() {
           skills={agentSkills}
           modelApiKeyStatus={modelApiKeyStatus}
           auditLogs={auditLogs}
+          appEventLogs={appEventLogs}
           isBusy={isBusy}
           onSelectKnowledgeBase={handleSelectKnowledgeBase}
           onAddKnowledgeBase={handleAddKnowledgeBase}
@@ -1450,6 +1566,9 @@ export function WorkspaceShell() {
           onOpenUserSkillsFolder={handleOpenUserSkillsFolder}
           onSaveApiKey={handleSaveApiKey}
           onRefreshAuditLogs={handleRefreshAuditLogs}
+          onRefreshAppEventLogs={handleRefreshAppEventLogs}
+          onClearAppEventLogs={handleClearAppEventLogs}
+          onOpenAppLogFolder={handleOpenAppLogFolder}
           onClose={() => setIsSettingsOpen(false)}
         />
       )}
@@ -1526,6 +1645,14 @@ export function WorkspaceShell() {
             </div>
           </form>
         </div>
+      )}
+      {pendingConfirmation && (
+        <ConfirmDialog
+          {...pendingConfirmation}
+          isBusy={isBusy}
+          onCancel={() => setPendingConfirmation(null)}
+          onConfirm={() => void handleConfirmDialogConfirm()}
+        />
       )}
     </div>
   );
