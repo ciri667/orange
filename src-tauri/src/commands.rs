@@ -1,22 +1,25 @@
 use crate::domain::{
-    AgentSession, AgentSkill, AgentTurnPayload, AgentTurnResult, ChangePayload,
+    AgentSession, AgentSkill, AgentTurnPayload, AgentTurnResult, AppEventLog, ChangePayload,
     CreateDocumentPayload, CreateFolderPayload, CreateNotePayload, DeleteAgentSkillPayload,
     DeleteDocumentPayload, DeleteNotePayload, DeleteSessionPayload, DocumentPreview, FolderEntry,
-    KnowledgeBaseSelection, LoadDocumentPreviewPayload, LoadSessionsPayload, ModelApiKeyStatus,
-    ProposedChange, RemoveKnowledgeBasePayload, RenameDocumentPayload, RenameNotePayload,
-    RequestAuditLog, RescanKnowledgeBasePayload, RestoreSessionContextPayload,
-    SaveAgentSkillPayload, SaveDocumentContentPayload, SaveModelApiKeyPayload,
-    SaveNoteContentPayload, SaveSessionPayload, SaveUserSettingsPayload, ScanKnowledgeBasePayload,
-    ScanReport, ToggleAgentSkillPayload, UpdateSessionScopePayload, UserSettings,
-    WorkspaceSnapshot,
+    KnowledgeBaseSelection, LoadAppEventLogsPayload, LoadDocumentPreviewPayload,
+    LoadSessionsPayload, ModelApiKeyStatus, ProposedChange, RemoveKnowledgeBasePayload,
+    RenameDocumentPayload, RenameNotePayload, RequestAuditLog, RescanKnowledgeBasePayload,
+    RestoreSessionContextPayload, SaveAgentSkillPayload, SaveDocumentContentPayload,
+    SaveModelApiKeyPayload, SaveNoteContentPayload, SaveSessionPayload, SaveUserSettingsPayload,
+    ScanKnowledgeBasePayload, ScanReport, ToggleAgentSkillPayload, UpdateSessionScopePayload,
+    UserSettings, WorkspaceSnapshot,
 };
+use crate::logging::{self, AppEventBuilder, AppLogCategory, AppLogLevel};
 use crate::runtime;
 use crate::skills;
 use crate::storage;
 use crate::text_edit::{replace_unique, UniqueReplacementError};
+use serde_json::json;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::time::Instant;
 use tauri::{AppHandle, Manager};
 use tauri_plugin_dialog::DialogExt;
 
@@ -25,6 +28,7 @@ use tauri_plugin_dialog::DialogExt;
 pub async fn load_workspace_state(app: AppHandle) -> Result<WorkspaceSnapshot, String> {
     let load_app = app.clone();
     let index_app = app.clone();
+    let started_at = Instant::now();
 
     let snapshot = run_blocking("加载工作台状态", move || {
         storage::load_workspace_snapshot(&load_app)
@@ -37,9 +41,26 @@ pub async fn load_workspace_state(app: AppHandle) -> Result<WorkspaceSnapshot, S
     // 启动索引只影响后续检索，不阻塞首屏进入；失败时写 stderr 供桌面日志排查。
     tauri::async_runtime::spawn(async move {
         if let Err(error) = index_snapshot_in_background(index_app, &index_snapshot).await {
-            eprintln!("启动刷新本地检索索引失败：{error}");
+            log::warn!(target: "storage", "启动刷新本地检索索引失败：{error}");
         }
     });
+
+    logging::write_app_event_best_effort(
+        &app,
+        AppEventBuilder::new(
+            AppLogLevel::Info,
+            AppLogCategory::App,
+            "load_workspace_state",
+            "completed",
+            "已加载工作台状态。",
+        )
+        .duration(started_at.elapsed())
+        .metadata(json!({
+            "knowledgeBaseCount": snapshot.knowledge_bases.len(),
+            "noteCount": snapshot.notes.len(),
+            "documentCount": snapshot.documents.len(),
+        })),
+    );
 
     Ok(snapshot)
 }
@@ -126,12 +147,44 @@ pub async fn save_user_settings(
     payload: SaveUserSettingsPayload,
 ) -> Result<UserSettings, String> {
     let saved_settings = payload.settings;
+    let settings_app = app.clone();
+    let started_at = Instant::now();
+    let model_enabled = saved_settings.model_config.enabled;
+    let model_name = saved_settings.model_config.model.clone();
 
-    run_blocking("保存用户设置", move || {
-        storage::save_user_settings(&app, &saved_settings)?;
+    let result = run_blocking("保存用户设置", move || {
+        storage::save_user_settings(&settings_app, &saved_settings)?;
         Ok(saved_settings)
     })
-    .await
+    .await;
+
+    match &result {
+        Ok(_) => logging::write_app_event_best_effort(
+            &app,
+            AppEventBuilder::new(
+                AppLogLevel::Info,
+                AppLogCategory::Settings,
+                "save_user_settings",
+                "completed",
+                "已保存用户设置。",
+            )
+            .duration(started_at.elapsed())
+            .metadata(json!({ "modelEnabled": model_enabled, "model": model_name })),
+        ),
+        Err(error) => logging::write_app_event_best_effort(
+            &app,
+            AppEventBuilder::new(
+                AppLogLevel::Error,
+                AppLogCategory::Settings,
+                "save_user_settings",
+                "failed",
+                error,
+            )
+            .duration(started_at.elapsed()),
+        ),
+    }
+
+    result
 }
 
 /** 读取内置和用户自建 skills，内置定义会合并用户保存的启停偏好。 */
@@ -148,14 +201,43 @@ pub async fn load_agent_skills(app: AppHandle) -> Result<Vec<AgentSkill>, String
 /** 打开 Cici Note 用户 Skills 文件夹，浏览器开发态由前端 mock 只展示路径。 */
 #[tauri::command]
 pub async fn open_user_skills_folder(app: AppHandle) -> Result<String, String> {
-    run_blocking("打开用户 Skills 文件夹", move || {
-        let skills_root = skills::user_skills_root(&app)?;
+    let skills_app = app.clone();
+    let started_at = Instant::now();
+    let result = run_blocking("打开用户 Skills 文件夹", move || {
+        let skills_root = skills::user_skills_root(&skills_app)?;
 
         open_folder_in_system(&skills_root)?;
 
         Ok(skills_root.to_string_lossy().to_string())
     })
-    .await
+    .await;
+
+    match &result {
+        Ok(_) => logging::write_app_event_best_effort(
+            &app,
+            AppEventBuilder::new(
+                AppLogLevel::Info,
+                AppLogCategory::Skill,
+                "open_user_skills_folder",
+                "completed",
+                "已打开用户 Skills 文件夹。",
+            )
+            .duration(started_at.elapsed()),
+        ),
+        Err(error) => logging::write_app_event_best_effort(
+            &app,
+            AppEventBuilder::new(
+                AppLogLevel::Error,
+                AppLogCategory::Skill,
+                "open_user_skills_folder",
+                "failed",
+                error,
+            )
+            .duration(started_at.elapsed()),
+        ),
+    }
+
+    result
 }
 
 /** 新增或编辑用户自建 skill；内置 skill 只能通过启停入口修改状态。 */
@@ -164,12 +246,49 @@ pub async fn save_agent_skill(
     app: AppHandle,
     payload: SaveAgentSkillPayload,
 ) -> Result<AgentSkill, String> {
-    run_blocking("保存 Skill", move || {
-        let connection = storage::open_database(&app)?;
+    let skills_app = app.clone();
+    let skill_id = payload.skill.id.clone();
+    let skill_name = payload.skill.name.clone();
+    let started_at = Instant::now();
+    let result = run_blocking("保存 Skill", move || {
+        let connection = storage::open_database(&skills_app)?;
 
-        skills::save_user_skill(&app, &connection, payload.skill)
+        skills::save_user_skill(&skills_app, &connection, payload.skill)
     })
-    .await
+    .await;
+
+    match &result {
+        Ok(saved_skill) => logging::write_app_event_best_effort(
+            &app,
+            AppEventBuilder::new(
+                AppLogLevel::Info,
+                AppLogCategory::Skill,
+                "save_agent_skill",
+                "completed",
+                "已保存 Skill。",
+            )
+            .duration(started_at.elapsed())
+            .entity("skill", saved_skill.id.clone())
+            .metadata(
+                json!({ "name": saved_skill.name.clone(), "source": saved_skill.source.clone() }),
+            ),
+        ),
+        Err(error) => logging::write_app_event_best_effort(
+            &app,
+            AppEventBuilder::new(
+                AppLogLevel::Error,
+                AppLogCategory::Skill,
+                "save_agent_skill",
+                "failed",
+                error,
+            )
+            .duration(started_at.elapsed())
+            .entity("skill", skill_id)
+            .metadata(json!({ "name": skill_name })),
+        ),
+    }
+
+    result
 }
 
 /** 启停 skill，并可同步修改是否允许自动触发。 */
@@ -178,18 +297,55 @@ pub async fn toggle_agent_skill(
     app: AppHandle,
     payload: ToggleAgentSkillPayload,
 ) -> Result<AgentSkill, String> {
-    run_blocking("更新 Skill 状态", move || {
-        let connection = storage::open_database(&app)?;
+    let skills_app = app.clone();
+    let skill_id = payload.skill_id.clone();
+    let enabled = payload.enabled;
+    let started_at = Instant::now();
+    let result = run_blocking("更新 Skill 状态", move || {
+        let connection = storage::open_database(&skills_app)?;
 
         skills::toggle_agent_skill(
-            &app,
+            &skills_app,
             &connection,
             &payload.skill_id,
             payload.enabled,
             payload.allow_auto_invoke,
         )
     })
-    .await
+    .await;
+
+    match &result {
+        Ok(skill) => logging::write_app_event_best_effort(
+            &app,
+            AppEventBuilder::new(
+                AppLogLevel::Info,
+                AppLogCategory::Skill,
+                "toggle_agent_skill",
+                "completed",
+                "已更新 Skill 状态。",
+            )
+            .duration(started_at.elapsed())
+            .entity("skill", skill.id.clone())
+            .metadata(
+                json!({ "enabled": skill.enabled, "allowAutoInvoke": skill.allow_auto_invoke }),
+            ),
+        ),
+        Err(error) => logging::write_app_event_best_effort(
+            &app,
+            AppEventBuilder::new(
+                AppLogLevel::Error,
+                AppLogCategory::Skill,
+                "toggle_agent_skill",
+                "failed",
+                error,
+            )
+            .duration(started_at.elapsed())
+            .entity("skill", skill_id)
+            .metadata(json!({ "enabled": enabled })),
+        ),
+    }
+
+    result
 }
 
 /** 删除用户自建 skill；内置 skill 必须保留供用户重新启用。 */
@@ -198,24 +354,86 @@ pub async fn delete_agent_skill(
     app: AppHandle,
     payload: DeleteAgentSkillPayload,
 ) -> Result<Vec<AgentSkill>, String> {
-    run_blocking("删除 Skill", move || {
-        let connection = storage::open_database(&app)?;
+    let skills_app = app.clone();
+    let skill_id = payload.skill_id.clone();
+    let started_at = Instant::now();
+    let result = run_blocking("删除 Skill", move || {
+        let connection = storage::open_database(&skills_app)?;
 
-        skills::delete_user_skill(&app, &connection, &payload.skill_id)?;
-        skills::load_agent_skills(&app, &connection)
+        skills::delete_user_skill(&skills_app, &connection, &payload.skill_id)?;
+        skills::load_agent_skills(&skills_app, &connection)
     })
-    .await
+    .await;
+
+    match &result {
+        Ok(_) => logging::write_app_event_best_effort(
+            &app,
+            AppEventBuilder::new(
+                AppLogLevel::Info,
+                AppLogCategory::Skill,
+                "delete_agent_skill",
+                "completed",
+                "已删除用户 Skill。",
+            )
+            .duration(started_at.elapsed())
+            .entity("skill", skill_id.clone()),
+        ),
+        Err(error) => logging::write_app_event_best_effort(
+            &app,
+            AppEventBuilder::new(
+                AppLogLevel::Error,
+                AppLogCategory::Skill,
+                "delete_agent_skill",
+                "failed",
+                error,
+            )
+            .duration(started_at.elapsed())
+            .entity("skill", skill_id),
+        ),
+    }
+
+    result
 }
 
 /** 保存 BYOK 模型密钥到系统安全存储，SQLite 只保存 keyReference。 */
 #[tauri::command]
 pub async fn save_model_api_key(
+    app: AppHandle,
     payload: SaveModelApiKeyPayload,
 ) -> Result<ModelApiKeyStatus, String> {
-    run_blocking("保存模型密钥", move || {
+    let started_at = Instant::now();
+    let result = run_blocking("保存模型密钥", move || {
         storage::save_model_api_key(&payload.api_key)
     })
-    .await
+    .await;
+
+    match &result {
+        Ok(status) => logging::write_app_event_best_effort(
+            &app,
+            AppEventBuilder::new(
+                AppLogLevel::Info,
+                AppLogCategory::Security,
+                "save_model_api_key",
+                "completed",
+                "已更新模型密钥状态。",
+            )
+            .duration(started_at.elapsed())
+            .metadata(json!({ "configured": status.configured, "keyReference": status.key_reference.clone() })),
+        ),
+        Err(error) => logging::write_app_event_best_effort(
+            &app,
+            AppEventBuilder::new(
+                AppLogLevel::Error,
+                AppLogCategory::Security,
+                "save_model_api_key",
+                "failed",
+                error,
+            )
+            .duration(started_at.elapsed()),
+        ),
+    }
+
+    result
 }
 
 /** 读取 BYOK 模型密钥状态，只返回是否已配置，不返回明文。 */
@@ -233,9 +451,81 @@ pub async fn load_request_audit_logs(app: AppHandle) -> Result<Vec<RequestAuditL
     .await
 }
 
+/** 读取最近应用事件日志，用于设置页展示运行诊断和用户关键操作。 */
+#[tauri::command]
+pub async fn load_app_event_logs(
+    app: AppHandle,
+    payload: LoadAppEventLogsPayload,
+) -> Result<Vec<AppEventLog>, String> {
+    run_blocking("读取应用事件日志", move || {
+        storage::load_app_event_logs(
+            &app,
+            payload.limit.unwrap_or(100),
+            payload.level.as_deref(),
+            payload.category.as_deref(),
+        )
+    })
+    .await
+}
+
+/** 清空用户可读应用事件日志，不删除 Tauri 文件诊断日志。 */
+#[tauri::command]
+pub async fn clear_app_event_logs(app: AppHandle) -> Result<(), String> {
+    let event_app = app.clone();
+
+    run_blocking("清空应用事件日志", move || {
+        storage::clear_app_event_logs(&app)
+    })
+    .await?;
+
+    logging::write_app_event_best_effort(
+        &event_app,
+        AppEventBuilder::new(
+            AppLogLevel::Info,
+            AppLogCategory::Settings,
+            "clear_app_event_logs",
+            "completed",
+            "已清空应用事件日志。",
+        ),
+    );
+
+    Ok(())
+}
+
+/** 打开系统应用日志目录，便于用户附带文件日志排查桌面端问题。 */
+#[tauri::command]
+pub async fn open_app_log_folder(app: AppHandle) -> Result<String, String> {
+    let event_app = app.clone();
+
+    let log_dir = run_blocking("打开应用日志目录", move || {
+        let log_dir = logging::app_log_dir(&app)?;
+
+        fs::create_dir_all(&log_dir).map_err(|error| format!("无法创建应用日志目录：{error}"))?;
+        open_folder_in_system(&log_dir)?;
+
+        Ok(log_dir)
+    })
+    .await?;
+    let display_path = log_dir.to_string_lossy().to_string();
+
+    logging::write_app_event_best_effort(
+        &event_app,
+        AppEventBuilder::new(
+            AppLogLevel::Info,
+            AppLogCategory::Settings,
+            "open_app_log_folder",
+            "completed",
+            "已打开应用日志目录。",
+        ),
+    );
+
+    Ok(display_path)
+}
+
 /** 打开系统目录选择器，让用户连接一个本地支持文档知识库。 */
 #[tauri::command]
 pub async fn select_knowledge_base(app: AppHandle) -> Result<KnowledgeBaseSelection, String> {
+    let started_at = Instant::now();
     let (sender, mut receiver) = tauri::async_runtime::channel(1);
 
     app.dialog()
@@ -265,12 +555,28 @@ pub async fn select_knowledge_base(app: AppHandle) -> Result<KnowledgeBaseSelect
             .await
             .map_err(|error| format!("统计 Markdown 文件时后台任务失败：{error}"))??;
 
-    Ok(KnowledgeBaseSelection {
+    let selection = KnowledgeBaseSelection {
         id: storage::create_id("kb"),
         name,
         path: path.to_string_lossy().to_string(),
         note_count,
-    })
+    };
+
+    logging::write_app_event_best_effort(
+        &app,
+        AppEventBuilder::new(
+            AppLogLevel::Info,
+            AppLogCategory::KnowledgeBase,
+            "select_knowledge_base",
+            "completed",
+            "已选择知识库目录。",
+        )
+        .duration(started_at.elapsed())
+        .knowledge_base_id(selection.id.clone())
+        .metadata(json!({ "noteCount": selection.note_count })),
+    );
+
+    Ok(selection)
 }
 
 /** 扫描用户选择的支持文档目录，并合并进当前工作台快照。 */
@@ -279,8 +585,10 @@ pub async fn scan_knowledge_base(
     app: AppHandle,
     payload: ScanKnowledgeBasePayload,
 ) -> Result<WorkspaceSnapshot, String> {
+    let started_at = Instant::now();
     let mut snapshot = payload.snapshot;
     let selection = payload.selection;
+    let selected_knowledge_base_id = selection.id.clone();
     let (knowledge_base, folders, notes, documents) =
         run_blocking("扫描支持文档知识库", move || {
             storage::scan_supported_documents_directory(&selection)
@@ -311,7 +619,25 @@ pub async fn scan_knowledge_base(
     normalize_knowledge_base_flags(&mut snapshot);
     normalize_active_entities(&mut snapshot, Some(&knowledge_base_id));
 
-    index_snapshot_in_background(app, &snapshot).await?;
+    index_snapshot_in_background(app.clone(), &snapshot).await?;
+
+    logging::write_app_event_best_effort(
+        &app,
+        AppEventBuilder::new(
+            AppLogLevel::Info,
+            AppLogCategory::KnowledgeBase,
+            "scan_knowledge_base",
+            "completed",
+            "已连接并扫描知识库。",
+        )
+        .duration(started_at.elapsed())
+        .knowledge_base_id(knowledge_base_id)
+        .metadata(json!({
+            "folderCount": snapshot.folders.iter().filter(|folder| folder.knowledge_base_id == selected_knowledge_base_id).count(),
+            "noteCount": snapshot.notes.iter().filter(|note| note.knowledge_base_id == selected_knowledge_base_id).count(),
+            "documentCount": snapshot.documents.iter().filter(|document| document.knowledge_base_id == selected_knowledge_base_id).count(),
+        })),
+    );
 
     Ok(snapshot)
 }
@@ -322,7 +648,9 @@ pub async fn rescan_knowledge_base(
     app: AppHandle,
     payload: RescanKnowledgeBasePayload,
 ) -> Result<WorkspaceSnapshot, String> {
+    let started_at = Instant::now();
     let mut snapshot = payload.snapshot;
+    let requested_knowledge_base_id = payload.knowledge_base_id.clone();
     let knowledge_base_index = snapshot
         .knowledge_bases
         .iter()
@@ -358,7 +686,7 @@ pub async fn rescan_knowledge_base(
                     scanned_by_type: crate::domain::default_scanned_by_type(),
                     failed_file_count: 1,
                     skipped_directories: Vec::new(),
-                    errors: vec![error_message],
+                    errors: vec![error_message.clone()],
                 });
                 snapshot.knowledge_bases[knowledge_base_index] = failed_knowledge_base;
                 snapshot
@@ -373,7 +701,20 @@ pub async fn rescan_knowledge_base(
                 normalize_sessions_after_rescan(&mut snapshot, &payload.knowledge_base_id);
                 normalize_knowledge_base_flags(&mut snapshot);
                 normalize_active_entities(&mut snapshot, Some(&payload.knowledge_base_id));
-                index_snapshot_in_background(app, &snapshot).await?;
+                index_snapshot_in_background(app.clone(), &snapshot).await?;
+
+                logging::write_app_event_best_effort(
+                    &app,
+                    AppEventBuilder::new(
+                        AppLogLevel::Warn,
+                        AppLogCategory::KnowledgeBase,
+                        "rescan_knowledge_base",
+                        "failed",
+                        error_message,
+                    )
+                    .duration(started_at.elapsed())
+                    .knowledge_base_id(requested_knowledge_base_id.clone()),
+                );
 
                 return Ok(snapshot);
             }
@@ -438,7 +779,24 @@ pub async fn rescan_knowledge_base(
     normalize_knowledge_base_flags(&mut snapshot);
     normalize_active_entities(&mut snapshot, Some(&payload.knowledge_base_id));
 
-    index_snapshot_in_background(app, &snapshot).await?;
+    index_snapshot_in_background(app.clone(), &snapshot).await?;
+
+    logging::write_app_event_best_effort(
+        &app,
+        AppEventBuilder::new(
+            AppLogLevel::Info,
+            AppLogCategory::KnowledgeBase,
+            "rescan_knowledge_base",
+            "completed",
+            "已重新扫描知识库。",
+        )
+        .duration(started_at.elapsed())
+        .knowledge_base_id(requested_knowledge_base_id)
+        .metadata(json!({
+            "noteCount": rescanned_knowledge_base.note_count,
+            "documentCount": rescanned_knowledge_base.document_count,
+        })),
+    );
 
     Ok(snapshot)
 }
@@ -472,6 +830,7 @@ pub async fn create_note(
     app: AppHandle,
     payload: CreateNotePayload,
 ) -> Result<WorkspaceSnapshot, String> {
+    let started_at = Instant::now();
     let mut snapshot = payload.snapshot;
     let knowledge_base_index = snapshot
         .knowledge_bases
@@ -491,6 +850,7 @@ pub async fn create_note(
         storage::create_blank_markdown_file(&root_path, &parent_path, file_name.as_deref())
     })
     .await?;
+    let created_relative_path = relative_path.clone();
     let note_id = storage::create_stable_note_id(&knowledge_base.id, &relative_path);
     let new_note = crate::domain::Note {
         id: note_id.clone(),
@@ -518,7 +878,22 @@ pub async fn create_note(
     snapshot.active_note_id = note_id;
     snapshot.active_document_id.clear();
     normalize_active_entities(&mut snapshot, Some(&knowledge_base.id));
-    index_snapshot_in_background(app, &snapshot).await?;
+    index_snapshot_in_background(app.clone(), &snapshot).await?;
+
+    logging::write_app_event_best_effort(
+        &app,
+        AppEventBuilder::new(
+            AppLogLevel::Info,
+            AppLogCategory::Editor,
+            "create_note",
+            "completed",
+            "已创建 Markdown 笔记。",
+        )
+        .duration(started_at.elapsed())
+        .knowledge_base_id(knowledge_base.id)
+        .entity("note", snapshot.active_note_id.clone())
+        .relative_path(created_relative_path),
+    );
 
     Ok(snapshot)
 }
@@ -529,6 +904,7 @@ pub async fn create_document(
     app: AppHandle,
     payload: CreateDocumentPayload,
 ) -> Result<WorkspaceSnapshot, String> {
+    let started_at = Instant::now();
     let mut snapshot = payload.snapshot;
     let knowledge_base_index = snapshot
         .knowledge_bases
@@ -548,6 +924,7 @@ pub async fn create_document(
         storage::create_blank_text_document_file(&root_path, &parent_path, file_name.as_deref())
     })
     .await?;
+    let created_relative_path = relative_path.clone();
     let document_id = storage::create_stable_document_id(&knowledge_base.id, &relative_path);
     let new_document = crate::domain::WorkspaceDocument {
         id: document_id.clone(),
@@ -575,7 +952,22 @@ pub async fn create_document(
     snapshot.active_note_id.clear();
     snapshot.active_document_id = document_id;
     normalize_active_entities(&mut snapshot, Some(&knowledge_base.id));
-    index_snapshot_in_background(app, &snapshot).await?;
+    index_snapshot_in_background(app.clone(), &snapshot).await?;
+
+    logging::write_app_event_best_effort(
+        &app,
+        AppEventBuilder::new(
+            AppLogLevel::Info,
+            AppLogCategory::Editor,
+            "create_document",
+            "completed",
+            "已创建 TXT 文档。",
+        )
+        .duration(started_at.elapsed())
+        .knowledge_base_id(knowledge_base.id)
+        .entity("document", snapshot.active_document_id.clone())
+        .relative_path(created_relative_path),
+    );
 
     Ok(snapshot)
 }
@@ -586,6 +978,7 @@ pub async fn create_folder(
     app: AppHandle,
     payload: CreateFolderPayload,
 ) -> Result<WorkspaceSnapshot, String> {
+    let started_at = Instant::now();
     let mut snapshot = payload.snapshot;
     let knowledge_base_index = snapshot
         .knowledge_bases
@@ -605,8 +998,10 @@ pub async fn create_folder(
         storage::create_folder(&root_path, &parent_path, &folder_name)
     })
     .await?;
+    let created_relative_path = relative_path.clone();
+    let folder_id = storage::create_stable_folder_id(&knowledge_base.id, &relative_path);
     let folder_entry = FolderEntry {
-        id: storage::create_stable_folder_id(&knowledge_base.id, &relative_path),
+        id: folder_id.clone(),
         knowledge_base_id: knowledge_base.id.clone(),
         name: folder_name_from_path(&relative_path),
         path: relative_path,
@@ -623,7 +1018,22 @@ pub async fn create_folder(
     snapshot.knowledge_bases[knowledge_base_index].updated_at = "刚刚".to_owned();
     snapshot.active_knowledge_base_id = knowledge_base.id.clone();
     normalize_active_entities(&mut snapshot, Some(&knowledge_base.id));
-    index_snapshot_in_background(app, &snapshot).await?;
+    index_snapshot_in_background(app.clone(), &snapshot).await?;
+
+    logging::write_app_event_best_effort(
+        &app,
+        AppEventBuilder::new(
+            AppLogLevel::Info,
+            AppLogCategory::Editor,
+            "create_folder",
+            "completed",
+            "已创建文件夹。",
+        )
+        .duration(started_at.elapsed())
+        .knowledge_base_id(knowledge_base.id)
+        .entity("folder", folder_id)
+        .relative_path(created_relative_path),
+    );
 
     Ok(snapshot)
 }
@@ -634,6 +1044,7 @@ pub async fn rename_note(
     app: AppHandle,
     payload: RenameNotePayload,
 ) -> Result<WorkspaceSnapshot, String> {
+    let started_at = Instant::now();
     let mut snapshot = payload.snapshot;
     let note_index = snapshot
         .notes
@@ -673,7 +1084,22 @@ pub async fn rename_note(
         &next_note_id,
         &next_relative_path,
     );
-    index_snapshot_in_background(app, &snapshot).await?;
+    index_snapshot_in_background(app.clone(), &snapshot).await?;
+
+    logging::write_app_event_best_effort(
+        &app,
+        AppEventBuilder::new(
+            AppLogLevel::Info,
+            AppLogCategory::Editor,
+            "rename_note",
+            "completed",
+            "已重命名 Markdown 笔记。",
+        )
+        .duration(started_at.elapsed())
+        .knowledge_base_id(knowledge_base.id)
+        .entity("note", next_note_id)
+        .relative_path(next_relative_path),
+    );
 
     Ok(snapshot)
 }
@@ -684,6 +1110,7 @@ pub async fn rename_document(
     app: AppHandle,
     payload: RenameDocumentPayload,
 ) -> Result<WorkspaceSnapshot, String> {
+    let started_at = Instant::now();
     let mut snapshot = payload.snapshot;
     let document_index = snapshot
         .documents
@@ -725,7 +1152,22 @@ pub async fn rename_document(
         snapshot.active_note_id.clear();
     }
 
-    index_snapshot_in_background(app, &snapshot).await?;
+    index_snapshot_in_background(app.clone(), &snapshot).await?;
+
+    logging::write_app_event_best_effort(
+        &app,
+        AppEventBuilder::new(
+            AppLogLevel::Info,
+            AppLogCategory::Editor,
+            "rename_document",
+            "completed",
+            "已重命名 TXT 文档。",
+        )
+        .duration(started_at.elapsed())
+        .knowledge_base_id(knowledge_base.id)
+        .entity("document", snapshot.documents[document_index].id.clone())
+        .relative_path(snapshot.documents[document_index].path.clone()),
+    );
 
     Ok(snapshot)
 }
@@ -736,6 +1178,7 @@ pub async fn delete_note(
     app: AppHandle,
     payload: DeleteNotePayload,
 ) -> Result<WorkspaceSnapshot, String> {
+    let started_at = Instant::now();
     let mut snapshot = payload.snapshot;
     let note_index = snapshot
         .notes
@@ -771,7 +1214,22 @@ pub async fn delete_note(
 
     remove_note_references_after_delete(&mut snapshot, &payload.note_id);
     normalize_active_entities(&mut snapshot, Some(&knowledge_base.id));
-    index_snapshot_in_background(app, &snapshot).await?;
+    index_snapshot_in_background(app.clone(), &snapshot).await?;
+
+    logging::write_app_event_best_effort(
+        &app,
+        AppEventBuilder::new(
+            AppLogLevel::Info,
+            AppLogCategory::Editor,
+            "delete_note",
+            "completed",
+            "已将 Markdown 笔记移入回收站。",
+        )
+        .duration(started_at.elapsed())
+        .knowledge_base_id(knowledge_base.id)
+        .entity("note", note.id)
+        .relative_path(note.path),
+    );
 
     Ok(snapshot)
 }
@@ -782,6 +1240,7 @@ pub async fn delete_document(
     app: AppHandle,
     payload: DeleteDocumentPayload,
 ) -> Result<WorkspaceSnapshot, String> {
+    let started_at = Instant::now();
     let mut snapshot = payload.snapshot;
     let document_index = snapshot
         .documents
@@ -828,7 +1287,22 @@ pub async fn delete_document(
     }
 
     normalize_active_entities(&mut snapshot, Some(&knowledge_base.id));
-    index_snapshot_in_background(app, &snapshot).await?;
+    index_snapshot_in_background(app.clone(), &snapshot).await?;
+
+    logging::write_app_event_best_effort(
+        &app,
+        AppEventBuilder::new(
+            AppLogLevel::Info,
+            AppLogCategory::Editor,
+            "delete_document",
+            "completed",
+            "已将 TXT 文档移入回收站。",
+        )
+        .duration(started_at.elapsed())
+        .knowledge_base_id(knowledge_base.id)
+        .entity("document", document.id)
+        .relative_path(document.path),
+    );
 
     Ok(snapshot)
 }
@@ -839,6 +1313,7 @@ pub async fn save_note_content(
     app: AppHandle,
     payload: SaveNoteContentPayload,
 ) -> Result<WorkspaceSnapshot, String> {
+    let started_at = Instant::now();
     let mut snapshot = payload.snapshot;
     let note_index = snapshot
         .notes
@@ -850,9 +1325,11 @@ pub async fn save_note_content(
         .iter()
         .find(|item| item.id == snapshot.notes[note_index].knowledge_base_id)
         .ok_or_else(|| "找不到笔记所属知识库".to_owned())?;
+    let knowledge_base_id = knowledge_base.id.clone();
+    let note_relative_path = snapshot.notes[note_index].path.clone();
     let target_path = storage::resolve_existing_file_inside_root(
         PathBuf::from(&knowledge_base.path).as_path(),
-        &snapshot.notes[note_index].path,
+        &note_relative_path,
     )?;
 
     let read_path = target_path.clone();
@@ -865,6 +1342,21 @@ pub async fn save_note_content(
 
     // expectedHash 来自用户开始编辑时的文件版本；不一致说明外部编辑器已改动，必须先重扫。
     if current_hash != payload.expected_hash {
+        logging::write_app_event_best_effort(
+            &app,
+            AppEventBuilder::new(
+                AppLogLevel::Warn,
+                AppLogCategory::Editor,
+                "save_note_content",
+                "blocked",
+                "目标 Markdown 文件已被外部修改，已阻止保存。",
+            )
+            .duration(started_at.elapsed())
+            .knowledge_base_id(knowledge_base_id.clone())
+            .entity("note", payload.note_id.clone())
+            .relative_path(note_relative_path.clone()),
+        );
+
         return Err("目标文件已被外部修改，已阻止保存。请重新扫描后再编辑。".to_owned());
     }
 
@@ -883,7 +1375,22 @@ pub async fn save_note_content(
     snapshot.active_note_id = payload.note_id;
     snapshot.active_document_id.clear();
     normalize_active_entities(&mut snapshot, None);
-    index_snapshot_in_background(app, &snapshot).await?;
+    index_snapshot_in_background(app.clone(), &snapshot).await?;
+
+    logging::write_app_event_best_effort(
+        &app,
+        AppEventBuilder::new(
+            AppLogLevel::Info,
+            AppLogCategory::Editor,
+            "save_note_content",
+            "completed",
+            "已保存 Markdown 笔记。",
+        )
+        .duration(started_at.elapsed())
+        .knowledge_base_id(knowledge_base_id)
+        .entity("note", snapshot.active_note_id.clone())
+        .relative_path(note_relative_path),
+    );
 
     Ok(snapshot)
 }
@@ -894,6 +1401,7 @@ pub async fn save_document_content(
     app: AppHandle,
     payload: SaveDocumentContentPayload,
 ) -> Result<WorkspaceSnapshot, String> {
+    let started_at = Instant::now();
     let mut snapshot = payload.snapshot;
     let document_index = snapshot
         .documents
@@ -910,9 +1418,11 @@ pub async fn save_document_content(
         .iter()
         .find(|item| item.id == snapshot.documents[document_index].knowledge_base_id)
         .ok_or_else(|| "找不到文档所属知识库".to_owned())?;
+    let knowledge_base_id = knowledge_base.id.clone();
+    let document_relative_path = snapshot.documents[document_index].path.clone();
     let target_path = storage::resolve_existing_file_inside_root(
         PathBuf::from(&knowledge_base.path).as_path(),
-        &snapshot.documents[document_index].path,
+        &document_relative_path,
     )?;
 
     let read_path = target_path.clone();
@@ -924,6 +1434,21 @@ pub async fn save_document_content(
 
     // expectedHash 来自用户开始编辑时的文件版本；不一致说明外部编辑器已改动，必须先重扫。
     if current_hash != payload.expected_hash {
+        logging::write_app_event_best_effort(
+            &app,
+            AppEventBuilder::new(
+                AppLogLevel::Warn,
+                AppLogCategory::Editor,
+                "save_document_content",
+                "blocked",
+                "目标 TXT 文件已被外部修改，已阻止保存。",
+            )
+            .duration(started_at.elapsed())
+            .knowledge_base_id(knowledge_base_id.clone())
+            .entity("document", payload.document_id.clone())
+            .relative_path(document_relative_path.clone()),
+        );
+
         return Err("目标文件已被外部修改，已阻止保存。请重新扫描后再编辑。".to_owned());
     }
 
@@ -942,7 +1467,22 @@ pub async fn save_document_content(
     snapshot.active_note_id.clear();
     snapshot.active_document_id = payload.document_id;
     normalize_active_entities(&mut snapshot, None);
-    index_snapshot_in_background(app, &snapshot).await?;
+    index_snapshot_in_background(app.clone(), &snapshot).await?;
+
+    logging::write_app_event_best_effort(
+        &app,
+        AppEventBuilder::new(
+            AppLogLevel::Info,
+            AppLogCategory::Editor,
+            "save_document_content",
+            "completed",
+            "已保存 TXT 文档。",
+        )
+        .duration(started_at.elapsed())
+        .knowledge_base_id(knowledge_base_id)
+        .entity("document", snapshot.active_document_id.clone())
+        .relative_path(document_relative_path),
+    );
 
     Ok(snapshot)
 }
@@ -982,6 +1522,8 @@ pub async fn remove_knowledge_base(
     app: AppHandle,
     payload: RemoveKnowledgeBasePayload,
 ) -> Result<WorkspaceSnapshot, String> {
+    let started_at = Instant::now();
+    let removed_knowledge_base_id = payload.knowledge_base_id.clone();
     let mut snapshot = payload.snapshot;
 
     snapshot
@@ -1019,7 +1561,20 @@ pub async fn remove_knowledge_base(
 
     normalize_knowledge_base_flags(&mut snapshot);
     normalize_active_entities(&mut snapshot, None);
-    index_snapshot_in_background(app, &snapshot).await?;
+    index_snapshot_in_background(app.clone(), &snapshot).await?;
+
+    logging::write_app_event_best_effort(
+        &app,
+        AppEventBuilder::new(
+            AppLogLevel::Info,
+            AppLogCategory::KnowledgeBase,
+            "remove_knowledge_base",
+            "completed",
+            "已移除知识库授权。",
+        )
+        .duration(started_at.elapsed())
+        .knowledge_base_id(removed_knowledge_base_id),
+    );
 
     Ok(snapshot)
 }
@@ -1030,8 +1585,28 @@ pub async fn run_agent_turn(
     app: AppHandle,
     payload: AgentTurnPayload,
 ) -> Result<AgentTurnResult, String> {
+    let started_at = Instant::now();
+    let operation_id = storage::create_id("op");
     let mut snapshot = hydrate_persisted_sessions_for_turn(&app, payload.snapshot).await?;
     let request = payload.request;
+    let session_id = request.session_id.clone();
+    let active_knowledge_base_id = request.active_knowledge_base_id.clone();
+
+    logging::write_app_event_best_effort(
+        &app,
+        AppEventBuilder::new(
+            AppLogLevel::Info,
+            AppLogCategory::Agent,
+            "run_agent_turn",
+            "started",
+            "Agent 开始处理用户请求。",
+        )
+        .operation_id(operation_id.clone())
+        .session_id(session_id.clone())
+        .knowledge_base_id(active_knowledge_base_id.clone())
+        .metadata(json!({ "action": request.action.clone(), "selectedSkillId": request.selected_skill_id.clone() })),
+    );
+
     let settings_app = app.clone();
     let settings = run_blocking("读取模型设置", move || {
         storage::load_user_settings(&settings_app)
@@ -1061,13 +1636,69 @@ pub async fn run_agent_turn(
     let audit_app = app.clone();
     let audit_log = runtime_result.audit_log.clone();
 
-    run_blocking("写入请求审计日志", move || {
+    if let Err(error) = run_blocking("写入请求审计日志", move || {
         storage::append_request_audit_log(&audit_app, &audit_log)
     })
-    .await?;
+    .await
+    {
+        logging::write_app_event_best_effort(
+            &app,
+            AppEventBuilder::new(
+                AppLogLevel::Error,
+                AppLogCategory::Agent,
+                "run_agent_turn",
+                "failed",
+                error.clone(),
+            )
+            .operation_id(operation_id)
+            .session_id(session_id)
+            .knowledge_base_id(active_knowledge_base_id)
+            .duration(started_at.elapsed()),
+        );
+
+        return Err(error);
+    }
 
     // 每轮后刷新本地索引并持久化会话，确保消息、工具轨迹和 pending diff 可在重启后恢复。
-    index_snapshot_in_background(app, &runtime_result.turn_result.snapshot).await?;
+    if let Err(error) =
+        index_snapshot_in_background(app.clone(), &runtime_result.turn_result.snapshot).await
+    {
+        logging::write_app_event_best_effort(
+            &app,
+            AppEventBuilder::new(
+                AppLogLevel::Error,
+                AppLogCategory::Agent,
+                "run_agent_turn",
+                "failed",
+                error.clone(),
+            )
+            .operation_id(operation_id)
+            .session_id(session_id)
+            .knowledge_base_id(active_knowledge_base_id)
+            .duration(started_at.elapsed()),
+        );
+
+        return Err(error);
+    }
+
+    logging::write_app_event_best_effort(
+        &app,
+        AppEventBuilder::new(
+            AppLogLevel::Info,
+            AppLogCategory::Agent,
+            "run_agent_turn",
+            "completed",
+            "Agent 已完成本轮处理。",
+        )
+        .operation_id(operation_id)
+        .session_id(session_id)
+        .knowledge_base_id(active_knowledge_base_id)
+        .duration(started_at.elapsed())
+        .metadata(json!({
+            "auditKind": runtime_result.audit_log.kind.clone(),
+            "toolSummary": runtime_result.audit_log.tool_summary.clone(),
+        })),
+    );
 
     Ok(runtime_result.turn_result)
 }
@@ -1078,7 +1709,10 @@ pub async fn apply_proposed_change(
     app: AppHandle,
     payload: ChangePayload,
 ) -> Result<WorkspaceSnapshot, String> {
+    let started_at = Instant::now();
+    let operation_id = storage::create_id("op");
     let mut snapshot = payload.snapshot;
+    let session_id = snapshot.active_session_id.clone();
     let session_index = snapshot
         .sessions
         .iter()
@@ -1092,6 +1726,7 @@ pub async fn apply_proposed_change(
         .iter()
         .find(|item| item.id == change.knowledge_base_id)
         .ok_or_else(|| "找不到变更所属知识库".to_owned())?;
+    let knowledge_base_id = knowledge_base.id.clone();
     let target_path = storage::resolve_inside_root(
         PathBuf::from(&knowledge_base.path).as_path(),
         &change.target_path,
@@ -1100,6 +1735,23 @@ pub async fn apply_proposed_change(
     if change.r#type == "create" {
         // 新建草稿不能覆盖用户已有文件；如路径已存在，应重新生成不同目标路径的 diff。
         if target_path.exists() {
+            logging::write_app_event_best_effort(
+                &app,
+                AppEventBuilder::new(
+                    AppLogLevel::Warn,
+                    AppLogCategory::Agent,
+                    "apply_proposed_change",
+                    "blocked",
+                    "目标 Markdown 已存在，已阻止覆盖。",
+                )
+                .operation_id(operation_id)
+                .session_id(session_id)
+                .knowledge_base_id(knowledge_base_id)
+                .entity("change", change.id)
+                .relative_path(change.target_path)
+                .duration(started_at.elapsed()),
+            );
+
             return Err("目标 Markdown 已存在，已阻止覆盖。请重新生成草稿路径。".to_owned());
         }
 
@@ -1138,12 +1790,34 @@ pub async fn apply_proposed_change(
         .await?;
         let current_hash = storage::hash_content(&current_content);
 
-        let next_content = apply_rewrite_change(
+        let next_content = match apply_rewrite_change(
             &current_content,
             &current_hash,
             &snapshot.notes[note_index].content_hash,
             &change,
-        )?;
+        ) {
+            Ok(next_content) => next_content,
+            Err(error) => {
+                logging::write_app_event_best_effort(
+                    &app,
+                    AppEventBuilder::new(
+                        AppLogLevel::Warn,
+                        AppLogCategory::Agent,
+                        "apply_proposed_change",
+                        "blocked",
+                        error.clone(),
+                    )
+                    .operation_id(operation_id)
+                    .session_id(session_id)
+                    .knowledge_base_id(knowledge_base_id)
+                    .entity("change", change.id)
+                    .relative_path(change.target_path)
+                    .duration(started_at.elapsed()),
+                );
+
+                return Err(error);
+            }
+        };
         let write_path = target_path.clone();
         let write_content = next_content.clone();
 
@@ -1156,11 +1830,32 @@ pub async fn apply_proposed_change(
         snapshot.notes[note_index].updated_at = "刚刚".to_owned();
     }
 
+    let accepted_change_id = change.id.clone();
+    let accepted_change_type = change.r#type.clone();
+    let accepted_target_path = change.target_path.clone();
     snapshot.sessions[session_index].pending_change = Some(crate::domain::ProposedChange {
         status: "accepted".to_owned(),
         ..change
     });
-    index_snapshot_in_background(app, &snapshot).await?;
+    index_snapshot_in_background(app.clone(), &snapshot).await?;
+
+    logging::write_app_event_best_effort(
+        &app,
+        AppEventBuilder::new(
+            AppLogLevel::Info,
+            AppLogCategory::Agent,
+            "apply_proposed_change",
+            "completed",
+            "已接受并写入 Agent diff。",
+        )
+        .operation_id(operation_id)
+        .session_id(session_id)
+        .knowledge_base_id(knowledge_base_id)
+        .entity("change", accepted_change_id)
+        .relative_path(accepted_target_path)
+        .duration(started_at.elapsed())
+        .metadata(json!({ "changeType": accepted_change_type })),
+    );
 
     Ok(snapshot)
 }
@@ -1203,7 +1898,9 @@ pub async fn reject_proposed_change(
     app: AppHandle,
     payload: ChangePayload,
 ) -> Result<WorkspaceSnapshot, String> {
+    let started_at = Instant::now();
     let mut snapshot = payload.snapshot;
+    let session_id = snapshot.active_session_id.clone();
     let session_index = snapshot
         .sessions
         .iter()
@@ -1211,14 +1908,36 @@ pub async fn reject_proposed_change(
         .ok_or_else(|| "找不到当前 Agent 会话".to_owned())?;
 
     if let Some(change) = snapshot.sessions[session_index].pending_change.clone() {
+        let rejected_change_id = change.id.clone();
+        let rejected_change_type = change.r#type.clone();
+        let rejected_knowledge_base_id = change.knowledge_base_id.clone();
+        let rejected_target_path = change.target_path.clone();
+
         snapshot.sessions[session_index].pending_change = Some(crate::domain::ProposedChange {
             status: "rejected".to_owned(),
             ..change
         });
         snapshot.sessions[session_index].updated_at = "刚刚".to_owned();
+
+        logging::write_app_event_best_effort(
+            &app,
+            AppEventBuilder::new(
+                AppLogLevel::Info,
+                AppLogCategory::Agent,
+                "reject_proposed_change",
+                "completed",
+                "已拒绝 Agent diff。",
+            )
+            .session_id(session_id)
+            .knowledge_base_id(rejected_knowledge_base_id)
+            .entity("change", rejected_change_id)
+            .relative_path(rejected_target_path)
+            .duration(started_at.elapsed())
+            .metadata(json!({ "changeType": rejected_change_type })),
+        );
     }
 
-    index_snapshot_in_background(app, &snapshot).await?;
+    index_snapshot_in_background(app.clone(), &snapshot).await?;
 
     Ok(snapshot)
 }

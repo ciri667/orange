@@ -1,9 +1,9 @@
 use crate::domain::{
-    AgentMessage, AgentSession, DocumentPreview, DocumentPreviewBlock, FolderEntry, KnowledgeBase,
-    KnowledgeBaseSelection, ModelApiKeyStatus, ModelConfig, Note, RequestAuditLog, ScanReport,
-    UserSettings, WorkspaceDocument, WorkspaceSnapshot,
+    AgentMessage, AgentSession, AppEventLog, DocumentPreview, DocumentPreviewBlock, FolderEntry,
+    KnowledgeBase, KnowledgeBaseSelection, ModelApiKeyStatus, ModelConfig, Note, RequestAuditLog,
+    ScanReport, UserSettings, WorkspaceDocument, WorkspaceSnapshot,
 };
-use chrono::{Local, NaiveDateTime, TimeZone};
+use chrono::{Duration as ChronoDuration, Local, NaiveDateTime, TimeZone};
 use quick_xml::events::Event;
 use quick_xml::Reader;
 use rusqlite::{params, Connection, TransactionBehavior};
@@ -42,6 +42,12 @@ const USER_SETTINGS_KEY: &str = "default";
 
 /** SQLite 被其他连接占用时的等待时长，覆盖大知识库索引重建的正常耗时窗口。 */
 const DATABASE_BUSY_TIMEOUT: Duration = Duration::from_secs(30);
+
+/** 用户可读事件日志最多保留条数，避免 SQLite 随长期使用无限增长。 */
+const MAX_APP_EVENT_LOGS: usize = 2_000;
+
+/** 用户可读事件日志最长保留天数，和条数限制共同控制本地数据库体积。 */
+const APP_EVENT_LOG_RETENTION_DAYS: i64 = 30;
 
 /** 系统安全存储中的模型密钥引用，SQLite 只保存这个引用而不保存明文 key。 */
 pub const MODEL_KEY_REFERENCE: &str = "cici-note-openai-compatible-api-key";
@@ -363,6 +369,24 @@ fn ensure_database_schema(connection: &Connection, database_path: &Path) -> Resu
               id TEXT PRIMARY KEY,
               kind TEXT NOT NULL,
               summary TEXT NOT NULL,
+              created_at TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS app_event_logs (
+              id TEXT PRIMARY KEY,
+              level TEXT NOT NULL,
+              category TEXT NOT NULL,
+              event TEXT NOT NULL,
+              message TEXT NOT NULL,
+              status TEXT NOT NULL,
+              operation_id TEXT,
+              session_id TEXT,
+              knowledge_base_id TEXT,
+              entity_type TEXT,
+              entity_id TEXT,
+              relative_path TEXT,
+              duration_ms INTEGER,
+              metadata_json TEXT,
               created_at TEXT NOT NULL
             );
             "#,
@@ -1218,6 +1242,201 @@ pub fn load_request_audit_logs(
 
         normalize_audit_log_created_at(&mut log);
         logs.push(log);
+    }
+
+    Ok(logs)
+}
+
+/** 追加一条用户可读应用事件日志，并顺带执行本地保留策略。 */
+pub fn append_app_event_log(app: &AppHandle, log: &AppEventLog) -> Result<(), String> {
+    let connection = open_database(app)?;
+    let _write_guard = lock_database_writer()?;
+
+    insert_app_event_log(&connection, log)?;
+    prune_app_event_logs(&connection)?;
+
+    Ok(())
+}
+
+/** 清空用户可读应用事件日志；运行诊断文件日志不受影响。 */
+pub fn clear_app_event_logs(app: &AppHandle) -> Result<(), String> {
+    let connection = open_database(app)?;
+    let _write_guard = lock_database_writer()?;
+
+    connection
+        .execute("DELETE FROM app_event_logs", [])
+        .map_err(|error| format!("无法清空应用事件日志：{error}"))?;
+
+    Ok(())
+}
+
+/** 读取最近应用事件日志，支持按级别和分类筛选。 */
+pub fn load_app_event_logs(
+    app: &AppHandle,
+    limit: usize,
+    level: Option<&str>,
+    category: Option<&str>,
+) -> Result<Vec<AppEventLog>, String> {
+    let connection = open_database(app)?;
+    let bounded_limit = limit.clamp(1, 500);
+
+    query_app_event_logs(&connection, bounded_limit, level, category)
+}
+
+/** 将应用事件日志写入当前 SQLite 连接，供生产代码和测试复用。 */
+fn insert_app_event_log(connection: &Connection, log: &AppEventLog) -> Result<(), String> {
+    connection
+        .execute(
+            "INSERT INTO app_event_logs
+             (id, level, category, event, message, status, operation_id, session_id,
+              knowledge_base_id, entity_type, entity_id, relative_path, duration_ms,
+              metadata_json, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
+            params![
+                &log.id,
+                &log.level,
+                &log.category,
+                &log.event,
+                &log.message,
+                &log.status,
+                log.operation_id.as_deref(),
+                log.session_id.as_deref(),
+                log.knowledge_base_id.as_deref(),
+                log.entity_type.as_deref(),
+                log.entity_id.as_deref(),
+                log.relative_path.as_deref(),
+                log.duration_ms,
+                log.metadata_json.as_deref(),
+                &log.created_at
+            ],
+        )
+        .map_err(|error| format!("无法写入应用事件日志：{error}"))?;
+
+    Ok(())
+}
+
+/** 按保留策略清理应用事件日志，先按时间，再按最新条数兜底。 */
+fn prune_app_event_logs(connection: &Connection) -> Result<(), String> {
+    let oldest_created_at = (Local::now() - ChronoDuration::days(APP_EVENT_LOG_RETENTION_DAYS))
+        .format("%Y/%m/%d %H:%M")
+        .to_string();
+
+    connection
+        .execute(
+            "DELETE FROM app_event_logs WHERE created_at < ?1",
+            params![oldest_created_at],
+        )
+        .map_err(|error| format!("无法清理过期应用事件日志：{error}"))?;
+
+    connection
+        .execute(
+            "DELETE FROM app_event_logs
+             WHERE rowid NOT IN (
+               SELECT rowid FROM app_event_logs ORDER BY rowid DESC LIMIT ?1
+             )",
+            params![MAX_APP_EVENT_LOGS as i64],
+        )
+        .map_err(|error| format!("无法裁剪应用事件日志数量：{error}"))?;
+
+    Ok(())
+}
+
+/** 使用固定 SQL 分支绑定筛选参数，避免动态拼接用户输入。 */
+fn query_app_event_logs(
+    connection: &Connection,
+    limit: usize,
+    level: Option<&str>,
+    category: Option<&str>,
+) -> Result<Vec<AppEventLog>, String> {
+    let bounded_limit = limit.clamp(1, 500) as i64;
+
+    match (
+        level.filter(|value| !value.trim().is_empty()),
+        category.filter(|value| !value.trim().is_empty()),
+    ) {
+        (Some(level), Some(category)) => query_app_event_logs_by_sql(
+            connection,
+            "SELECT id, level, category, event, message, status, operation_id, session_id,
+                    knowledge_base_id, entity_type, entity_id, relative_path, duration_ms,
+                    metadata_json, created_at
+             FROM app_event_logs
+             WHERE level = ?1 AND category = ?2
+             ORDER BY rowid DESC
+             LIMIT ?3",
+            params![level, category, bounded_limit],
+        ),
+        (Some(level), None) => query_app_event_logs_by_sql(
+            connection,
+            "SELECT id, level, category, event, message, status, operation_id, session_id,
+                    knowledge_base_id, entity_type, entity_id, relative_path, duration_ms,
+                    metadata_json, created_at
+             FROM app_event_logs
+             WHERE level = ?1
+             ORDER BY rowid DESC
+             LIMIT ?2",
+            params![level, bounded_limit],
+        ),
+        (None, Some(category)) => query_app_event_logs_by_sql(
+            connection,
+            "SELECT id, level, category, event, message, status, operation_id, session_id,
+                    knowledge_base_id, entity_type, entity_id, relative_path, duration_ms,
+                    metadata_json, created_at
+             FROM app_event_logs
+             WHERE category = ?1
+             ORDER BY rowid DESC
+             LIMIT ?2",
+            params![category, bounded_limit],
+        ),
+        (None, None) => query_app_event_logs_by_sql(
+            connection,
+            "SELECT id, level, category, event, message, status, operation_id, session_id,
+                    knowledge_base_id, entity_type, entity_id, relative_path, duration_ms,
+                    metadata_json, created_at
+             FROM app_event_logs
+             ORDER BY rowid DESC
+             LIMIT ?1",
+            params![bounded_limit],
+        ),
+    }
+}
+
+/** 执行应用事件日志查询，并把 SQLite row 转成前端 camelCase wire 模型。 */
+fn query_app_event_logs_by_sql<P>(
+    connection: &Connection,
+    sql: &str,
+    params: P,
+) -> Result<Vec<AppEventLog>, String>
+where
+    P: rusqlite::Params,
+{
+    let mut statement = connection
+        .prepare(sql)
+        .map_err(|error| format!("无法准备应用事件日志读取：{error}"))?;
+    let rows = statement
+        .query_map(params, |row| {
+            Ok(AppEventLog {
+                id: row.get(0)?,
+                level: row.get(1)?,
+                category: row.get(2)?,
+                event: row.get(3)?,
+                message: row.get(4)?,
+                status: row.get(5)?,
+                operation_id: row.get(6)?,
+                session_id: row.get(7)?,
+                knowledge_base_id: row.get(8)?,
+                entity_type: row.get(9)?,
+                entity_id: row.get(10)?,
+                relative_path: row.get(11)?,
+                duration_ms: row.get(12)?,
+                metadata_json: row.get(13)?,
+                created_at: row.get(14)?,
+            })
+        })
+        .map_err(|error| format!("无法查询应用事件日志：{error}"))?;
+    let mut logs = Vec::new();
+
+    for row in rows {
+        logs.push(row.map_err(|error| format!("无法解析应用事件日志：{error}"))?);
     }
 
     Ok(logs)
@@ -2756,18 +2975,22 @@ mod tests {
     use super::{
         atomic_write_markdown, atomic_write_text_document, create_blank_markdown_file,
         create_blank_text_document_file, create_folder, create_id, create_stable_note_id,
-        ensure_persistent_model_keyring, extract_docx_preview_blocks,
-        format_local_datetime_from_millis, hash_bytes, hash_content,
+        ensure_persistent_model_keyring, extract_docx_preview_blocks, format_local_datetime,
+        format_local_datetime_from_millis, hash_bytes, hash_content, insert_app_event_log,
         is_missing_keyring_entry_error, load_document_preview, load_model_api_key_from_cache,
         model_keyring_persists_until_delete, normalize_audit_log_created_at,
-        normalize_session_created_at, rename_markdown_file, rename_text_document_file,
-        resolve_existing_file_inside_root, resolve_inside_root, scan_markdown_directory,
-        scan_supported_documents_directory, sort_sessions_by_created_at_desc,
-        store_model_api_key_in_cache, trash_markdown_file, trash_text_document_file_with,
-        validate_folder_name, validate_markdown_file_name, validate_new_markdown_file_name,
-        validate_new_text_document_file_name, validate_text_document_file_name,
+        normalize_session_created_at, prune_app_event_logs, query_app_event_logs,
+        rename_markdown_file, rename_text_document_file, resolve_existing_file_inside_root,
+        resolve_inside_root, scan_markdown_directory, scan_supported_documents_directory,
+        sort_sessions_by_created_at_desc, store_model_api_key_in_cache, trash_markdown_file,
+        trash_text_document_file_with, validate_folder_name, validate_markdown_file_name,
+        validate_new_markdown_file_name, validate_new_text_document_file_name,
+        validate_text_document_file_name,
     };
-    use crate::domain::{AgentSession, KnowledgeBaseSelection, RequestAuditLog, WorkspaceDocument};
+    use crate::domain::{
+        AgentSession, AppEventLog, KnowledgeBaseSelection, RequestAuditLog, WorkspaceDocument,
+    };
+    use rusqlite::Connection;
     use std::fs;
     use std::io::Write;
     use std::path::Path;
@@ -2821,6 +3044,58 @@ mod tests {
             content_hash: String::new(),
             content: None,
             preview_available: file_type != "txt",
+        }
+    }
+
+    /** 构造只包含应用事件日志表的内存 SQLite 连接，隔离持久化测试。 */
+    fn test_event_log_connection() -> Connection {
+        let connection = Connection::open_in_memory().unwrap();
+
+        connection
+            .execute_batch(
+                r#"
+                CREATE TABLE app_event_logs (
+                  id TEXT PRIMARY KEY,
+                  level TEXT NOT NULL,
+                  category TEXT NOT NULL,
+                  event TEXT NOT NULL,
+                  message TEXT NOT NULL,
+                  status TEXT NOT NULL,
+                  operation_id TEXT,
+                  session_id TEXT,
+                  knowledge_base_id TEXT,
+                  entity_type TEXT,
+                  entity_id TEXT,
+                  relative_path TEXT,
+                  duration_ms INTEGER,
+                  metadata_json TEXT,
+                  created_at TEXT NOT NULL
+                );
+                "#,
+            )
+            .unwrap();
+
+        connection
+    }
+
+    /** 构造测试事件日志，保留必要字段，避免用例重复冗长结构体。 */
+    fn test_app_event_log(id: &str, level: &str, category: &str, created_at: &str) -> AppEventLog {
+        AppEventLog {
+            id: id.to_owned(),
+            level: level.to_owned(),
+            category: category.to_owned(),
+            event: "test_event".to_owned(),
+            message: "测试事件".to_owned(),
+            status: "completed".to_owned(),
+            operation_id: Some("op-test".to_owned()),
+            session_id: None,
+            knowledge_base_id: Some("kb-test".to_owned()),
+            entity_type: None,
+            entity_id: None,
+            relative_path: Some("folder/note.md".to_owned()),
+            duration_ms: Some(12),
+            metadata_json: Some(r#"{"count":1}"#.to_owned()),
+            created_at: created_at.to_owned(),
         }
     }
 
@@ -2918,6 +3193,79 @@ mod tests {
 
         assert_ne!(log.created_at, "刚刚");
         assert!(!log.created_at.trim().is_empty());
+    }
+
+    /** 应用事件日志读取应按最新写入倒序，并受 limit 限制。 */
+    #[test]
+    fn app_event_logs_query_descending_with_limit() {
+        let connection = test_event_log_connection();
+
+        insert_app_event_log(
+            &connection,
+            &test_app_event_log("event-old", "info", "editor", "2026/06/23 10:00"),
+        )
+        .unwrap();
+        insert_app_event_log(
+            &connection,
+            &test_app_event_log("event-new", "error", "agent", "2026/06/23 10:01"),
+        )
+        .unwrap();
+
+        let logs = query_app_event_logs(&connection, 1, None, None).unwrap();
+
+        assert_eq!(logs.len(), 1);
+        assert_eq!(logs[0].id, "event-new");
+    }
+
+    /** 应用事件日志筛选应同时支持级别和分类，且不会返回其他类别记录。 */
+    #[test]
+    fn app_event_logs_query_filters_level_and_category() {
+        let connection = test_event_log_connection();
+
+        insert_app_event_log(
+            &connection,
+            &test_app_event_log("event-agent-error", "error", "agent", "2026/06/23 10:00"),
+        )
+        .unwrap();
+        insert_app_event_log(
+            &connection,
+            &test_app_event_log("event-editor-error", "error", "editor", "2026/06/23 10:01"),
+        )
+        .unwrap();
+        insert_app_event_log(
+            &connection,
+            &test_app_event_log("event-agent-info", "info", "agent", "2026/06/23 10:02"),
+        )
+        .unwrap();
+
+        let logs = query_app_event_logs(&connection, 10, Some("error"), Some("agent")).unwrap();
+
+        assert_eq!(logs.len(), 1);
+        assert_eq!(logs[0].id, "event-agent-error");
+    }
+
+    /** 应用事件日志保留策略应移除过期记录，避免本地数据库无限增长。 */
+    #[test]
+    fn app_event_logs_prune_removes_expired_records() {
+        let connection = test_event_log_connection();
+
+        insert_app_event_log(
+            &connection,
+            &test_app_event_log("event-expired", "info", "app", "2000/01/01 00:00"),
+        )
+        .unwrap();
+        insert_app_event_log(
+            &connection,
+            &test_app_event_log("event-current", "info", "app", &format_local_datetime()),
+        )
+        .unwrap();
+
+        prune_app_event_logs(&connection).unwrap();
+
+        let logs = query_app_event_logs(&connection, 10, None, None).unwrap();
+
+        assert_eq!(logs.len(), 1);
+        assert_eq!(logs[0].id, "event-current");
     }
 
     /** 路径穿越必须被阻止，防止 Agent 写出知识库根目录。 */

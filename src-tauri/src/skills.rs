@@ -416,7 +416,13 @@ fn scan_file_skills(
             // 单个 SKILL.md 解析失败不能影响同目录下其他文件式 skill 的加载。
             match load_file_skill(root, entry.path(), persisted_skills) {
                 Ok(skill) => skills.push(skill),
-                Err(error) => eprintln!("跳过无效文件 skill {}：{error}", entry.path().display()),
+                Err(error) => {
+                    log::warn!(
+                        target: "skill",
+                        "跳过无效文件 skill {}：{error}",
+                        entry.path().display()
+                    );
+                }
             }
         }
     }
@@ -983,11 +989,11 @@ fn migrate_legacy_user_skills(
                 let override_skill = skill_state_override_payload(&saved_skill);
                 persisted_skills.insert(override_skill.id.clone(), override_skill);
                 if let Err(error) = delete_skill_override(connection, &legacy_skill_id) {
-                    eprintln!("迁移旧版 user skill 后清理 SQLite 失败：{error}");
+                    log::warn!(target: "skill", "迁移旧版 user skill 后清理 SQLite 失败：{error}");
                 }
             }
             Err(error) => {
-                eprintln!("迁移旧版 user skill 失败：{error}");
+                log::warn!(target: "skill", "迁移旧版 user skill 失败：{error}");
             }
         }
     }
