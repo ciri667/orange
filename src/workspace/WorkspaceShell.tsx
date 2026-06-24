@@ -53,6 +53,7 @@ import type {
   WorkspaceSnapshot,
 } from "../shared/types";
 import { TopBar } from "./TopBar";
+import { useResizableWorkspaceLayout } from "./useResizableWorkspaceLayout";
 
 /** 将未知异常统一转换为可展示文案，避免启动错误页渲染空对象。 */
 function formatErrorMessage(error: unknown) {
@@ -147,6 +148,8 @@ export function WorkspaceShell() {
     parentPath: string;
     name: string;
   } | null>(null);
+  /** 主工作台三栏布局偏好，负责拖拽分隔条、键盘调整和本机持久化。 */
+  const { workspaceRef, gridTemplateColumns, resizingPane, getSeparatorProps } = useResizableWorkspaceLayout();
 
   useEffect(() => {
     let isMounted = true;
@@ -1018,7 +1021,11 @@ export function WorkspaceShell() {
         knowledgeBaseCount={currentSnapshot.knowledgeBases.length}
         onOpenSettings={() => setIsSettingsOpen(true)}
       />
-      <main className="workspace-grid">
+      <main
+        className={`workspace-grid ${resizingPane ? "is-resizing" : ""}`}
+        ref={workspaceRef}
+        style={{ gridTemplateColumns }}
+      >
         <KnowledgeBaseSidebar
           knowledgeBases={currentSnapshot.knowledgeBases}
           activeKnowledgeBase={activeKnowledgeBase}
@@ -1040,6 +1047,10 @@ export function WorkspaceShell() {
           onCreateFolder={(parentPath) => openCreateDialog("folder", parentPath)}
           onRefreshKnowledgeBase={handleRescanKnowledgeBase}
         />
+        <div
+          className={`workspace-resizer ${resizingPane === "sidebar" ? "active" : ""}`}
+          {...getSeparatorProps("sidebar")}
+        />
         <EditorPane
           note={activeNote}
           knowledgeBase={activeKnowledgeBase}
@@ -1055,6 +1066,10 @@ export function WorkspaceShell() {
           onDeleteNote={() => handleDeleteNote()}
           onAcceptChange={handleAcceptChange}
           onRejectChange={handleRejectChange}
+        />
+        <div
+          className={`workspace-resizer ${resizingPane === "agent" ? "active" : ""}`}
+          {...getSeparatorProps("agent")}
         />
         <AgentPanel
           sessions={currentSnapshot.sessions}
