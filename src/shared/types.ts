@@ -32,7 +32,13 @@ export type ModelProvider = "openai-compatible";
 /** 用户选择的隐私策略，决定模型请求是否允许携带本地笔记片段。 */
 export type PrivacyPolicy = "local-only" | "allow-selected-scope";
 
-/** 用户选择的本地 Markdown 知识库元信息。 */
+/** 非 Markdown 文档类型，决定目录树操作权限和中间面板展示方式。 */
+export type DocumentFileType = "txt" | "docx" | "pdf";
+
+/** 可预览文档的正文块类型，首版 docx 只抽取段落级文本。 */
+export type DocumentPreviewBlockType = "heading" | "paragraph";
+
+/** 用户选择的本地知识库元信息。 */
 export interface KnowledgeBase {
   id: string;
   name: string;
@@ -40,6 +46,7 @@ export interface KnowledgeBase {
   description: string;
   status: KnowledgeBaseStatus;
   noteCount: number;
+  documentCount: number;
   updatedAt: string;
   isDefault: boolean;
   semanticIndexEnabled: boolean;
@@ -85,6 +92,7 @@ export interface SkillSettings {
 /** 单次知识库扫描报告，用于展示成功、失败、跳过目录和错误信息。 */
 export interface ScanReport {
   scannedFileCount: number;
+  scannedByType: Record<"markdown" | DocumentFileType, number>;
   failedFileCount: number;
   skippedDirectories: string[];
   errors: string[];
@@ -101,6 +109,37 @@ export interface Note {
   updatedAt: string;
   backlinks: string[];
   contentHash: string;
+}
+
+/** 非 Markdown 文档的数据模型；txt 带正文，docx/pdf 只保存预览所需元数据。 */
+export interface WorkspaceDocument {
+  id: string;
+  knowledgeBaseId: string;
+  title: string;
+  path: string;
+  fileType: DocumentFileType;
+  updatedAt: string;
+  contentHash: string;
+  content?: string;
+  previewAvailable: boolean;
+}
+
+/** docx 预览中经过安全抽取的只读文本块。 */
+export interface DocumentPreviewBlock {
+  type: DocumentPreviewBlockType;
+  text: string;
+}
+
+/** 非 Markdown 文档预览命令返回值，pdf 返回 asset 路径，docx 返回结构化文本。 */
+export interface DocumentPreview {
+  documentId: string;
+  fileType: DocumentFileType;
+  title: string;
+  path: string;
+  updatedAt: string;
+  contentHash: string;
+  assetPath?: string;
+  blocks?: DocumentPreviewBlock[];
 }
 
 /** 本地知识库中的真实目录节点，用于显示没有 Markdown 文件的空文件夹。 */
@@ -213,7 +252,15 @@ export interface FileTreeNode {
   name: string;
   path: string;
   type: "folder" | "file";
+  fileType?: "markdown" | DocumentFileType;
   noteId?: string;
+  documentId?: string;
+  capabilities?: {
+    canEdit: boolean;
+    canRename: boolean;
+    canDelete: boolean;
+    canPreview: boolean;
+  };
   isRoot?: boolean;
   children: FileTreeNode[];
 }
@@ -223,9 +270,11 @@ export interface WorkspaceSnapshot {
   knowledgeBases: KnowledgeBase[];
   folders: FolderEntry[];
   notes: Note[];
+  documents: WorkspaceDocument[];
   sessions: AgentSession[];
   activeKnowledgeBaseId: string;
   activeNoteId: string;
+  activeDocumentId?: string;
   activeSessionId: string;
 }
 

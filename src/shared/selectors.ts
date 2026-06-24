@@ -1,4 +1,4 @@
-import type { AgentSession, KnowledgeBase, Note, WorkspaceSnapshot } from "./types";
+import type { AgentSession, KnowledgeBase, Note, WorkspaceDocument, WorkspaceSnapshot } from "./types";
 
 /** 获取当前激活知识库，缺失时回退到第一个知识库。 */
 export function getActiveKnowledgeBase(snapshot: WorkspaceSnapshot): KnowledgeBase {
@@ -11,12 +11,31 @@ export function getActiveKnowledgeBase(snapshot: WorkspaceSnapshot): KnowledgeBa
 /** 获取当前激活笔记，缺失时回退到激活知识库的第一篇笔记；空知识库返回 undefined。 */
 export function getActiveNote(snapshot: WorkspaceSnapshot): Note | undefined {
   const activeKnowledgeBase = getActiveKnowledgeBase(snapshot);
+  const activeDocument = getActiveDocument(snapshot);
+
+  if (activeDocument) {
+    return undefined;
+  }
+
   const activeKnowledgeBaseNotes = snapshot.notes.filter((note) => note.knowledgeBaseId === activeKnowledgeBase.id);
 
   return (
     activeKnowledgeBaseNotes.find((note) => note.id === snapshot.activeNoteId) ??
     activeKnowledgeBaseNotes[0] ??
     undefined
+  );
+}
+
+/** 获取当前激活普通文档；普通文档不会被映射到 Agent note 上下文。 */
+export function getActiveDocument(snapshot: WorkspaceSnapshot): WorkspaceDocument | undefined {
+  const activeKnowledgeBase = getActiveKnowledgeBase(snapshot);
+
+  if (!snapshot.activeDocumentId) {
+    return undefined;
+  }
+
+  return snapshot.documents.find(
+    (document) => document.id === snapshot.activeDocumentId && document.knowledgeBaseId === activeKnowledgeBase.id,
   );
 }
 

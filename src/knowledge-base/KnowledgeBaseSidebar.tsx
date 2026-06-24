@@ -8,6 +8,7 @@ export function KnowledgeBaseSidebar({
   activeKnowledgeBase,
   fileTree,
   activeNoteId,
+  activeDocumentId,
   collapsedFolderPaths,
   searchTerm,
   isBusy,
@@ -18,9 +19,13 @@ export function KnowledgeBaseSidebar({
   onAddKnowledgeBase,
   onToggleFolder,
   onSelectNote,
+  onSelectDocument,
   onRenameNote,
   onDeleteNote,
-  onCreateDocument,
+  onRenameDocument,
+  onDeleteDocument,
+  onCreateMarkdown,
+  onCreateText,
   onCreateFolder,
   onRefreshKnowledgeBase,
 }: {
@@ -28,6 +33,7 @@ export function KnowledgeBaseSidebar({
   activeKnowledgeBase: KnowledgeBase;
   fileTree: FileTreeNode[];
   activeNoteId: string;
+  activeDocumentId: string;
   collapsedFolderPaths: Set<string>;
   searchTerm: string;
   isBusy: boolean;
@@ -38,9 +44,13 @@ export function KnowledgeBaseSidebar({
   onAddKnowledgeBase: () => void;
   onToggleFolder: (folderPath: string) => void;
   onSelectNote: (noteId: string) => void;
+  onSelectDocument: (documentId: string) => void;
   onRenameNote: (noteId: string) => void;
   onDeleteNote: (noteId: string) => void;
-  onCreateDocument: (parentPath: string) => void;
+  onRenameDocument: (documentId: string) => void;
+  onDeleteDocument: (documentId: string) => void;
+  onCreateMarkdown: (parentPath: string) => void;
+  onCreateText: (parentPath: string) => void;
   onCreateFolder: (parentPath: string) => void;
   onRefreshKnowledgeBase: (knowledgeBaseId: string) => void;
 }) {
@@ -72,7 +82,7 @@ export function KnowledgeBaseSidebar({
             <span className="kb-row-copy">
               <strong>{knowledgeBase.name}</strong>
               <span>
-                {knowledgeBase.noteCount} 篇 · {getKnowledgeBaseStatusLabel(knowledgeBase)}
+                {knowledgeBase.noteCount} 篇 Markdown · {knowledgeBase.documentCount} 个文档 · {getKnowledgeBaseStatusLabel(knowledgeBase)}
               </span>
             </span>
           </button>
@@ -104,7 +114,7 @@ export function KnowledgeBaseSidebar({
         <div className="section-header">
           <p className="section-label">本地目录树</p>
           <div className="section-actions">
-            <span>{activeKnowledgeBase.status === "error" ? "目录失效" : "Markdown"}</span>
+            <span>{activeKnowledgeBase.status === "error" ? "目录失效" : "支持文档"}</span>
             <button
               className="tree-refresh-button"
               type="button"
@@ -122,12 +132,17 @@ export function KnowledgeBaseSidebar({
         <FileTree
           nodes={fileTree}
           activeNoteId={activeNoteId}
+          activeDocumentId={activeDocumentId}
           collapsedFolderPaths={collapsedFolderPaths}
           onToggleFolder={onToggleFolder}
           onSelectNote={onSelectNote}
+          onSelectDocument={onSelectDocument}
           onRenameNote={onRenameNote}
           onDeleteNote={onDeleteNote}
-          onCreateDocument={onCreateDocument}
+          onRenameDocument={onRenameDocument}
+          onDeleteDocument={onDeleteDocument}
+          onCreateMarkdown={onCreateMarkdown}
+          onCreateText={onCreateText}
           onCreateFolder={onCreateFolder}
         />
       </div>
@@ -165,7 +180,7 @@ function ScanReportSummary({ knowledgeBase }: { knowledgeBase: KnowledgeBase }) 
 
   return (
     <p className={`scan-summary ${report.failedFileCount ? "warning" : ""}`}>
-      已扫描 {report.scannedFileCount} 篇{errorText}
+      已扫描 {report.scannedFileCount} 个支持文档{errorText}
       {skippedText}
     </p>
   );
