@@ -1,9 +1,11 @@
 import { Clock3, Columns2, Eye, FilePenLine, PencilLine, Save, Tags, Trash2, Wand2 } from "lucide-react";
+import type { RefObject, UIEventHandler } from "react";
 import ReactMarkdown from "react-markdown";
 import rehypeSanitize from "rehype-sanitize";
 import remarkGfm from "remark-gfm";
 import { DiffPanel } from "../diff/DiffPanel";
 import type { KnowledgeBase, MarkdownViewMode, Note, ProposedChange } from "../shared/types";
+import { useSyncedMarkdownScroll } from "./useSyncedMarkdownScroll";
 
 /** 编辑器视图切换按钮配置，集中维护标签、图标和 aria 文案。 */
 const MARKDOWN_VIEW_OPTIONS: Array<{ mode: MarkdownViewMode; label: string; title: string; icon: typeof PencilLine }> = [
@@ -52,6 +54,9 @@ export function EditorPane({
   onAcceptChange: () => void;
   onRejectChange: () => void;
 }) {
+  /** 分屏模式下同步源码和预览滚动；非分屏时 hook 会保持静默。 */
+  const { editorRef, previewRef, handleEditorScroll, handlePreviewScroll } = useSyncedMarkdownScroll(viewMode === "split");
+
   if (!note) {
     return (
       <section className="editor-pane" aria-label="Markdown 编辑器">
@@ -149,6 +154,7 @@ export function EditorPane({
         {shouldShowEditor && (
           <textarea
             className="markdown-editor"
+            ref={editorRef}
             value={note.content}
             onChange={(event) => onContentChange(event.target.value)}
             onKeyDown={(event) => {
@@ -158,11 +164,14 @@ export function EditorPane({
                 onSaveNote();
               }
             }}
+            onScroll={handleEditorScroll}
             spellCheck={false}
             aria-label="当前 Markdown 笔记内容"
           />
         )}
-        {shouldShowPreview && <MarkdownPreview content={note.content} />}
+        {shouldShowPreview && (
+          <MarkdownPreview content={note.content} previewRef={previewRef} onScroll={handlePreviewScroll} />
+        )}
       </div>
 
       {proposedChange?.status === "pending" && (
@@ -173,9 +182,17 @@ export function EditorPane({
 }
 
 /** 安全的 GFM Markdown 预览，渲染内存草稿并通过 rehype-sanitize 禁用危险 HTML。 */
-function MarkdownPreview({ content }: { content: string }) {
+function MarkdownPreview({
+  content,
+  previewRef,
+  onScroll,
+}: {
+  content: string;
+  previewRef: RefObject<HTMLDivElement | null>;
+  onScroll: UIEventHandler<HTMLDivElement>;
+}) {
   return (
-    <div className="markdown-preview" aria-label="Markdown 预览">
+    <div className="markdown-preview" ref={previewRef} onScroll={onScroll} aria-label="Markdown 预览">
       {content.trim() ? (
         <ReactMarkdown remarkPlugins={[remarkGfm]} rehypePlugins={[rehypeSanitize]}>
           {content}

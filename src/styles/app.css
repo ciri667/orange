@@ -735,6 +735,7 @@ textarea:disabled {
 .markdown-editor {
   width: 100%;
   min-height: 0;
+  overflow: auto;
   resize: none;
   border: 1px solid var(--border);
   border-radius: 8px;
@@ -745,6 +746,7 @@ textarea:disabled {
   font-family: "SF Mono", "Roboto Mono", ui-monospace, monospace;
   font-size: 14px;
   line-height: 1.72;
+  scrollbar-gutter: stable;
 }
 
 .markdown-preview {
@@ -758,6 +760,7 @@ textarea:disabled {
   color: #1d2a33;
   font-size: 14px;
   line-height: 1.72;
+  scrollbar-gutter: stable;
 }
 
 .markdown-preview > :first-child {
