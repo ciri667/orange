@@ -1,6 +1,7 @@
 import { Edit3, FolderOpen, Plus, Save, Search, Trash2, X } from "lucide-react";
 import type { FormEvent } from "react";
 import { useMemo, useState } from "react";
+import { ConfirmDialog, type ConfirmDialogConfig } from "../shared/ConfirmDialog";
 import type { AgentSkill, AgentSkillSource } from "../shared/types";
 
 /** Skills 列表来源筛选，all 用于展示完整合并结果。 */
@@ -22,6 +23,11 @@ interface SkillFormDraft {
   triggersText: string;
   enabled: boolean;
   allowAutoInvoke: boolean;
+}
+
+/** 待确认的 Skill 操作；确认后才执行删除，避免依赖系统 confirm。 */
+interface PendingSkillConfirmation extends ConfirmDialogConfig {
+  onConfirm: () => Promise<void> | void;
 }
 
 /** Skills 管理弹窗，提供浏览、筛选、启停和用户自建 skill CRUD。 */
@@ -52,6 +58,8 @@ export function SkillsModal({
   const [selectedSkillId, setSelectedSkillId] = useState(skills[0]?.id ?? "");
   /** 表单草稿存在时详情面板切换为新建或编辑模式。 */
   const [formDraft, setFormDraft] = useState<SkillFormDraft | null>(null);
+  /** 当前等待用户确认的危险操作，使用应用内弹窗承载。 */
+  const [pendingConfirmation, setPendingConfirmation] = useState<PendingSkillConfirmation | null>(null);
 
   /** 可用标签来自当前 skill 列表，便于用户快速按能力类别筛选。 */
   const availableTags = useMemo(
@@ -175,13 +183,29 @@ export function SkillsModal({
       return;
     }
 
-    // 用户自建 skill 删除后需要从文件夹或备份恢复，需要明确确认。
-    if (!window.confirm(`删除 Skill「${skill.displayName}」？`)) {
+    setPendingConfirmation({
+      title: "删除 Skill",
+      message: `删除 Skill「${skill.displayName}」？文件式 Skill 会移除用户 Skills 目录中的对应文件夹。`,
+      confirmLabel: "删除 Skill",
+      cancelLabel: "取消",
+      tone: "danger",
+      onConfirm: async () => {
+        await onDeleteSkill(skill.id);
+        setSelectedSkillId(skills.find((item) => item.id !== skill.id)?.id ?? "");
+      },
+    });
+  }
+
+  /** 执行已确认的 Skill 危险操作，并在业务完成后关闭确认弹窗。 */
+  async function handleConfirmDialogConfirm() {
+    const confirmation = pendingConfirmation;
+
+    if (!confirmation) {
       return;
     }
 
-    await onDeleteSkill(skill.id);
-    setSelectedSkillId(skills.find((item) => item.id !== skill.id)?.id ?? "");
+    await confirmation.onConfirm();
+    setPendingConfirmation(null);
   }
 
   return (
@@ -281,6 +305,14 @@ export function SkillsModal({
           </div>
         </div>
       </section>
+      {pendingConfirmation && (
+        <ConfirmDialog
+          {...pendingConfirmation}
+          isBusy={isBusy}
+          onCancel={() => setPendingConfirmation(null)}
+          onConfirm={() => void handleConfirmDialogConfirm()}
+        />
+      )}
     </div>
   );
 }
