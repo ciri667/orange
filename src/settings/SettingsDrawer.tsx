@@ -1,5 +1,21 @@
-import { Check, FolderOpen, KeyRound, Plus, RotateCw, Save, Sparkles, Trash2, X } from "lucide-react";
-import { useEffect, useState } from "react";
+import {
+  BookOpen,
+  FolderOpen,
+  History,
+  KeyRound,
+  Plus,
+  RotateCw,
+  Save,
+  ScrollText,
+  Settings2,
+  ShieldCheck,
+  Sparkles,
+  Trash2,
+  X,
+} from "lucide-react";
+import type { LucideIcon } from "lucide-react";
+import { useEffect, useMemo, useState } from "react";
+import { logDebug, logError, logInfo } from "../shared/logger";
 import type {
   AgentSkill,
   AppEventLog,
@@ -12,7 +28,27 @@ import type {
 } from "../shared/types";
 import { SkillsModal } from "./SkillsModal";
 
-/** 设置抽屉，展示多知识库管理、模型策略和写入权限。 */
+/** 设置页左侧导航的可选分区，和右侧主内容一一对应。 */
+type SettingsSectionId = "knowledge" | "model" | "skills" | "eventLogs" | "auditLogs";
+
+/** 设置页导航分组，帮助用户区分可配置项和只读诊断项。 */
+type SettingsSectionGroup = "配置" | "诊断";
+
+/** 设置页导航项展示模型，meta 只放脱敏状态或轻量计数。 */
+interface SettingsSectionNavItem {
+  id: SettingsSectionId;
+  group: SettingsSectionGroup;
+  label: string;
+  description: string;
+  meta: string;
+  icon: LucideIcon;
+  tone?: "neutral" | "success" | "warning";
+}
+
+/** 左侧导航分组顺序，保证配置项始终排在诊断项之前。 */
+const SETTINGS_SECTION_GROUPS: SettingsSectionGroup[] = ["配置", "诊断"];
+
+/** 设置抽屉，展示多知识库、模型策略、Skills 和诊断信息。 */
 export function SettingsDrawer({
   knowledgeBases,
   activeKnowledgeBaseId,
@@ -68,6 +104,8 @@ export function SettingsDrawer({
   const [apiKeyDraft, setApiKeyDraft] = useState("");
   /** Skills 管理弹窗状态，避免设置抽屉内一次性铺开完整管理页。 */
   const [isSkillsModalOpen, setIsSkillsModalOpen] = useState(false);
+  /** 当前设置分区，驱动左侧导航高亮和右侧单页内容渲染。 */
+  const [activeSection, setActiveSection] = useState<SettingsSectionId>("knowledge");
   /** 应用事件日志级别筛选，空字符串表示不过滤。 */
   const [eventLogLevel, setEventLogLevel] = useState<AppEventLogLevel | "">("");
   /** 应用事件日志分类筛选，空字符串表示不过滤。 */
@@ -78,26 +116,140 @@ export function SettingsDrawer({
   const autoSkillCount = skills.filter((skill) => skill.enabled && skill.allowAutoInvoke).length;
   /** 文件式 skill 数量用于确认用户目录扫描是否已生效。 */
   const fileSkillCount = skills.filter((skill) => skill.source === "file").length;
+  /** 左侧导航项只汇总脱敏状态和轻量计数，避免路径、密钥或请求内容进入 UI 状态元数据。 */
+  const settingsNavItems = useMemo<SettingsSectionNavItem[]>(
+    () => [
+      {
+        id: "knowledge",
+        group: "配置",
+        label: "知识库管理",
+        description: "目录授权、激活和重新扫描",
+        meta: `${knowledgeBases.length} 个`,
+        icon: BookOpen,
+        tone: knowledgeBases.some((knowledgeBase) => knowledgeBase.status === "error") ? "warning" : "neutral",
+      },
+      {
+        id: "model",
+        group: "配置",
+        label: "模型与隐私",
+        description: "BYOK、模型端点和发送边界",
+        meta: settingsDraft.modelConfig.enabled ? "已启用" : "未启用",
+        icon: Settings2,
+        tone: settingsDraft.modelConfig.enabled ? "success" : "neutral",
+      },
+      {
+        id: "skills",
+        group: "配置",
+        label: "Skills 能力",
+        description: "自动匹配和能力管理入口",
+        meta: `${enabledSkillCount}/${skills.length}`,
+        icon: Sparkles,
+        tone: settingsDraft.skillSettings.activationMode === "auto" ? "success" : "neutral",
+      },
+      {
+        id: "eventLogs",
+        group: "诊断",
+        label: "运行日志",
+        description: "应用事件、级别和分类筛选",
+        meta: `${appEventLogs.length} 条`,
+        icon: History,
+        tone: appEventLogs.some((log) => log.level === "error") ? "warning" : "neutral",
+      },
+      {
+        id: "auditLogs",
+        group: "诊断",
+        label: "请求审计",
+        description: "模型请求和工具边界",
+        meta: `${auditLogs.length} 条`,
+        icon: ScrollText,
+        tone: "neutral",
+      },
+    ],
+    [
+      appEventLogs,
+      auditLogs.length,
+      enabledSkillCount,
+      knowledgeBases,
+      settingsDraft.modelConfig.enabled,
+      settingsDraft.skillSettings.activationMode,
+      skills.length,
+    ],
+  );
 
   useEffect(() => {
     setSettingsDraft(settings);
   }, [settings]);
 
-  /** 保存模型与隐私设置；写入确认策略在首版始终保持开启。 */
+  /** 保存模型、隐私和 skill 设置；日志只记录状态和耗时，不记录端点、模型名或密钥。 */
   async function handleSaveSettings() {
-    await onSaveSettings({
+    const startedAt = performance.now();
+    const nextSettings = {
       ...settingsDraft,
       writeConfirmationRequired: true,
+    };
+
+    logInfo("设置页保存用户设置。", {
+      category: "settings",
+      event: "settings_save",
+      status: "started",
+      metadata: {
+        modelEnabled: nextSettings.modelConfig.enabled,
+        privacyPolicy: nextSettings.privacyPolicy,
+        skillActivationMode: nextSettings.skillSettings.activationMode,
+      },
     });
+
+    try {
+      await onSaveSettings(nextSettings);
+      logInfo("设置页用户设置保存完成。", {
+        category: "settings",
+        event: "settings_save",
+        status: "completed",
+        durationMs: performance.now() - startedAt,
+      });
+    } catch (error) {
+      logError("设置页用户设置保存失败。", {
+        category: "settings",
+        event: "settings_save",
+        status: "failed",
+        durationMs: performance.now() - startedAt,
+        error,
+      });
+      throw error;
+    }
   }
 
-  /** 保存 BYOK key 后清空输入框，避免密钥继续留在可见表单状态里。 */
+  /** 保存 BYOK key 后清空输入框，日志只记录是否提交了输入，不记录密钥内容。 */
   async function handleSaveApiKey() {
+    const startedAt = performance.now();
+
+    logInfo("设置页保存模型密钥。", {
+      category: "settings",
+      event: "model_api_key_save",
+      status: "started",
+      metadata: {
+        hasInput: Boolean(apiKeyDraft.trim()),
+      },
+    });
+
     try {
       await onSaveApiKey(apiKeyDraft);
       setApiKeyDraft("");
-    } catch {
+      logInfo("设置页模型密钥保存完成。", {
+        category: "settings",
+        event: "model_api_key_save",
+        status: "completed",
+        durationMs: performance.now() - startedAt,
+      });
+    } catch (error) {
       // 外层已经把失败原因写入全局 notice；这里保留输入，方便用户修正后重试。
+      logError("设置页模型密钥保存失败。", {
+        category: "settings",
+        event: "model_api_key_save",
+        status: "failed",
+        durationMs: performance.now() - startedAt,
+        error,
+      });
     }
   }
 
@@ -110,6 +262,24 @@ export function SettingsDrawer({
         [field]: value,
       },
     }));
+  }
+
+  /** 切换设置分区并写入低频调试日志，便于诊断导航状态但不影响渲染性能。 */
+  function handleActiveSectionChange(sectionId: SettingsSectionId) {
+    if (sectionId === activeSection) {
+      return;
+    }
+
+    logDebug("切换设置页分区。", {
+      category: "settings",
+      event: "settings_section_change",
+      status: "completed",
+      metadata: {
+        from: activeSection,
+        to: sectionId,
+      },
+    });
+    setActiveSection(sectionId);
   }
 
   /** 返回当前运行日志筛选条件，供刷新和清空后重载列表复用。 */
@@ -132,69 +302,109 @@ export function SettingsDrawer({
     void onRefreshAppEventLogs({ level: eventLogLevel, category });
   }
 
-  return (
-    <div className="settings-backdrop" role="presentation">
-      <aside className="settings-drawer" aria-label="设置">
-        <header className="settings-header">
-          <div>
-            <p className="section-label">Settings</p>
-            <h2>知识库与 Agent 设置</h2>
-          </div>
-          <button className="icon-button" type="button" title="关闭设置" onClick={onClose}>
-            <X size={18} />
-          </button>
-        </header>
+  /** 渲染设置导航分组；按配置/诊断拆开，避免所有入口混在同一列表里。 */
+  function renderNavigationGroup(group: SettingsSectionGroup) {
+    const groupItems = settingsNavItems.filter((item) => item.group === group);
 
-        <div className="settings-section">
-          <div className="settings-section-title">
-            <h3>知识库管理</h3>
+    return (
+      <div className="settings-nav-group" key={group}>
+        <p className="settings-nav-group-label">{group}</p>
+        <div className="settings-nav-items">
+          {groupItems.map((item) => {
+            const SectionIcon = item.icon;
+
+            return (
+              <button
+                className={`settings-nav-item ${activeSection === item.id ? "active" : ""}`}
+                key={item.id}
+                type="button"
+                aria-current={activeSection === item.id ? "page" : undefined}
+                onClick={() => handleActiveSectionChange(item.id)}
+              >
+                <SectionIcon size={17} />
+                <span className="settings-nav-text">
+                  <strong>{item.label}</strong>
+                  <small>{item.description}</small>
+                </span>
+                <em className={`settings-nav-meta ${item.tone ?? "neutral"}`}>{item.meta}</em>
+              </button>
+            );
+          })}
+        </div>
+      </div>
+    );
+  }
+
+  /** 根据左侧选中项只渲染一个主配置区，避免设置面板出现长串卡片和双重滚动。 */
+  function renderActiveSection() {
+    if (activeSection === "knowledge") {
+      return (
+        <section className="settings-section" aria-labelledby="knowledge-settings-title">
+          <div className="settings-section-title settings-content-title">
+            <div>
+              <p className="section-label">Configuration</p>
+              <h3 id="knowledge-settings-title">知识库管理</h3>
+              <p>管理已授权目录、激活知识库和本地索引刷新。</p>
+            </div>
             <button className="ghost-button" type="button" onClick={onAddKnowledgeBase}>
               <Plus size={15} />
               添加知识库
             </button>
           </div>
           <div className="settings-kb-list">
-            {knowledgeBases.map((knowledgeBase) => (
-              <article className="settings-kb-card" key={knowledgeBase.id}>
-                <div>
-                  <div className="kb-card-title">
-                    <strong>{knowledgeBase.name}</strong>
-                    <span>{knowledgeBase.status === "error" ? "目录失效" : knowledgeBase.semanticIndexEnabled ? "本地向量" : "FTS5"}</span>
-                    {knowledgeBase.id === activeKnowledgeBaseId && <span>当前激活</span>}
+            {knowledgeBases.length ? (
+              knowledgeBases.map((knowledgeBase) => (
+                <article className="settings-kb-card" key={knowledgeBase.id}>
+                  <div>
+                    <div className="kb-card-title">
+                      <strong>{knowledgeBase.name}</strong>
+                      <span>{knowledgeBase.status === "error" ? "目录失效" : knowledgeBase.semanticIndexEnabled ? "本地向量" : "FTS5"}</span>
+                      {knowledgeBase.id === activeKnowledgeBaseId && <span>当前激活</span>}
+                    </div>
+                    <p>{knowledgeBase.description}</p>
+                    <code>{knowledgeBase.path}</code>
+                    <ScanReportDetails knowledgeBase={knowledgeBase} />
                   </div>
-                  <p>{knowledgeBase.description}</p>
-                  <code>{knowledgeBase.path}</code>
-                  <ScanReportDetails knowledgeBase={knowledgeBase} />
-                </div>
-                <div className="setting-actions">
-                  <button type="button" onClick={() => onSelectKnowledgeBase(knowledgeBase.id)} disabled={isBusy}>
-                    激活
-                  </button>
-                  <button type="button" onClick={() => onRescanKnowledgeBase(knowledgeBase.id)} disabled={isBusy}>
-                    <RotateCw size={13} />
-                    重新扫描
-                  </button>
-                  <button
-                    className="danger-action"
-                    type="button"
-                    onClick={() => onRemoveKnowledgeBase(knowledgeBase.id)}
-                    disabled={isBusy}
-                  >
-                    <Trash2 size={13} />
-                    移除授权
-                  </button>
-                </div>
-              </article>
-            ))}
+                  <div className="setting-actions">
+                    <button type="button" onClick={() => onSelectKnowledgeBase(knowledgeBase.id)} disabled={isBusy}>
+                      激活
+                    </button>
+                    <button type="button" onClick={() => onRescanKnowledgeBase(knowledgeBase.id)} disabled={isBusy}>
+                      <RotateCw size={13} />
+                      重新扫描
+                    </button>
+                    <button
+                      className="danger-action"
+                      type="button"
+                      onClick={() => onRemoveKnowledgeBase(knowledgeBase.id)}
+                      disabled={isBusy}
+                    >
+                      <Trash2 size={13} />
+                      移除授权
+                    </button>
+                  </div>
+                </article>
+              ))
+            ) : (
+              <p className="settings-empty">暂无已授权知识库。</p>
+            )}
           </div>
-        </div>
+        </section>
+      );
+    }
 
-        <div className="settings-section">
-          <div className="settings-section-title">
-            <h3>模型与工具</h3>
+    if (activeSection === "model") {
+      return (
+        <section className="settings-section" aria-labelledby="model-settings-title">
+          <div className="settings-section-title settings-content-title">
+            <div>
+              <p className="section-label">Configuration</p>
+              <h3 id="model-settings-title">模型与隐私</h3>
+              <p>配置 OpenAI-compatible BYOK、发送边界和写入确认策略。</p>
+            </div>
             <button className="primary-button compact" type="button" onClick={handleSaveSettings} disabled={isBusy}>
               <Save size={14} />
-              保存
+              保存设置
             </button>
           </div>
           <div className="settings-grid">
@@ -247,7 +457,7 @@ export function SettingsDrawer({
               <span>Key reference</span>
               <input value={settingsDraft.modelConfig.keyReference} readOnly />
             </label>
-            <label>
+            <label className="settings-full-row">
               <span>API key</span>
               <div className="key-save-row">
                 <input
@@ -267,15 +477,33 @@ export function SettingsDrawer({
               </div>
             </label>
           </div>
-        </div>
+          <div className="policy-row">
+            <ShieldCheck size={16} />
+            <span>Agent 写入工具只能生成 diff；用户确认后才执行路径校验、hash 校验和原子写入。</span>
+          </div>
+        </section>
+      );
+    }
 
-        <div className="settings-section">
-          <div className="settings-section-title">
-            <h3>Skills 能力</h3>
-            <button className="ghost-button" type="button" onClick={() => setIsSkillsModalOpen(true)}>
-              <Sparkles size={14} />
-              管理 Skills
-            </button>
+    if (activeSection === "skills") {
+      return (
+        <section className="settings-section" aria-labelledby="skills-settings-title">
+          <div className="settings-section-title settings-content-title">
+            <div>
+              <p className="section-label">Configuration</p>
+              <h3 id="skills-settings-title">Skills 能力</h3>
+              <p>管理 Agent 可用能力和未显式选择时的匹配方式。</p>
+            </div>
+            <div className="settings-title-actions">
+              <button className="ghost-button" type="button" onClick={() => setIsSkillsModalOpen(true)}>
+                <Sparkles size={14} />
+                管理 Skills
+              </button>
+              <button className="primary-button compact" type="button" onClick={handleSaveSettings} disabled={isBusy}>
+                <Save size={14} />
+                保存设置
+              </button>
+            </div>
           </div>
           <div className="skills-summary">
             <div>
@@ -286,7 +514,7 @@ export function SettingsDrawer({
             </div>
             <div>
               <span>自动触发</span>
-              <strong>{settings.skillSettings.activationMode === "auto" ? `${autoSkillCount} 个` : "已关闭"}</strong>
+              <strong>{settingsDraft.skillSettings.activationMode === "auto" ? `${autoSkillCount} 个` : "已关闭"}</strong>
             </div>
             <div>
               <span>文件 Skills</span>
@@ -308,19 +536,19 @@ export function SettingsDrawer({
             />
             <span>允许未显式选择时自动匹配 skill</span>
           </label>
-        </div>
+        </section>
+      );
+    }
 
-        <div className="settings-section">
-          <h3>写入策略</h3>
-          <div className="policy-row">
-            <Check size={16} />
-            <span>Agent 写入工具只能生成 diff；用户确认后才执行路径校验、hash 校验和原子写入。</span>
-          </div>
-        </div>
-
-        <div className="settings-section">
-          <div className="settings-section-title">
-            <h3>运行日志与诊断</h3>
+    if (activeSection === "eventLogs") {
+      return (
+        <section className="settings-section" aria-labelledby="event-log-settings-title">
+          <div className="settings-section-title settings-content-title">
+            <div>
+              <p className="section-label">Diagnostics</p>
+              <h3 id="event-log-settings-title">运行日志</h3>
+              <p>查看应用事件日志，按级别和分类筛选。</p>
+            </div>
             <div className="settings-title-actions">
               <button className="ghost-button" type="button" onClick={onOpenAppLogFolder} disabled={isBusy}>
                 <FolderOpen size={14} />
@@ -330,7 +558,12 @@ export function SettingsDrawer({
                 <RotateCw size={14} />
                 刷新
               </button>
-              <button className="ghost-button danger-action" type="button" onClick={() => onClearAppEventLogs(currentEventLogFilters())} disabled={isBusy}>
+              <button
+                className="ghost-button danger-action"
+                type="button"
+                onClick={() => onClearAppEventLogs(currentEventLogFilters())}
+                disabled={isBusy}
+              >
                 <Trash2 size={14} />
                 清空
               </button>
@@ -371,26 +604,53 @@ export function SettingsDrawer({
             {appEventLogs.length ? (
               appEventLogs.map((log) => <AppEventLogCard key={log.id} log={log} />)
             ) : (
-              <p>暂无运行日志。</p>
+              <p className="settings-empty">暂无运行日志。</p>
             )}
           </div>
-        </div>
+        </section>
+      );
+    }
 
-        <div className="settings-section">
-          <div className="settings-section-title">
-            <h3>请求审计</h3>
-            <button className="ghost-button" type="button" onClick={onRefreshAuditLogs} disabled={isBusy}>
-              <RotateCw size={14} />
-              刷新
-            </button>
+    return (
+      <section className="settings-section" aria-labelledby="audit-settings-title">
+        <div className="settings-section-title settings-content-title">
+          <div>
+            <p className="section-label">Diagnostics</p>
+            <h3 id="audit-settings-title">请求审计</h3>
+            <p>查看最近模型请求、本地规则回退和工具边界摘要。</p>
           </div>
-          <div className="audit-list">
-            {auditLogs.length ? (
-              auditLogs.map((log) => <AuditLogCard key={log.id} log={log} />)
-            ) : (
-              <p>暂无审计记录。</p>
-            )}
+          <button className="ghost-button" type="button" onClick={onRefreshAuditLogs} disabled={isBusy}>
+            <RotateCw size={14} />
+            刷新
+          </button>
+        </div>
+        <div className="audit-list">
+          {auditLogs.length ? auditLogs.map((log) => <AuditLogCard key={log.id} log={log} />) : <p className="settings-empty">暂无审计记录。</p>}
+        </div>
+      </section>
+    );
+  }
+
+  return (
+    <div className="settings-backdrop" role="presentation" onMouseDown={onClose}>
+      <aside className="settings-drawer" aria-label="设置" onMouseDown={(event) => event.stopPropagation()}>
+        <header className="settings-header">
+          <div>
+            <p className="section-label">Settings</p>
+            <h2>知识库与 Agent 设置</h2>
           </div>
+          <button className="icon-button" type="button" title="关闭设置" onClick={onClose}>
+            <X size={18} />
+          </button>
+        </header>
+
+        <div className="settings-workbench">
+          <nav className="settings-sidebar" aria-label="设置项">
+            {SETTINGS_SECTION_GROUPS.map((group) => renderNavigationGroup(group))}
+          </nav>
+          <main className="settings-content" aria-label="设置主要内容">
+            {renderActiveSection()}
+          </main>
         </div>
         {isSkillsModalOpen && (
           <SkillsModal
