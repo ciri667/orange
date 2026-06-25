@@ -6,9 +6,9 @@ use crate::domain::{
     LoadSessionsPayload, ModelApiKeyStatus, ProposedChange, RemoveKnowledgeBasePayload,
     RenameDocumentPayload, RenameNotePayload, RequestAuditLog, RescanKnowledgeBasePayload,
     RestoreSessionContextPayload, SaveAgentSkillPayload, SaveDocumentContentPayload,
-    SaveModelApiKeyPayload, SaveNoteContentPayload, SaveSessionPayload, SaveUserSettingsPayload,
-    ScanKnowledgeBasePayload, ScanReport, ToggleAgentSkillPayload, UpdateSessionScopePayload,
-    UserSettings, WorkspaceSnapshot,
+    SaveModelApiKeyPayload, SaveNoteContentPayload, SaveNoteImageAttachmentsPayload,
+    SaveSessionPayload, SaveUserSettingsPayload, ScanKnowledgeBasePayload, ScanReport,
+    ToggleAgentSkillPayload, UpdateSessionScopePayload, UserSettings, WorkspaceSnapshot,
 };
 use crate::logging::{self, AppEventBuilder, AppLogCategory, AppLogLevel};
 use crate::runtime;
@@ -1393,6 +1393,91 @@ pub async fn save_note_content(
     );
 
     Ok(snapshot)
+}
+
+/** 保存当前笔记粘贴的图片附件，只负责落盘和返回 Markdown 片段，不写回正文。 */
+#[tauri::command]
+pub async fn save_note_image_attachments(
+    app: AppHandle,
+    payload: SaveNoteImageAttachmentsPayload,
+) -> Result<Vec<crate::domain::SavedNoteImageAttachment>, String> {
+    let started_at = Instant::now();
+    let note_count = payload.images.len();
+    let note_id = payload.note_id.clone();
+    let snapshot = payload.snapshot;
+    let note = snapshot
+        .notes
+        .iter()
+        .find(|item| item.id == note_id)
+        .ok_or_else(|| "找不到要保存图片的 Markdown 笔记。".to_owned())?;
+    let knowledge_base = snapshot
+        .knowledge_bases
+        .iter()
+        .find(|item| item.id == note.knowledge_base_id)
+        .ok_or_else(|| "找不到图片附件所属知识库。".to_owned())?;
+    let knowledge_base_id = knowledge_base.id.clone();
+    let note_entity_id = note.id.clone();
+    let root_path = PathBuf::from(&knowledge_base.path);
+    let note_relative_path = note.path.clone();
+    let write_note_relative_path = note_relative_path.clone();
+    let images = payload.images;
+
+    let save_result = run_blocking("保存粘贴图片附件", move || {
+        storage::save_note_image_attachments(&root_path, &write_note_relative_path, &images)
+    })
+    .await;
+
+    match save_result {
+        Ok(saved_attachments) => {
+            let total_byte_size: usize = saved_attachments
+                .iter()
+                .map(|attachment| attachment.byte_size)
+                .sum();
+
+            logging::write_app_event_best_effort(
+                &app,
+                AppEventBuilder::new(
+                    AppLogLevel::Info,
+                    AppLogCategory::Editor,
+                    "paste_image_attachment",
+                    "completed",
+                    "已保存粘贴图片附件。",
+                )
+                .duration(started_at.elapsed())
+                .knowledge_base_id(knowledge_base_id.clone())
+                .entity("note", note_entity_id.clone())
+                .relative_path(note_relative_path.clone())
+                .metadata(json!({
+                    "imageCount": note_count,
+                    "savedCount": saved_attachments.len(),
+                    "totalBytes": total_byte_size,
+                })),
+            );
+
+            Ok(saved_attachments)
+        }
+        Err(error) => {
+            logging::write_app_event_best_effort(
+                &app,
+                AppEventBuilder::new(
+                    AppLogLevel::Warn,
+                    AppLogCategory::Editor,
+                    "paste_image_attachment",
+                    "failed",
+                    "粘贴图片附件保存失败。",
+                )
+                .duration(started_at.elapsed())
+                .knowledge_base_id(knowledge_base_id)
+                .entity("note", note_entity_id)
+                .relative_path(note_relative_path)
+                .metadata(json!({
+                    "imageCount": note_count,
+                })),
+            );
+
+            Err(error)
+        }
+    }
 }
 
 /** 保存当前 txt 文档正文，校验知识库边界和文件 hash 后原子写回本地文件。 */

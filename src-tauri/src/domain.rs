@@ -465,6 +465,35 @@ pub struct SaveNoteContentPayload {
     pub expected_hash: String,
 }
 
+/** 单张待保存的粘贴图片；bytesBase64 只在命令边界传输，不能写入日志。 */
+#[derive(Clone, Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NoteImageAttachmentInput {
+    pub mime_type: String,
+    pub bytes_base64: String,
+    #[serde(default)]
+    pub original_file_name: Option<String>,
+}
+
+/** 粘贴图片保存命令入参，正文不在此命令内写回 Markdown。 */
+#[derive(Clone, Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SaveNoteImageAttachmentsPayload {
+    pub snapshot: WorkspaceSnapshot,
+    pub note_id: String,
+    pub images: Vec<NoteImageAttachmentInput>,
+}
+
+/** 已保存的图片附件，relativePath 是相对当前 Markdown 文件的引用路径。 */
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SavedNoteImageAttachment {
+    pub relative_path: String,
+    pub markdown: String,
+    pub mime_type: String,
+    pub byte_size: usize,
+}
+
 /** 保存 txt 文档正文的命令入参，expectedHash 用于发现外部编辑器冲突。 */
 #[derive(Clone, Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]

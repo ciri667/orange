@@ -93,6 +93,7 @@ pub fn run() {
             commands::delete_note,
             commands::delete_document,
             commands::save_note_content,
+            commands::save_note_image_attachments,
             commands::save_document_content,
             commands::load_document_preview,
             commands::remove_knowledge_base,

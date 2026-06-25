@@ -1,8 +1,11 @@
 use crate::domain::{
     AgentMessage, AgentSession, AppEventLog, DocumentPreview, DocumentPreviewBlock, FolderEntry,
-    KnowledgeBase, KnowledgeBaseSelection, ModelApiKeyStatus, ModelConfig, Note, RequestAuditLog,
-    ScanReport, UserSettings, WorkspaceDocument, WorkspaceSnapshot,
+    KnowledgeBase, KnowledgeBaseSelection, ModelApiKeyStatus, ModelConfig, Note,
+    NoteImageAttachmentInput, RequestAuditLog, SavedNoteImageAttachment, ScanReport, UserSettings,
+    WorkspaceDocument, WorkspaceSnapshot,
 };
+use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
+use base64::Engine as _;
 use chrono::{Duration as ChronoDuration, Local, NaiveDateTime, TimeZone};
 use quick_xml::events::Event;
 use quick_xml::Reader;
@@ -10,7 +13,7 @@ use rusqlite::{params, Connection, TransactionBehavior};
 use sha2::{Digest, Sha256};
 use std::collections::{HashMap, HashSet};
 use std::fs;
-use std::io::{Read, Write};
+use std::io::{ErrorKind, Read, Write};
 use std::path::{Component, Path, PathBuf};
 use std::sync::{Mutex, MutexGuard, OnceLock};
 use std::time::Duration;
@@ -52,6 +55,18 @@ const APP_EVENT_LOG_RETENTION_DAYS: i64 = 30;
 /** 系统安全存储中的模型密钥引用，SQLite 只保存这个引用而不保存明文 key。 */
 pub const MODEL_KEY_REFERENCE: &str = "cici-note-openai-compatible-api-key";
 
+/** 单张粘贴图片最大字节数，避免超大剪贴板内容阻塞 UI 或撑爆本地目录。 */
+const MAX_SINGLE_PASTE_IMAGE_BYTES: usize = 20 * 1024 * 1024;
+
+/** 单次粘贴图片总字节数上限，用于限制批量截图或多图复制的最坏写入成本。 */
+const MAX_PASTE_IMAGE_BATCH_BYTES: usize = 50 * 1024 * 1024;
+
+/** 图片附件文件名 hash 前缀长度，兼顾可读性和同秒重复粘贴冲突概率。 */
+const PASTED_IMAGE_HASH_PREFIX_LENGTH: usize = 12;
+
+/** 附件目录没有可用笔记名时使用的兜底目录名。 */
+const DEFAULT_ATTACHMENT_NOTE_FOLDER_NAME: &str = "note";
+
 /** 当前桌面进程内的模型密钥缓存，用于减少同一会话内反复访问系统安全存储。 */
 static MODEL_API_KEY_CACHE: OnceLock<Mutex<Option<String>>> = OnceLock::new();
 
@@ -85,6 +100,200 @@ pub fn hash_bytes(bytes: &[u8]) -> String {
     let mut hasher = Sha256::new();
     hasher.update(bytes);
     format!("{:x}", hasher.finalize())
+}
+
+/** 粘贴图片识别后的安全格式，只允许浏览器和 Markdown 预览能直接显示的常见位图。 */
+#[derive(Clone, Copy, Debug)]
+struct ImageAttachmentFormat {
+    mime_type: &'static str,
+    extension: &'static str,
+}
+
+/** 已完成校验的待写入图片，避免写文件过程中才发现 MIME 或大小不合法。 */
+struct PreparedImageAttachment {
+    bytes: Vec<u8>,
+    format: ImageAttachmentFormat,
+    hash_prefix: String,
+}
+
+/** 单次写入完成后的文件位置，分别服务清理和 Markdown 插入。 */
+struct WrittenImageAttachment {
+    absolute_path: PathBuf,
+    markdown_relative_path: String,
+}
+
+/** 为当前 Markdown 笔记保存粘贴图片附件，返回可插入正文的 Markdown 图片片段。 */
+pub fn save_note_image_attachments(
+    root: &Path,
+    note_relative_path: &str,
+    images: &[NoteImageAttachmentInput],
+) -> Result<Vec<SavedNoteImageAttachment>, String> {
+    if images.is_empty() {
+        return Err("没有可保存的图片。".to_owned());
+    }
+
+    let note_path = resolve_existing_file_inside_root(root, note_relative_path)?;
+
+    if !is_markdown_file(&note_path) {
+        return Err("只能为 Markdown 笔记保存图片附件。".to_owned());
+    }
+
+    let prepared_images = prepare_image_attachments(images)?;
+    let note_directory = get_relative_parent_path(note_relative_path);
+    let attachment_note_folder = attachment_folder_name_from_note_path(note_relative_path);
+    let attachment_directory =
+        join_relative_path_parts(&[&note_directory, "assets", &attachment_note_folder]);
+    let markdown_directory = join_relative_path_parts(&["assets", &attachment_note_folder]);
+    let timestamp = Local::now().format("%Y%m%d-%H%M%S").to_string();
+    let mut saved_files = Vec::new();
+    let mut saved_attachments = Vec::new();
+
+    for prepared_image in prepared_images {
+        let file_stem = format!("pasted-{timestamp}-{}", prepared_image.hash_prefix);
+        let write_result = write_unique_image_attachment(
+            root,
+            &attachment_directory,
+            &markdown_directory,
+            &file_stem,
+            prepared_image.format.extension,
+            &prepared_image.bytes,
+        );
+
+        let written_image = match write_result {
+            Ok(written_image) => written_image,
+            Err(error) => {
+                remove_written_files_best_effort(&saved_files);
+                return Err(error);
+            }
+        };
+        let byte_size = prepared_image.bytes.len();
+        let markdown_path = encode_markdown_image_path(&written_image.markdown_relative_path);
+
+        saved_files.push(written_image.absolute_path);
+        saved_attachments.push(SavedNoteImageAttachment {
+            relative_path: written_image.markdown_relative_path,
+            markdown: format!("![image]({markdown_path})"),
+            mime_type: prepared_image.format.mime_type.to_owned(),
+            byte_size,
+        });
+    }
+
+    Ok(saved_attachments)
+}
+
+/** 解码并校验整批图片；任何一张失败都不会进入文件写入阶段。 */
+fn prepare_image_attachments(
+    images: &[NoteImageAttachmentInput],
+) -> Result<Vec<PreparedImageAttachment>, String> {
+    let mut total_bytes = 0usize;
+    let mut prepared_images = Vec::with_capacity(images.len());
+
+    for image in images {
+        // 原始文件名可能包含用户隐私，首版只保留接口兼容性，不参与命名、日志或错误信息。
+        let _ignored_original_file_name = image.original_file_name.as_deref();
+        let expected_mime_type = normalize_image_mime_type(&image.mime_type)?;
+        let bytes = decode_image_base64(&image.bytes_base64)?;
+
+        if bytes.is_empty() {
+            return Err("图片内容为空，已阻止保存。".to_owned());
+        }
+
+        if bytes.len() > MAX_SINGLE_PASTE_IMAGE_BYTES {
+            return Err("单张图片超过 20MB，已阻止保存。".to_owned());
+        }
+
+        total_bytes = total_bytes
+            .checked_add(bytes.len())
+            .ok_or_else(|| "图片总大小超过限制，已阻止保存。".to_owned())?;
+
+        if total_bytes > MAX_PASTE_IMAGE_BATCH_BYTES {
+            return Err("单次粘贴图片总大小超过 50MB，已阻止保存。".to_owned());
+        }
+
+        let detected_format = detect_image_attachment_format(&bytes)?;
+
+        if expected_mime_type != detected_format.mime_type {
+            return Err("图片 MIME 类型与文件内容不一致，已阻止保存。".to_owned());
+        }
+
+        let digest = hash_bytes(&bytes);
+        let hash_prefix = digest
+            .chars()
+            .take(PASTED_IMAGE_HASH_PREFIX_LENGTH)
+            .collect::<String>();
+
+        prepared_images.push(PreparedImageAttachment {
+            bytes,
+            format: detected_format,
+            hash_prefix,
+        });
+    }
+
+    Ok(prepared_images)
+}
+
+/** 标准化剪贴板 MIME；image/jpg 作为常见别名接受，但仍按内容校验为 JPEG。 */
+fn normalize_image_mime_type(mime_type: &str) -> Result<&'static str, String> {
+    let normalized_mime_type = mime_type
+        .split(';')
+        .next()
+        .unwrap_or_default()
+        .trim()
+        .to_ascii_lowercase();
+
+    match normalized_mime_type.as_str() {
+        "image/png" => Ok("image/png"),
+        "image/jpeg" | "image/jpg" => Ok("image/jpeg"),
+        "image/webp" => Ok("image/webp"),
+        "image/gif" => Ok("image/gif"),
+        _ => Err("仅支持 png、jpeg、webp 和 gif 图片。".to_owned()),
+    }
+}
+
+/** 从前端传入的 base64 或 data URL 中提取图片字节，不把原文写入错误信息。 */
+fn decode_image_base64(bytes_base64: &str) -> Result<Vec<u8>, String> {
+    let encoded_body = bytes_base64
+        .split_once(',')
+        .map(|(_, body)| body)
+        .unwrap_or(bytes_base64)
+        .trim();
+
+    BASE64_STANDARD
+        .decode(encoded_body)
+        .map_err(|_| "图片内容不是有效的 base64，已阻止保存。".to_owned())
+}
+
+/** 根据文件头识别图片真实格式，防止伪造 MIME 的 SVG 或其他文件落盘。 */
+fn detect_image_attachment_format(bytes: &[u8]) -> Result<ImageAttachmentFormat, String> {
+    if bytes.starts_with(&[0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a]) {
+        return Ok(ImageAttachmentFormat {
+            mime_type: "image/png",
+            extension: "png",
+        });
+    }
+
+    if bytes.len() >= 3 && bytes[0] == 0xff && bytes[1] == 0xd8 && bytes[2] == 0xff {
+        return Ok(ImageAttachmentFormat {
+            mime_type: "image/jpeg",
+            extension: "jpg",
+        });
+    }
+
+    if bytes.starts_with(b"GIF87a") || bytes.starts_with(b"GIF89a") {
+        return Ok(ImageAttachmentFormat {
+            mime_type: "image/gif",
+            extension: "gif",
+        });
+    }
+
+    if bytes.len() >= 12 && &bytes[..4] == b"RIFF" && &bytes[8..12] == b"WEBP" {
+        return Ok(ImageAttachmentFormat {
+            mime_type: "image/webp",
+            extension: "webp",
+        });
+    }
+
+    Err("无法识别图片格式，已阻止保存。".to_owned())
 }
 
 /** 生成本地唯一 ID，Rust 层用于新知识库、新笔记和工具调用记录。 */
@@ -2430,6 +2639,124 @@ pub fn resolve_existing_directory_inside_root(
     Ok(target_path)
 }
 
+/** 获取知识库内相对文件路径的父目录，返回值始终使用 / 作为分隔符。 */
+fn get_relative_parent_path(relative_path: &str) -> String {
+    relative_path
+        .trim()
+        .trim_matches('/')
+        .rsplit_once('/')
+        .map(|(parent_path, _file_name)| parent_path.to_owned())
+        .unwrap_or_default()
+}
+
+/** 从 Markdown 文件名生成附件子目录名，避免隐藏目录、路径字符和控制字符进入本地路径。 */
+fn attachment_folder_name_from_note_path(note_relative_path: &str) -> String {
+    let file_name = note_relative_path
+        .trim()
+        .trim_matches('/')
+        .rsplit('/')
+        .next()
+        .unwrap_or_default();
+    let file_stem = file_name
+        .rsplit_once('.')
+        .map(|(stem, _extension)| stem)
+        .unwrap_or(file_name);
+    let sanitized_name = file_stem
+        .chars()
+        .map(|character| match character {
+            '/' | '\\' | ':' | '*' | '?' | '"' | '<' | '>' | '|' => '-',
+            character if character.is_control() => '-',
+            character => character,
+        })
+        .collect::<String>()
+        .trim()
+        .trim_matches('.')
+        .to_owned();
+
+    if sanitized_name.is_empty() || sanitized_name.starts_with('.') {
+        DEFAULT_ATTACHMENT_NOTE_FOLDER_NAME.to_owned()
+    } else {
+        sanitized_name
+    }
+}
+
+/** 拼接知识库内相对路径片段，过滤空片段并统一使用 /，避免平台分隔符进入 Markdown。 */
+fn join_relative_path_parts(parts: &[&str]) -> String {
+    parts
+        .iter()
+        .map(|part| part.trim().trim_matches('/'))
+        .filter(|part| !part.is_empty())
+        .collect::<Vec<_>>()
+        .join("/")
+}
+
+/** 以不覆盖方式写入图片附件，遇到同秒同 hash 重名时追加序号继续尝试。 */
+fn write_unique_image_attachment(
+    root: &Path,
+    attachment_directory: &str,
+    markdown_directory: &str,
+    file_stem: &str,
+    extension: &str,
+    bytes: &[u8],
+) -> Result<WrittenImageAttachment, String> {
+    for duplicate_index in 0..1_000 {
+        let file_name = if duplicate_index == 0 {
+            format!("{file_stem}.{extension}")
+        } else {
+            format!("{file_stem}-{}.{extension}", duplicate_index + 1)
+        };
+        let knowledge_base_relative_path =
+            join_relative_path_parts(&[attachment_directory, &file_name]);
+        let markdown_relative_path = join_relative_path_parts(&[markdown_directory, &file_name]);
+        let target_path = resolve_inside_root(root, &knowledge_base_relative_path)?;
+        let mut target_file = match fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&target_path)
+        {
+            Ok(target_file) => target_file,
+            Err(error) if error.kind() == ErrorKind::AlreadyExists => continue,
+            Err(error) => return Err(format!("无法创建图片附件：{error}")),
+        };
+
+        if let Err(error) = target_file.write_all(bytes) {
+            let _ = fs::remove_file(&target_path);
+            return Err(format!("无法写入图片附件：{error}"));
+        }
+
+        return Ok(WrittenImageAttachment {
+            absolute_path: target_path,
+            markdown_relative_path,
+        });
+    }
+
+    Err("无法生成可用的图片附件文件名，请稍后重试。".to_owned())
+}
+
+/** 对 Markdown 图片路径做最小 URL 转义，保证空格、中文和括号都能被标准 Markdown 解析。 */
+fn encode_markdown_image_path(path: &str) -> String {
+    let mut encoded_path = String::new();
+
+    for byte in path.as_bytes() {
+        let character = *byte as char;
+
+        if character.is_ascii_alphanumeric() || matches!(character, '-' | '_' | '.' | '~' | '/') {
+            encoded_path.push(character);
+        } else {
+            encoded_path.push_str(&format!("%{byte:02X}"));
+        }
+    }
+
+    encoded_path
+}
+
+/** 批量写入后续失败时清理本次已经创建的文件；清理失败不覆盖原始业务错误。 */
+fn remove_written_files_best_effort(paths: &[PathBuf]) {
+    for path in paths {
+        let _ = fs::remove_file(path);
+    }
+}
+
 /** 在指定目录创建不覆盖已有文件的空白 Markdown，并返回相对路径。 */
 pub fn create_blank_markdown_file(
     root: &Path,
@@ -2981,15 +3308,17 @@ mod tests {
         model_keyring_persists_until_delete, normalize_audit_log_created_at,
         normalize_session_created_at, prune_app_event_logs, query_app_event_logs,
         rename_markdown_file, rename_text_document_file, resolve_existing_file_inside_root,
-        resolve_inside_root, scan_markdown_directory, scan_supported_documents_directory,
-        sort_sessions_by_created_at_desc, store_model_api_key_in_cache, trash_markdown_file,
-        trash_text_document_file_with, validate_folder_name, validate_markdown_file_name,
-        validate_new_markdown_file_name, validate_new_text_document_file_name,
-        validate_text_document_file_name,
+        resolve_inside_root, save_note_image_attachments, scan_markdown_directory,
+        scan_supported_documents_directory, sort_sessions_by_created_at_desc,
+        store_model_api_key_in_cache, trash_markdown_file, trash_text_document_file_with,
+        validate_folder_name, validate_markdown_file_name, validate_new_markdown_file_name,
+        validate_new_text_document_file_name, validate_text_document_file_name, BASE64_STANDARD,
     };
     use crate::domain::{
-        AgentSession, AppEventLog, KnowledgeBaseSelection, RequestAuditLog, WorkspaceDocument,
+        AgentSession, AppEventLog, KnowledgeBaseSelection, NoteImageAttachmentInput,
+        RequestAuditLog, WorkspaceDocument,
     };
+    use base64::Engine as _;
     use rusqlite::Connection;
     use std::fs;
     use std::io::Write;
@@ -3044,6 +3373,23 @@ mod tests {
             content_hash: String::new(),
             content: None,
             preview_available: file_type != "txt",
+        }
+    }
+
+    /** 构造最小 PNG 字节，格式识别只依赖文件头即可覆盖附件保存逻辑。 */
+    fn test_png_bytes(label: &[u8]) -> Vec<u8> {
+        let mut bytes = vec![0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a];
+
+        bytes.extend_from_slice(label);
+        bytes
+    }
+
+    /** 构造图片附件命令入参，避免测试把 base64 编码细节散落到各个用例。 */
+    fn test_image_attachment(mime_type: &str, bytes: &[u8]) -> NoteImageAttachmentInput {
+        NoteImageAttachmentInput {
+            mime_type: mime_type.to_owned(),
+            bytes_base64: BASE64_STANDARD.encode(bytes),
+            original_file_name: None,
         }
     }
 
@@ -3423,6 +3769,108 @@ mod tests {
         assert!(validate_folder_name("node_modules").is_err());
         assert!(create_folder(dir.path(), "", "taken").is_err());
         assert!(create_folder(dir.path(), "../outside", "x").is_err());
+    }
+
+    /** 粘贴图片应保存到当前 Markdown 同级 assets/<笔记名>/，并返回可插入的标准 Markdown。 */
+    #[test]
+    fn save_note_image_attachments_creates_note_assets_folder() {
+        let dir = tempdir().unwrap();
+        let note_path = dir.path().join("notes").join("My Note.md");
+        let png_bytes = test_png_bytes(b"first");
+
+        fs::create_dir_all(note_path.parent().unwrap()).unwrap();
+        fs::write(&note_path, "# My Note").unwrap();
+
+        let attachments = save_note_image_attachments(
+            dir.path(),
+            "notes/My Note.md",
+            &[test_image_attachment("image/png", &png_bytes)],
+        )
+        .unwrap();
+        let attachment = &attachments[0];
+
+        assert_eq!(attachments.len(), 1);
+        assert!(attachment
+            .relative_path
+            .starts_with("assets/My Note/pasted-"));
+        assert!(attachment.relative_path.ends_with(".png"));
+        assert!(attachment
+            .markdown
+            .starts_with("![image](assets/My%20Note/pasted-"));
+        assert!(dir
+            .path()
+            .join("notes")
+            .join(&attachment.relative_path)
+            .exists());
+        assert_eq!(
+            fs::read(dir.path().join("notes").join(&attachment.relative_path)).unwrap(),
+            png_bytes
+        );
+    }
+
+    /** 同一批次粘贴相同图片必须生成不同文件名，不能覆盖已写入附件。 */
+    #[test]
+    fn save_note_image_attachments_does_not_overwrite_duplicate_images() {
+        let dir = tempdir().unwrap();
+        let png_bytes = test_png_bytes(b"same-image");
+
+        fs::write(dir.path().join("note.md"), "# Note").unwrap();
+
+        let attachments = save_note_image_attachments(
+            dir.path(),
+            "note.md",
+            &[
+                test_image_attachment("image/png", &png_bytes),
+                test_image_attachment("image/png", &png_bytes),
+            ],
+        )
+        .unwrap();
+
+        assert_eq!(attachments.len(), 2);
+        assert_ne!(attachments[0].relative_path, attachments[1].relative_path);
+        assert!(dir.path().join(&attachments[0].relative_path).exists());
+        assert!(dir.path().join(&attachments[1].relative_path).exists());
+    }
+
+    /** MIME 与文件头不一致时应拒绝保存，防止伪造类型的内容进入知识库。 */
+    #[test]
+    fn save_note_image_attachments_rejects_mime_mismatch() {
+        let dir = tempdir().unwrap();
+        let png_bytes = test_png_bytes(b"mismatch");
+
+        fs::write(dir.path().join("note.md"), "# Note").unwrap();
+
+        let result = save_note_image_attachments(
+            dir.path(),
+            "note.md",
+            &[test_image_attachment("image/jpeg", &png_bytes)],
+        );
+
+        assert!(result.is_err());
+        assert!(!dir.path().join("assets").exists());
+    }
+
+    /** 批量粘贴中任一图片非法时不应修改正文，也不应提前创建附件目录。 */
+    #[test]
+    fn save_note_image_attachments_rejects_batch_without_partial_files() {
+        let dir = tempdir().unwrap();
+        let png_bytes = test_png_bytes(b"valid");
+        let svg_bytes = br#"<svg xmlns="http://www.w3.org/2000/svg"></svg>"#;
+
+        fs::create_dir(dir.path().join("nested")).unwrap();
+        fs::write(dir.path().join("nested").join("note.md"), "# Note").unwrap();
+
+        let result = save_note_image_attachments(
+            dir.path(),
+            "nested/note.md",
+            &[
+                test_image_attachment("image/png", &png_bytes),
+                test_image_attachment("image/svg+xml", svg_bytes),
+            ],
+        );
+
+        assert!(result.is_err());
+        assert!(!dir.path().join("nested").join("assets").exists());
     }
 
     /** 重命名应拒绝路径穿越、空名和非 Markdown 扩展名。 */
