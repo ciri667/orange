@@ -328,6 +328,21 @@ export interface AgentTurnResult {
   snapshot: WorkspaceSnapshot;
 }
 
+/** 单张待保存的粘贴图片；bytesBase64 只传给 Tauri 命令，不能进入日志。 */
+export interface NoteImageAttachmentInput {
+  mimeType: string;
+  bytesBase64: string;
+  originalFileName?: string;
+}
+
+/** 已保存的图片附件，relativePath 是相对当前 Markdown 文件的引用路径。 */
+export interface SavedNoteImageAttachment {
+  relativePath: string;
+  markdown: string;
+  mimeType: string;
+  byteSize: number;
+}
+
 /** 知识库目录选择结果，Tauri 环境中来自系统目录选择器。 */
 export interface KnowledgeBaseSelection {
   id: string;

@@ -24,8 +24,10 @@ import type {
   KnowledgeBaseSelection,
   ModelApiKeyStatus,
   Note,
+  NoteImageAttachmentInput,
   ProposedChange,
   RequestAuditLog,
+  SavedNoteImageAttachment,
   UserSettings,
   WorkspaceDocument,
   WorkspaceSnapshot,
@@ -860,6 +862,21 @@ export async function saveNoteContent(
   }
 
   return invokeLogged<WorkspaceSnapshot>("save_note_content", { payload: { snapshot, noteId, content, expectedHash } });
+}
+
+/** 保存当前 Markdown 粘贴图片附件；只写图片文件，不自动保存正文草稿。 */
+export async function saveNoteImageAttachments(
+  snapshot: WorkspaceSnapshot,
+  noteId: string,
+  images: NoteImageAttachmentInput[],
+): Promise<SavedNoteImageAttachment[]> {
+  if (!isTauriRuntime()) {
+    throw new Error("浏览器开发态不能保存本地图片附件，请在 Tauri 桌面端使用粘贴图片。");
+  }
+
+  return invokeLogged<SavedNoteImageAttachment[]>("save_note_image_attachments", {
+    payload: { snapshot, noteId, images },
+  });
 }
 
 /** 保存当前 TXT 文档正文；桌面端会执行 hash 冲突检测和原子写入。 */

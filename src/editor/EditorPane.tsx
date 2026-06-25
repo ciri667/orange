@@ -1,6 +1,6 @@
 import { convertFileSrc } from "@tauri-apps/api/core";
 import { Clock3, Columns2, Eye, FilePenLine, PencilLine, Save, Tags, Trash2, Wand2 } from "lucide-react";
-import type { RefObject, UIEventHandler } from "react";
+import type { ClipboardEventHandler, RefObject, UIEventHandler } from "react";
 import ReactMarkdown, { defaultUrlTransform } from "react-markdown";
 import type { UrlTransform } from "react-markdown";
 import rehypeSanitize, { defaultSchema } from "rehype-sanitize";
@@ -38,6 +38,14 @@ function getReadingStats(content: string) {
   return { words, minutes };
 }
 
+/** 从剪贴板中提取图片文件；非图片内容保持默认粘贴行为。 */
+function getImageFilesFromClipboard(clipboardData: DataTransfer) {
+  return Array.from(clipboardData.items)
+    .filter((item) => item.kind === "file" && item.type.toLowerCase().startsWith("image/"))
+    .map((item) => item.getAsFile())
+    .filter((file): file is File => Boolean(file));
+}
+
 /** 中间 Markdown 编辑器，展示当前笔记内容和 Agent 写入确认入口。 */
 export function EditorPane({
   note,
@@ -49,6 +57,7 @@ export function EditorPane({
   onViewModeChange,
   onSaveNote,
   onContentChange,
+  onPasteImages,
   onRequestRewrite,
   onRenameNote,
   onDeleteNote,
@@ -64,6 +73,7 @@ export function EditorPane({
   onViewModeChange: (mode: MarkdownViewMode) => void;
   onSaveNote: () => void;
   onContentChange: (content: string) => void;
+  onPasteImages: (files: File[], selectionStart: number, selectionEnd: number) => void;
   onRequestRewrite: () => void;
   onRenameNote: () => void;
   onDeleteNote: () => void;
@@ -103,6 +113,17 @@ export function EditorPane({
   const stats = getReadingStats(note.content);
   const shouldShowEditor = viewMode === "edit" || viewMode === "split";
   const shouldShowPreview = viewMode === "preview" || viewMode === "split";
+  /** 图片粘贴需要先落盘附件，再把返回的 Markdown 片段插入当前草稿。 */
+  const handlePaste: ClipboardEventHandler<HTMLTextAreaElement> = (event) => {
+    const imageFiles = getImageFilesFromClipboard(event.clipboardData);
+
+    if (!imageFiles.length) {
+      return;
+    }
+
+    event.preventDefault();
+    onPasteImages(imageFiles, event.currentTarget.selectionStart, event.currentTarget.selectionEnd);
+  };
 
   return (
     <section className="editor-pane" aria-label="Markdown 编辑器">
@@ -173,6 +194,7 @@ export function EditorPane({
             ref={editorRef}
             value={note.content}
             onChange={(event) => onContentChange(event.target.value)}
+            onPaste={handlePaste}
             onKeyDown={(event) => {
               // 拦截系统保存快捷键，确保桌面端写入统一经过 Tauri hash 和路径校验。
               if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "s") {
