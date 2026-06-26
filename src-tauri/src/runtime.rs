@@ -158,25 +158,25 @@ async fn run_model_loop(
     api_key: String,
 ) -> Result<RuntimeTurnResult, String> {
     let session_index = resolve_session_index(&snapshot, &request)?;
-    let user_message = build_user_message(&request);
     let mut citations = Vec::new();
     let mut audit_trail = RuntimeAuditTrail::default();
     let client = build_http_client()?;
+    apply_first_prompt_title(&mut snapshot.sessions[session_index], &request.prompt);
+    let current_user_message_id =
+        ensure_user_message_for_turn(&mut snapshot.sessions[session_index], &request);
     let mut model_messages = build_model_messages(
         &snapshot,
         session_index,
         &request,
         &available_skills,
         active_skill.as_ref(),
+        &current_user_message_id,
     );
     let endpoint = chat_completions_endpoint(&settings.model_config.api_base);
     let tool_registry = ToolRegistry::default();
     let mut tool_calls = vec![skill_activation_tool_call(active_skill.as_ref())];
 
     tool_calls.push(model_request_tool_call(&settings, &endpoint, "completed"));
-
-    apply_first_prompt_title(&mut snapshot.sessions[session_index], &request.prompt);
-    snapshot.sessions[session_index].messages.push(user_message);
 
     for _ in 0..3 {
         audit_trail.record_model_request();
@@ -323,6 +323,7 @@ fn build_model_messages(
     request: &AgentTurnRequest,
     available_skills: &[AgentSkill],
     active_skill: Option<&AgentSkill>,
+    current_user_message_id: &str,
 ) -> Vec<Value> {
     let session = &snapshot.sessions[session_index];
     let local_context_policy = if should_expect_local_context(request) {
@@ -353,16 +354,20 @@ fn build_model_messages(
         .take(MAX_MODEL_HISTORY_MESSAGES)
         .rev()
     {
+        let content = if message.id == current_user_message_id && message.role == "user" {
+            format!(
+                "动作类型：{}\n用户输入：{}",
+                request.action, message.content
+            )
+        } else {
+            message.content.clone()
+        };
+
         messages.push(json!({
             "role": message.role,
-            "content": truncate_chars(&message.content, MAX_HISTORY_MESSAGE_CHARS)
+            "content": truncate_chars(&content, MAX_HISTORY_MESSAGE_CHARS)
         }));
     }
-
-    messages.push(json!({
-        "role": "user",
-        "content": format!("动作类型：{}\n用户输入：{}", request.action, request.prompt)
-    }));
 
     messages
 }
@@ -466,10 +471,31 @@ fn fallback_agent_turn(
     }
 }
 
+/** 确保本轮用户消息存在；前端已乐观落库时复用同一条消息，避免最终快照重复。 */
+fn ensure_user_message_for_turn(session: &mut AgentSession, request: &AgentTurnRequest) -> String {
+    let user_message_id = request
+        .client_message_id
+        .clone()
+        .unwrap_or_else(|| create_id("user"));
+
+    if session
+        .messages
+        .iter()
+        .any(|message| message.id == user_message_id && message.role == "user")
+    {
+        return user_message_id;
+    }
+
+    session
+        .messages
+        .push(build_user_message(request, user_message_id.clone()));
+    user_message_id
+}
+
 /** 构造用户消息，确保真实模型、错误分支和本地 fallback 的消息形态一致。 */
-fn build_user_message(request: &AgentTurnRequest) -> AgentMessage {
+fn build_user_message(request: &AgentTurnRequest, id: String) -> AgentMessage {
     AgentMessage {
-        id: create_id("user"),
+        id,
         role: "user".to_owned(),
         content: request.prompt.clone(),
         action: Some(request.action.clone()),
@@ -545,9 +571,7 @@ fn model_error_turn(
 
     failed_request.summary = reason.to_owned();
     apply_first_prompt_title(&mut snapshot.sessions[session_index], &request.prompt);
-    snapshot.sessions[session_index]
-        .messages
-        .push(build_user_message(&request));
+    ensure_user_message_for_turn(&mut snapshot.sessions[session_index], &request);
     snapshot.sessions[session_index]
         .messages
         .push(AgentMessage {
@@ -845,6 +869,7 @@ mod tests {
             session_id: "session-a".to_owned(),
             active_knowledge_base_id: "kb-a".to_owned(),
             active_note_id: "note-a".to_owned(),
+            client_message_id: None,
             selected_skill_id: None,
         }
     }
@@ -877,6 +902,7 @@ mod tests {
             &request,
             &available_skills,
             active_skill.as_ref(),
+            "user-current",
         );
         let system_content = messages[0]["content"].as_str().unwrap_or_default();
 

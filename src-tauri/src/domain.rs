@@ -429,6 +429,8 @@ pub struct AgentTurnRequest {
     pub active_knowledge_base_id: String,
     pub active_note_id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub client_message_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub selected_skill_id: Option<String>,
 }
 

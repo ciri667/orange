@@ -545,6 +545,7 @@ export function runMockAgentTurn(
   prompt: string,
   action: AgentActionType,
   activeSkill?: AgentSkill,
+  clientMessageId?: string,
 ): WorkspaceSnapshot {
   const nextSnapshot = cloneWorkspaceSnapshot(snapshot);
   const session = nextSnapshot.sessions.find((item) => item.id === nextSnapshot.activeSessionId) ?? nextSnapshot.sessions[0];
@@ -560,7 +561,7 @@ export function runMockAgentTurn(
   }
 
   const userMessage: AgentMessage = {
-    id: createLocalId("user"),
+    id: clientMessageId ?? createLocalId("user"),
     role: "user",
     content: prompt,
     action,
@@ -584,10 +585,21 @@ export function runMockAgentTurn(
   let citations: Citation[] = [];
   let content = "";
 
-  if (session.title.trim() === "新会话" && !session.messages.some((message) => message.role === "user")) {
+  const hasExistingClientMessage = Boolean(
+    clientMessageId && session.messages.some((message) => message.id === clientMessageId && message.role === "user"),
+  );
+
+  if (
+    session.title.trim() === "新会话" &&
+    !session.messages.some((message) => message.role === "user" && message.id !== clientMessageId)
+  ) {
     session.title = prompt.trim() || "新会话";
   }
-  session.messages.push(userMessage);
+
+  // 前端会在发送瞬间先落库并渲染用户消息，mock loop 只在没有该消息时补齐。
+  if (!hasExistingClientMessage) {
+    session.messages.push(userMessage);
+  }
 
   if (action === "rewrite") {
     if (!activeNote) {

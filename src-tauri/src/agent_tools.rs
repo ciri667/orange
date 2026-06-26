@@ -904,6 +904,7 @@ mod tests {
             session_id: "session-a".to_owned(),
             active_knowledge_base_id: "kb-a".to_owned(),
             active_note_id: "note-a".to_owned(),
+            client_message_id: None,
             selected_skill_id: None,
         }
     }

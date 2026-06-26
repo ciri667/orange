@@ -1219,6 +1219,7 @@ export async function runAgentTurn(
   snapshot: WorkspaceSnapshot,
   prompt: string,
   action: AgentActionType,
+  clientMessageId?: string,
   selectedSkillId?: string,
 ): Promise<AgentTurnResult> {
   const request: AgentTurnRequest = {
@@ -1227,12 +1228,13 @@ export async function runAgentTurn(
     sessionId: snapshot.activeSessionId,
     activeKnowledgeBaseId: snapshot.activeKnowledgeBaseId,
     activeNoteId: snapshot.activeNoteId,
+    clientMessageId,
     selectedSkillId,
   };
 
   if (!isTauriRuntime()) {
     const activeSkill = resolveBrowserActiveSkill(browserAgentSkills, browserUserSettings, request);
-    const nextSnapshot = runMockAgentTurn(snapshot, prompt, action, activeSkill);
+    const nextSnapshot = runMockAgentTurn(snapshot, prompt, action, activeSkill, clientMessageId);
 
     browserAuditLogs = [createBrowserAuditLog(nextSnapshot, prompt), ...browserAuditLogs].slice(0, 20);
 

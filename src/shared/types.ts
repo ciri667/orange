@@ -320,6 +320,8 @@ export interface AgentTurnRequest {
   sessionId: string;
   activeKnowledgeBaseId: string;
   activeNoteId: string;
+  /** 前端已乐观渲染并持久化的用户消息 ID，运行时复用它避免重复追加。 */
+  clientMessageId?: string;
   selectedSkillId?: string;
 }
 

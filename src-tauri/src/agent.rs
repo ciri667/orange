@@ -14,20 +14,12 @@ pub fn run_agent_turn(
     request: AgentTurnRequest,
 ) -> AgentTurnResult {
     let session_index = resolve_session_index(&snapshot, &request);
-    let user_message = AgentMessage {
-        id: create_id("user"),
-        role: "user".to_owned(),
-        content: request.prompt.clone(),
-        action: Some(request.action.clone()),
-        citations: None,
-        tool_calls: None,
-    };
     let mut tool_calls = Vec::new();
     let mut citations = Vec::new();
     let registry = ToolRegistry::default();
 
     apply_first_prompt_title(&mut snapshot.sessions[session_index], &request.prompt);
-    snapshot.sessions[session_index].messages.push(user_message);
+    ensure_user_message_for_turn(&mut snapshot.sessions[session_index], &request);
 
     // 本地兜底只做确定性工具调用，不根据 action 自动生成写入 diff。
     if should_use_local_context(&request) {
@@ -200,6 +192,34 @@ fn apply_first_prompt_title(session: &mut crate::domain::AgentSession, prompt: &
     }
 }
 
+/** 确保本轮用户消息只出现一次；前端即时渲染的消息会通过 client_message_id 复用。 */
+fn ensure_user_message_for_turn(
+    session: &mut crate::domain::AgentSession,
+    request: &AgentTurnRequest,
+) {
+    let user_message_id = request
+        .client_message_id
+        .clone()
+        .unwrap_or_else(|| create_id("user"));
+
+    if session
+        .messages
+        .iter()
+        .any(|message| message.id == user_message_id && message.role == "user")
+    {
+        return;
+    }
+
+    session.messages.push(AgentMessage {
+        id: user_message_id,
+        role: "user".to_owned(),
+        content: request.prompt.clone(),
+        action: Some(request.action.clone()),
+        citations: None,
+        tool_calls: None,
+    });
+}
+
 /** 根据 sessionId 查找会话；找不到时保持旧行为回退到首个会话。 */
 fn resolve_session_index(snapshot: &WorkspaceSnapshot, request: &AgentTurnRequest) -> usize {
     snapshot
@@ -243,10 +263,56 @@ mod tests {
             session_id: "session-a".to_owned(),
             active_knowledge_base_id: "kb-a".to_owned(),
             active_note_id: "note-a".to_owned(),
+            client_message_id: None,
             selected_skill_id: None,
         };
         let response = build_local_response(&request, &[], &[]);
 
         assert!(response.contains("不会根据固定 action 自动生成写入 diff"));
+    }
+
+    /** 前端已乐观落库的用户消息不能在本地兜底里重复追加。 */
+    #[test]
+    fn local_fallback_reuses_client_user_message() {
+        let mut session = crate::domain::AgentSession {
+            id: "session-a".to_owned(),
+            title: "测试会话".to_owned(),
+            r#type: "knowledge-base".to_owned(),
+            knowledge_base_ids: vec!["kb-a".to_owned()],
+            active_note_id: None,
+            pinned_note_ids: Vec::new(),
+            messages: vec![AgentMessage {
+                id: "user-client".to_owned(),
+                role: "user".to_owned(),
+                content: "已发送消息".to_owned(),
+                action: Some("ask".to_owned()),
+                citations: None,
+                tool_calls: None,
+            }],
+            pending_change: None,
+            created_at: "刚刚".to_owned(),
+            updated_at: "刚刚".to_owned(),
+            deleted_at: None,
+        };
+        let request = AgentTurnRequest {
+            prompt: "已发送消息".to_owned(),
+            action: "ask".to_owned(),
+            session_id: "session-a".to_owned(),
+            active_knowledge_base_id: "kb-a".to_owned(),
+            active_note_id: String::new(),
+            client_message_id: Some("user-client".to_owned()),
+            selected_skill_id: None,
+        };
+
+        ensure_user_message_for_turn(&mut session, &request);
+
+        assert_eq!(
+            session
+                .messages
+                .iter()
+                .filter(|message| message.role == "user")
+                .count(),
+            1
+        );
     }
 }
