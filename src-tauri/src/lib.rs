@@ -77,6 +77,7 @@ pub fn run() {
             commands::save_agent_skill,
             commands::toggle_agent_skill,
             commands::delete_agent_skill,
+            commands::install_agent_skill,
             commands::save_model_api_key,
             commands::load_model_api_key_status,
             commands::load_request_audit_logs,

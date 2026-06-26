@@ -1,12 +1,15 @@
-use crate::domain::{AgentSkill, AgentTurnRequest, UserSettings};
+use crate::domain::{AgentSkill, AgentTurnRequest, InstallAgentSkillResult, UserSettings};
 use crate::storage::{create_id, format_local_datetime, lock_database_writer};
 use rusqlite::{params, Connection};
 use sha2::{Digest, Sha256};
 use std::collections::{HashMap, HashSet};
 use std::fs;
+use std::io::Cursor;
 use std::path::{Component, Path, PathBuf};
 use tauri::{AppHandle, Manager};
+use tempfile::TempDir;
 use walkdir::WalkDir;
+use zip::ZipArchive;
 
 /** 内置 skill 来源标记，决定设置页只能禁用不能删除。 */
 pub const BUILT_IN_SKILL_SOURCE: &str = "built-in";
@@ -28,6 +31,33 @@ const MEMORY_DIRECTORY_NAME: &str = "memory";
 
 /** Skill 全局设置中允许 Runtime 根据 prompt 自动匹配的模式。 */
 const AUTO_ACTIVATION_MODE: &str = "auto";
+
+/** Skill 摘要目录注入模型的最大字符数，避免用户安装大量 skill 后挤占上下文。 */
+const MAX_SKILL_CATALOG_PROMPT_CHARS: usize = 8_000;
+
+/** 第三方 skill 安装时允许复制的最大普通文件数量。 */
+const MAX_SKILL_INSTALL_FILE_COUNT: usize = 512;
+
+/** 第三方 skill 安装时允许复制的单文件最大字节数。 */
+const MAX_SKILL_INSTALL_SINGLE_FILE_BYTES: u64 = 5 * 1024 * 1024;
+
+/** 第三方 skill 安装时允许复制的总字节数。 */
+const MAX_SKILL_INSTALL_TOTAL_BYTES: u64 = 50 * 1024 * 1024;
+
+/** 远程下载的单个 SKILL.md 最大字节数。 */
+pub const MAX_REMOTE_SKILL_MARKDOWN_BYTES: usize = 1024 * 1024;
+
+/** 远程下载的压缩包最大字节数；解压后还会再次做总量限制。 */
+pub const MAX_REMOTE_SKILL_ARCHIVE_BYTES: usize = 25 * 1024 * 1024;
+
+/** 第三方 skill 安装时保存在 agents 目录中的 Cici Note 元数据文件。 */
+const CICI_INSTALL_METADATA_FILE_NAME: &str = "cici-note.yaml";
+
+/** 第三方 skill 安装冲突时直接失败，不覆盖用户现有目录。 */
+const INSTALL_CONFLICT_FAIL: &str = "fail";
+
+/** 第三方 skill 安装冲突时替换同名目录。 */
+const INSTALL_CONFLICT_REPLACE: &str = "replace";
 
 /** 读取全部内置 skill，首版固定为指令型工作流，不携带脚本或外部命令。 */
 pub fn built_in_skills() -> Vec<AgentSkill> {
@@ -263,6 +293,166 @@ pub fn delete_user_skill_from_root(
     Ok(())
 }
 
+/** 安装来源已经准备成目录后，将其中的标准 SKILL.md 包复制到用户 skills 根目录。 */
+pub fn install_agent_skills_from_prepared_root(
+    connection: &Connection,
+    skills_root: &Path,
+    prepared_root: &Path,
+    options: SkillInstallOptions,
+) -> Result<InstallAgentSkillResult, String> {
+    let operation_started_at = format_local_datetime();
+    let discovered_skills = discover_installable_skills(prepared_root)?;
+
+    if discovered_skills.is_empty() {
+        return Err("安装来源中没有找到有效 SKILL.md。".to_owned());
+    }
+
+    let mut warnings = Vec::new();
+    let mut installed_skill_paths = Vec::new();
+    let mut installed_file_count = 0usize;
+
+    fs::create_dir_all(skills_root).map_err(|error| {
+        format!(
+            "无法创建用户 Skills 目录 {}：{error}",
+            skills_root.display()
+        )
+    })?;
+
+    for discovered_skill in &discovered_skills {
+        validate_install_conflict(
+            skills_root,
+            &discovered_skill.target_folder_name,
+            &options.conflict_strategy,
+        )?;
+    }
+
+    for discovered_skill in discovered_skills {
+        let install_result = install_discovered_skill(
+            connection,
+            skills_root,
+            &discovered_skill,
+            &options,
+            &operation_started_at,
+        )?;
+
+        warnings.extend(install_result.warnings);
+        installed_file_count += install_result.file_count;
+        installed_skill_paths.push(install_result.skill_markdown_path);
+    }
+
+    let mut persisted_skills = read_persisted_skills(connection)?;
+    let mut installed_skills = installed_skill_paths
+        .iter()
+        .map(|skill_path| load_file_skill(skills_root, skill_path, &mut persisted_skills))
+        .collect::<Result<Vec<_>, String>>()?;
+
+    installed_skills.sort_by(|left, right| left.relative_path.cmp(&right.relative_path));
+    let skills = load_agent_skills_from_roots(connection, &[skills_root.to_path_buf()])?;
+    let summary = format!(
+        "已安装 {} 个 Skill，复制 {} 个文件。",
+        installed_skills.len(),
+        installed_file_count
+    );
+
+    Ok(InstallAgentSkillResult {
+        installed_count: installed_skills.len(),
+        installed_skills,
+        skills,
+        warnings,
+        summary,
+        source_type: options.source_type,
+        source_summary: options.source_summary,
+        file_count: installed_file_count,
+    })
+}
+
+/** 把单个远程 SKILL.md 内容写入临时目录，供统一安装管线复用。 */
+pub fn prepare_single_skill_markdown(content: &str) -> Result<TempDir, String> {
+    if content.len() > MAX_REMOTE_SKILL_MARKDOWN_BYTES {
+        return Err("远程 SKILL.md 超过 1MB，已阻止安装。".to_owned());
+    }
+
+    let parsed_skill = parse_skill_markdown(content)?;
+    let temp_dir = TempDir::new().map_err(|error| format!("无法创建安装临时目录：{error}"))?;
+    let skill_dir = temp_dir
+        .path()
+        .join(safe_skill_folder_name(&normalize_skill_name(
+            &parsed_skill.name,
+        ))?);
+
+    fs::create_dir_all(&skill_dir).map_err(|error| format!("无法创建临时 skill 目录：{error}"))?;
+    fs::write(skill_dir.join(SKILL_MARKDOWN_FILE_NAME), content)
+        .map_err(|error| format!("无法写入临时 SKILL.md：{error}"))?;
+
+    Ok(temp_dir)
+}
+
+/** 把 zip 字节安全解压到临时目录，拒绝路径穿越、过大文件和过多文件。 */
+pub fn prepare_skill_archive_bytes(bytes: &[u8]) -> Result<TempDir, String> {
+    if bytes.len() > MAX_REMOTE_SKILL_ARCHIVE_BYTES {
+        return Err("远程 Skill 压缩包超过 25MB，已阻止安装。".to_owned());
+    }
+
+    let temp_dir = TempDir::new().map_err(|error| format!("无法创建安装临时目录：{error}"))?;
+    let mut archive = ZipArchive::new(Cursor::new(bytes))
+        .map_err(|error| format!("无法读取 Skill zip 压缩包：{error}"))?;
+    let mut extracted_file_count = 0usize;
+    let mut extracted_total_bytes = 0u64;
+
+    for index in 0..archive.len() {
+        let mut file = archive
+            .by_index(index)
+            .map_err(|error| format!("无法读取 Skill zip 条目：{error}"))?;
+        let enclosed_path = file
+            .enclosed_name()
+            .ok_or_else(|| "Skill zip 包含不安全路径，已阻止安装。".to_owned())?
+            .to_path_buf();
+
+        if should_skip_install_relative_path(&enclosed_path) {
+            continue;
+        }
+
+        let target_path = temp_dir.path().join(&enclosed_path);
+
+        if file.is_dir() {
+            fs::create_dir_all(&target_path)
+                .map_err(|error| format!("无法创建临时解压目录：{error}"))?;
+            continue;
+        }
+
+        extracted_file_count += 1;
+        if extracted_file_count > MAX_SKILL_INSTALL_FILE_COUNT {
+            return Err("Skill 包文件数量超过限制，已阻止安装。".to_owned());
+        }
+
+        let file_size = file.size();
+
+        if file_size > MAX_SKILL_INSTALL_SINGLE_FILE_BYTES {
+            return Err("Skill 包包含超过 5MB 的单个文件，已阻止安装。".to_owned());
+        }
+
+        extracted_total_bytes = extracted_total_bytes
+            .checked_add(file_size)
+            .ok_or_else(|| "Skill 包总大小超过限制，已阻止安装。".to_owned())?;
+
+        if extracted_total_bytes > MAX_SKILL_INSTALL_TOTAL_BYTES {
+            return Err("Skill 包解压后超过 50MB，已阻止安装。".to_owned());
+        }
+
+        if let Some(parent) = target_path.parent() {
+            fs::create_dir_all(parent).map_err(|error| format!("无法创建临时解压目录：{error}"))?;
+        }
+
+        let mut output_file = fs::File::create(&target_path)
+            .map_err(|error| format!("无法创建临时解压文件：{error}"))?;
+
+        std::io::copy(&mut file, &mut output_file)
+            .map_err(|error| format!("无法写入临时解压文件：{error}"))?;
+    }
+
+    Ok(temp_dir)
+}
+
 /** 根据用户显式选择或自动匹配规则决定本轮激活的 skill。 */
 pub fn resolve_active_skill(
     skills: &[AgentSkill],
@@ -327,9 +517,12 @@ pub fn skill_catalog_prompt(skills: &[AgentSkill]) -> String {
     if enabled_summaries.is_empty() {
         "可用 Skills：未启用。".to_owned()
     } else {
-        format!(
-            "可用 Skills（默认只作为能力目录）：\n{}",
-            enabled_summaries.join("\n")
+        truncate_chars(
+            &format!(
+                "可用 Skills（默认只作为能力目录）：\n{}",
+                enabled_summaries.join("\n")
+            ),
+            MAX_SKILL_CATALOG_PROMPT_CHARS,
         )
     }
 }
@@ -466,6 +659,12 @@ fn load_file_skill(
     let mut metadata_map = HashMap::new();
 
     metadata_map.insert("frontmatterName".to_owned(), parsed_skill.name.clone());
+    if parsed_skill.display_name.is_some() {
+        metadata_map.insert(
+            "displayNameSource".to_owned(),
+            "SKILL.md frontmatter".to_owned(),
+        );
+    }
     if metadata.display_name_override.is_some() {
         metadata_map.insert(
             "displayNameSource".to_owned(),
@@ -484,6 +683,7 @@ fn load_file_skill(
         name: normalize_skill_name(&parsed_skill.name),
         display_name: metadata
             .display_name_override
+            .or(parsed_skill.display_name)
             .unwrap_or_else(|| parsed_skill.name.clone()),
         description: parsed_skill.description,
         instructions: parsed_skill.instructions,
@@ -522,8 +722,10 @@ fn load_file_skill(
 }
 
 /** 文件式 skill 的 frontmatter 解析结果，正文即完整执行说明。 */
+#[derive(Clone, Debug)]
 struct ParsedSkillMarkdown {
     name: String,
+    display_name: Option<String>,
     description: String,
     instructions: String,
     tags: Vec<String>,
@@ -535,6 +737,34 @@ struct ParsedSkillMarkdown {
 struct OpenAiSkillMetadata {
     display_name_override: Option<String>,
     allow_auto_invoke_override: Option<bool>,
+}
+
+/** 安装管线的显式选项，调用方负责把 URL、本地目录或压缩包准备成目录。 */
+#[derive(Clone, Debug)]
+pub struct SkillInstallOptions {
+    /** 来源类型只进入脱敏日志和前端摘要，不参与文件系统路径判断。 */
+    pub source_type: String,
+    /** 来源摘要必须由调用方脱敏，不能包含完整 URL 或本机绝对路径。 */
+    pub source_summary: String,
+    /** 第三方 skill 默认停用，用户审阅后再启用。 */
+    pub enable_after_install: bool,
+    /** 同名目录冲突处理策略，首版支持 fail 和 replace。 */
+    pub conflict_strategy: String,
+}
+
+/** 安装前在来源目录中发现的一个 SKILL.md 包。 */
+#[derive(Clone, Debug)]
+struct DiscoveredInstallableSkill {
+    source_dir: PathBuf,
+    target_folder_name: String,
+    content_hash: String,
+}
+
+/** 单个 skill 安装后的文件复制结果。 */
+struct InstalledSkillFiles {
+    skill_markdown_path: PathBuf,
+    file_count: usize,
+    warnings: Vec<String>,
 }
 
 /** 解析 SKILL.md 的 YAML frontmatter；首版只要求 name 和 description 两个键。 */
@@ -573,25 +803,19 @@ fn parse_skill_markdown(content: &str) -> Result<ParsedSkillMarkdown, String> {
         return Err("frontmatter 缺少结束标记 ---。".to_owned());
     }
 
-    let frontmatter = parse_simple_key_values(&frontmatter_lines.join("\n"));
-    let name = frontmatter
-        .get("name")
-        .map(|value| value.trim().to_owned())
-        .filter(|value| !value.is_empty())
+    let frontmatter_text = frontmatter_lines.join("\n");
+    let frontmatter = serde_yaml::from_str::<serde_yaml::Mapping>(&frontmatter_text)
+        .map_err(|error| format!("frontmatter 不是有效 YAML：{error}"))?;
+    let name = yaml_mapping_string(&frontmatter, "name")
+        .filter(|value| !value.trim().is_empty())
         .ok_or_else(|| "frontmatter 缺少 name。".to_owned())?;
-    let description = frontmatter
-        .get("description")
-        .map(|value| value.trim().to_owned())
-        .filter(|value| !value.is_empty())
+    let description = yaml_mapping_string(&frontmatter, "description")
+        .filter(|value| !value.trim().is_empty())
         .ok_or_else(|| "frontmatter 缺少 description。".to_owned())?;
-    let tags = frontmatter
-        .get("tags")
-        .map(|value| parse_frontmatter_list(value))
-        .unwrap_or_default();
-    let triggers = frontmatter
-        .get("triggers")
-        .map(|value| parse_frontmatter_list(value))
-        .unwrap_or_default();
+    let display_name = yaml_mapping_string(&frontmatter, "display_name")
+        .or_else(|| yaml_mapping_string(&frontmatter, "title"));
+    let tags = yaml_mapping_list(&frontmatter, "tags");
+    let triggers = yaml_mapping_list(&frontmatter, "triggers");
     let instructions = body_lines.join("\n").trim().to_owned();
 
     if instructions.is_empty() {
@@ -600,11 +824,47 @@ fn parse_skill_markdown(content: &str) -> Result<ParsedSkillMarkdown, String> {
 
     Ok(ParsedSkillMarkdown {
         name,
+        display_name,
         description,
         instructions,
         tags,
         triggers,
     })
+}
+
+/** 从 YAML mapping 中读取字符串标量字段；非字符串字段会被忽略。 */
+fn yaml_mapping_string(mapping: &serde_yaml::Mapping, key: &str) -> Option<String> {
+    mapping
+        .get(serde_yaml::Value::String(key.to_owned()))
+        .and_then(|value| match value {
+            serde_yaml::Value::String(text) => Some(text.trim().to_owned()),
+            serde_yaml::Value::Number(number) => Some(number.to_string()),
+            serde_yaml::Value::Bool(value) => Some(value.to_string()),
+            _ => None,
+        })
+        .filter(|value| !value.is_empty())
+}
+
+/** 从 YAML mapping 中读取字符串列表字段，兼容数组和逗号分隔字符串。 */
+fn yaml_mapping_list(mapping: &serde_yaml::Mapping, key: &str) -> Vec<String> {
+    let Some(value) = mapping.get(serde_yaml::Value::String(key.to_owned())) else {
+        return Vec::new();
+    };
+
+    match value {
+        serde_yaml::Value::Sequence(items) => items
+            .iter()
+            .filter_map(|item| match item {
+                serde_yaml::Value::String(text) => Some(text.trim().to_owned()),
+                serde_yaml::Value::Number(number) => Some(number.to_string()),
+                serde_yaml::Value::Bool(value) => Some(value.to_string()),
+                _ => None,
+            })
+            .filter(|value| !value.is_empty())
+            .collect(),
+        serde_yaml::Value::String(text) => parse_frontmatter_list(text),
+        _ => Vec::new(),
+    }
 }
 
 /** 读取 agents/openai.yaml 的 display_name 和 allow_implicit_invocation 覆盖。 */
@@ -640,24 +900,6 @@ fn read_openai_yaml_metadata(skill_dir: &Path) -> OpenAiSkillMetadata {
     }
 
     metadata
-}
-
-/** 解析扁平 key/value frontmatter，足够覆盖 name 和 description 字段。 */
-fn parse_simple_key_values(content: &str) -> HashMap<String, String> {
-    content
-        .lines()
-        .filter_map(|line| {
-            let trimmed_line = line.trim();
-
-            if trimmed_line.is_empty() || trimmed_line.starts_with('#') {
-                return None;
-            }
-
-            let (key, value) = trimmed_line.split_once(':')?;
-
-            Some((key.trim().to_owned(), trim_yaml_scalar(value)))
-        })
-        .collect()
 }
 
 /** 从单行 yaml 字段中提取冒号后的标量值。 */
@@ -930,6 +1172,296 @@ fn write_openai_yaml_override(skill_dir: &Path, skill: &AgentSkill) -> Result<()
         .map_err(|error| format!("无法写入 skill 元数据 {}：{error}", metadata_path.display()))
 }
 
+/** 递归发现待安装目录中的 SKILL.md，并在安装前完成格式校验。 */
+fn discover_installable_skills(
+    prepared_root: &Path,
+) -> Result<Vec<DiscoveredInstallableSkill>, String> {
+    if !prepared_root.exists() || !prepared_root.is_dir() {
+        return Err("安装来源目录不存在。".to_owned());
+    }
+
+    let mut skills = Vec::new();
+
+    for entry in WalkDir::new(prepared_root)
+        .follow_links(false)
+        .into_iter()
+        .filter_entry(|entry| should_walk_skill_entry(entry))
+    {
+        let entry = entry.map_err(|error| format!("无法读取安装来源目录：{error}"))?;
+
+        if !entry.file_type().is_file() || entry.file_name() != SKILL_MARKDOWN_FILE_NAME {
+            continue;
+        }
+
+        let content = fs::read_to_string(entry.path())
+            .map_err(|error| format!("无法读取待安装 SKILL.md：{error}"))?;
+        let parsed_skill = parse_skill_markdown(&content)?;
+        let normalized_name = normalize_skill_name(&parsed_skill.name);
+        let content_hash = hash_skill_directory(entry.path().parent().unwrap_or(prepared_root))?;
+        let target_folder_name = if normalized_name.is_empty() {
+            format!("skill-{}", &content_hash[..12])
+        } else {
+            safe_skill_folder_name(&normalized_name)?
+        };
+        let source_dir = entry
+            .path()
+            .parent()
+            .ok_or_else(|| "无法解析待安装 skill 目录。".to_owned())?
+            .to_path_buf();
+
+        skills.push(DiscoveredInstallableSkill {
+            source_dir,
+            target_folder_name,
+            content_hash,
+        });
+    }
+
+    if has_duplicate_install_targets(&skills) {
+        return Err("安装包中存在重复的 skill name，请拆分或改名后重试。".to_owned());
+    }
+
+    skills.sort_by(|left, right| left.target_folder_name.cmp(&right.target_folder_name));
+
+    Ok(skills)
+}
+
+/** 判断同一安装批次内是否会写入同一个目标目录。 */
+fn has_duplicate_install_targets(skills: &[DiscoveredInstallableSkill]) -> bool {
+    let mut targets = HashSet::new();
+
+    skills
+        .iter()
+        .any(|skill| !targets.insert(skill.target_folder_name.clone()))
+}
+
+/** 安装前校验目标目录冲突策略，避免安装到一半才发现不可覆盖。 */
+fn validate_install_conflict(
+    skills_root: &Path,
+    target_folder_name: &str,
+    conflict_strategy: &str,
+) -> Result<(), String> {
+    let target_dir = skills_root.join(target_folder_name);
+
+    if !target_dir.exists() {
+        return Ok(());
+    }
+
+    if conflict_strategy == INSTALL_CONFLICT_REPLACE {
+        return Ok(());
+    }
+
+    if conflict_strategy == INSTALL_CONFLICT_FAIL {
+        return Err(format!(
+            "Skill「{target_folder_name}」已存在，请开启替换同名 Skill 后重试。"
+        ));
+    }
+
+    Err("未知的 Skill 安装冲突处理策略。".to_owned())
+}
+
+/** 安装单个已发现 skill；先写 staging 目录，成功后再替换目标目录。 */
+fn install_discovered_skill(
+    connection: &Connection,
+    skills_root: &Path,
+    discovered_skill: &DiscoveredInstallableSkill,
+    options: &SkillInstallOptions,
+    installed_at: &str,
+) -> Result<InstalledSkillFiles, String> {
+    let target_dir = skills_root.join(&discovered_skill.target_folder_name);
+    let staging_dir = skills_root.join(format!(
+        ".installing-{}-{}",
+        discovered_skill.target_folder_name,
+        create_id("skill")
+    ));
+    let mut warnings = Vec::new();
+    let file_count =
+        copy_skill_directory_checked(&discovered_skill.source_dir, &staging_dir, &mut warnings)?;
+
+    write_cici_install_metadata(
+        &staging_dir,
+        discovered_skill,
+        options,
+        installed_at,
+        file_count,
+    )?;
+
+    if target_dir.exists() {
+        if options.conflict_strategy != INSTALL_CONFLICT_REPLACE {
+            let _ = fs::remove_dir_all(&staging_dir);
+            return Err(format!(
+                "Skill「{}」已存在，请开启替换同名 Skill 后重试。",
+                discovered_skill.target_folder_name
+            ));
+        }
+
+        fs::remove_dir_all(&target_dir)
+            .map_err(|error| format!("无法替换已有 Skill 目录：{error}"))?;
+    }
+
+    fs::rename(&staging_dir, &target_dir).map_err(|error| {
+        let _ = fs::remove_dir_all(&staging_dir);
+        format!("无法安装 Skill 到用户目录：{error}")
+    })?;
+
+    let skill_markdown_path = target_dir.join(SKILL_MARKDOWN_FILE_NAME);
+    let mut persisted_skills = read_persisted_skills(connection)?;
+    let mut installed_skill =
+        load_file_skill(skills_root, &skill_markdown_path, &mut persisted_skills)?;
+
+    installed_skill.enabled = options.enable_after_install;
+    installed_skill.allow_auto_invoke = options.enable_after_install;
+    installed_skill.updated_at = format_local_datetime();
+    upsert_skill_state_override(connection, &installed_skill)?;
+
+    Ok(InstalledSkillFiles {
+        skill_markdown_path,
+        file_count,
+        warnings,
+    })
+}
+
+/** 复制 skill 目录，限制大小、数量和路径，保留 references/assets/scripts 等附带资料。 */
+fn copy_skill_directory_checked(
+    source_dir: &Path,
+    target_dir: &Path,
+    warnings: &mut Vec<String>,
+) -> Result<usize, String> {
+    let mut file_count = 0usize;
+    let mut total_bytes = 0u64;
+
+    fs::create_dir_all(target_dir)
+        .map_err(|error| format!("无法创建安装 staging 目录：{error}"))?;
+
+    for entry in WalkDir::new(source_dir)
+        .follow_links(false)
+        .into_iter()
+        .filter_entry(|entry| should_walk_skill_entry(entry))
+    {
+        let entry = entry.map_err(|error| format!("无法读取待安装 skill 文件：{error}"))?;
+        let relative_path = entry
+            .path()
+            .strip_prefix(source_dir)
+            .map_err(|_| "无法解析待安装 skill 相对路径。".to_owned())?;
+
+        if relative_path.as_os_str().is_empty() {
+            continue;
+        }
+
+        if should_skip_install_relative_path(relative_path) {
+            if entry.file_type().is_dir() {
+                continue;
+            }
+
+            continue;
+        }
+
+        let target_path = target_dir.join(relative_path);
+        let file_type = entry
+            .path()
+            .symlink_metadata()
+            .map_err(|error| format!("无法读取待安装 skill 文件元数据：{error}"))?
+            .file_type();
+
+        if file_type.is_symlink() {
+            warnings.push("安装包包含符号链接，已跳过。".to_owned());
+            continue;
+        }
+
+        if file_type.is_dir() {
+            if relative_path
+                .components()
+                .any(|component| component.as_os_str() == "scripts")
+            {
+                warnings.push(
+                    "安装包包含 scripts 目录；Cici Note 已保留文件但不会执行脚本。".to_owned(),
+                );
+            }
+
+            fs::create_dir_all(&target_path)
+                .map_err(|error| format!("无法创建 skill 子目录：{error}"))?;
+            continue;
+        }
+
+        if !file_type.is_file() {
+            warnings.push("安装包包含非常规文件，已跳过。".to_owned());
+            continue;
+        }
+
+        file_count += 1;
+        if file_count > MAX_SKILL_INSTALL_FILE_COUNT {
+            return Err("Skill 包文件数量超过限制，已阻止安装。".to_owned());
+        }
+
+        let metadata = entry
+            .metadata()
+            .map_err(|error| format!("无法读取待安装 skill 文件大小：{error}"))?;
+
+        if metadata.len() > MAX_SKILL_INSTALL_SINGLE_FILE_BYTES {
+            return Err("Skill 包包含超过 5MB 的单个文件，已阻止安装。".to_owned());
+        }
+
+        total_bytes = total_bytes
+            .checked_add(metadata.len())
+            .ok_or_else(|| "Skill 包总大小超过限制，已阻止安装。".to_owned())?;
+
+        if total_bytes > MAX_SKILL_INSTALL_TOTAL_BYTES {
+            return Err("Skill 包总大小超过 50MB，已阻止安装。".to_owned());
+        }
+
+        if let Some(parent) = target_path.parent() {
+            fs::create_dir_all(parent)
+                .map_err(|error| format!("无法创建 skill 子目录：{error}"))?;
+        }
+
+        fs::copy(entry.path(), &target_path)
+            .map_err(|error| format!("无法复制 skill 文件：{error}"))?;
+    }
+
+    Ok(file_count)
+}
+
+/** 判断安装包中的相对路径是否应该跳过，避免复制依赖、构建产物和隐藏目录。 */
+fn should_skip_install_relative_path(relative_path: &Path) -> bool {
+    relative_path.components().any(|component| {
+        let Component::Normal(part) = component else {
+            return true;
+        };
+        let name = part.to_string_lossy();
+
+        name.starts_with('.')
+            || matches!(
+                name.as_ref(),
+                "node_modules" | "target" | "dist" | "build" | ".git"
+            )
+    })
+}
+
+/** 写入 Cici Note 安装元数据，保留可审计摘要但不保存完整来源 URL 或绝对路径。 */
+fn write_cici_install_metadata(
+    skill_dir: &Path,
+    discovered_skill: &DiscoveredInstallableSkill,
+    options: &SkillInstallOptions,
+    installed_at: &str,
+    file_count: usize,
+) -> Result<(), String> {
+    let agents_dir = skill_dir.join("agents");
+    let metadata_path = agents_dir.join(CICI_INSTALL_METADATA_FILE_NAME);
+    let content = format!(
+        "install:\n  source_type: {}\n  source_summary: {}\n  installed_at: {}\n  content_hash: {}\n  file_count: {}\n  default_enabled: {}\n",
+        yaml_quote(&options.source_type),
+        yaml_quote(&options.source_summary),
+        yaml_quote(installed_at),
+        yaml_quote(&discovered_skill.content_hash),
+        file_count,
+        if options.enable_after_install { "true" } else { "false" }
+    );
+
+    fs::create_dir_all(&agents_dir)
+        .map_err(|error| format!("无法创建 skill 安装元数据目录：{error}"))?;
+    fs::write(&metadata_path, content)
+        .map_err(|error| format!("无法写入 skill 安装元数据：{error}"))
+}
+
 /** 删除用户 skills 根目录中的单个文件式 skill 目录，并限制只能删除根目录内路径。 */
 fn delete_file_skill_directory(skills_root: &Path, skill: &AgentSkill) -> Result<(), String> {
     let path = skill
@@ -1025,6 +1557,168 @@ fn create_file_skill_id(skill_markdown_path: &Path) -> String {
     let digest = format!("{:x}", hasher.finalize());
 
     format!("skill-file-{}", &digest[..24])
+}
+
+/** 计算 skill 目录内容 hash，安装日志和元数据只记录摘要，不记录正文。 */
+fn hash_skill_directory(skill_dir: &Path) -> Result<String, String> {
+    let mut files = Vec::new();
+
+    for entry in WalkDir::new(skill_dir)
+        .follow_links(false)
+        .into_iter()
+        .filter_entry(|entry| should_walk_skill_entry(entry))
+    {
+        let entry = entry.map_err(|error| format!("无法读取 skill 目录用于 hash：{error}"))?;
+
+        if !entry.file_type().is_file() {
+            continue;
+        }
+
+        let relative_path = entry
+            .path()
+            .strip_prefix(skill_dir)
+            .map_err(|_| "无法解析 skill hash 相对路径。".to_owned())?
+            .to_path_buf();
+
+        if should_skip_install_relative_path(&relative_path) {
+            continue;
+        }
+
+        files.push((relative_path, entry.path().to_path_buf()));
+    }
+
+    files.sort_by(|left, right| left.0.cmp(&right.0));
+
+    let mut hasher = Sha256::new();
+
+    for (relative_path, path) in files {
+        let bytes =
+            fs::read(&path).map_err(|error| format!("无法读取 skill 文件用于 hash：{error}"))?;
+
+        hasher.update(relative_path.to_string_lossy().as_bytes());
+        hasher.update([0]);
+        hasher.update(&bytes);
+        hasher.update([0]);
+    }
+
+    Ok(format!("{:x}", hasher.finalize()))
+}
+
+/** 按字符数截断字符串，避免 skill 摘要目录挤占过多模型上下文。 */
+fn truncate_chars(value: &str, max_chars: usize) -> String {
+    if value.chars().count() <= max_chars {
+        return value.to_owned();
+    }
+
+    let truncated = value.chars().take(max_chars).collect::<String>();
+
+    format!("{truncated}\n...（可用 Skills 过多，已截断目录摘要）")
+}
+
+/** 根据用户输入的 URL 推导下载目标和脱敏来源摘要。 */
+pub fn resolve_skill_url_download(input: &str) -> Result<SkillUrlDownload, String> {
+    let trimmed_input = input.trim();
+
+    if trimmed_input.is_empty() {
+        return Err("请输入 Skill URL。".to_owned());
+    }
+
+    let parsed_url = reqwest::Url::parse(trimmed_input)
+        .map_err(|_| "Skill URL 格式无效，请使用 https 地址。".to_owned())?;
+
+    if parsed_url.scheme() != "https" {
+        return Err("只支持 https Skill URL。".to_owned());
+    }
+
+    let host = parsed_url
+        .host_str()
+        .ok_or_else(|| "Skill URL 缺少 host。".to_owned())?
+        .to_owned();
+
+    if host == "github.com" {
+        return resolve_github_skill_url(&parsed_url);
+    }
+
+    Ok(SkillUrlDownload {
+        url: parsed_url.to_string(),
+        kind: SkillUrlDownloadKind::Unknown,
+        source_summary: host,
+    })
+}
+
+/** URL 下载类型决定后续按 SKILL.md 文本还是 zip 字节处理。 */
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum SkillUrlDownloadKind {
+    Markdown,
+    Archive,
+    Unknown,
+}
+
+/** 已解析的远程 skill 下载目标，source_summary 只能用于日志和 UI。 */
+#[derive(Clone, Debug)]
+pub struct SkillUrlDownload {
+    pub url: String,
+    pub kind: SkillUrlDownloadKind,
+    pub source_summary: String,
+}
+
+/** 把 GitHub repo/blob/tree 链接转换成 raw SKILL.md 或 zipball 下载地址。 */
+fn resolve_github_skill_url(url: &reqwest::Url) -> Result<SkillUrlDownload, String> {
+    let parts = url
+        .path_segments()
+        .ok_or_else(|| "GitHub URL 路径无效。".to_owned())?
+        .filter(|part| !part.is_empty())
+        .collect::<Vec<_>>();
+
+    if parts.len() < 2 {
+        return Err("GitHub URL 至少需要 owner/repo。".to_owned());
+    }
+
+    let owner = parts[0];
+    let repo = normalize_github_repo_name(parts[1])?;
+    let source_summary = format!("github.com/{owner}/{repo}");
+
+    if parts.get(2) == Some(&"blob") && parts.len() >= 5 {
+        let branch = parts[3];
+        let file_path = parts[4..].join("/");
+
+        if !file_path.ends_with(SKILL_MARKDOWN_FILE_NAME) {
+            return Err("GitHub blob 链接必须指向 SKILL.md。".to_owned());
+        }
+
+        return Ok(SkillUrlDownload {
+            url: format!("https://raw.githubusercontent.com/{owner}/{repo}/{branch}/{file_path}"),
+            kind: SkillUrlDownloadKind::Markdown,
+            source_summary,
+        });
+    }
+
+    if parts.get(2) == Some(&"tree") && parts.len() >= 4 {
+        let branch = parts[3];
+
+        return Ok(SkillUrlDownload {
+            url: format!("https://github.com/{owner}/{repo}/archive/refs/heads/{branch}.zip"),
+            kind: SkillUrlDownloadKind::Archive,
+            source_summary,
+        });
+    }
+
+    Ok(SkillUrlDownload {
+        url: format!("https://github.com/{owner}/{repo}/archive/refs/heads/main.zip"),
+        kind: SkillUrlDownloadKind::Archive,
+        source_summary,
+    })
+}
+
+/** 归一化 GitHub repo 路径片段，兼容用户从 clone 按钮复制的 owner/repo.git URL。 */
+fn normalize_github_repo_name(repo: &str) -> Result<String, String> {
+    let repo_name = repo.trim_end_matches(".git");
+
+    if repo_name.is_empty() || repo_name.contains('/') {
+        return Err("GitHub repo 名称无效。".to_owned());
+    }
+
+    Ok(repo_name.to_owned())
 }
 
 /** 给文件 skill 派生基础触发词，正文不参与触发词列表但仍参与轻量匹配。 */
@@ -1240,6 +1934,7 @@ fn is_built_in_skill_id(skill_id: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::Write;
     use tempfile::tempdir;
 
     /** 创建只包含 agent_skills 表的内存数据库，避免单元测试依赖 Tauri AppHandle。 */
@@ -1317,6 +2012,32 @@ mod tests {
         }
     }
 
+    /** 构造安装测试选项，默认模拟第三方来源且安装后停用。 */
+    fn install_options(conflict_strategy: &str, enable_after_install: bool) -> SkillInstallOptions {
+        SkillInstallOptions {
+            source_type: "localFolder".to_owned(),
+            source_summary: "local:test".to_owned(),
+            enable_after_install,
+            conflict_strategy: conflict_strategy.to_owned(),
+        }
+    }
+
+    /** 创建测试 zip 字节，路径保持原样交给解包逻辑校验。 */
+    fn build_zip_bytes(entries: &[(&str, &str)]) -> Vec<u8> {
+        let cursor = std::io::Cursor::new(Vec::new());
+        let mut writer = zip::ZipWriter::new(cursor);
+        let options = zip::write::SimpleFileOptions::default();
+
+        for (path, content) in entries {
+            writer.start_file(path, options).expect("start zip file");
+            writer
+                .write_all(content.as_bytes())
+                .expect("write zip content");
+        }
+
+        writer.finish().expect("finish zip").into_inner()
+    }
+
     /** 自动匹配应根据 action 和触发词命中内置技能。 */
     #[test]
     fn resolves_builtin_skill_by_action() {
@@ -1388,6 +2109,222 @@ mod tests {
             Some(stable_absolute_path(&skill_path).to_string_lossy().as_ref())
         );
         assert!(skill.id.starts_with("skill-file-"));
+    }
+
+    /** 标准 YAML frontmatter 支持 display_name 和数组字段。 */
+    #[test]
+    fn parses_standard_yaml_frontmatter_fields() {
+        let parsed = parse_skill_markdown(
+            r#"---
+name: yaml-demo
+display_name: YAML 展示名
+description: 标准 YAML 描述
+tags:
+  - 写作
+  - 研究
+triggers: ["总结", "summary"]
+---
+
+执行 YAML skill。
+"#,
+        )
+        .expect("parse yaml skill");
+
+        assert_eq!(parsed.name, "yaml-demo");
+        assert_eq!(parsed.display_name.as_deref(), Some("YAML 展示名"));
+        assert_eq!(parsed.tags, vec!["写作", "研究"]);
+        assert_eq!(parsed.triggers, vec!["总结", "summary"]);
+    }
+
+    /** 安装本地多 skill 包时，应复制到用户目录并默认停用。 */
+    #[test]
+    fn installs_multiple_local_skills_disabled_by_default() {
+        let temp_dir = tempdir().expect("create tempdir");
+        let source = temp_dir.path().join("source");
+        let root = temp_dir.path().join("skills");
+        let connection = test_connection();
+
+        write_skill_markdown(
+            &source,
+            "one",
+            &valid_skill_markdown("install-one", "安装技能一", "执行安装技能一。"),
+        );
+        write_skill_markdown(
+            &source,
+            "nested/two",
+            &valid_skill_markdown("install-two", "安装技能二", "执行安装技能二。"),
+        );
+
+        let result = install_agent_skills_from_prepared_root(
+            &connection,
+            &root,
+            &source,
+            install_options(INSTALL_CONFLICT_FAIL, false),
+        )
+        .expect("install skills");
+
+        assert_eq!(result.installed_count, 2);
+        assert!(root
+            .join("install-one")
+            .join(SKILL_MARKDOWN_FILE_NAME)
+            .exists());
+        assert!(root
+            .join("install-two")
+            .join(SKILL_MARKDOWN_FILE_NAME)
+            .exists());
+        assert!(result.installed_skills.iter().all(|skill| !skill.enabled));
+        assert!(result
+            .installed_skills
+            .iter()
+            .all(|skill| !skill.allow_auto_invoke));
+    }
+
+    /** 安装包中的 scripts 目录会保留但给出不会执行的提示。 */
+    #[test]
+    fn install_keeps_scripts_but_returns_warning() {
+        let temp_dir = tempdir().expect("create tempdir");
+        let source = temp_dir.path().join("source");
+        let root = temp_dir.path().join("skills");
+        let connection = test_connection();
+
+        write_skill_markdown(
+            &source,
+            "scripted",
+            &valid_skill_markdown("scripted", "带脚本技能", "执行前先阅读说明。"),
+        );
+        fs::create_dir_all(source.join("scripted/scripts")).expect("create scripts");
+        fs::write(source.join("scripted/scripts/run.sh"), "echo test").expect("write script");
+
+        let result = install_agent_skills_from_prepared_root(
+            &connection,
+            &root,
+            &source,
+            install_options(INSTALL_CONFLICT_FAIL, false),
+        )
+        .expect("install scripted skill");
+
+        assert!(root.join("scripted/scripts/run.sh").exists());
+        assert!(result
+            .warnings
+            .iter()
+            .any(|warning| warning.contains("不会执行脚本")));
+    }
+
+    /** 同名 skill 默认拒绝覆盖；replace 策略才会替换已有目录。 */
+    #[test]
+    fn install_conflict_fail_and_replace_behaviors() {
+        let temp_dir = tempdir().expect("create tempdir");
+        let source = temp_dir.path().join("source");
+        let replacement = temp_dir.path().join("replacement");
+        let root = temp_dir.path().join("skills");
+        let connection = test_connection();
+
+        write_skill_markdown(
+            &source,
+            "conflict",
+            &valid_skill_markdown("conflict-skill", "旧描述", "旧 instructions。"),
+        );
+        install_agent_skills_from_prepared_root(
+            &connection,
+            &root,
+            &source,
+            install_options(INSTALL_CONFLICT_FAIL, false),
+        )
+        .expect("install original");
+
+        write_skill_markdown(
+            &replacement,
+            "conflict",
+            &valid_skill_markdown("conflict-skill", "新描述", "新 instructions。"),
+        );
+        let failed = install_agent_skills_from_prepared_root(
+            &connection,
+            &root,
+            &replacement,
+            install_options(INSTALL_CONFLICT_FAIL, false),
+        )
+        .expect_err("conflict should fail");
+
+        assert!(failed.contains("已存在"));
+
+        install_agent_skills_from_prepared_root(
+            &connection,
+            &root,
+            &replacement,
+            install_options(INSTALL_CONFLICT_REPLACE, false),
+        )
+        .expect("replace skill");
+
+        let markdown =
+            fs::read_to_string(root.join("conflict-skill/SKILL.md")).expect("read replaced skill");
+
+        assert!(markdown.contains("新 instructions"));
+    }
+
+    /** zip 包会安全解压并进入同一安装管线。 */
+    #[test]
+    fn installs_skill_from_zip_bytes() {
+        let temp_dir = tempdir().expect("create tempdir");
+        let root = temp_dir.path().join("skills");
+        let connection = test_connection();
+        let bytes = build_zip_bytes(&[(
+            "repo-main/skills/zip-demo/SKILL.md",
+            &valid_skill_markdown("zip-demo", "zip 安装技能", "执行 zip 技能。"),
+        )]);
+        let prepared = prepare_skill_archive_bytes(&bytes).expect("prepare zip");
+        let result = install_agent_skills_from_prepared_root(
+            &connection,
+            &root,
+            prepared.path(),
+            install_options(INSTALL_CONFLICT_FAIL, false),
+        )
+        .expect("install from zip");
+
+        assert_eq!(result.installed_count, 1);
+        assert!(root
+            .join("zip-demo")
+            .join(SKILL_MARKDOWN_FILE_NAME)
+            .exists());
+    }
+
+    /** zip 中的路径穿越条目必须在解包阶段被拒绝。 */
+    #[test]
+    fn rejects_zip_path_traversal() {
+        let bytes = build_zip_bytes(&[("../evil/SKILL.md", "bad")]);
+        let error = prepare_skill_archive_bytes(&bytes).expect_err("path traversal rejected");
+
+        assert!(error.contains("不安全路径"));
+    }
+
+    /** URL 解析应把 GitHub blob 和 tree 转换为下载地址，并保留脱敏摘要。 */
+    #[test]
+    fn resolves_github_skill_urls() {
+        let blob = resolve_skill_url_download(
+            "https://github.com/example/skills/blob/main/writing/SKILL.md",
+        )
+        .expect("resolve blob");
+        let tree = resolve_skill_url_download("https://github.com/example/skills/tree/dev/writing")
+            .expect("resolve tree");
+        let clone_url = resolve_skill_url_download("https://github.com/obra/superpowers.git")
+            .expect("resolve clone url");
+
+        assert_eq!(blob.kind, SkillUrlDownloadKind::Markdown);
+        assert_eq!(
+            blob.url,
+            "https://raw.githubusercontent.com/example/skills/main/writing/SKILL.md"
+        );
+        assert_eq!(tree.kind, SkillUrlDownloadKind::Archive);
+        assert_eq!(
+            tree.url,
+            "https://github.com/example/skills/archive/refs/heads/dev.zip"
+        );
+        assert_eq!(blob.source_summary, "github.com/example/skills");
+        assert_eq!(clone_url.kind, SkillUrlDownloadKind::Archive);
+        assert_eq!(
+            clone_url.url,
+            "https://github.com/obra/superpowers/archive/refs/heads/main.zip"
+        );
+        assert_eq!(clone_url.source_summary, "github.com/obra/superpowers");
     }
 
     /** 单个无效 SKILL.md 只会被跳过，不应阻塞同根目录下其他有效文件式 skill。 */

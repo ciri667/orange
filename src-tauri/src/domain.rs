@@ -90,6 +90,25 @@ pub enum AgentSkillActivationMode {
     Manual,
 }
 
+/** Skill 安装来源类型，URL、本地目录和本地压缩包走不同的准备流程。 */
+#[allow(dead_code)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum SkillInstallSourceType {
+    Url,
+    LocalFolder,
+    LocalArchive,
+}
+
+/** Skill 安装遇到同名目录时的处理策略。 */
+#[allow(dead_code)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum SkillInstallConflictStrategy {
+    Fail,
+    Replace,
+}
+
 /** 用户选择的本地 Markdown 知识库元信息。 */
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -684,4 +703,30 @@ pub struct ToggleAgentSkillPayload {
 #[serde(rename_all = "camelCase")]
 pub struct DeleteAgentSkillPayload {
     pub skill_id: String,
+}
+
+/** 安装第三方 skill 的命令入参；本地来源 source 为空时由后端打开系统选择器。 */
+#[derive(Clone, Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct InstallAgentSkillPayload {
+    pub source_type: String,
+    #[serde(default)]
+    pub source: Option<String>,
+    #[serde(default)]
+    pub enable_after_install: bool,
+    pub conflict_strategy: String,
+}
+
+/** 安装第三方 skill 后返回安装项、刷新列表和脱敏摘要。 */
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct InstallAgentSkillResult {
+    pub installed_skills: Vec<AgentSkill>,
+    pub skills: Vec<AgentSkill>,
+    pub warnings: Vec<String>,
+    pub summary: String,
+    pub source_type: String,
+    pub source_summary: String,
+    pub installed_count: usize,
+    pub file_count: usize,
 }

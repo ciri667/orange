@@ -2,13 +2,14 @@ use crate::domain::{
     AgentSession, AgentSkill, AgentTurnPayload, AgentTurnResult, AppEventLog, ChangePayload,
     CreateDocumentPayload, CreateFolderPayload, CreateNotePayload, DeleteAgentSkillPayload,
     DeleteDocumentPayload, DeleteNotePayload, DeleteSessionPayload, DocumentPreview, FolderEntry,
-    KnowledgeBaseSelection, LoadAppEventLogsPayload, LoadDocumentPreviewPayload,
-    LoadSessionsPayload, ModelApiKeyStatus, ProposedChange, RemoveKnowledgeBasePayload,
-    RenameDocumentPayload, RenameNotePayload, RequestAuditLog, RescanKnowledgeBasePayload,
-    RestoreSessionContextPayload, SaveAgentSkillPayload, SaveDocumentContentPayload,
-    SaveModelApiKeyPayload, SaveNoteContentPayload, SaveNoteImageAttachmentsPayload,
-    SaveSessionPayload, SaveUserSettingsPayload, ScanKnowledgeBasePayload, ScanReport,
-    ToggleAgentSkillPayload, UpdateSessionScopePayload, UserSettings, WorkspaceSnapshot,
+    InstallAgentSkillPayload, InstallAgentSkillResult, KnowledgeBaseSelection,
+    LoadAppEventLogsPayload, LoadDocumentPreviewPayload, LoadSessionsPayload, ModelApiKeyStatus,
+    ProposedChange, RemoveKnowledgeBasePayload, RenameDocumentPayload, RenameNotePayload,
+    RequestAuditLog, RescanKnowledgeBasePayload, RestoreSessionContextPayload,
+    SaveAgentSkillPayload, SaveDocumentContentPayload, SaveModelApiKeyPayload,
+    SaveNoteContentPayload, SaveNoteImageAttachmentsPayload, SaveSessionPayload,
+    SaveUserSettingsPayload, ScanKnowledgeBasePayload, ScanReport, ToggleAgentSkillPayload,
+    UpdateSessionScopePayload, UserSettings, WorkspaceSnapshot,
 };
 use crate::logging::{self, AppEventBuilder, AppLogCategory, AppLogLevel};
 use crate::runtime;
@@ -17,6 +18,7 @@ use crate::storage;
 use crate::text_edit::{replace_unique, UniqueReplacementError};
 use serde_json::json;
 use std::fs;
+use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::Instant;
@@ -389,6 +391,106 @@ pub async fn delete_agent_skill(
             )
             .duration(started_at.elapsed())
             .entity("skill", skill_id),
+        ),
+    }
+
+    result
+}
+
+/** 安装第三方 Skill 包；默认停用，用户审阅后再手动启用。 */
+#[tauri::command]
+pub async fn install_agent_skill(
+    app: AppHandle,
+    payload: InstallAgentSkillPayload,
+) -> Result<InstallAgentSkillResult, String> {
+    let source_type = payload.source_type.clone();
+    let conflict_strategy = payload.conflict_strategy.clone();
+    let enable_after_install = payload.enable_after_install;
+    let started_at = Instant::now();
+    let operation_id = storage::create_id("op");
+
+    logging::write_app_event_best_effort(
+        &app,
+        AppEventBuilder::new(
+            AppLogLevel::Info,
+            AppLogCategory::Skill,
+            "install_agent_skill",
+            "started",
+            "开始安装第三方 Skill。",
+        )
+        .operation_id(operation_id.clone())
+        .metadata(json!({
+            "sourceType": source_type.clone(),
+            "conflictStrategy": conflict_strategy.clone(),
+            "enableAfterInstall": enable_after_install,
+        })),
+    );
+
+    let prepare_result = prepare_skill_install_source(&app, &payload).await;
+    let result = match prepare_result {
+        Ok(prepared_source) => {
+            let install_app = app.clone();
+            let install_source_type = source_type.clone();
+            let install_conflict_strategy = conflict_strategy.clone();
+            let install_enable_after_install = enable_after_install;
+
+            run_blocking("安装 Skill", move || {
+                let connection = storage::open_database(&install_app)?;
+                let skills_root = skills::user_skills_root(&install_app)?;
+
+                skills::install_agent_skills_from_prepared_root(
+                    &connection,
+                    &skills_root,
+                    prepared_source.root_path(),
+                    skills::SkillInstallOptions {
+                        source_type: install_source_type,
+                        source_summary: prepared_source.source_summary().to_owned(),
+                        enable_after_install: install_enable_after_install,
+                        conflict_strategy: install_conflict_strategy,
+                    },
+                )
+            })
+            .await
+        }
+        Err(error) => Err(error),
+    };
+
+    match &result {
+        Ok(install_result) => logging::write_app_event_best_effort(
+            &app,
+            AppEventBuilder::new(
+                AppLogLevel::Info,
+                AppLogCategory::Skill,
+                "install_agent_skill",
+                "completed",
+                "已安装第三方 Skill。",
+            )
+            .operation_id(operation_id)
+            .duration(started_at.elapsed())
+            .metadata(json!({
+                "sourceType": install_result.source_type.clone(),
+                "sourceSummary": install_result.source_summary.clone(),
+                "installedCount": install_result.installed_count,
+                "fileCount": install_result.file_count,
+                "warningCount": install_result.warnings.len(),
+            })),
+        ),
+        Err(error) => logging::write_app_event_best_effort(
+            &app,
+            AppEventBuilder::new(
+                AppLogLevel::Error,
+                AppLogCategory::Skill,
+                "install_agent_skill",
+                "failed",
+                error,
+            )
+            .operation_id(operation_id)
+            .duration(started_at.elapsed())
+            .metadata(json!({
+                "sourceType": source_type,
+                "conflictStrategy": conflict_strategy,
+                "enableAfterInstall": enable_after_install,
+            })),
         ),
     }
 
@@ -2055,6 +2157,251 @@ async fn hydrate_persisted_sessions_for_turn(
     }
 
     Ok(snapshot)
+}
+
+/** 已准备好的安装来源，TempDir 持有临时目录生命周期直到后台安装结束。 */
+enum PreparedSkillInstallSource {
+    Borrowed {
+        path: PathBuf,
+        source_summary: String,
+    },
+    Temp {
+        temp_dir: tempfile::TempDir,
+        source_summary: String,
+    },
+}
+
+impl PreparedSkillInstallSource {
+    /** 返回统一安装管线可读取的根目录。 */
+    fn root_path(&self) -> &Path {
+        match self {
+            PreparedSkillInstallSource::Borrowed { path, .. } => path.as_path(),
+            PreparedSkillInstallSource::Temp { temp_dir, .. } => temp_dir.path(),
+        }
+    }
+
+    /** 返回已脱敏的来源摘要，用于日志、UI 和安装元数据。 */
+    fn source_summary(&self) -> &str {
+        match self {
+            PreparedSkillInstallSource::Borrowed { source_summary, .. }
+            | PreparedSkillInstallSource::Temp { source_summary, .. } => source_summary,
+        }
+    }
+}
+
+/** 根据 payload 准备安装来源；本地来源未传路径时打开系统选择器。 */
+async fn prepare_skill_install_source(
+    app: &AppHandle,
+    payload: &InstallAgentSkillPayload,
+) -> Result<PreparedSkillInstallSource, String> {
+    match payload.source_type.as_str() {
+        "url" => {
+            prepare_url_skill_install_source(payload.source.as_deref().unwrap_or_default()).await
+        }
+        "localFolder" => {
+            let path = match payload
+                .source
+                .as_deref()
+                .filter(|value| !value.trim().is_empty())
+            {
+                Some(path) => PathBuf::from(path),
+                None => pick_skill_folder(app).await?,
+            };
+
+            if !path.exists() || !path.is_dir() {
+                return Err("请选择有效的 Skill 文件夹。".to_owned());
+            }
+
+            Ok(PreparedSkillInstallSource::Borrowed {
+                source_summary: summarize_local_install_source(&path),
+                path,
+            })
+        }
+        "localArchive" => {
+            let path = match payload
+                .source
+                .as_deref()
+                .filter(|value| !value.trim().is_empty())
+            {
+                Some(path) => PathBuf::from(path),
+                None => pick_skill_archive(app).await?,
+            };
+
+            if !path.exists() || !path.is_file() {
+                return Err("请选择有效的 Skill zip 文件。".to_owned());
+            }
+
+            let bytes = read_limited_file(&path, skills::MAX_REMOTE_SKILL_ARCHIVE_BYTES)?;
+            let temp_dir = skills::prepare_skill_archive_bytes(&bytes)?;
+
+            Ok(PreparedSkillInstallSource::Temp {
+                source_summary: summarize_local_install_source(&path),
+                temp_dir,
+            })
+        }
+        _ => Err("未知的 Skill 安装来源类型。".to_owned()),
+    }
+}
+
+/** 下载远程 Skill 来源并转换成统一的临时目录。 */
+async fn prepare_url_skill_install_source(url: &str) -> Result<PreparedSkillInstallSource, String> {
+    let download = skills::resolve_skill_url_download(url)?;
+    let response = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(30))
+        .build()
+        .map_err(|error| format!("无法创建 Skill 下载客户端：{error}"))?
+        .get(&download.url)
+        .header(
+            reqwest::header::ACCEPT,
+            "text/markdown, application/zip, */*",
+        )
+        .send()
+        .await
+        .map_err(|error| format!("下载 Skill 失败：{error}"))?;
+
+    if !response.status().is_success() {
+        return Err(format!("下载 Skill 失败：HTTP {}", response.status()));
+    }
+
+    let content_type = response
+        .headers()
+        .get(reqwest::header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or_default()
+        .to_lowercase();
+    let is_archive_download = matches!(download.kind, skills::SkillUrlDownloadKind::Archive)
+        || content_type.contains("zip")
+        || download.url.ends_with(".zip");
+    let max_bytes = if is_archive_download {
+        skills::MAX_REMOTE_SKILL_ARCHIVE_BYTES
+    } else {
+        skills::MAX_REMOTE_SKILL_MARKDOWN_BYTES
+    };
+    let bytes = read_limited_response_bytes(response, max_bytes, is_archive_download).await?;
+    let temp_dir = if is_archive_download {
+        skills::prepare_skill_archive_bytes(&bytes)?
+    } else {
+        let markdown = String::from_utf8(bytes)
+            .map_err(|_| "远程 Skill 内容不是有效 UTF-8 文本。".to_owned())?;
+
+        skills::prepare_single_skill_markdown(&markdown)?
+    };
+
+    Ok(PreparedSkillInstallSource::Temp {
+        source_summary: download.source_summary,
+        temp_dir,
+    })
+}
+
+/** 按最大字节数读取远程响应体，Content-Length 缺失时也能在流式读取过程中截断。 */
+async fn read_limited_response_bytes(
+    mut response: reqwest::Response,
+    max_bytes: usize,
+    is_archive: bool,
+) -> Result<Vec<u8>, String> {
+    if response
+        .content_length()
+        .is_some_and(|content_length| content_length > max_bytes as u64)
+    {
+        return Err(remote_skill_size_limit_message(is_archive));
+    }
+
+    let mut bytes = Vec::new();
+
+    while let Some(chunk) = response
+        .chunk()
+        .await
+        .map_err(|error| format!("读取 Skill 下载内容失败：{error}"))?
+    {
+        if bytes.len().saturating_add(chunk.len()) > max_bytes {
+            return Err(remote_skill_size_limit_message(is_archive));
+        }
+
+        bytes.extend_from_slice(&chunk);
+    }
+
+    Ok(bytes)
+}
+
+/** 返回远程下载大小限制提示，避免多个下载分支各自硬编码文案。 */
+fn remote_skill_size_limit_message(is_archive: bool) -> String {
+    if is_archive {
+        "远程 Skill 压缩包超过 25MB，已阻止安装。".to_owned()
+    } else {
+        "远程 SKILL.md 超过 1MB，已阻止安装。".to_owned()
+    }
+}
+
+/** 打开系统目录选择器选择待安装 Skill 文件夹。 */
+async fn pick_skill_folder(app: &AppHandle) -> Result<PathBuf, String> {
+    let (sender, mut receiver) = tauri::async_runtime::channel(1);
+
+    app.dialog()
+        .file()
+        .set_title("选择 Skill 文件夹")
+        .pick_folder(move |selected_path| {
+            let _ = sender.blocking_send(selected_path);
+        });
+
+    receiver
+        .recv()
+        .await
+        .flatten()
+        .and_then(|path| path.as_path().map(PathBuf::from))
+        .ok_or_else(|| "未选择 Skill 文件夹。".to_owned())
+}
+
+/** 打开系统文件选择器选择待安装 Skill zip。 */
+async fn pick_skill_archive(app: &AppHandle) -> Result<PathBuf, String> {
+    let (sender, mut receiver) = tauri::async_runtime::channel(1);
+
+    app.dialog()
+        .file()
+        .set_title("选择 Skill zip 文件")
+        .add_filter("Zip archive", &["zip"])
+        .pick_file(move |selected_path| {
+            let _ = sender.blocking_send(selected_path);
+        });
+
+    receiver
+        .recv()
+        .await
+        .flatten()
+        .and_then(|path| path.as_path().map(PathBuf::from))
+        .ok_or_else(|| "未选择 Skill zip 文件。".to_owned())
+}
+
+/** 读取本地压缩包并限制最大字节数，避免大文件通过 IPC 之外的路径阻塞安装。 */
+fn read_limited_file(path: &Path, max_bytes: usize) -> Result<Vec<u8>, String> {
+    let metadata =
+        fs::metadata(path).map_err(|error| format!("无法读取 Skill 文件元数据：{error}"))?;
+
+    if metadata.len() > max_bytes as u64 {
+        return Err("Skill zip 文件超过 25MB，已阻止安装。".to_owned());
+    }
+
+    let mut file =
+        fs::File::open(path).map_err(|error| format!("无法读取 Skill zip 文件：{error}"))?;
+    let mut bytes = Vec::new();
+
+    file.by_ref()
+        .take(max_bytes as u64 + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|error| format!("无法读取 Skill zip 文件：{error}"))?;
+
+    if bytes.len() > max_bytes {
+        return Err("Skill zip 文件超过 25MB，已阻止安装。".to_owned());
+    }
+
+    Ok(bytes)
+}
+
+/** 生成本地安装来源摘要，只保留文件或目录名，避免日志写入绝对路径。 */
+fn summarize_local_install_source(path: &Path) -> String {
+    path.file_name()
+        .and_then(|value| value.to_str())
+        .map(|name| format!("local:{name}"))
+        .unwrap_or_else(|| "local".to_owned())
 }
 
 /** 在 Tauri 后台阻塞线程中运行文件系统或 SQLite 重任务，避免卡住 WebView 主线程。 */
