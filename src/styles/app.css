@@ -2235,7 +2235,7 @@ textarea:disabled {
 .skills-list-pane {
   display: grid;
   min-height: 0;
-  grid-template-rows: auto auto auto auto minmax(0, 1fr);
+  grid-template-rows: auto auto auto auto auto minmax(0, 1fr);
   gap: 10px;
   border-right: 1px solid var(--border);
   padding: 14px;
@@ -2490,6 +2490,71 @@ textarea:disabled {
 .skill-form textarea {
   min-height: 140px;
   resize: vertical;
+  line-height: 1.55;
+}
+
+.skill-form .toggle-row input {
+  width: 16px;
+  height: 16px;
+  padding: 0;
+}
+
+.skill-install-source-tabs {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.skill-install-source-tabs button {
+  display: inline-flex;
+  min-width: 0;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  padding: 8px;
+  background: #ffffff;
+  color: var(--text-muted);
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.skill-install-source-tabs button.active {
+  border-color: #b8d9d4;
+  background: var(--accent-soft);
+  color: var(--accent-strong);
+}
+
+.skill-install-help {
+  margin: -6px 0 0;
+  color: var(--text-muted);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.skill-install-safety {
+  display: grid;
+  gap: 6px;
+  border: 1px solid #e4e8ec;
+  border-radius: 7px;
+  padding: 10px;
+  background: #fbfcfd;
+}
+
+.skill-install-safety h4,
+.skill-install-safety p {
+  margin: 0;
+}
+
+.skill-install-safety h4 {
+  color: #172026;
+  font-size: 13px;
+}
+
+.skill-install-safety p {
+  color: var(--text-muted);
+  font-size: 12px;
   line-height: 1.55;
 }
 

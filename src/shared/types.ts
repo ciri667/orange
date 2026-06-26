@@ -62,6 +62,12 @@ export type AgentSkillSource = "built-in" | "file" | "user";
 /** Skill 默认触发模式，auto 允许 Runtime 根据输入轻量匹配。 */
 export type AgentSkillActivationMode = "auto" | "manual";
 
+/** Skill 安装来源类型，URL、本地文件夹和本地 zip 走不同的后端准备流程。 */
+export type SkillInstallSourceType = "url" | "localFolder" | "localArchive";
+
+/** Skill 安装同名冲突策略，fail 保守失败，replace 由用户明确替换。 */
+export type SkillInstallConflictStrategy = "fail" | "replace";
+
 /** Agent skill 是可启停、可显式选择、可自动匹配的指令型工作流。 */
 export interface AgentSkill {
   id: string;
@@ -87,6 +93,26 @@ export interface AgentSkill {
 /** Skill 全局设置，控制未显式选择时是否自动匹配。 */
 export interface SkillSettings {
   activationMode: AgentSkillActivationMode;
+}
+
+/** 第三方 skill 安装请求；本地来源 source 为空时桌面端会打开系统选择器。 */
+export interface InstallAgentSkillPayload {
+  sourceType: SkillInstallSourceType;
+  source?: string;
+  enableAfterInstall: boolean;
+  conflictStrategy: SkillInstallConflictStrategy;
+}
+
+/** 第三方 skill 安装结果，包含刷新后的完整列表和脱敏摘要。 */
+export interface InstallAgentSkillResult {
+  installedSkills: AgentSkill[];
+  skills: AgentSkill[];
+  warnings: string[];
+  summary: string;
+  sourceType: SkillInstallSourceType;
+  sourceSummary: string;
+  installedCount: number;
+  fileCount: number;
 }
 
 /** 单次知识库扫描报告，用于展示成功、失败、跳过目录和错误信息。 */

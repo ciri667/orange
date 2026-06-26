@@ -27,6 +27,7 @@ import {
   loadDocumentPreview,
   loadAppEventLogs,
   loadAgentSkills,
+  installAgentSkill,
   loadModelApiKeyStatus,
   loadRequestAuditLogs,
   loadUserSettings,
@@ -60,6 +61,8 @@ import type {
   AppEventLogCategory,
   AppEventLogLevel,
   DocumentPreview,
+  InstallAgentSkillPayload,
+  InstallAgentSkillResult,
   KnowledgeBase,
   MarkdownViewMode,
   ModelApiKeyStatus,
@@ -135,6 +138,16 @@ function summarizeImageMimeTypes(files: File[]) {
   return Array.from(new Set(files.map((file) => file.type || "unknown")))
     .sort()
     .join(",");
+}
+
+/** 生成 skill 安装完成提示，保留 warning 数量但限制文本长度避免挤占全局 notice。 */
+function buildSkillInstallNotice(result: InstallAgentSkillResult, enabledAfterInstall: boolean) {
+  const statusText = enabledAfterInstall ? "已启用。" : "默认停用，审阅后可手动启用。";
+  const warningText = result.warnings.length ? ` 警告：${result.warnings.slice(0, 2).join("；")}` : "";
+  const extraWarningText = result.warnings.length > 2 ? ` 等 ${result.warnings.length} 条。` : "";
+  const notice = `${result.summary} ${statusText}${warningText}${extraWarningText}`;
+
+  return notice.length > 360 ? `${notice.slice(0, 360)}...` : notice;
 }
 
 /** 新建 Agent 会话对象，作为消息、检索范围和待确认 diff 的容器。 */
@@ -1561,6 +1574,31 @@ export function WorkspaceShell() {
     }
   }
 
+  /** 安装第三方 skill 包并刷新列表；日志由 API 层和后端记录脱敏摘要。 */
+  async function handleInstallSkill(payload: InstallAgentSkillPayload): Promise<InstallAgentSkillResult> {
+    beginBusy("正在安装 Skill...");
+
+    try {
+      const result = await installAgentSkill(payload);
+      const firstInstalledSkill = result.installedSkills[0];
+
+      setAgentSkills(result.skills);
+      if (firstInstalledSkill) {
+        setSelectedSkillId(firstInstalledSkill.id);
+      }
+      setNotice(buildSkillInstallNotice(result, payload.enableAfterInstall));
+
+      return result;
+    } catch (error) {
+      const message = formatErrorMessage(error);
+
+      setNotice(message);
+      throw new Error(message);
+    } finally {
+      endBusy();
+    }
+  }
+
   /** 启停 skill 或切换自动触发状态，禁用后也会清除输入区的显式选择。 */
   async function handleToggleSkill(skillId: string, enabled: boolean, allowAutoInvoke?: boolean) {
     beginBusy("正在更新 Skill...");
@@ -1838,6 +1876,7 @@ export function WorkspaceShell() {
           onRemoveKnowledgeBase={handleRemoveKnowledgeBase}
           onSaveSettings={handleSaveSettings}
           onSaveSkill={handleSaveSkill}
+          onInstallSkill={handleInstallSkill}
           onToggleSkill={handleToggleSkill}
           onDeleteSkill={handleDeleteSkill}
           onOpenUserSkillsFolder={handleOpenUserSkillsFolder}

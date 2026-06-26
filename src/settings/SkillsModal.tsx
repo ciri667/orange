@@ -1,8 +1,15 @@
-import { Edit3, FolderOpen, Plus, Save, Search, Trash2, X } from "lucide-react";
+import { Archive, Download, Edit3, FolderOpen, Link, Plus, Save, Search, Trash2, X } from "lucide-react";
 import type { FormEvent } from "react";
 import { useMemo, useState } from "react";
 import { ConfirmDialog, type ConfirmDialogConfig } from "../shared/ConfirmDialog";
-import type { AgentSkill, AgentSkillSource } from "../shared/types";
+import { logError, logInfo } from "../shared/logger";
+import type {
+  AgentSkill,
+  AgentSkillSource,
+  InstallAgentSkillPayload,
+  InstallAgentSkillResult,
+  SkillInstallSourceType,
+} from "../shared/types";
 
 /** Skills 列表来源筛选，all 用于展示完整合并结果。 */
 type SkillSourceFilter = "all" | AgentSkillSource;
@@ -25,16 +32,33 @@ interface SkillFormDraft {
   allowAutoInvoke: boolean;
 }
 
+/** Skill 安装表单草稿；本地来源 source 留空时由 Tauri 打开系统选择器。 */
+interface SkillInstallDraft {
+  sourceType: SkillInstallSourceType;
+  source: string;
+  enableAfterInstall: boolean;
+  replaceExisting: boolean;
+}
+
 /** 待确认的 Skill 操作；确认后才执行删除，避免依赖系统 confirm。 */
 interface PendingSkillConfirmation extends ConfirmDialogConfig {
   onConfirm: () => Promise<void> | void;
 }
+
+/** 安装表单默认值，第三方 skill 默认停用，避免未审阅能力进入 Runtime。 */
+const DEFAULT_INSTALL_DRAFT: SkillInstallDraft = {
+  sourceType: "url",
+  source: "",
+  enableAfterInstall: false,
+  replaceExisting: false,
+};
 
 /** Skills 管理弹窗，提供浏览、筛选、启停和用户自建 skill CRUD。 */
 export function SkillsModal({
   skills,
   isBusy,
   onSaveSkill,
+  onInstallSkill,
   onToggleSkill,
   onDeleteSkill,
   onOpenUserSkillsFolder,
@@ -43,6 +67,7 @@ export function SkillsModal({
   skills: AgentSkill[];
   isBusy: boolean;
   onSaveSkill: (skill: AgentSkill) => Promise<AgentSkill | void> | AgentSkill | void;
+  onInstallSkill: (payload: InstallAgentSkillPayload) => Promise<InstallAgentSkillResult> | InstallAgentSkillResult;
   onToggleSkill: (skillId: string, enabled: boolean, allowAutoInvoke?: boolean) => Promise<void> | void;
   onDeleteSkill: (skillId: string) => Promise<void> | void;
   onOpenUserSkillsFolder: () => Promise<void> | void;
@@ -58,6 +83,8 @@ export function SkillsModal({
   const [selectedSkillId, setSelectedSkillId] = useState(skills[0]?.id ?? "");
   /** 表单草稿存在时详情面板切换为新建或编辑模式。 */
   const [formDraft, setFormDraft] = useState<SkillFormDraft | null>(null);
+  /** 安装草稿存在时详情面板展示第三方 skill 安装入口。 */
+  const [installDraft, setInstallDraft] = useState<SkillInstallDraft | null>(null);
   /** 当前等待用户确认的危险操作，使用应用内弹窗承载。 */
   const [pendingConfirmation, setPendingConfirmation] = useState<PendingSkillConfirmation | null>(null);
 
@@ -108,6 +135,7 @@ export function SkillsModal({
   /** 打开新建用户 skill 表单，默认启用自动触发但不预填触发词。 */
   function handleCreateSkill() {
     setSelectedSkillId("");
+    setInstallDraft(null);
     setFormDraft({
       id: "",
       name: "",
@@ -128,6 +156,7 @@ export function SkillsModal({
     }
 
     setSelectedSkillId(skill.id);
+    setInstallDraft(null);
     setFormDraft({
       id: skill.id,
       name: skill.name,
@@ -139,6 +168,13 @@ export function SkillsModal({
       enabled: skill.enabled,
       allowAutoInvoke: skill.allowAutoInvoke,
     });
+  }
+
+  /** 打开安装表单，使用安全默认值：安装后停用且不覆盖同名 skill。 */
+  function handleOpenInstallSkill() {
+    setSelectedSkillId("");
+    setFormDraft(null);
+    setInstallDraft(DEFAULT_INSTALL_DRAFT);
   }
 
   /** 提交用户 skill 表单，并把逗号分隔文本归一化为数组。 */
@@ -175,6 +211,68 @@ export function SkillsModal({
       setSelectedSkillId(savedSkill.id);
     }
     setFormDraft(null);
+  }
+
+  /** 提交第三方 skill 安装请求，日志只记录类型和策略，不记录 URL 或本地路径。 */
+  async function handleSubmitInstall(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+
+    if (!installDraft) {
+      return;
+    }
+
+    const startedAt = performance.now();
+    const payload: InstallAgentSkillPayload = {
+      sourceType: installDraft.sourceType,
+      source: installDraft.source.trim() || undefined,
+      enableAfterInstall: installDraft.enableAfterInstall,
+      conflictStrategy: installDraft.replaceExisting ? "replace" : "fail",
+    };
+
+    logInfo("设置页提交 Skill 安装。", {
+      category: "skill",
+      event: "skill_install_submit",
+      status: "started",
+      metadata: {
+        sourceType: payload.sourceType,
+        conflictStrategy: payload.conflictStrategy,
+        enableAfterInstall: payload.enableAfterInstall,
+        hasSource: Boolean(payload.source),
+      },
+    });
+
+    try {
+      const result = await onInstallSkill(payload);
+      const firstInstalledSkill = result.installedSkills[0];
+
+      if (firstInstalledSkill) {
+        setSelectedSkillId(firstInstalledSkill.id);
+      }
+      setInstallDraft(null);
+      logInfo("设置页 Skill 安装提交完成。", {
+        category: "skill",
+        event: "skill_install_submit",
+        status: "completed",
+        durationMs: performance.now() - startedAt,
+        metadata: {
+          sourceType: result.sourceType,
+          installedCount: result.installedCount,
+          warningCount: result.warnings.length,
+        },
+      });
+    } catch (error) {
+      logError("设置页 Skill 安装提交失败。", {
+        category: "skill",
+        event: "skill_install_submit",
+        status: "failed",
+        durationMs: performance.now() - startedAt,
+        error,
+        metadata: {
+          sourceType: payload.sourceType,
+          conflictStrategy: payload.conflictStrategy,
+        },
+      });
+    }
   }
 
   /** 删除用户自建 skill 前二次确认，文件式 skill 会移除用户目录中的对应文件夹。 */
@@ -260,15 +358,20 @@ export function SkillsModal({
               <Plus size={14} />
               新建 Skill
             </button>
+            <button className="ghost-button skill-new-button" type="button" onClick={handleOpenInstallSkill} disabled={isBusy}>
+              <Download size={14} />
+              安装 Skill
+            </button>
             <div className="skills-list">
               {filteredSkills.map((skill) => (
                 <button
-                  className={`skill-row ${skill.id === selectedSkill?.id && !formDraft ? "active" : ""}`}
+                  className={`skill-row ${skill.id === selectedSkill?.id && !formDraft && !installDraft ? "active" : ""}`}
                   key={skill.id}
                   type="button"
                   onClick={() => {
                     setSelectedSkillId(skill.id);
                     setFormDraft(null);
+                    setInstallDraft(null);
                   }}
                 >
                   <span>
@@ -283,7 +386,15 @@ export function SkillsModal({
           </aside>
 
           <div className="skill-detail-pane">
-            {formDraft ? (
+            {installDraft ? (
+              <SkillInstallForm
+                draft={installDraft}
+                isBusy={isBusy}
+                onChange={setInstallDraft}
+                onCancel={() => setInstallDraft(null)}
+                onSubmit={handleSubmitInstall}
+              />
+            ) : formDraft ? (
               <SkillForm
                 draft={formDraft}
                 isBusy={isBusy}
@@ -427,6 +538,123 @@ function sourceHeading(skill: AgentSkill) {
   };
 
   return isUserManagedSkill(skill) ? "User Skill" : labels[skill.source];
+}
+
+/** 第三方 skill 安装表单，支持 URL、本地文件夹和本地 zip 三种来源。 */
+function SkillInstallForm({
+  draft,
+  isBusy,
+  onChange,
+  onCancel,
+  onSubmit,
+}: {
+  draft: SkillInstallDraft;
+  isBusy: boolean;
+  onChange: (draft: SkillInstallDraft) => void;
+  onCancel: () => void;
+  onSubmit: (event: FormEvent<HTMLFormElement>) => void;
+}) {
+  const sourcePlaceholder =
+    draft.sourceType === "url"
+      ? "https://github.com/owner/repo/tree/main/skill"
+      : draft.sourceType === "localFolder"
+        ? "留空后选择本地文件夹"
+        : "留空后选择本地 .zip";
+  const sourceHelp =
+    draft.sourceType === "url"
+      ? "支持 HTTPS、GitHub tree/blob/repo 链接和 raw SKILL.md。"
+      : draft.sourceType === "localFolder"
+        ? "文件夹中可以包含一个或多个带 SKILL.md 的 skill 目录。"
+        : "仅支持 .zip，安装时会拒绝路径穿越并跳过隐藏目录。";
+
+  /** 更新安装草稿字段；切换来源类型时清空输入，避免旧路径误用于新模式。 */
+  function updateDraft(field: keyof SkillInstallDraft, value: string | boolean) {
+    if (field === "sourceType") {
+      onChange({ ...draft, sourceType: value as SkillInstallSourceType, source: "" });
+      return;
+    }
+
+    onChange({ ...draft, [field]: value });
+  }
+
+  return (
+    <form className="skill-form skill-install-form" onSubmit={onSubmit}>
+      <div className="skill-detail-header">
+        <div>
+          <p className="section-label">Install Skill</p>
+          <h3>安装 Skill</h3>
+          <span>第三方 skill 安装后默认停用。</span>
+        </div>
+      </div>
+      <div className="skill-install-source-tabs" aria-label="Skill 安装来源">
+        {(["url", "localFolder", "localArchive"] as SkillInstallSourceType[]).map((sourceType) => {
+          const SourceIcon = sourceType === "url" ? Link : sourceType === "localFolder" ? FolderOpen : Archive;
+
+          return (
+            <button
+              className={draft.sourceType === sourceType ? "active" : ""}
+              key={sourceType}
+              type="button"
+              onClick={() => updateDraft("sourceType", sourceType)}
+              disabled={isBusy}
+            >
+              <SourceIcon size={14} />
+              {installSourceLabel(sourceType)}
+            </button>
+          );
+        })}
+      </div>
+      <label>
+        <span>{draft.sourceType === "url" ? "安装 URL" : "本地来源"}</span>
+        <input value={draft.source} onChange={(event) => updateDraft("source", event.target.value)} placeholder={sourcePlaceholder} />
+      </label>
+      <p className="skill-install-help">{sourceHelp}</p>
+      <div className="skill-switches">
+        <label className="toggle-row">
+          <input
+            checked={draft.enableAfterInstall}
+            onChange={(event) => updateDraft("enableAfterInstall", event.target.checked)}
+            type="checkbox"
+            disabled={isBusy}
+          />
+          <span>安装后启用</span>
+        </label>
+        <label className="toggle-row">
+          <input
+            checked={draft.replaceExisting}
+            onChange={(event) => updateDraft("replaceExisting", event.target.checked)}
+            type="checkbox"
+            disabled={isBusy}
+          />
+          <span>替换同名 Skill</span>
+        </label>
+      </div>
+      <section className="skill-install-safety">
+        <h4>安装边界</h4>
+        <p>安装只复制标准 skill 包，不执行 scripts 目录中的脚本；来源摘要会脱敏写入日志。</p>
+      </section>
+      <div className="modal-actions">
+        <button className="ghost-button" type="button" onClick={onCancel} disabled={isBusy}>
+          取消
+        </button>
+        <button className="primary-button compact" type="submit" disabled={isBusy || (draft.sourceType === "url" && !draft.source.trim())}>
+          <Download size={14} />
+          安装 Skill
+        </button>
+      </div>
+    </form>
+  );
+}
+
+/** 把安装来源类型转为用户可读标签。 */
+function installSourceLabel(sourceType: SkillInstallSourceType) {
+  const labels: Record<SkillInstallSourceType, string> = {
+    url: "URL",
+    localFolder: "文件夹",
+    localArchive: "ZIP",
+  };
+
+  return labels[sourceType];
 }
 
 /** 用户 skill 新建和编辑表单，字段与后端 AgentSkill 保持一一对应。 */

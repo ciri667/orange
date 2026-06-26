@@ -21,6 +21,8 @@ import type {
   AppEventLog,
   AppEventLogCategory,
   AppEventLogLevel,
+  InstallAgentSkillPayload,
+  InstallAgentSkillResult,
   KnowledgeBase,
   ModelApiKeyStatus,
   RequestAuditLog,
@@ -64,6 +66,7 @@ export function SettingsDrawer({
   onRemoveKnowledgeBase,
   onSaveSettings,
   onSaveSkill,
+  onInstallSkill,
   onToggleSkill,
   onDeleteSkill,
   onOpenUserSkillsFolder,
@@ -88,6 +91,7 @@ export function SettingsDrawer({
   onRemoveKnowledgeBase: (knowledgeBaseId: string) => void;
   onSaveSettings: (settings: UserSettings) => Promise<void> | void;
   onSaveSkill: (skill: AgentSkill) => Promise<AgentSkill | void> | AgentSkill | void;
+  onInstallSkill: (payload: InstallAgentSkillPayload) => Promise<InstallAgentSkillResult> | InstallAgentSkillResult;
   onToggleSkill: (skillId: string, enabled: boolean, allowAutoInvoke?: boolean) => Promise<void> | void;
   onDeleteSkill: (skillId: string) => Promise<void> | void;
   onOpenUserSkillsFolder: () => Promise<void> | void;
@@ -657,6 +661,7 @@ export function SettingsDrawer({
             skills={skills}
             isBusy={isBusy}
             onSaveSkill={onSaveSkill}
+            onInstallSkill={onInstallSkill}
             onToggleSkill={onToggleSkill}
             onDeleteSkill={onDeleteSkill}
             onOpenUserSkillsFolder={onOpenUserSkillsFolder}

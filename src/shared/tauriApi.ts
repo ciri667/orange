@@ -1,6 +1,6 @@
 import { invoke, isTauri } from "@tauri-apps/api/core";
 import { createContentHash, createLocalId, formatLocalDateTime } from "./id";
-import { logDebug, logError } from "./logger";
+import { logDebug, logError, logInfo } from "./logger";
 import {
   acceptMockProposedChange,
   cloneWorkspaceSnapshot,
@@ -20,6 +20,8 @@ import type {
   AppEventLogLevel,
   DocumentPreview,
   FolderEntry,
+  InstallAgentSkillPayload,
+  InstallAgentSkillResult,
   KnowledgeBase,
   KnowledgeBaseSelection,
   ModelApiKeyStatus,
@@ -471,6 +473,58 @@ export async function deleteAgentSkill(skillId: string): Promise<AgentSkill[]> {
   }
 
   return invokeLogged<AgentSkill[]>("delete_agent_skill", { payload: { skillId } });
+}
+
+/** 安装标准 SKILL.md 包；第三方来源默认停用，用户审阅后再启用。 */
+export async function installAgentSkill(payload: InstallAgentSkillPayload): Promise<InstallAgentSkillResult> {
+  const startedAt = performance.now();
+
+  logInfo("开始安装第三方 Skill。", {
+    category: "skill",
+    event: "install_agent_skill",
+    status: "started",
+    metadata: {
+      sourceType: payload.sourceType,
+      conflictStrategy: payload.conflictStrategy,
+      enableAfterInstall: payload.enableAfterInstall,
+      hasSource: Boolean(payload.source?.trim()),
+    },
+  });
+
+  try {
+    const result = isTauriRuntime()
+      ? await invokeLogged<InstallAgentSkillResult>("install_agent_skill", { payload })
+      : installBrowserMockSkill(payload);
+
+    logInfo("第三方 Skill 安装完成。", {
+      category: "skill",
+      event: "install_agent_skill",
+      status: "completed",
+      durationMs: performance.now() - startedAt,
+      metadata: {
+        sourceType: result.sourceType,
+        sourceSummary: result.sourceSummary,
+        installedCount: result.installedCount,
+        warningCount: result.warnings.length,
+        fileCount: result.fileCount,
+      },
+    });
+
+    return result;
+  } catch (error) {
+    logError("第三方 Skill 安装失败。", {
+      category: "skill",
+      event: "install_agent_skill",
+      status: "failed",
+      durationMs: performance.now() - startedAt,
+      error,
+      metadata: {
+        sourceType: payload.sourceType,
+        conflictStrategy: payload.conflictStrategy,
+      },
+    });
+    throw error;
+  }
 }
 
 /** 保存 BYOK 模型密钥；桌面端写入系统安全存储并返回读回校验状态。 */
@@ -1525,6 +1579,92 @@ function normalizeBrowserFileSkill(skill: AgentSkill): AgentSkill {
   }
 
   return normalizedSkill;
+}
+
+/** 浏览器开发态模拟第三方 skill 安装，便于不启动 Tauri 时验证设置页流程。 */
+function installBrowserMockSkill(payload: InstallAgentSkillPayload): InstallAgentSkillResult {
+  const now = formatLocalDateTime();
+  const sourceSummary = summarizeBrowserSkillInstallSource(payload);
+  const skillName = buildBrowserInstalledSkillName(payload);
+  const normalizedSkill = normalizeBrowserFileSkill({
+    id: "",
+    name: skillName,
+    displayName: `安装 Skill ${skillName}`,
+    description: "浏览器开发态模拟安装的第三方 SKILL.md，桌面端会读取真实来源并验证 frontmatter。",
+    instructions:
+      "这是浏览器开发态的安装模拟能力。真实桌面端会在安装后默认停用第三方 skill，用户审阅并启用后才会进入 Runtime。",
+    tags: ["安装", "模拟"],
+    triggers: [skillName],
+    enabled: payload.enableAfterInstall,
+    source: "file",
+    allowAutoInvoke: payload.enableAfterInstall,
+    createdAt: now,
+    updatedAt: now,
+    metadata: {
+      installSourceType: payload.sourceType,
+      installSourceSummary: sourceSummary,
+    },
+  });
+  const existingSkill = browserAgentSkills.find((skill) => skill.id === normalizedSkill.id || skill.name === normalizedSkill.name);
+
+  if (existingSkill && payload.conflictStrategy === "fail") {
+    throw new Error("目标 Skill 目录已存在，请勾选替换同名 Skill 后重试。");
+  }
+
+  browserAgentSkills = [
+    ...browserAgentSkills.filter((skill) => skill.id !== normalizedSkill.id && skill.name !== normalizedSkill.name),
+    normalizedSkill,
+  ];
+
+  const installedSkills = cloneAgentSkills([normalizedSkill]);
+
+  return {
+    installedSkills,
+    skills: cloneAgentSkills(browserAgentSkills),
+    warnings: [],
+    summary: "已安装 1 个 Skill，复制 1 个文件。",
+    sourceType: payload.sourceType,
+    sourceSummary,
+    installedCount: 1,
+    fileCount: 1,
+  };
+}
+
+/** 根据安装来源生成稳定 mock 名称，避免浏览器开发态反复安装产生不可追踪 ID。 */
+function buildBrowserInstalledSkillName(payload: InstallAgentSkillPayload) {
+  const source = payload.source?.trim();
+  const sourceTail = source ? source.split(/[\\/]/).filter(Boolean).at(-1) ?? source : payload.sourceType;
+  const withoutExtension = sourceTail.replace(/\.(zip|md|markdown)$/i, "");
+  const normalizedName = normalizeBrowserSkillName(withoutExtension || payload.sourceType);
+
+  return normalizedName || `installed-${payload.sourceType.toLowerCase()}`;
+}
+
+/** 生成安装来源脱敏摘要，只保留 host、文件名或选择器类型。 */
+function summarizeBrowserSkillInstallSource(payload: InstallAgentSkillPayload) {
+  const source = payload.source?.trim();
+
+  if (payload.sourceType === "url") {
+    if (!source) {
+      return "url:empty";
+    }
+
+    try {
+      const parsedUrl = new URL(source);
+
+      return parsedUrl.host || "url:unknown";
+    } catch {
+      return "url:invalid";
+    }
+  }
+
+  if (!source) {
+    return payload.sourceType === "localFolder" ? "local:folder-picker" : "local:archive-picker";
+  }
+
+  const fileName = source.split(/[\\/]/).filter(Boolean).at(-1);
+
+  return fileName ? `local:${fileName}` : "local:selected";
 }
 
 /** 把用户输入的 skill name 转成稳定标识，便于 selector 和 prompt 识别。 */
