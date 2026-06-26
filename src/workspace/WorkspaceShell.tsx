@@ -53,6 +53,7 @@ import {
 } from "../shared/tauriApi";
 import type {
   AgentActionType,
+  AgentMessage,
   AgentSkill,
   AgentSession,
   AppEventLog,
@@ -213,6 +214,38 @@ function applyFirstPromptTitle(snapshot: WorkspaceSnapshot, session: AgentSessio
   const nextSession = {
     ...session,
     title: buildTitleFromFirstPrompt(prompt),
+    updatedAt: formatLocalDateTime(),
+  };
+
+  return {
+    snapshot: {
+      ...snapshot,
+      activeSessionId: nextSession.id,
+      sessions: snapshot.sessions.map((item) => (item.id === nextSession.id ? nextSession : item)),
+    },
+    session: nextSession,
+  };
+}
+
+/** 构造发送后立即展示的用户消息，后端会通过同一 ID 复用并持久化本轮记录。 */
+function buildOptimisticUserMessage(prompt: string, action: AgentActionType): AgentMessage {
+  return {
+    id: createLocalId("user"),
+    role: "user",
+    content: prompt,
+    action,
+  };
+}
+
+/** 把用户消息追加进目标会话，确保 Agent 响应前对话框已经显示用户输入。 */
+function appendUserMessageToSession(
+  snapshot: WorkspaceSnapshot,
+  session: AgentSession,
+  message: AgentMessage,
+) {
+  const nextSession = {
+    ...session,
+    messages: [...session.messages, message],
     updatedAt: formatLocalDateTime(),
   };
 
@@ -1308,6 +1341,10 @@ export function WorkspaceShell() {
       return;
     }
 
+    const optimisticMessage = buildOptimisticUserMessage(prompt, action);
+    const promptBeforeSubmit = agentPrompt;
+    let didPersistOptimisticMessage = false;
+
     beginBusy("Agent 正在处理...");
 
     try {
@@ -1324,11 +1361,10 @@ export function WorkspaceShell() {
           sessions: [sessionForTurn, ...currentSnapshot.sessions],
           activeSessionId: sessionForTurn.id,
         };
-        snapshotForTurn = await saveSession(snapshotForTurn, sessionForTurn);
-        logInfo("草稿会话已落库。", {
+        logInfo("准备创建草稿会话。", {
           category: "frontend",
           event: "bootstrap_session",
-          status: "completed",
+          status: "started",
           metadata: {
             knowledgeBaseId: activeKnowledgeBase.id,
             promptLength: prompt.length,
@@ -1338,7 +1374,7 @@ export function WorkspaceShell() {
         const titled = applyFirstPromptTitle(currentSnapshot, activeSession, prompt);
 
         sessionForTurn = titled.session;
-        snapshotForTurn = await saveSession(titled.snapshot, titled.session);
+        snapshotForTurn = titled.snapshot;
         logInfo("会话标题已由首条输入确定。", {
           category: "frontend",
           event: "title_session",
@@ -1350,6 +1386,26 @@ export function WorkspaceShell() {
         });
       }
 
+      const optimisticTurn = appendUserMessageToSession(snapshotForTurn, sessionForTurn, optimisticMessage);
+
+      sessionForTurn = optimisticTurn.session;
+      snapshotForTurn = optimisticTurn.snapshot;
+      // 先提交本地快照，让用户发送的消息立即出现在对话框中，再等待 Agent 慢任务。
+      commitSnapshot(snapshotForTurn);
+      setAgentPrompt("");
+      snapshotForTurn = await saveSession(snapshotForTurn, sessionForTurn);
+      didPersistOptimisticMessage = true;
+      logInfo("用户消息已乐观落库。", {
+        category: "frontend",
+        event: "persist_user_message",
+        status: "completed",
+        metadata: {
+          knowledgeBaseId: activeKnowledgeBase.id,
+          sessionId: sessionForTurn.id,
+          promptLength: prompt.length,
+        },
+      });
+
       const turnSnapshot = {
         ...snapshotForTurn,
         activeSessionId: sessionForTurn.id,
@@ -1357,15 +1413,24 @@ export function WorkspaceShell() {
         activeNoteId: activeNote?.id ?? "",
         activeDocumentId: activeDocument?.id ?? "",
       };
-      const result = await runAgentTurn(turnSnapshot, prompt, action, selectedSkillId || undefined);
+      const result = await runAgentTurn(
+        turnSnapshot,
+        prompt,
+        action,
+        optimisticMessage.id,
+        selectedSkillId || undefined,
+      );
 
       commitSnapshot(result.snapshot);
       const [nextAuditLogs, nextAppEventLogs] = await Promise.all([loadRequestAuditLogs(), loadAppEventLogs()]);
 
       setAuditLogs(nextAuditLogs);
       setAppEventLogs(nextAppEventLogs);
-      setAgentPrompt("");
     } catch (error) {
+      if (!didPersistOptimisticMessage) {
+        commitSnapshot(currentSnapshot);
+        setAgentPrompt(promptBeforeSubmit);
+      }
       setNotice(error instanceof Error ? error.message : String(error));
     } finally {
       endBusy();
