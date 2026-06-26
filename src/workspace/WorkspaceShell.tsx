@@ -12,7 +12,6 @@ import {
   getActiveKnowledgeBase,
   getActiveDocument,
   getActiveNote,
-  getActiveSession,
 } from "../shared/selectors";
 import {
   acceptProposedChange,
@@ -56,7 +55,6 @@ import type {
   AgentActionType,
   AgentSkill,
   AgentSession,
-  AgentSessionType,
   AppEventLog,
   AppEventLogCategory,
   AppEventLogLevel,
@@ -90,31 +88,11 @@ const MAX_PASTE_IMAGE_BYTES = 20 * 1024 * 1024;
 /** 前端单次粘贴总大小预检查上限，减少无意义 base64 读取和 IPC 成本。 */
 const MAX_PASTE_IMAGE_BATCH_BYTES = 50 * 1024 * 1024;
 
-/** 根据会话绑定范围生成标题，正式版本中可由用户重命名。 */
-function buildSessionTitle(type: AgentSessionType, knowledgeBase: KnowledgeBase, note?: Note) {
-  if (type === "note" && note) {
-    return `${note.title} · 笔记助手`;
-  }
+/** 空白会话的默认标题；首条用户输入提交后会替换为用户原始输入。 */
+const DEFAULT_SESSION_TITLE = "新会话";
 
-  if (type === "task") {
-    return `${note?.title ?? knowledgeBase.name} · 任务助手`;
-  }
-
-  return `${knowledgeBase.name}问答助手`;
-}
-
-/** 创建一条会话开场消息，明确说明本会话绑定的上下文和工具边界。 */
-function buildSessionIntroMessage(sessionTitle: string, knowledgeBase: KnowledgeBase, note?: Note) {
-  return {
-    id: createLocalId("assistant-session"),
-    role: "assistant" as const,
-    action: "find" as const,
-    content: note
-      ? `已开启「${sessionTitle}」。我会作为知识库 Agent 助手工作；需要依据本地内容时才调用工具。`
-      : `已开启「${sessionTitle}」。检索工具默认只允许访问「${knowledgeBase.name}」。`,
-    toolCalls: [],
-  };
-}
+/** 未持久化的占位会话 ID，只用于没有当前知识库会话时驱动侧栏展示。 */
+const DRAFT_SESSION_ID = "__draft-session__";
 
 /** 将图片文件读成 base64 主体；调用方负责限制大小和记录脱敏日志。 */
 function readImageFileAsBase64(file: File): Promise<string> {
@@ -160,28 +138,91 @@ function summarizeImageMimeTypes(files: File[]) {
 
 /** 新建 Agent 会话对象，作为消息、检索范围和待确认 diff 的容器。 */
 function buildAgentSession({
-  type,
   knowledgeBase,
-  note,
+  title = DEFAULT_SESSION_TITLE,
+  knowledgeBaseIds,
 }: {
-  type: AgentSessionType;
   knowledgeBase: KnowledgeBase;
-  note?: Note;
+  title?: string;
+  knowledgeBaseIds?: string[];
 }): AgentSession {
-  const title = buildSessionTitle(type, knowledgeBase, note);
   /** 会话创建时间需要长期可辨认，避免历史列表里多个“刚刚”无法区分。 */
   const createdAt = formatLocalDateTime();
 
   return {
-    id: createLocalId(`session-${type}`),
+    id: createLocalId("session-knowledge-base"),
     title,
-    type,
-    knowledgeBaseIds: [knowledgeBase.id],
-    activeNoteId: note?.id,
-    pinnedNoteIds: note ? [note.id] : [],
-    messages: [buildSessionIntroMessage(title, knowledgeBase, note)],
+    type: "knowledge-base",
+    knowledgeBaseIds: knowledgeBaseIds?.length ? knowledgeBaseIds : [knowledgeBase.id],
+    pinnedNoteIds: [],
+    messages: [],
     createdAt,
     updatedAt: createdAt,
+  };
+}
+
+/** 构造未落库的侧栏占位会话，避免仅切换文档时隐式创建真实会话。 */
+function buildDraftAgentSession(knowledgeBase: KnowledgeBase): AgentSession {
+  return {
+    id: DRAFT_SESSION_ID,
+    title: DEFAULT_SESSION_TITLE,
+    type: "knowledge-base",
+    knowledgeBaseIds: [knowledgeBase.id],
+    pinnedNoteIds: [],
+    messages: [],
+    createdAt: "未保存",
+    updatedAt: "未保存",
+  };
+}
+
+/** 从当前知识库解析应展示的会话；只复用已有会话，不创建新的历史记录。 */
+function resolveKnowledgeBaseSessionId(snapshot: WorkspaceSnapshot, knowledgeBaseId: string) {
+  const activeSession = snapshot.sessions.find((session) => session.id === snapshot.activeSessionId);
+
+  if (activeSession?.knowledgeBaseIds.includes(knowledgeBaseId)) {
+    return activeSession.id;
+  }
+
+  return snapshot.sessions.find((session) => session.knowledgeBaseIds.includes(knowledgeBaseId))?.id ?? "";
+}
+
+/** 获取当前知识库下可用的真实会话；没有时返回 undefined，由 UI 使用草稿会话展示。 */
+function resolveActiveSessionForKnowledgeBase(snapshot: WorkspaceSnapshot, knowledgeBase: KnowledgeBase) {
+  const sessionId = resolveKnowledgeBaseSessionId(snapshot, knowledgeBase.id);
+
+  return snapshot.sessions.find((session) => session.id === sessionId);
+}
+
+/** 判断会话是否已经持久化在当前快照中，草稿会话不能直接提交给后端 Agent。 */
+function isPersistedSession(snapshot: WorkspaceSnapshot, session: AgentSession) {
+  return snapshot.sessions.some((item) => item.id === session.id);
+}
+
+/** 首条用户消息会成为会话标题；空输入不会触发提交，保留默认“新会话”。 */
+function buildTitleFromFirstPrompt(prompt: string) {
+  return prompt.trim() || DEFAULT_SESSION_TITLE;
+}
+
+/** 仅在空白新会话第一次发送消息前允许用用户输入替换标题。 */
+function shouldUseFirstPromptAsTitle(session: AgentSession) {
+  return session.title === DEFAULT_SESSION_TITLE && !session.messages.some((message) => message.role === "user");
+}
+
+/** 返回替换标题后的快照和会话对象，避免在运行 Agent 前丢失用户首条输入标题。 */
+function applyFirstPromptTitle(snapshot: WorkspaceSnapshot, session: AgentSession, prompt: string) {
+  const nextSession = {
+    ...session,
+    title: buildTitleFromFirstPrompt(prompt),
+    updatedAt: formatLocalDateTime(),
+  };
+
+  return {
+    snapshot: {
+      ...snapshot,
+      activeSessionId: nextSession.id,
+      sessions: snapshot.sessions.map((item) => (item.id === nextSession.id ? nextSession : item)),
+    },
+    session: nextSession,
   };
 }
 
@@ -407,7 +448,8 @@ export function WorkspaceShell() {
   }
 
   const activeKnowledgeBase = getActiveKnowledgeBase(currentSnapshot);
-  const activeSession = getActiveSession(currentSnapshot);
+  const persistedActiveSession = resolveActiveSessionForKnowledgeBase(currentSnapshot, activeKnowledgeBase);
+  const activeSession = persistedActiveSession ?? buildDraftAgentSession(activeKnowledgeBase);
   const activeDocument = getActiveDocument(currentSnapshot);
   const activeNote = getActiveNote(currentSnapshot);
   const isActiveNoteDirty = activeNote ? dirtyNoteIds.has(activeNote.id) : false;
@@ -513,7 +555,7 @@ export function WorkspaceShell() {
     setDirtyDocumentIds(nextDirtyDocumentIds);
   }
 
-  /** 选择知识库时同步收窄 Agent 工具范围，避免跨库误检索。 */
+  /** 选择知识库时只切换浏览焦点；会话最多切到该知识库已有会话，不再隐式创建。 */
   async function handleSelectKnowledgeBase(knowledgeBaseId: string) {
     const nextKnowledgeBase = currentSnapshot.knowledgeBases.find((knowledgeBase) => knowledgeBase.id === knowledgeBaseId);
     const nextNotes = currentSnapshot.notes.filter((note) => note.knowledgeBaseId === knowledgeBaseId);
@@ -523,38 +565,28 @@ export function WorkspaceShell() {
       return;
     }
 
-    const existingSession = currentSnapshot.sessions.find(
-      (session) =>
-        session.type === "knowledge-base" &&
-        session.knowledgeBaseIds.length === 1 &&
-        session.knowledgeBaseIds[0] === nextKnowledgeBase.id,
-    );
-    const nextSession = existingSession ?? buildAgentSession({ type: "knowledge-base", knowledgeBase: nextKnowledgeBase });
+    const nextActiveSessionId = resolveKnowledgeBaseSessionId(currentSnapshot, nextKnowledgeBase.id);
     const activatedSnapshot = {
       ...currentSnapshot,
-      sessions: existingSession ? currentSnapshot.sessions : [nextSession, ...currentSnapshot.sessions],
       activeKnowledgeBaseId: knowledgeBaseId,
       activeNoteId: nextNotes[0]?.id ?? "",
       activeDocumentId: nextNotes[0] ? "" : nextDocuments[0]?.id ?? "",
-      activeSessionId: nextSession.id,
+      activeSessionId: nextActiveSessionId,
     };
 
-    beginBusy("正在切换知识库会话...");
-
-    try {
-      // 选择知识库会创建或恢复默认知识库会话，确保会话和 scope 可重启恢复。
-      const nextSnapshot = existingSession
-        ? await restoreSessionContext(activatedSnapshot, nextSession.id)
-        : await saveSession(activatedSnapshot, nextSession);
-
-      commitSnapshot(nextSnapshot);
-      setSearchTerm("");
-      setCollapsedFolderPaths(new Set());
-    } catch (error) {
-      setNotice(error instanceof Error ? error.message : String(error));
-    } finally {
-      endBusy();
-    }
+    logInfo("切换知识库浏览焦点。", {
+      category: "frontend",
+      event: "select_knowledge_base",
+      status: "completed",
+      metadata: {
+        hasExistingSession: Boolean(nextActiveSessionId),
+        noteCount: nextNotes.length,
+        documentCount: nextDocuments.length,
+      },
+    });
+    commitSnapshot(activatedSnapshot);
+    setSearchTerm("");
+    setCollapsedFolderPaths(new Set());
   }
 
   /** 添加知识库时走 Tauri 目录选择器，浏览器开发态使用 mock 目录。 */
@@ -605,7 +637,7 @@ export function WorkspaceShell() {
     });
   }
 
-  /** 打开 Markdown 文件时同步激活对应笔记会话，避免 Agent 使用旧文件上下文。 */
+  /** 打开 Markdown 文件只切换编辑器焦点；会话保持知识库级别，不再跟随文档切换。 */
   async function handleSelectNote(noteId: string) {
     const nextNote = currentSnapshot.notes.find((note) => note.id === noteId);
 
@@ -615,36 +647,25 @@ export function WorkspaceShell() {
 
     const nextKnowledgeBase =
       currentSnapshot.knowledgeBases.find((knowledgeBase) => knowledgeBase.id === nextNote.knowledgeBaseId) ?? activeKnowledgeBase;
-    const existingSession = currentSnapshot.sessions.find(
-      (session) => session.type === "note" && session.activeNoteId === nextNote.id,
-    );
-    const nextSession = existingSession ?? buildAgentSession({ type: "note", knowledgeBase: nextKnowledgeBase, note: nextNote });
+    const nextActiveSessionId = resolveKnowledgeBaseSessionId(currentSnapshot, nextKnowledgeBase.id);
     const activatedSnapshot = {
       ...currentSnapshot,
-      sessions: existingSession ? currentSnapshot.sessions : [nextSession, ...currentSnapshot.sessions],
       activeKnowledgeBaseId: nextKnowledgeBase.id,
       activeNoteId: noteId,
       activeDocumentId: "",
-      activeSessionId: nextSession.id,
+      activeSessionId: nextActiveSessionId,
     };
 
-    beginBusy("正在切换笔记会话...");
-
-    try {
-      // 笔记会话绑定 activeNoteId，pending diff 也会留在创建它的会话中。
-      const nextSnapshot = existingSession
-        ? await restoreSessionContext(activatedSnapshot, nextSession.id)
-        : await saveSession(activatedSnapshot, nextSession);
-
-      commitSnapshot(nextSnapshot);
-    } catch (error) {
-      setNotice(error instanceof Error ? error.message : String(error));
-    } finally {
-      endBusy();
-    }
+    logInfo("切换 Markdown 浏览焦点。", {
+      category: "frontend",
+      event: "select_note",
+      status: "completed",
+      metadata: { hasExistingSession: Boolean(nextActiveSessionId) },
+    });
+    commitSnapshot(activatedSnapshot);
   }
 
-  /** 打开普通文档时切换到知识库级 Agent 会话，避免旧 Markdown 笔记上下文继续生效。 */
+  /** 打开普通文档只切换编辑器焦点；没有同库会话时也不创建默认会话。 */
   async function handleSelectDocument(documentId: string) {
     const nextDocument = currentSnapshot.documents.find((document) => document.id === documentId);
 
@@ -655,35 +676,22 @@ export function WorkspaceShell() {
     const nextKnowledgeBase =
       currentSnapshot.knowledgeBases.find((knowledgeBase) => knowledgeBase.id === nextDocument.knowledgeBaseId) ??
       activeKnowledgeBase;
-    const existingSession = currentSnapshot.sessions.find(
-      (session) =>
-        session.type === "knowledge-base" &&
-        session.knowledgeBaseIds.length === 1 &&
-        session.knowledgeBaseIds[0] === nextKnowledgeBase.id,
-    );
-    const nextSession = existingSession ?? buildAgentSession({ type: "knowledge-base", knowledgeBase: nextKnowledgeBase });
+    const nextActiveSessionId = resolveKnowledgeBaseSessionId(currentSnapshot, nextKnowledgeBase.id);
     const activatedSnapshot = {
       ...currentSnapshot,
-      sessions: existingSession ? currentSnapshot.sessions : [nextSession, ...currentSnapshot.sessions],
       activeKnowledgeBaseId: nextKnowledgeBase.id,
       activeNoteId: "",
       activeDocumentId: documentId,
-      activeSessionId: nextSession.id,
+      activeSessionId: nextActiveSessionId,
     };
 
-    beginBusy("正在打开文档...");
-
-    try {
-      const nextSnapshot = existingSession
-        ? await restoreSessionContext(activatedSnapshot, nextSession.id)
-        : await saveSession(activatedSnapshot, nextSession);
-
-      commitSnapshot({ ...nextSnapshot, activeNoteId: "", activeDocumentId: documentId });
-    } catch (error) {
-      setNotice(error instanceof Error ? error.message : String(error));
-    } finally {
-      endBusy();
-    }
+    logInfo("切换普通文档浏览焦点。", {
+      category: "frontend",
+      event: "select_document",
+      status: "completed",
+      metadata: { hasExistingSession: Boolean(nextActiveSessionId) },
+    });
+    commitSnapshot(activatedSnapshot);
   }
 
   /** 更新当前笔记正文，只修改内存草稿；保存时才写回本地 Markdown 文件。 */
@@ -860,26 +868,17 @@ export function WorkspaceShell() {
         );
         const nextNote = getActiveNote(nextSnapshot);
         const nextKnowledgeBase = getActiveKnowledgeBase(nextSnapshot);
-        const existingSession = nextNote
-          ? nextSnapshot.sessions.find((session) => session.type === "note" && session.activeNoteId === nextNote.id)
-          : undefined;
-        const nextSession =
-          existingSession ??
-          (nextNote ? buildAgentSession({ type: "note", knowledgeBase: nextKnowledgeBase, note: nextNote }) : undefined);
-        const activatedSnapshot =
-          nextNote && nextSession
-            ? {
-                ...nextSnapshot,
-                sessions: existingSession ? nextSnapshot.sessions : [nextSession, ...nextSnapshot.sessions],
-                activeKnowledgeBaseId: nextKnowledgeBase.id,
-                activeNoteId: nextNote.id,
-                activeDocumentId: "",
-                activeSessionId: nextSession.id,
-              }
-            : nextSnapshot;
-        const persistedSnapshot = nextNote && nextSession ? await saveSession(activatedSnapshot, nextSession) : activatedSnapshot;
+        const activatedSnapshot = nextNote
+          ? {
+              ...nextSnapshot,
+              activeKnowledgeBaseId: nextKnowledgeBase.id,
+              activeNoteId: nextNote.id,
+              activeDocumentId: "",
+              activeSessionId: resolveKnowledgeBaseSessionId(nextSnapshot, nextKnowledgeBase.id),
+            }
+          : nextSnapshot;
 
-        commitSnapshot(persistedSnapshot);
+        commitSnapshot(activatedSnapshot);
         setSearchTerm("");
         expandFolderPaths([createDialog.parentPath]);
         setMarkdownViewMode("edit");
@@ -1165,12 +1164,19 @@ export function WorkspaceShell() {
     );
   }
 
-  /** 新建一个任务会话，绑定当前笔记和当前知识库作为上下文起点。 */
+  /** 新建一个空白知识库会话；标题等到首条用户输入后再确定。 */
   async function handleCreateSession() {
+    logInfo("创建空白会话。", {
+      category: "frontend",
+      event: "create_session",
+      status: "started",
+      metadata: {
+        knowledgeBaseId: activeKnowledgeBase.id,
+      },
+    });
+
     const nextSession = buildAgentSession({
-      type: "task",
       knowledgeBase: activeKnowledgeBase,
-      note: activeNote,
     });
     const nextSnapshot = {
       ...currentSnapshot,
@@ -1182,7 +1188,15 @@ export function WorkspaceShell() {
 
     try {
       commitSnapshot(await saveSession(nextSnapshot, nextSession));
-      setIsSessionListOpen(true);
+      logInfo("空白会话已创建。", {
+        category: "frontend",
+        event: "create_session",
+        status: "completed",
+        metadata: {
+          knowledgeBaseId: activeKnowledgeBase.id,
+        },
+      });
+      setIsSessionListOpen(false);
       setIsSessionContextOpen(false);
       setIsScopeSelectorOpen(false);
     } catch (error) {
@@ -1192,7 +1206,7 @@ export function WorkspaceShell() {
     }
   }
 
-  /** 切换会话时恢复它绑定的知识库、笔记和工具范围。 */
+  /** 切换会话时恢复它绑定的知识库和工具范围；文件焦点不再被默认会话推着走。 */
   async function handleSelectSession(sessionId: string) {
     const nextSession = currentSnapshot.sessions.find((session) => session.id === sessionId);
 
@@ -1254,6 +1268,11 @@ export function WorkspaceShell() {
 
   /** 为当前会话勾选或取消额外知识库，当前激活知识库始终保留。 */
   async function handleToggleScopeKnowledgeBase(knowledgeBaseId: string) {
+    if (!isPersistedSession(currentSnapshot, activeSession)) {
+      setNotice("请先新建或发送一条消息创建会话，再调整工具范围。");
+      return;
+    }
+
     const selectedIds = new Set(activeSession.knowledgeBaseIds.length ? activeSession.knowledgeBaseIds : [activeKnowledgeBase.id]);
 
     selectedIds.add(activeKnowledgeBase.id);
@@ -1292,7 +1311,54 @@ export function WorkspaceShell() {
     beginBusy("Agent 正在处理...");
 
     try {
-      const result = await runAgentTurn(currentSnapshot, prompt, action, selectedSkillId || undefined);
+      let snapshotForTurn = currentSnapshot;
+      let sessionForTurn = activeSession;
+
+      if (!isPersistedSession(currentSnapshot, activeSession)) {
+        sessionForTurn = buildAgentSession({
+          knowledgeBase: activeKnowledgeBase,
+          title: buildTitleFromFirstPrompt(prompt),
+        });
+        snapshotForTurn = {
+          ...currentSnapshot,
+          sessions: [sessionForTurn, ...currentSnapshot.sessions],
+          activeSessionId: sessionForTurn.id,
+        };
+        snapshotForTurn = await saveSession(snapshotForTurn, sessionForTurn);
+        logInfo("草稿会话已落库。", {
+          category: "frontend",
+          event: "bootstrap_session",
+          status: "completed",
+          metadata: {
+            knowledgeBaseId: activeKnowledgeBase.id,
+            promptLength: prompt.length,
+          },
+        });
+      } else if (shouldUseFirstPromptAsTitle(activeSession)) {
+        const titled = applyFirstPromptTitle(currentSnapshot, activeSession, prompt);
+
+        sessionForTurn = titled.session;
+        snapshotForTurn = await saveSession(titled.snapshot, titled.session);
+        logInfo("会话标题已由首条输入确定。", {
+          category: "frontend",
+          event: "title_session",
+          status: "completed",
+          metadata: {
+            knowledgeBaseId: activeKnowledgeBase.id,
+            promptLength: prompt.length,
+          },
+        });
+      }
+
+      const turnSnapshot = {
+        ...snapshotForTurn,
+        activeSessionId: sessionForTurn.id,
+        activeKnowledgeBaseId: activeKnowledgeBase.id,
+        activeNoteId: activeNote?.id ?? "",
+        activeDocumentId: activeDocument?.id ?? "",
+      };
+      const result = await runAgentTurn(turnSnapshot, prompt, action, selectedSkillId || undefined);
+
       commitSnapshot(result.snapshot);
       const [nextAuditLogs, nextAppEventLogs] = await Promise.all([loadRequestAuditLogs(), loadAppEventLogs()]);
 
