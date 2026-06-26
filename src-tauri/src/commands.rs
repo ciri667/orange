@@ -611,7 +611,6 @@ pub async fn scan_knowledge_base(
     } else {
         String::new()
     };
-    snapshot.active_session_id = ensure_knowledge_base_session(&mut snapshot, &knowledge_base);
     snapshot.knowledge_bases.push(knowledge_base);
     snapshot.folders.extend(folders);
     snapshot.notes.extend(notes);
@@ -773,8 +772,6 @@ pub async fn rescan_knowledge_base(
         } else {
             String::new()
         };
-        snapshot.active_session_id =
-            ensure_knowledge_base_session(&mut snapshot, &rescanned_knowledge_base);
     }
     normalize_knowledge_base_flags(&mut snapshot);
     normalize_active_entities(&mut snapshot, Some(&payload.knowledge_base_id));
@@ -2137,26 +2134,6 @@ fn count_markdown_files(root: &PathBuf) -> Result<usize, String> {
     Ok(count)
 }
 
-/** 确保知识库至少有一个默认会话，并返回这个会话 ID。 */
-fn ensure_knowledge_base_session(
-    snapshot: &mut WorkspaceSnapshot,
-    knowledge_base: &crate::domain::KnowledgeBase,
-) -> String {
-    if let Some(session) = snapshot.sessions.iter().find(|session| {
-        session.r#type == "knowledge-base"
-            && session.knowledge_base_ids.len() == 1
-            && session.knowledge_base_ids[0] == knowledge_base.id
-    }) {
-        return session.id.clone();
-    }
-
-    let session = storage::create_default_agent_session(knowledge_base);
-    let session_id = session.id.clone();
-
-    snapshot.sessions.insert(0, session);
-    session_id
-}
-
 /** 从新建文件相对路径提取初始标题，空白正文会在重扫时继续使用文件名。 */
 fn note_title_from_path(relative_path: &str) -> String {
     Path::new(relative_path)
@@ -2316,21 +2293,21 @@ fn normalize_active_entities(
         snapshot.active_document_id.clear();
     }
 
-    let active_session_exists = snapshot
+    if !snapshot
         .sessions
         .iter()
-        .any(|session| session.id == snapshot.active_session_id);
-
-    if !active_session_exists {
-        let active_knowledge_base = snapshot
-            .knowledge_bases
+        .any(|session| session.id == snapshot.active_session_id)
+    {
+        snapshot.active_session_id = snapshot
+            .sessions
             .iter()
-            .find(|knowledge_base| knowledge_base.id == snapshot.active_knowledge_base_id)
-            .cloned();
-
-        if let Some(knowledge_base) = active_knowledge_base {
-            snapshot.active_session_id = ensure_knowledge_base_session(snapshot, &knowledge_base);
-        }
+            .find(|session| {
+                session.knowledge_base_ids.iter().any(|knowledge_base_id| {
+                    knowledge_base_id == &snapshot.active_knowledge_base_id
+                })
+            })
+            .map(|session| session.id.clone())
+            .unwrap_or_default();
     }
 }
 

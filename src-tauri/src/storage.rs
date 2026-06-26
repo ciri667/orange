@@ -1,8 +1,8 @@
 use crate::domain::{
-    AgentMessage, AgentSession, AppEventLog, DocumentPreview, DocumentPreviewBlock, FolderEntry,
-    KnowledgeBase, KnowledgeBaseSelection, ModelApiKeyStatus, ModelConfig, Note,
-    NoteImageAttachmentInput, RequestAuditLog, SavedNoteImageAttachment, ScanReport, UserSettings,
-    WorkspaceDocument, WorkspaceSnapshot,
+    AgentSession, AppEventLog, DocumentPreview, DocumentPreviewBlock, FolderEntry, KnowledgeBase,
+    KnowledgeBaseSelection, ModelApiKeyStatus, ModelConfig, Note, NoteImageAttachmentInput,
+    RequestAuditLog, SavedNoteImageAttachment, ScanReport, UserSettings, WorkspaceDocument,
+    WorkspaceSnapshot,
 };
 use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 use base64::Engine as _;
@@ -928,43 +928,19 @@ pub fn delete_session(
     Ok(snapshot)
 }
 
-/** 删除当前会话后确保 UI 仍有一个可激活会话，必要时创建当前知识库默认会话。 */
+/** 删除当前会话后只在当前知识库内选择已有会话；没有会话时保持空状态。 */
 fn ensure_visible_session_after_delete(snapshot: &mut WorkspaceSnapshot) {
-    if snapshot.sessions.is_empty() {
-        if let Some(knowledge_base) = snapshot
-            .knowledge_bases
-            .iter()
-            .find(|knowledge_base| knowledge_base.id == snapshot.active_knowledge_base_id)
-            .or_else(|| snapshot.knowledge_bases.first())
-        {
-            snapshot
-                .sessions
-                .push(create_default_agent_session(knowledge_base));
-        }
-    }
-
-    if let Some(session) = snapshot.sessions.first() {
-        snapshot.active_session_id = session.id.clone();
-        snapshot.active_knowledge_base_id = session
-            .knowledge_base_ids
-            .first()
-            .cloned()
-            .unwrap_or_else(|| snapshot.active_knowledge_base_id.clone());
-        snapshot.active_note_id = resolve_session_note_id(
-            snapshot,
-            session.active_note_id.as_deref(),
-            &snapshot.active_knowledge_base_id,
-        );
-        snapshot.active_document_id = resolve_fallback_document_id(
-            snapshot,
-            &snapshot.active_knowledge_base_id,
-            &snapshot.active_note_id,
-        );
-    } else {
-        snapshot.active_session_id.clear();
-        snapshot.active_note_id.clear();
-        snapshot.active_document_id.clear();
-    }
+    snapshot.active_session_id = snapshot
+        .sessions
+        .iter()
+        .find(|session| {
+            session
+                .knowledge_base_ids
+                .iter()
+                .any(|knowledge_base_id| knowledge_base_id == &snapshot.active_knowledge_base_id)
+        })
+        .map(|session| session.id.clone())
+        .unwrap_or_default();
 }
 
 /** 从 SQLite 读取并按当前知识库和笔记快照清理后的会话列表。 */
@@ -1034,7 +1010,7 @@ pub fn update_session_scope(
     Ok(snapshot)
 }
 
-/** 恢复历史会话绑定的知识库和 Markdown 笔记上下文；普通文档只作为无笔记时的展示兜底。 */
+/** 恢复历史会话绑定的知识库；文件焦点只在会话仍有有效笔记引用时同步。 */
 pub fn restore_session_context(
     app: &AppHandle,
     mut snapshot: WorkspaceSnapshot,
@@ -1069,19 +1045,32 @@ pub fn restore_session_context(
         session.active_note_id.as_deref(),
         &next_knowledge_base_id,
     );
-    let next_document_id =
-        resolve_fallback_document_id(&snapshot, &next_knowledge_base_id, &next_note_id);
+    let should_keep_current_file = snapshot.active_knowledge_base_id == next_knowledge_base_id;
 
     snapshot.active_session_id = session.id;
     snapshot.active_knowledge_base_id = next_knowledge_base_id;
-    snapshot.active_note_id = next_note_id;
-    snapshot.active_document_id = next_document_id;
+    if !next_note_id.is_empty() {
+        snapshot.active_note_id = next_note_id;
+        snapshot.active_document_id.clear();
+    } else if !should_keep_current_file {
+        snapshot.active_note_id = snapshot
+            .notes
+            .iter()
+            .find(|note| note.knowledge_base_id == snapshot.active_knowledge_base_id)
+            .map(|note| note.id.clone())
+            .unwrap_or_default();
+        snapshot.active_document_id = resolve_fallback_document_id(
+            &snapshot,
+            &snapshot.active_knowledge_base_id,
+            &snapshot.active_note_id,
+        );
+    }
     save_sessions(app, &snapshot)?;
 
     Ok(snapshot)
 }
 
-/** 根据会话里的 note 引用恢复同知识库 Markdown；无有效引用时使用该知识库第一篇 Markdown。 */
+/** 根据会话里的 note 引用恢复同知识库 Markdown；无有效引用时不再默认绑定第一篇文档。 */
 fn resolve_session_note_id(
     snapshot: &WorkspaceSnapshot,
     session_note_id: Option<&str>,
@@ -1097,12 +1086,7 @@ fn resolve_session_note_id(
         }
     }
 
-    snapshot
-        .notes
-        .iter()
-        .find(|note| note.knowledge_base_id == knowledge_base_id)
-        .map(|note| note.id.clone())
-        .unwrap_or_default()
+    String::new()
 }
 
 /** 当当前知识库没有可激活 Markdown 时，选择第一个普通文档作为中间面板展示对象。 */
@@ -1764,74 +1748,19 @@ pub fn load_workspace_snapshot(app: &AppHandle) -> Result<WorkspaceSnapshot, Str
     };
     snapshot.sessions = load_sessions_for_snapshot(app, &snapshot)?;
 
-    if snapshot.sessions.is_empty() {
-        snapshot.sessions = snapshot
-            .knowledge_bases
-            .first()
-            .map(|knowledge_base| vec![create_default_agent_session(knowledge_base)])
-            .unwrap_or_default();
-    }
-
-    let restored_session = snapshot.sessions.first().cloned();
-
-    if let Some(session) = restored_session {
-        snapshot.active_session_id = session.id;
-        snapshot.active_knowledge_base_id = session
-            .knowledge_base_ids
-            .first()
-            .cloned()
-            .unwrap_or_else(|| snapshot.active_knowledge_base_id.clone());
-        snapshot.active_note_id = session.active_note_id.unwrap_or_else(|| {
-            snapshot
-                .notes
+    snapshot.active_session_id = snapshot
+        .sessions
+        .iter()
+        .find(|session| {
+            session
+                .knowledge_base_ids
                 .iter()
-                .find(|note| note.knowledge_base_id == snapshot.active_knowledge_base_id)
-                .map(|note| note.id.clone())
-                .unwrap_or_default()
-        });
-        snapshot.active_document_id = if snapshot.active_note_id.is_empty() {
-            snapshot
-                .documents
-                .iter()
-                .find(|document| document.knowledge_base_id == snapshot.active_knowledge_base_id)
-                .map(|document| document.id.clone())
-                .unwrap_or_default()
-        } else {
-            String::new()
-        };
-    }
+                .any(|knowledge_base_id| knowledge_base_id == &snapshot.active_knowledge_base_id)
+        })
+        .map(|session| session.id.clone())
+        .unwrap_or_default();
 
     Ok(snapshot)
-}
-
-/** 为恢复或新增知识库创建默认 Agent 会话，绑定单个知识库作为工具范围。 */
-pub fn create_default_agent_session(knowledge_base: &KnowledgeBase) -> AgentSession {
-    let title = format!("{}问答助手", knowledge_base.name);
-    let created_at = format_local_datetime();
-
-    AgentSession {
-        id: create_id("session-knowledge-base"),
-        title: title.clone(),
-        r#type: "knowledge-base".to_owned(),
-        knowledge_base_ids: vec![knowledge_base.id.clone()],
-        active_note_id: None,
-        pinned_note_ids: Vec::new(),
-        messages: vec![AgentMessage {
-            id: create_id("assistant-session"),
-            role: "assistant".to_owned(),
-            content: format!(
-                "已开启「{title}」。检索工具默认只允许访问「{}」。",
-                knowledge_base.name
-            ),
-            action: Some("find".to_owned()),
-            citations: None,
-            tool_calls: Some(Vec::new()),
-        }],
-        pending_change: None,
-        created_at: created_at.clone(),
-        updated_at: created_at,
-        deleted_at: None,
-    }
 }
 
 /** 使用 SQLite/FTS5 索引检索会话允许范围内的笔记，失败时由 Agent 层决定是否降级。 */
