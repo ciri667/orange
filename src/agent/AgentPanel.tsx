@@ -84,6 +84,8 @@ export function AgentPanel({
   const writeStatus = activeSession.pendingChange?.status === "pending" ? "待确认 diff" : "写入需确认";
   /** 只有已启用 skill 可以显式参与本轮；禁用项不会出现在输入区选择器中。 */
   const enabledSkills = skills.filter((skill) => skill.enabled);
+  /** 当前选择必须存在于已启用列表，否则回退到自动，避免安装后停用 skill 造成 select 值游离。 */
+  const visibleSelectedSkillId = enabledSkills.some((skill) => skill.id === selectedSkillId) ? selectedSkillId : "";
 
   return (
     <aside className="agent-panel" aria-label="AI 侧栏">
@@ -262,7 +264,7 @@ export function AgentPanel({
             <Sparkles size={14} />
             <span>Skill</span>
             <select
-              value={selectedSkillId}
+              value={visibleSelectedSkillId}
               onChange={(event) => onSelectedSkillChange(event.target.value)}
               disabled={isBusy}
               aria-label="选择本轮 Agent Skill"
