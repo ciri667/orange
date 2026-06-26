@@ -26,6 +26,7 @@ pub fn run_agent_turn(
     let mut citations = Vec::new();
     let registry = ToolRegistry::default();
 
+    apply_first_prompt_title(&mut snapshot.sessions[session_index], &request.prompt);
     snapshot.sessions[session_index].messages.push(user_message);
 
     // 本地兜底只做确定性工具调用，不根据 action 自动生成写入 diff。
@@ -181,6 +182,22 @@ fn build_local_response(
         citations.len(),
         titles
     )
+}
+
+/** 空白新会话的标题直接使用用户第一条输入，避免按知识库或文档名组装默认标题。 */
+fn apply_first_prompt_title(session: &mut crate::domain::AgentSession, prompt: &str) {
+    let has_user_message = session
+        .messages
+        .iter()
+        .any(|message| message.role == "user");
+
+    if !has_user_message && session.title.trim() == "新会话" {
+        let next_title = prompt.trim();
+
+        if !next_title.is_empty() {
+            session.title = next_title.to_owned();
+        }
+    }
 }
 
 /** 根据 sessionId 查找会话；找不到时保持旧行为回退到首个会话。 */

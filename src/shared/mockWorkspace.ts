@@ -384,23 +384,13 @@ function createInitialSessions(): AgentSession[] {
   return [
     {
       id: "session-product-brief",
-      title: "产品立项助手",
-      type: "note",
+      title: "新会话",
+      type: "knowledge-base",
       knowledgeBaseIds: ["kb-personal"],
-      activeNoteId: "note-product-brief",
-      pinnedNoteIds: ["note-product-brief", "note-privacy"],
+      pinnedNoteIds: [],
       createdAt: "今天 14:18",
       updatedAt: "今天 14:18",
-      messages: [
-        {
-          id: "assistant-welcome",
-          role: "assistant",
-          action: "ask",
-          content:
-            "当前会话已绑定《Agent 笔记应用立项》。我会作为知识库 Agent 助手工作；需要依据本地笔记时会调用检索工具，写入前只生成待确认 diff。",
-          toolCalls: [],
-        },
-      ],
+      messages: [],
     },
   ];
 }
@@ -558,10 +548,17 @@ export function runMockAgentTurn(
 ): WorkspaceSnapshot {
   const nextSnapshot = cloneWorkspaceSnapshot(snapshot);
   const session = nextSnapshot.sessions.find((item) => item.id === nextSnapshot.activeSessionId) ?? nextSnapshot.sessions[0];
-  const activeNote = nextSnapshot.notes.find((note) => note.id === nextSnapshot.activeNoteId) ?? nextSnapshot.notes[0];
+  const activeNote = nextSnapshot.activeNoteId
+    ? nextSnapshot.notes.find((note) => note.id === nextSnapshot.activeNoteId)
+    : undefined;
   const activeKnowledgeBase =
     nextSnapshot.knowledgeBases.find((knowledgeBase) => knowledgeBase.id === nextSnapshot.activeKnowledgeBaseId) ??
     nextSnapshot.knowledgeBases[0];
+
+  if (!session) {
+    throw new Error("当前没有可用 Agent 会话。");
+  }
+
   const userMessage: AgentMessage = {
     id: createLocalId("user"),
     role: "user",
@@ -587,36 +584,43 @@ export function runMockAgentTurn(
   let citations: Citation[] = [];
   let content = "";
 
+  if (session.title.trim() === "新会话" && !session.messages.some((message) => message.role === "user")) {
+    session.title = prompt.trim() || "新会话";
+  }
   session.messages.push(userMessage);
 
   if (action === "rewrite") {
-    const original = getFirstBodyParagraph(activeNote.content);
-
-    if (!original) {
-      content = "我没有找到适合改写的正文段落。你可以先补充内容，再让我生成改写建议。";
+    if (!activeNote) {
+      content = "当前没有可改写的 Markdown 笔记。";
     } else {
-      const nextChange: ProposedChange = {
-        id: createLocalId("change"),
-        knowledgeBaseId: activeKnowledgeBase.id,
-        noteId: activeNote.id,
-        type: "rewrite",
-        title: `改写《${activeNote.title}》的核心段落`,
-        targetPath: activeNote.path,
-        original,
-        next: buildRewriteText(original),
-        originalHash: activeNote.contentHash,
-        status: "pending",
-      };
-      toolCalls.push(
-        createToolCall("propose_note_change", `已为《${activeNote.title}》生成待确认改写 diff`, {
+      const original = getFirstBodyParagraph(activeNote.content);
+
+      if (!original) {
+        content = "我没有找到适合改写的正文段落。你可以先补充内容，再让我生成改写建议。";
+      } else {
+        const nextChange: ProposedChange = {
+          id: createLocalId("change"),
+          knowledgeBaseId: activeKnowledgeBase.id,
           noteId: activeNote.id,
+          type: "rewrite",
+          title: `改写《${activeNote.title}》的核心段落`,
           targetPath: activeNote.path,
-        }),
-      );
-      session.pendingChange = nextChange;
-      session.activeNoteId = activeNote.id;
-      session.pinnedNoteIds = Array.from(new Set([...session.pinnedNoteIds, activeNote.id]));
-      content = "我已经生成一份改写建议。它现在只是待确认 diff，确认前不会修改本地 Markdown 文件。";
+          original,
+          next: buildRewriteText(original),
+          originalHash: activeNote.contentHash,
+          status: "pending",
+        };
+        toolCalls.push(
+          createToolCall("propose_note_change", `已为《${activeNote.title}》生成待确认改写 diff`, {
+            noteId: activeNote.id,
+            targetPath: activeNote.path,
+          }),
+        );
+        session.pendingChange = nextChange;
+        session.activeNoteId = activeNote.id;
+        session.pinnedNoteIds = Array.from(new Set([...session.pinnedNoteIds, activeNote.id]));
+        content = "我已经生成一份改写建议。它现在只是待确认 diff，确认前不会修改本地 Markdown 文件。";
+      }
     }
   } else if (action === "create") {
     const targetPath = activeKnowledgeBase.id === "kb-work" ? "Release/上线检查清单.md" : "00-Inbox/上线检查清单.md";
@@ -645,13 +649,17 @@ export function runMockAgentTurn(
     session.pendingChange = nextChange;
     content = "我已经生成新笔记草稿，但它还没有写入本地目录。确认 diff 后才会创建 Markdown 文件。";
   } else if (action === "organize") {
-    toolCalls.push(
-      createToolCall("suggest_organization", `已基于当前笔记生成整理建议`, {
-        noteId: activeNote.id,
-        knowledgeBaseId: activeKnowledgeBase.id,
-      }),
-    );
-    content = `建议继续把《${activeNote.title}》保留在「${activeKnowledgeBase.name}」中，并补充更稳定的标签和相关链接。该建议不涉及写入。`;
+    if (!activeNote) {
+      content = "当前知识库没有可整理的 Markdown 笔记。";
+    } else {
+      toolCalls.push(
+        createToolCall("suggest_organization", `已基于当前笔记生成整理建议`, {
+          noteId: activeNote.id,
+          knowledgeBaseId: activeKnowledgeBase.id,
+        }),
+      );
+      content = `建议继续把《${activeNote.title}》保留在「${activeKnowledgeBase.name}」中，并补充更稳定的标签和相关链接。该建议不涉及写入。`;
+    }
   } else if (shouldUseSearchTool(prompt, action)) {
     citations = searchNotes(nextSnapshot, session, prompt);
     toolCalls.push(

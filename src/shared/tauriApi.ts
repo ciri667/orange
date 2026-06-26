@@ -277,11 +277,9 @@ export async function deleteSession(snapshot: WorkspaceSnapshot, sessionId: stri
     nextSnapshot.sessions = nextSnapshot.sessions.filter((session) => !session.deletedAt);
 
     if (!nextSnapshot.sessions.some((session) => session.id === nextSnapshot.activeSessionId)) {
-      nextSnapshot.activeSessionId = nextSnapshot.sessions[0]?.id ?? "";
+      nextSnapshot.activeSessionId =
+        nextSnapshot.sessions.find((session) => session.knowledgeBaseIds.includes(nextSnapshot.activeKnowledgeBaseId))?.id ?? "";
     }
-
-    ensureMockVisibleSession(nextSnapshot);
-    restoreMockActiveSessionContext(nextSnapshot);
 
     return normalizeMockSnapshotSessions(nextSnapshot);
   }
@@ -320,7 +318,7 @@ export async function updateSessionScope(
   });
 }
 
-/** 恢复历史会话绑定的知识库、Markdown 笔记和会话焦点；无笔记时展示同库普通文档。 */
+/** 恢复历史会话绑定的知识库和会话焦点；文件焦点只在会话仍有有效笔记引用时同步。 */
 export async function restoreSessionContext(snapshot: WorkspaceSnapshot, sessionId: string): Promise<WorkspaceSnapshot> {
   if (!isTauriRuntime()) {
     const nextSnapshot = normalizeMockSnapshotSessions(cloneWorkspaceSnapshot(snapshot));
@@ -337,11 +335,18 @@ export async function restoreSessionContext(snapshot: WorkspaceSnapshot, session
       nextSnapshot.knowledgeBases[0]?.id ??
       "";
     const nextNoteId = getSessionNoteId(nextSnapshot, session.activeNoteId, nextKnowledgeBaseId);
+    const shouldKeepCurrentFile = nextSnapshot.activeKnowledgeBaseId === nextKnowledgeBaseId;
 
     nextSnapshot.activeSessionId = session.id;
     nextSnapshot.activeKnowledgeBaseId = nextKnowledgeBaseId;
-    nextSnapshot.activeNoteId = nextNoteId;
-    nextSnapshot.activeDocumentId = getFallbackDocumentId(nextSnapshot, nextKnowledgeBaseId, nextNoteId);
+
+    if (nextNoteId) {
+      nextSnapshot.activeNoteId = nextNoteId;
+      nextSnapshot.activeDocumentId = "";
+    } else if (!shouldKeepCurrentFile) {
+      nextSnapshot.activeNoteId = nextSnapshot.notes.find((note) => note.knowledgeBaseId === nextKnowledgeBaseId)?.id ?? "";
+      nextSnapshot.activeDocumentId = getFallbackDocumentId(nextSnapshot, nextKnowledgeBaseId, nextSnapshot.activeNoteId);
+    }
 
     return nextSnapshot;
   }
@@ -1193,7 +1198,6 @@ export async function removeKnowledgeBase(snapshot: WorkspaceSnapshot, knowledge
       : nextSnapshot.documents.find((document) => document.knowledgeBaseId === nextSnapshot.activeKnowledgeBaseId)?.id ?? "";
     nextSnapshot.activeSessionId =
       nextSnapshot.sessions.find((session) => session.knowledgeBaseIds.includes(nextSnapshot.activeKnowledgeBaseId))?.id ??
-      nextSnapshot.sessions[0]?.id ??
       "";
 
     if (!nextSnapshot.knowledgeBases.length) {
@@ -1620,7 +1624,8 @@ function normalizeMockSnapshotSessions(snapshot: WorkspaceSnapshot): WorkspaceSn
   sortSessionsByCreatedAtDesc(snapshot.sessions);
 
   if (!snapshot.sessions.some((session) => session.id === snapshot.activeSessionId)) {
-    snapshot.activeSessionId = snapshot.sessions[0]?.id ?? "";
+    snapshot.activeSessionId =
+      snapshot.sessions.find((session) => session.knowledgeBaseIds.includes(snapshot.activeKnowledgeBaseId))?.id ?? "";
   }
 
   if (snapshot.activeDocumentId && !documentIds.has(snapshot.activeDocumentId)) {
@@ -1630,62 +1635,7 @@ function normalizeMockSnapshotSessions(snapshot: WorkspaceSnapshot): WorkspaceSn
   return snapshot;
 }
 
-/** 浏览器 fallback 删除最后一个会话时创建默认知识库会话，避免 Agent 面板失去 activeSession。 */
-function ensureMockVisibleSession(snapshot: WorkspaceSnapshot) {
-  if (snapshot.sessions.length || !snapshot.knowledgeBases.length) {
-    return;
-  }
-
-  const knowledgeBase =
-    snapshot.knowledgeBases.find((item) => item.id === snapshot.activeKnowledgeBaseId) ?? snapshot.knowledgeBases[0];
-  const title = `${knowledgeBase.name}问答助手`;
-  /** 默认会话也需要具体创建时间，方便删除最后一条会话后继续辨认历史。 */
-  const createdAt = formatLocalDateTime();
-  const session: AgentSession = {
-    id: createLocalId("session-knowledge-base"),
-    title,
-    type: "knowledge-base",
-    knowledgeBaseIds: [knowledgeBase.id],
-    pinnedNoteIds: [],
-    messages: [
-      {
-        id: createLocalId("assistant-session"),
-        role: "assistant",
-        action: "find",
-        content: `已开启「${title}」。检索工具默认只允许访问「${knowledgeBase.name}」。`,
-        toolCalls: [],
-      },
-    ],
-    createdAt,
-    updatedAt: createdAt,
-  };
-
-  snapshot.sessions = [session];
-  snapshot.activeSessionId = session.id;
-}
-
-/** 浏览器 fallback 删除当前会话后同步恢复新 activeSession 绑定的知识库、笔记或文档。 */
-function restoreMockActiveSessionContext(snapshot: WorkspaceSnapshot) {
-  const session = snapshot.sessions.find((item) => item.id === snapshot.activeSessionId);
-
-  if (!session) {
-    return;
-  }
-
-  const nextKnowledgeBaseId =
-    session.knowledgeBaseIds.find((knowledgeBaseId) =>
-      snapshot.knowledgeBases.some((knowledgeBase) => knowledgeBase.id === knowledgeBaseId),
-    ) ??
-    snapshot.knowledgeBases[0]?.id ??
-    "";
-  const nextNoteId = getSessionNoteId(snapshot, session.activeNoteId, nextKnowledgeBaseId);
-
-  snapshot.activeKnowledgeBaseId = nextKnowledgeBaseId;
-  snapshot.activeNoteId = nextNoteId;
-  snapshot.activeDocumentId = getFallbackDocumentId(snapshot, nextKnowledgeBaseId, nextNoteId);
-}
-
-/** 按会话引用恢复同知识库 Markdown；引用无效时回退到该知识库第一篇 Markdown。 */
+/** 按会话引用恢复同知识库 Markdown；引用无效时保持文件焦点由调用方决定。 */
 function getSessionNoteId(snapshot: WorkspaceSnapshot, activeNoteId: string | undefined, knowledgeBaseId: string) {
   if (
     activeNoteId &&
@@ -1694,7 +1644,7 @@ function getSessionNoteId(snapshot: WorkspaceSnapshot, activeNoteId: string | un
     return activeNoteId;
   }
 
-  return snapshot.notes.find((note) => note.knowledgeBaseId === knowledgeBaseId)?.id ?? "";
+  return "";
 }
 
 /** 无可激活 Markdown 时，用同知识库第一个普通文档填充中间面板。 */

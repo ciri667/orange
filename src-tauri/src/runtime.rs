@@ -175,6 +175,7 @@ async fn run_model_loop(
 
     tool_calls.push(model_request_tool_call(&settings, &endpoint, "completed"));
 
+    apply_first_prompt_title(&mut snapshot.sessions[session_index], &request.prompt);
     snapshot.sessions[session_index].messages.push(user_message);
 
     for _ in 0..3 {
@@ -543,6 +544,7 @@ fn model_error_turn(
     let mut failed_request = model_request_tool_call(settings, &endpoint, "failed");
 
     failed_request.summary = reason.to_owned();
+    apply_first_prompt_title(&mut snapshot.sessions[session_index], &request.prompt);
     snapshot.sessions[session_index]
         .messages
         .push(build_user_message(&request));
@@ -593,6 +595,22 @@ fn resolve_session_index(
         })
         .or_else(|| (!snapshot.sessions.is_empty()).then_some(0))
         .ok_or_else(|| "当前没有可用 Agent 会话。".to_owned())
+}
+
+/** 空白新会话的标题直接使用用户第一条输入，避免按知识库或文档名组装默认标题。 */
+fn apply_first_prompt_title(session: &mut AgentSession, prompt: &str) {
+    let has_user_message = session
+        .messages
+        .iter()
+        .any(|message| message.role == "user");
+
+    if !has_user_message && session.title.trim() == "新会话" {
+        let next_title = prompt.trim();
+
+        if !next_title.is_empty() {
+            session.title = next_title.to_owned();
+        }
+    }
 }
 
 /** 追加 assistant 消息并更新时间。 */
