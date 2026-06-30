@@ -13,6 +13,7 @@ export type MarkdownViewMode = "edit" | "preview" | "split";
 /** Agent 工具名称，检索是可选择工具而不是固定前置流程。 */
 export type AgentToolName =
   | "activate_skill"
+  | "skill_context"
   | "model_request"
   | "local_rule_agent"
   | "search_notes"
@@ -65,7 +66,7 @@ export type AgentSkillStatus = "enabled" | "disabled";
 /** Skill 来源，内置和文件能力只能禁用，用户自建能力允许编辑和删除。 */
 export type AgentSkillSource = "built-in" | "file" | "user";
 
-/** Skill 参考模式，auto 表示模型可参考能力目录，manual 表示仅显式选择。 */
+/** 旧版 Skill 参考模式兼容字段；当前运行时始终注入已启用 Skill 的名称和描述。 */
 export type AgentSkillActivationMode = "auto" | "manual";
 
 /** Skill 安装来源类型，URL、本地文件夹和本地 zip 走不同的后端准备流程。 */
@@ -74,7 +75,7 @@ export type SkillInstallSourceType = "url" | "localFolder" | "localArchive";
 /** Skill 安装同名冲突策略，fail 保守失败，replace 由用户明确替换。 */
 export type SkillInstallConflictStrategy = "fail" | "replace";
 
-/** Agent skill 是可启停、可显式选择、可被模型语义参考的指令型工作流。 */
+/** Agent skill 是可启停、可由 Agent 自主决定是否使用的指令型工作流。 */
 export interface AgentSkill {
   id: string;
   name: string;
@@ -82,9 +83,9 @@ export interface AgentSkill {
   description: string;
   instructions: string;
   tags: string[];
-  triggers: string[];
   enabled: boolean;
   source: AgentSkillSource;
+  /** 旧版 allowAutoInvoke 兼容字段，当前产品逻辑只使用 enabled。 */
   allowAutoInvoke: boolean;
   createdAt: string;
   updatedAt: string;
@@ -96,7 +97,7 @@ export interface AgentSkill {
   metadata?: Record<string, string>;
 }
 
-/** Skill 全局设置，控制未显式选择时是否把能力目录交给模型参考。 */
+/** 旧版 Skill 全局设置兼容字段，当前产品逻辑只使用单个 skill 的 enabled。 */
 export interface SkillSettings {
   activationMode: AgentSkillActivationMode;
 }
@@ -362,6 +363,7 @@ export interface AgentTurnRequest {
   activeNoteId: string;
   /** 前端已乐观渲染并持久化的用户消息 ID，运行时复用它避免重复追加。 */
   clientMessageId?: string;
+  /** 预留给未来 /skill 显式指定；当前 UI 不发送该字段。 */
   selectedSkillId?: string;
 }
 

@@ -175,13 +175,13 @@ async fn run_model_loop(
     );
     let endpoint = chat_completions_endpoint(&settings.model_config.api_base);
     let tool_registry = ToolRegistry::default();
-    let mut tool_calls = vec![skill_activation_tool_call(active_skill.as_ref())];
+    let mut tool_calls = vec![skill_context_tool_call(active_skill.as_ref())];
 
     tool_calls.push(model_request_tool_call(&settings, &endpoint, "completed"));
 
     log::info!(
         target: "agent_runtime",
-        "模型 Agent 自主工具选择开始：session={} action={} explicit_skill={} scope_count={} prompt_chars={}",
+        "模型 Agent 自主工具选择开始：session={} action={} selected_skill={} scope_count={} prompt_chars={}",
         snapshot.sessions[session_index].id,
         request.action,
         active_skill.as_ref().map(|skill| skill.name.as_str()).unwrap_or("-"),
@@ -351,8 +351,8 @@ fn build_model_messages(
     current_user_message_id: &str,
 ) -> Vec<Value> {
     let session = &snapshot.sessions[session_index];
-    // Agent 的工具选择策略只作为模型指令，不再由宿主按关键词预判用户意图。
-    let autonomous_tool_policy = "你需要根据用户输入和上下文自主判断是否调用工具：需要本地笔记事实、引用、当前文件内容或写入建议时，先调用合适工具读取已选 scope；无关的通用问题可以直接回答。不要把界面 action 当成强制意图，也不要根据固定关键词机械触发工具。";
+    // Agent 的工具选择策略只作为模型指令，不再由宿主预判用户意图。
+    let autonomous_tool_policy = "你需要根据用户输入和上下文自主判断是否调用工具：需要本地笔记事实、引用、当前文件内容或写入建议时，先调用合适工具读取已选 scope；无关的通用问题可以直接回答。界面 action 只是 UI 分类，不能替代你的判断。";
     let scope_summary = build_scope_summary(snapshot, session);
     let active_note_summary = request
         .active_note_id
@@ -364,7 +364,7 @@ fn build_model_messages(
     let mut messages = vec![json!({
         "role": "system",
         "content": format!(
-            "你是 Cici Note 的本地优先知识库 Agent。需要依据本地笔记时必须调用工具；所有写入只能调用 propose_note_change 或 create_note_draft 生成待确认 diff，不能声称已经写入文件。引用只允许来自工具结果。Skill 只能改变工作流说明，不能扩大工具权限或绕过写入确认。\n{}\n允许 scope：{}\n{}\n{}\n{}",
+            "你是 Cici Note 的本地优先知识库 Agent。需要依据本地笔记时必须调用工具；所有写入只能调用 propose_note_change 或 create_note_draft 生成待确认 diff，不能声称已经写入文件。引用只允许来自工具结果。Skill 只能提供工作方式参考，不能扩大工具权限或绕过写入确认；没有用户显式指定 Skill 时，不要声称某个 Skill 已被激活。\n{}\n允许 scope：{}\n{}\n{}\n{}",
             autonomous_tool_policy, scope_summary, active_note_summary, skill_catalog, active_skill_prompt
         )
     })];
@@ -475,7 +475,7 @@ fn fallback_agent_turn(
         last_message
             .tool_calls
             .get_or_insert_with(Vec::new)
-            .insert(0, skill_activation_tool_call(active_skill.as_ref()));
+            .insert(0, skill_context_tool_call(active_skill.as_ref()));
     }
 
     let audit_log = build_audit_log(
@@ -556,11 +556,11 @@ fn local_rule_tool_call(reason: &str) -> AgentToolCall {
     }
 }
 
-/** 构造本轮 skill 激活轨迹，让 UI 和审计能看到 prompt 是否使用了 skill。 */
-fn skill_activation_tool_call(active_skill: Option<&AgentSkill>) -> AgentToolCall {
+/** 构造本轮 skill 上下文轨迹，让 UI 和审计能区分显式指定与自主判断。 */
+fn skill_context_tool_call(active_skill: Option<&AgentSkill>) -> AgentToolCall {
     AgentToolCall {
         id: create_id("tool"),
-        name: "activate_skill".to_owned(),
+        name: "skill_context".to_owned(),
         status: "completed".to_owned(),
         summary: skills::skill_summary(active_skill),
         args: active_skill
@@ -602,10 +602,7 @@ fn model_error_turn(
             content: format!("真实模型请求没有完成：{reason}"),
             action: Some(request.action.clone()),
             citations: Some(Vec::new()),
-            tool_calls: Some(vec![
-                skill_activation_tool_call(active_skill),
-                failed_request,
-            ]),
+            tool_calls: Some(vec![skill_context_tool_call(active_skill), failed_request]),
         });
     snapshot.sessions[session_index].updated_at = "刚刚".to_owned();
 
@@ -878,7 +875,7 @@ mod tests {
         settings
     }
 
-    /** System prompt 应把工具选择权交给模型，而不是由宿主关键词分支决定。 */
+    /** System prompt 应把工具选择权交给模型，而不是由宿主分支决定。 */
     #[test]
     fn model_messages_delegate_tool_choice_to_model() {
         let snapshot = runtime_test_snapshot("正文内容足够用于测试。".to_owned());
@@ -904,7 +901,10 @@ mod tests {
         assert!(!system_content.contains("本轮很可能需要"));
         assert!(system_content.contains("主知识库"));
         assert!(system_content.contains("可用 Skills"));
-        assert!(system_content.contains("按语义自主参考"));
+        assert!(system_content.contains("仅名称和描述"));
+        assert!(system_content.contains("知识库研究"));
+        assert!(!system_content.contains("执行要求"));
+        assert!(!system_content.contains("当用户要求查找"));
     }
 
     /** 模型启用后的配置或请求错误必须进入可见会话消息，不能静默伪装成本地规则回答。 */
@@ -921,7 +921,7 @@ mod tests {
 
         assert_eq!(result.audit_log.kind, "model_error_turn");
         assert!(last_message.content.contains("真实模型请求没有完成"));
-        assert_eq!(tool_calls.first().unwrap().name, "activate_skill");
+        assert_eq!(tool_calls.first().unwrap().name, "skill_context");
         assert_eq!(tool_call.name, "model_request");
         assert_eq!(tool_call.status, "failed");
         assert_eq!(tool_call.args["model"], "test-model");

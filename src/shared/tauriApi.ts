@@ -134,7 +134,6 @@ const browserBuiltInSkills: AgentSkill[] = [
     instructions:
       "当用户要求查找、总结、对比或引用本地笔记时，先调用 search_notes、read_note 或 list_tree 获取依据。回答中只引用工具返回的材料；如果工具没有结果，明确说明未找到依据，不要编造来源。",
     tags: ["研究", "检索", "引用"],
-    triggers: ["查找", "搜索", "检索", "引用", "来源", "总结", "知识库", "笔记", "资料"],
     enabled: true,
     source: "built-in",
     allowAutoInvoke: true,
@@ -149,7 +148,6 @@ const browserBuiltInSkills: AgentSkill[] = [
     instructions:
       "当用户要求润色、改写、压缩或扩写当前笔记时，先读取当前笔记或目标笔记。只能调用 propose_note_change 生成待确认 diff；不能声称已经修改文件，也不能绕过 original 唯一命中校验。",
     tags: ["写作", "改写", "diff"],
-    triggers: ["改写", "润色", "重写", "优化", "扩写", "压缩", "rewrite"],
     enabled: true,
     source: "built-in",
     allowAutoInvoke: true,
@@ -164,7 +162,6 @@ const browserBuiltInSkills: AgentSkill[] = [
     instructions:
       "当用户要求生成新笔记、清单、总结稿或草稿时，可以先检索或读取相关笔记，再调用 create_note_draft。目标路径必须在当前会话允许的知识库内，正文应是完整 Markdown。",
     tags: ["草稿", "生成", "Markdown"],
-    triggers: ["创建", "新建", "草稿", "生成", "清单", "draft", "markdown"],
     enabled: true,
     source: "built-in",
     allowAutoInvoke: true,
@@ -179,7 +176,6 @@ const browserBuiltInSkills: AgentSkill[] = [
     instructions:
       "当用户要求整理知识库、补标签、规划目录或建立关联时，优先调用 list_tree、search_notes 或 read_note 获取结构与内容，再调用 suggest_organization 输出建议。该 skill 不执行文件移动或直接写入。",
     tags: ["整理", "标签", "目录"],
-    triggers: ["整理", "归档", "标签", "目录", "分类", "关联", "组织", "organize"],
     enabled: true,
     source: "built-in",
     allowAutoInvoke: true,
@@ -198,7 +194,6 @@ const browserFileSkills: AgentSkill[] = [
     instructions:
       "读取当前会议纪要上下文，保持事实和行动项不变，输出更清晰的 Markdown 结构。涉及写入时必须生成待确认 diff。",
     tags: ["文件", "会议", "写作"],
-    triggers: ["会议", "纪要", "行动项", "meeting"],
     enabled: true,
     source: "file",
     allowAutoInvoke: true,
@@ -427,11 +422,10 @@ export async function saveAgentSkill(skill: AgentSkill): Promise<AgentSkill> {
   return invokeLogged<AgentSkill>("save_agent_skill", { payload: { skill } });
 }
 
-/** 启停任意 skill；allowAutoInvoke 不传时保留原模型参考设置。 */
+/** 启停任意 skill；启用的 skill 会以名称和描述进入 Agent system prompt。 */
 export async function toggleAgentSkill(
   skillId: string,
   enabled: boolean,
-  allowAutoInvoke?: boolean,
 ): Promise<AgentSkill> {
   if (!isTauriRuntime()) {
     const skillIndex = browserAgentSkills.findIndex((skill) => skill.id === skillId);
@@ -443,7 +437,6 @@ export async function toggleAgentSkill(
     const nextSkill: AgentSkill = {
       ...browserAgentSkills[skillIndex],
       enabled,
-      allowAutoInvoke: allowAutoInvoke ?? browserAgentSkills[skillIndex].allowAutoInvoke,
       updatedAt: formatLocalDateTime(),
     };
 
@@ -453,7 +446,7 @@ export async function toggleAgentSkill(
   }
 
   return invokeLogged<AgentSkill>("toggle_agent_skill", {
-    payload: { skillId, enabled, allowAutoInvoke },
+    payload: { skillId, enabled },
   });
 }
 
@@ -1293,7 +1286,6 @@ export async function runAgentTurn(
   prompt: string,
   action: AgentActionType,
   clientMessageId?: string,
-  selectedSkillId?: string,
 ): Promise<AgentTurnResult> {
   const request: AgentTurnRequest = {
     prompt,
@@ -1302,12 +1294,11 @@ export async function runAgentTurn(
     activeKnowledgeBaseId: snapshot.activeKnowledgeBaseId,
     activeNoteId: snapshot.activeNoteId,
     clientMessageId,
-    selectedSkillId,
   };
 
   if (!isTauriRuntime()) {
-    const activeSkill = resolveBrowserActiveSkill(browserAgentSkills, browserUserSettings, request);
-    const nextSnapshot = runMockAgentTurn(snapshot, prompt, action, activeSkill, clientMessageId);
+    logBrowserSkillContext(browserAgentSkills, request);
+    const nextSnapshot = runMockAgentTurn(snapshot, prompt, action, clientMessageId);
 
     browserAuditLogs = [createBrowserAuditLog(nextSnapshot, prompt), ...browserAuditLogs].slice(0, 20);
 
@@ -1543,7 +1534,6 @@ function cloneAgentSkills(skills: AgentSkill[]) {
   return skills.map((skill) => ({
     ...skill,
     tags: [...skill.tags],
-    triggers: [...skill.triggers],
     metadata: skill.metadata ? { ...skill.metadata } : undefined,
   }));
 }
@@ -1571,10 +1561,9 @@ function normalizeBrowserFileSkill(skill: AgentSkill): AgentSkill {
     description: skill.description.trim(),
     instructions: skill.instructions.trim(),
     tags: normalizeBrowserTerms(skill.tags),
-    triggers: normalizeBrowserTerms(skill.triggers),
     enabled: skill.enabled,
     source: "file",
-    allowAutoInvoke: skill.allowAutoInvoke,
+    allowAutoInvoke: true,
     createdAt: skill.createdAt.trim() || now,
     updatedAt: now,
     path: `~/.cici-note/skills/${relativePath}`,
@@ -1613,10 +1602,9 @@ function installBrowserMockSkill(payload: InstallAgentSkillPayload): InstallAgen
     instructions:
       "这是浏览器开发态的安装模拟能力。真实桌面端会在安装后默认停用第三方 skill，用户审阅并启用后才会进入 Runtime。",
     tags: ["安装", "模拟"],
-    triggers: [skillName],
     enabled: payload.enableAfterInstall,
     source: "file",
-    allowAutoInvoke: payload.enableAfterInstall,
+    allowAutoInvoke: true,
     createdAt: now,
     updatedAt: now,
     metadata: {
@@ -1697,7 +1685,7 @@ function normalizeBrowserSkillName(name: string) {
     .join("-");
 }
 
-/** 清理标签和语义线索，去重并限制数量，避免 mock prompt 摘要失控。 */
+/** 清理标签，去重并限制数量，避免 mock prompt 摘要失控。 */
 function normalizeBrowserTerms(terms: string[]) {
   const seenTerms = new Set<string>();
 
@@ -1717,34 +1705,9 @@ function normalizeBrowserTerms(terms: string[]) {
     .slice(0, 16);
 }
 
-/** 浏览器 mock 中只根据显式选择注入完整 skill；未选择时由 Agent 语义参考能力目录。 */
-function resolveBrowserActiveSkill(
-  skills: AgentSkill[],
-  settings: UserSettings,
-  request: AgentTurnRequest,
-): AgentSkill | undefined {
-  if (request.selectedSkillId) {
-    const selectedSkill = skills.find((skill) => skill.enabled && skill.id === request.selectedSkillId);
-
-    if (!selectedSkill) {
-      logError("显式选择的 Skill 不可用或已禁用。", {
-        category: "frontend",
-        event: "resolve_skill",
-        status: "failed",
-        metadata: {
-          skillId: request.selectedSkillId,
-        },
-      });
-    }
-
-    return selectedSkill;
-  }
-
-  if (settings.skillSettings.activationMode !== "auto") {
-    return undefined;
-  }
-
-  logDebug("未显式选择 Skill，浏览器 mock 不做关键词路由。", {
+/** 浏览器 mock 只记录已启用 skill 数量，具体是否使用由真实模型场景自行判断。 */
+function logBrowserSkillContext(skills: AgentSkill[], request: AgentTurnRequest): void {
+  logDebug("浏览器 mock 未预先选择 Skill。", {
     category: "frontend",
     event: "resolve_skill",
     status: "skipped",
@@ -1753,8 +1716,6 @@ function resolveBrowserActiveSkill(
       enabledSkillCount: skills.filter((skill) => skill.enabled).length,
     },
   });
-
-  return undefined;
 }
 
 /** 浏览器 fallback 清理会话中的失效知识库和笔记引用，模拟后端持久化入口的归一化。 */
@@ -1837,8 +1798,8 @@ function createBrowserAuditLog(snapshot: WorkspaceSnapshot, prompt: string): Req
   const skillSummary =
     session?.messages
       .at(-1)
-      ?.toolCalls?.find((toolCall) => toolCall.name === "activate_skill")
-      ?.summary ?? "未激活 Skill";
+      ?.toolCalls?.find((toolCall) => toolCall.name === "skill_context" || toolCall.name === "activate_skill")
+      ?.summary ?? "没有 Skill 上下文";
 
   return {
     id: createLocalId("audit"),

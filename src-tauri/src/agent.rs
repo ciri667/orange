@@ -29,7 +29,7 @@ pub fn run_agent_turn(
         request.prompt.chars().count()
     );
 
-    // 本地兜底没有模型推理能力，只响应明确的非自然语言工具入口，不按 prompt 关键词推断意图。
+    // 本地兜底没有模型推理能力，只响应明确的非自然语言工具入口，不替模型推断自然语言意图。
     if should_use_explicit_context_action(&request) {
         let search_outcome = execute_local_tool(
             &registry,
@@ -153,8 +153,8 @@ fn build_local_response(
         }
 
         if tool_calls.is_empty() {
-            return "当前运行在本地保守兜底模式；我不会根据关键词判断是否检索、改写或创建内容。需要 Agent 自主判断时请启用模型；确认前不会修改 Markdown 文件。"
-                .to_owned();
+            return "当前运行在本地保守兜底模式；自然语言意图需要启用模型后由 Agent 自主判断。确认前不会修改 Markdown 文件。"
+            .to_owned();
         }
 
         return "我没有在当前会话允许的知识库范围内找到足够相关的内容。本地兜底不会越权读取其他目录，也不会隐式写入文件。"
@@ -270,7 +270,7 @@ mod tests {
         assert!(response.contains("不会根据固定 action 自动生成写入 diff"));
     }
 
-    /** 本地兜底不能通过 prompt 关键词自动触发检索，避免伪装成 Agent 判断。 */
+    /** 本地兜底不能通过 prompt 字面内容自动检索，避免伪装成 Agent 判断。 */
     #[test]
     fn local_fallback_does_not_keyword_route_plain_ask() {
         let request = AgentTurnRequest {
@@ -285,7 +285,7 @@ mod tests {
         let response = build_local_response(&request, &[], &[]);
 
         assert!(!should_use_explicit_context_action(&request));
-        assert!(response.contains("不会根据关键词判断"));
+        assert!(response.contains("自然语言意图需要启用模型后由 Agent 自主判断"));
     }
 
     /** 前端已乐观落库的用户消息不能在本地兜底里重复追加。 */

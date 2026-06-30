@@ -52,7 +52,7 @@ export function ToolCallList({ toolCalls }: { toolCalls?: AgentToolCall[] }) {
           {toolCalls.map((toolCall) => {
             /** 根据调用类型选择轨迹图标，让模型请求和本地工具一眼可分辨。 */
             const Icon =
-              toolCall.name === "activate_skill"
+              toolCall.name === "activate_skill" || toolCall.name === "skill_context"
                 ? Sparkles
                 : toolCall.name === "model_request"
                 ? BrainCircuit

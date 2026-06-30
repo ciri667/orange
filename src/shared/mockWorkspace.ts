@@ -2,7 +2,6 @@ import { createContentHash, createLocalId } from "./id";
 import type {
   AgentActionType,
   AgentMessage,
-  AgentSkill,
   AgentSession,
   AgentToolCall,
   Citation,
@@ -425,7 +424,7 @@ export function createMockKnowledgeBaseSelection(count: number): KnowledgeBaseSe
   };
 }
 
-/** 浏览器 mock 没有真实模型，只响应显式工具入口，避免用关键词假装 Agent 自主判断。 */
+/** 浏览器 mock 没有真实模型，只响应显式工具入口，避免假装 Agent 已完成自主判断。 */
 function shouldUseSearchTool(action: AgentActionType) {
   return action === "find";
 }
@@ -520,12 +519,11 @@ function getScopeLabel(snapshot: WorkspaceSnapshot, session: AgentSession) {
   return `${selectedNames.length} 个已选知识库`;
 }
 
-/** 执行浏览器开发态 Agent loop；无真实模型时只模拟显式工具动作，不做关键词意图路由。 */
+/** 执行浏览器开发态 Agent loop；无真实模型时只模拟显式工具动作，不预先推断自然语言意图。 */
 export function runMockAgentTurn(
   snapshot: WorkspaceSnapshot,
   prompt: string,
   action: AgentActionType,
-  activeSkill?: AgentSkill,
   clientMessageId?: string,
 ): WorkspaceSnapshot {
   const nextSnapshot = cloneWorkspaceSnapshot(snapshot);
@@ -549,19 +547,9 @@ export function runMockAgentTurn(
   };
   const toolCalls: AgentToolCall[] = [
     createToolCall(
-      "activate_skill",
-      activeSkill ? `已激活 Skill：${activeSkill.displayName}` : "未激活 Skill",
-      activeSkill
-        ? {
-            skillId: activeSkill.id,
-            name: activeSkill.name,
-            displayName: activeSkill.displayName,
-            source: activeSkill.source,
-            path: activeSkill.path,
-            relativePath: activeSkill.relativePath,
-            explicit: true,
-          }
-        : { skillId: null, explicit: false },
+      "skill_context",
+      "浏览器 mock 未显式指定 Skill；真实模型场景会按已启用 Skills 的名称和描述自主判断。",
+      { skillId: null, explicit: false },
     ),
   ];
   let citations: Citation[] = [];
@@ -675,7 +663,7 @@ export function runMockAgentTurn(
       ? `我调用了检索工具，并只在 ${getScopeLabel(nextSnapshot, session)} 范围内组织回答：本地优先的关键是把 Markdown 文件作为用户拥有的主数据源，索引和模型请求都只是辅助层；写入必须先形成 diff，确认后才落盘。`
       : `我调用了检索工具，但在 ${getScopeLabel(nextSnapshot, session)} 中没有找到足够相关的笔记。`;
   } else {
-    content = "浏览器开发态没有真实模型，因此不会根据关键词自动调用工具。桌面端启用模型后，Agent 会自行判断是否检索、读取或生成待确认 diff。";
+    content = "浏览器开发态没有真实模型，因此不会替 Agent 预先选择工具。桌面端启用模型后，Agent 会自行判断是否检索、读取或生成待确认 diff。";
   }
 
   session.messages.push({
