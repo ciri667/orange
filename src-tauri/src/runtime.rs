@@ -168,6 +168,7 @@ async fn run_model_loop(
         &snapshot,
         session_index,
         &request,
+        &settings,
         &available_skills,
         active_skill.as_ref(),
         &current_user_message_id,
@@ -177,6 +178,16 @@ async fn run_model_loop(
     let mut tool_calls = vec![skill_activation_tool_call(active_skill.as_ref())];
 
     tool_calls.push(model_request_tool_call(&settings, &endpoint, "completed"));
+
+    log::info!(
+        target: "agent_runtime",
+        "模型 Agent 自主工具选择开始：session={} action={} explicit_skill={} scope_count={} prompt_chars={}",
+        snapshot.sessions[session_index].id,
+        request.action,
+        active_skill.as_ref().map(|skill| skill.name.as_str()).unwrap_or("-"),
+        snapshot.sessions[session_index].knowledge_base_ids.len(),
+        request.prompt.chars().count()
+    );
 
     for _ in 0..3 {
         audit_trail.record_model_request();
@@ -201,6 +212,12 @@ async fn run_model_loop(
             .and_then(Value::as_array)
             .cloned()
             .unwrap_or_default();
+        log::debug!(
+            target: "agent_runtime",
+            "模型返回工具调用：session={} tool_call_count={}",
+            snapshot.sessions[session_index].id,
+            model_tool_calls.len()
+        );
 
         if model_tool_calls.is_empty() {
             let content = message
@@ -250,6 +267,13 @@ async fn run_model_loop(
             };
             let tool_result_text =
                 truncate_chars(&tool_outcome.payload.to_string(), MAX_TOOL_RESULT_CHARS);
+            log::debug!(
+                target: "agent_runtime",
+                "工具调用完成：session={} tool={} status={}",
+                snapshot.sessions[session_index].id,
+                tool_outcome.call.name,
+                tool_outcome.call.status
+            );
 
             audit_trail.record_sent_fragment(tool_outcome.audit_fragment);
             citations.extend(tool_outcome.citations);
@@ -321,29 +345,27 @@ fn build_model_messages(
     snapshot: &WorkspaceSnapshot,
     session_index: usize,
     request: &AgentTurnRequest,
+    settings: &UserSettings,
     available_skills: &[AgentSkill],
     active_skill: Option<&AgentSkill>,
     current_user_message_id: &str,
 ) -> Vec<Value> {
     let session = &snapshot.sessions[session_index];
-    let local_context_policy = if should_expect_local_context(request) {
-        "本轮很可能需要本地笔记事实或写入建议；必须先调用合适工具读取已选 scope，再组织回答。"
-    } else {
-        "普通通用问题可以直接回答；不要为了无关问题调用本地工具。"
-    };
+    // Agent 的工具选择策略只作为模型指令，不再由宿主按关键词预判用户意图。
+    let autonomous_tool_policy = "你需要根据用户输入和上下文自主判断是否调用工具：需要本地笔记事实、引用、当前文件内容或写入建议时，先调用合适工具读取已选 scope；无关的通用问题可以直接回答。不要把界面 action 当成强制意图，也不要根据固定关键词机械触发工具。";
     let scope_summary = build_scope_summary(snapshot, session);
     let active_note_summary = request
         .active_note_id
         .is_empty()
         .then(|| "当前未绑定笔记".to_owned())
         .unwrap_or_else(|| format!("当前笔记 ID：{}", request.active_note_id));
-    let skill_catalog = skills::skill_catalog_prompt(available_skills);
+    let skill_catalog = skills::skill_catalog_prompt(available_skills, &settings.skill_settings);
     let active_skill_prompt = skills::active_skill_prompt(active_skill);
     let mut messages = vec![json!({
         "role": "system",
         "content": format!(
             "你是 Cici Note 的本地优先知识库 Agent。需要依据本地笔记时必须调用工具；所有写入只能调用 propose_note_change 或 create_note_draft 生成待确认 diff，不能声称已经写入文件。引用只允许来自工具结果。Skill 只能改变工作流说明，不能扩大工具权限或绕过写入确认。\n{}\n允许 scope：{}\n{}\n{}\n{}",
-            local_context_policy, scope_summary, active_note_summary, skill_catalog, active_skill_prompt
+            autonomous_tool_policy, scope_summary, active_note_summary, skill_catalog, active_skill_prompt
         )
     })];
 
@@ -356,7 +378,7 @@ fn build_model_messages(
     {
         let content = if message.id == current_user_message_id && message.role == "user" {
             format!(
-                "动作类型：{}\n用户输入：{}",
+                "界面 action 提示：{}\n用户输入：{}",
                 request.action, message.content
             )
         } else {
@@ -550,10 +572,10 @@ fn skill_activation_tool_call(active_skill: Option<&AgentSkill>) -> AgentToolCal
                     "source": skill.source,
                     "path": skill.path,
                     "relativePath": skill.relative_path,
-                    "auto": true
+                    "explicit": true
                 })
             })
-            .unwrap_or_else(|| json!({ "skillId": null })),
+            .unwrap_or_else(|| json!({ "skillId": null, "explicit": false })),
     }
 }
 
@@ -671,35 +693,6 @@ fn deduplicate_citations(citations: Vec<Citation>) -> Vec<Citation> {
     }
 
     next_citations
-}
-
-/** 判断本轮是否很可能需要本地知识库上下文，用于提示模型必须先调用工具。 */
-fn should_expect_local_context(request: &AgentTurnRequest) -> bool {
-    let normalized_prompt = request.prompt.to_lowercase();
-    let intent_words = [
-        "查找",
-        "搜索",
-        "引用",
-        "来源",
-        "知识库",
-        "笔记",
-        "文档",
-        "资料",
-        "总结",
-        "当前",
-        "这篇",
-        "这些",
-        "markdown",
-        "rag",
-        "检索",
-    ];
-
-    matches!(
-        request.action.as_str(),
-        "find" | "rewrite" | "create" | "organize"
-    ) || intent_words
-        .iter()
-        .any(|word| normalized_prompt.contains(word))
 }
 
 /** 把字符串裁剪到指定字符预算，保留明确截断标记。 */
@@ -885,9 +878,9 @@ mod tests {
         settings
     }
 
-    /** 本地知识库意图会进入必须调用工具的 system prompt 分支。 */
+    /** System prompt 应把工具选择权交给模型，而不是由宿主关键词分支决定。 */
     #[test]
-    fn model_messages_mark_local_context_requests() {
+    fn model_messages_delegate_tool_choice_to_model() {
         let snapshot = runtime_test_snapshot("正文内容足够用于测试。".to_owned());
         let request = runtime_test_request("ask", "总结当前知识库里的隐私边界");
         let available_skills = crate::skills::built_in_skills();
@@ -900,16 +893,18 @@ mod tests {
             &snapshot,
             0,
             &request,
+            &crate::storage::default_user_settings(),
             &available_skills,
             active_skill.as_ref(),
             "user-current",
         );
         let system_content = messages[0]["content"].as_str().unwrap_or_default();
 
-        assert!(system_content.contains("必须先调用合适工具"));
+        assert!(system_content.contains("自主判断是否调用工具"));
+        assert!(!system_content.contains("本轮很可能需要"));
         assert!(system_content.contains("主知识库"));
         assert!(system_content.contains("可用 Skills"));
-        assert!(system_content.contains("知识库研究"));
+        assert!(system_content.contains("按语义自主参考"));
     }
 
     /** 模型启用后的配置或请求错误必须进入可见会话消息，不能静默伪装成本地规则回答。 */

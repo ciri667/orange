@@ -1,4 +1,6 @@
-use crate::domain::{AgentSkill, AgentTurnRequest, InstallAgentSkillResult, UserSettings};
+use crate::domain::{
+    AgentSkill, AgentTurnRequest, InstallAgentSkillResult, SkillSettings, UserSettings,
+};
 use crate::storage::{create_id, format_local_datetime, lock_database_writer};
 use rusqlite::{params, Connection};
 use sha2::{Digest, Sha256};
@@ -28,9 +30,6 @@ const SKILL_MARKDOWN_FILE_NAME: &str = "SKILL.md";
 
 /** 预留记忆目录名，首版只创建但不读取、不注入 Runtime。 */
 const MEMORY_DIRECTORY_NAME: &str = "memory";
-
-/** Skill 全局设置中允许 Runtime 根据 prompt 自动匹配的模式。 */
-const AUTO_ACTIVATION_MODE: &str = "auto";
 
 /** Skill 摘要目录注入模型的最大字符数，避免用户安装大量 skill 后挤占上下文。 */
 const MAX_SKILL_CATALOG_PROMPT_CHARS: usize = 8_000;
@@ -143,7 +142,7 @@ pub fn load_agent_skills_from_roots(
         .into_iter()
         .map(|mut skill| {
             if let Some(saved_skill) = persisted_skills.remove(&skill.id) {
-                // 内置 skill 的说明始终以代码版本为准，只继承用户启停和自动触发偏好。
+                // 内置 skill 的说明始终以代码版本为准，只继承用户启停和模型参考偏好。
                 skill.enabled = saved_skill.enabled;
                 skill.allow_auto_invoke = saved_skill.allow_auto_invoke;
                 skill.updated_at = saved_skill.updated_at;
@@ -222,7 +221,7 @@ pub fn save_user_skill_to_root(
     Ok(saved_skill)
 }
 
-/** 启停任意 skill；SQLite 只保存启停和自动触发覆盖，不保存文件式 skill 正文。 */
+/** 启停任意 skill；SQLite 只保存启停和模型参考覆盖，不保存文件式 skill 正文。 */
 pub fn toggle_agent_skill(
     app: &AppHandle,
     connection: &Connection,
@@ -453,49 +452,48 @@ pub fn prepare_skill_archive_bytes(bytes: &[u8]) -> Result<TempDir, String> {
     Ok(temp_dir)
 }
 
-/** 根据用户显式选择或自动匹配规则决定本轮激活的 skill。 */
+/** 根据用户显式选择决定本轮激活的完整 skill；未选择时由模型参考能力目录自主判断。 */
 pub fn resolve_active_skill(
     skills: &[AgentSkill],
-    settings: &UserSettings,
+    _settings: &UserSettings,
     request: &AgentTurnRequest,
 ) -> Option<AgentSkill> {
     if let Some(selected_skill_id) = request.selected_skill_id.as_deref() {
-        return skills
+        let selected_skill = skills
             .iter()
             .find(|skill| skill.enabled && skill.id == selected_skill_id)
             .cloned();
+
+        if selected_skill.is_none() {
+            log::warn!(
+                target: "agent_skill",
+                "显式选择的 Skill 不可用或已禁用：skill_id={selected_skill_id}"
+            );
+        }
+
+        return selected_skill;
     }
 
-    if settings.skill_settings.activation_mode != AUTO_ACTIVATION_MODE {
-        return None;
-    }
+    log::debug!(
+        target: "agent_skill",
+        "未显式选择 Skill，Runtime 不做关键词路由：action={} enabled_skill_count={}",
+        request.action,
+        skills.iter().filter(|skill| skill.enabled).count()
+    );
 
-    let prompt = request.prompt.to_lowercase();
-    let action = request.action.to_lowercase();
-    let enabled_auto_skills = skills
-        .iter()
-        .filter(|skill| skill.enabled && skill.allow_auto_invoke)
-        .collect::<Vec<_>>();
-
-    // 固定 action 是用户显式点击入口推导出的强信号，优先于“笔记”等泛化触发词。
-    if let Some(skill) = enabled_auto_skills
-        .iter()
-        .find(|skill| action_matches_skill_name(&skill.name, &action))
-    {
-        return Some((*skill).clone());
-    }
-
-    enabled_auto_skills
-        .into_iter()
-        .find(|skill| skill_matches(skill, &prompt, &action))
-        .cloned()
+    None
 }
 
-/** 生成注入模型 system prompt 的可用 skill 摘要，避免默认塞入完整说明。 */
-pub fn skill_catalog_prompt(skills: &[AgentSkill]) -> String {
+/** 生成注入模型 system prompt 的可用 skill 目录，由模型按语义自主参考而非宿主关键词匹配。 */
+pub fn skill_catalog_prompt(skills: &[AgentSkill], settings: &SkillSettings) -> String {
+    if settings.activation_mode != "auto" {
+        return "可用 Skills：自动参考已关闭；只有用户显式选择的 Skill 会注入完整执行说明。"
+            .to_owned();
+    }
+
     let enabled_summaries = skills
         .iter()
-        .filter(|skill| skill.enabled)
+        .filter(|skill| skill.enabled && skill.allow_auto_invoke)
         .map(|skill| {
             let path_summary = skill
                 .path
@@ -504,22 +502,23 @@ pub fn skill_catalog_prompt(skills: &[AgentSkill]) -> String {
                 .unwrap_or_default();
 
             format!(
-                "- {} (`{}`): {}{}；触发词：{}",
+                "- {} (`{}`): {}{}；执行要求：{}；语义线索：{}",
                 skill.display_name,
                 skill.name,
                 skill.description,
                 path_summary,
+                truncate_chars(&skill.instructions, 900),
                 skill.triggers.join("、")
             )
         })
         .collect::<Vec<_>>();
 
     if enabled_summaries.is_empty() {
-        "可用 Skills：未启用。".to_owned()
+        "可用 Skills：没有允许自动参考的已启用 Skill。".to_owned()
     } else {
         truncate_chars(
             &format!(
-                "可用 Skills（默认只作为能力目录）：\n{}",
+                "可用 Skills（模型按语义自主参考；宿主不会按关键词强制激活）：\n{}",
                 enabled_summaries.join("\n")
             ),
             MAX_SKILL_CATALOG_PROMPT_CHARS,
@@ -527,7 +526,7 @@ pub fn skill_catalog_prompt(skills: &[AgentSkill]) -> String {
     }
 }
 
-/** 生成本轮激活 skill 的完整说明，只有命中后才进入模型上下文。 */
+/** 生成本轮显式激活 skill 的完整说明，未选择时不再由宿主关键词命中。 */
 pub fn active_skill_prompt(active_skill: Option<&AgentSkill>) -> String {
     active_skill
         .map(|skill| {
@@ -549,7 +548,7 @@ pub fn skill_summary(active_skill: Option<&AgentSkill>) -> String {
                 .map(|path| format!("已激活 Skill：{}（{}）", skill.display_name, path))
                 .unwrap_or_else(|| format!("已激活 Skill：{}", skill.display_name))
         })
-        .unwrap_or_else(|| "未激活 Skill".to_owned())
+        .unwrap_or_else(|| "未显式选择 Skill；模型按能力目录和工具边界自主判断".to_owned())
 }
 
 /** 创建一条内置 skill，统一填充稳定元数据。 */
@@ -909,7 +908,7 @@ fn parse_yaml_value_after_colon(line: &str) -> Option<String> {
         .filter(|value| !value.is_empty())
 }
 
-/** 解析 frontmatter 中的逗号分隔或简单数组字段，用于保留 UI 表单里的标签和触发词。 */
+/** 解析 frontmatter 中的逗号分隔或简单数组字段，用于保留 UI 表单里的标签和语义线索。 */
 fn parse_frontmatter_list(value: &str) -> Vec<String> {
     let trimmed_value = value.trim();
     let list_body = trimmed_value
@@ -1148,7 +1147,7 @@ fn build_skill_markdown(skill: &AgentSkill) -> String {
     )
 }
 
-/** displayName 和自动触发偏好写到 agents/openai.yaml，保持 SKILL.md 兼容 Codex 风格。 */
+/** displayName 和模型参考偏好写到 agents/openai.yaml，保持 SKILL.md 兼容 Codex 风格。 */
 fn write_openai_yaml_override(skill_dir: &Path, skill: &AgentSkill) -> Result<(), String> {
     let agents_dir = skill_dir.join("agents");
     let metadata_path = agents_dir.join("openai.yaml");
@@ -1721,7 +1720,7 @@ fn normalize_github_repo_name(repo: &str) -> Result<String, String> {
     Ok(repo_name.to_owned())
 }
 
-/** 给文件 skill 派生基础触发词，正文不参与触发词列表但仍参与轻量匹配。 */
+/** 给文件 skill 派生基础语义线索，仅用于展示和模型能力目录，不参与宿主关键词路由。 */
 fn derive_file_skill_triggers(name: &str) -> Vec<String> {
     normalize_terms(vec![name.to_owned(), normalize_skill_name(name)])
 }
@@ -1755,34 +1754,6 @@ fn home_dir() -> Option<PathBuf> {
     std::env::var_os("HOME")
         .map(PathBuf::from)
         .or_else(|| std::env::var_os("USERPROFILE").map(PathBuf::from))
-}
-
-/** 判断 skill 是否命中本轮 prompt 或 action，首版使用可解释的轻量规则。 */
-fn skill_matches(skill: &AgentSkill, prompt: &str, action: &str) -> bool {
-    let mut candidate_terms = skill
-        .triggers
-        .iter()
-        .chain(skill.tags.iter())
-        .map(|term| term.to_lowercase())
-        .collect::<Vec<_>>();
-
-    candidate_terms.push(skill.name.to_lowercase());
-    candidate_terms.push(skill.description.to_lowercase());
-
-    candidate_terms
-        .iter()
-        .any(|term| !term.trim().is_empty() && (prompt.contains(term) || action.contains(term)))
-}
-
-/** 把当前固定 action 映射到首版内置 skill，降低中文触发词缺失时的漏匹配。 */
-fn action_matches_skill_name(skill_name: &str, action: &str) -> bool {
-    matches!(
-        (skill_name, action),
-        ("note-research", "ask" | "find")
-            | ("note-rewrite", "rewrite")
-            | ("draft-from-context", "create")
-            | ("organize-knowledge", "organize")
-    )
 }
 
 /** 从 SQLite 读取已持久化的 skill payload。 */
@@ -1913,7 +1884,7 @@ fn normalize_skill_name(name: &str) -> String {
         .join("-")
 }
 
-/** 清理标签或触发词，去重后限制数量，避免单个 skill 占用过多 prompt。 */
+/** 清理标签或语义线索，去重后限制数量，避免单个 skill 占用过多 prompt。 */
 fn normalize_terms(terms: Vec<String>) -> Vec<String> {
     let mut seen_terms = HashSet::new();
 
@@ -2038,9 +2009,9 @@ mod tests {
         writer.finish().expect("finish zip").into_inner()
     }
 
-    /** 自动匹配应根据 action 和触发词命中内置技能。 */
+    /** 未显式选择时不再根据 action 或触发词激活 Skill。 */
     #[test]
-    fn resolves_builtin_skill_by_action() {
+    fn does_not_activate_skill_without_explicit_selection() {
         let settings = crate::storage::default_user_settings();
         let request = AgentTurnRequest {
             prompt: "请处理当前笔记".to_owned(),
@@ -2054,13 +2025,10 @@ mod tests {
 
         let active_skill = resolve_active_skill(&built_in_skills(), &settings, &request);
 
-        assert_eq!(
-            active_skill.map(|skill| skill.name),
-            Some("note-rewrite".to_owned())
-        );
+        assert!(active_skill.is_none());
     }
 
-    /** 显式选择必须优先于自动匹配，方便用户覆盖轻量规则。 */
+    /** 显式选择必须注入完整 Skill，方便用户主动指定工作流。 */
     #[test]
     fn explicit_skill_selection_wins() {
         let settings = crate::storage::default_user_settings();
@@ -2351,7 +2319,7 @@ triggers: ["总结", "summary"]
         assert_eq!(files[0].name, "valid-skill");
     }
 
-    /** agents/openai.yaml 可以覆盖展示名称，并关闭隐式自动触发。 */
+    /** agents/openai.yaml 可以覆盖展示名称，并关闭隐式模型参考。 */
     #[test]
     fn openai_yaml_can_disable_file_skill_auto_invocation() {
         let temp_dir = tempdir().expect("create tempdir");
@@ -2466,7 +2434,7 @@ triggers: ["总结", "summary"]
         assert!(!persisted.contains_key(&saved.id));
     }
 
-    /** 文件 skill 的启停和自动触发偏好应按路径 ID 保存在 SQLite 中并在重新加载时生效。 */
+    /** 文件 skill 的启停和模型参考偏好应按路径 ID 保存在 SQLite 中并在重新加载时生效。 */
     #[test]
     fn file_skill_toggle_override_persists_across_loads() {
         let temp_dir = tempdir().expect("create tempdir");

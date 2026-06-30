@@ -21,8 +21,16 @@ pub fn run_agent_turn(
     apply_first_prompt_title(&mut snapshot.sessions[session_index], &request.prompt);
     ensure_user_message_for_turn(&mut snapshot.sessions[session_index], &request);
 
-    // 本地兜底只做确定性工具调用，不根据 action 自动生成写入 diff。
-    if should_use_local_context(&request) {
+    log::info!(
+        target: "local_agent",
+        "本地保守兜底开始：session={} action={} prompt_chars={}",
+        request.session_id,
+        request.action,
+        request.prompt.chars().count()
+    );
+
+    // 本地兜底没有模型推理能力，只响应明确的非自然语言工具入口，不按 prompt 关键词推断意图。
+    if should_use_explicit_context_action(&request) {
         let search_outcome = execute_local_tool(
             &registry,
             app,
@@ -74,6 +82,14 @@ pub fn run_agent_turn(
     }
 
     let content = build_local_response(&request, &citations, &tool_calls);
+    log::debug!(
+        target: "local_agent",
+        "本地保守兜底完成：session={} action={} tool_count={} citation_count={}",
+        request.session_id,
+        request.action,
+        tool_calls.len(),
+        citations.len()
+    );
 
     snapshot.sessions[session_index]
         .messages
@@ -110,31 +126,9 @@ fn execute_local_tool(
     registry.execute_named(&mut context, name, args)
 }
 
-/** 根据请求内容判断本地兜底是否需要读取用户授权 scope 内的知识库上下文。 */
-fn should_use_local_context(request: &AgentTurnRequest) -> bool {
-    let normalized_prompt = request.prompt.to_lowercase();
-    let intent_words = [
-        "查找",
-        "搜索",
-        "引用",
-        "来源",
-        "知识库",
-        "笔记",
-        "文档",
-        "资料",
-        "总结",
-        "当前",
-        "这篇",
-        "这些",
-        "markdown",
-        "rag",
-        "检索",
-    ];
-
-    request.action != "ask"
-        || intent_words
-            .iter()
-            .any(|word| normalized_prompt.contains(word))
+/** 本地兜底只响应明确工具入口；自然语言意图必须交给真实模型判断。 */
+fn should_use_explicit_context_action(request: &AgentTurnRequest) -> bool {
+    request.action == "find"
 }
 
 /** 构造本地兜底回复，明确说明没有模型推理也没有隐式写入。 */
@@ -155,6 +149,11 @@ fn build_local_response(
     if citations.is_empty() {
         if has_failed_search {
             return "本地检索工具没有完成，因此这轮不会编造知识库依据，也不会执行任何写入。"
+                .to_owned();
+        }
+
+        if tool_calls.is_empty() {
+            return "当前运行在本地保守兜底模式；我不会根据关键词判断是否检索、改写或创建内容。需要 Agent 自主判断时请启用模型；确认前不会修改 Markdown 文件。"
                 .to_owned();
         }
 
@@ -269,6 +268,24 @@ mod tests {
         let response = build_local_response(&request, &[], &[]);
 
         assert!(response.contains("不会根据固定 action 自动生成写入 diff"));
+    }
+
+    /** 本地兜底不能通过 prompt 关键词自动触发检索，避免伪装成 Agent 判断。 */
+    #[test]
+    fn local_fallback_does_not_keyword_route_plain_ask() {
+        let request = AgentTurnRequest {
+            prompt: "请总结当前知识库".to_owned(),
+            action: "ask".to_owned(),
+            session_id: "session-a".to_owned(),
+            active_knowledge_base_id: "kb-a".to_owned(),
+            active_note_id: "note-a".to_owned(),
+            client_message_id: None,
+            selected_skill_id: None,
+        };
+        let response = build_local_response(&request, &[], &[]);
+
+        assert!(!should_use_explicit_context_action(&request));
+        assert!(response.contains("不会根据关键词判断"));
     }
 
     /** 前端已乐观落库的用户消息不能在本地兜底里重复追加。 */
