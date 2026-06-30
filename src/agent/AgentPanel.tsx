@@ -170,27 +170,29 @@ export function AgentPanel({
               <X size={15} />
             </button>
           </div>
-          <div className="context-matrix">
-            <div>
-              <span>工具检索范围</span>
-              <strong>{getSessionKnowledgeBaseLabel(activeSession, knowledgeBases)}</strong>
+          <div className="context-popover-body">
+            <div className="context-matrix">
+              <div>
+                <span>工具检索范围</span>
+                <strong>{getSessionKnowledgeBaseLabel(activeSession, knowledgeBases)}</strong>
+              </div>
+              <div>
+                <span>当前文件</span>
+                <strong>{getSessionNoteLabel(activeSession, notes)}</strong>
+              </div>
+              <div>
+                <span>消息</span>
+                <strong>{activeSession.messages.length} 条</strong>
+              </div>
+              <div>
+                <span>写入</span>
+                <strong>{writeStatus}</strong>
+              </div>
             </div>
-            <div>
-              <span>当前文件</span>
-              <strong>{getSessionNoteLabel(activeSession, notes)}</strong>
-            </div>
-            <div>
-              <span>消息</span>
-              <strong>{activeSession.messages.length} 条</strong>
-            </div>
-            <div>
-              <span>写入</span>
-              <strong>{writeStatus}</strong>
-            </div>
+            <p className="context-note">
+              Agent 只有调用 `search_notes` 或 `read_note` 工具后，才会展示知识库引用。
+            </p>
           </div>
-          <p className="context-note">
-            Agent 只有调用 `search_notes` 或 `read_note` 工具后，才会展示知识库引用。
-          </p>
         </section>
       )}
 

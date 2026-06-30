@@ -1217,8 +1217,9 @@ textarea:disabled {
   box-shadow: var(--shadow);
 }
 
-.session-popover {
-  /* 会话历史必须脱离右侧栏 flex 流，避免切换会话时被消息区和输入区压缩。 */
+.session-popover,
+.context-popover {
+  /* 会话相关浮层必须脱离右侧栏 flex 流，避免切换会话时被消息区和输入区压缩。 */
   position: absolute;
   top: 18px;
   bottom: 18px;
@@ -1243,10 +1244,6 @@ textarea:disabled {
   z-index: 10;
   max-height: none;
   overflow: hidden;
-}
-
-.context-popover {
-  max-height: min(38vh, 320px);
 }
 
 .popover-header-actions {
@@ -1275,6 +1272,11 @@ textarea:disabled {
 .scope-option-list {
   /* 工具范围选项独立滚动，避免知识库数量或会话切换影响弹层高度。 */
   align-content: start;
+  overflow: auto;
+  padding-right: 2px;
+}
+
+.context-popover-body {
   overflow: auto;
   padding-right: 2px;
 }

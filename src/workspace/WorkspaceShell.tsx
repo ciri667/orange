@@ -1482,6 +1482,25 @@ export function WorkspaceShell() {
     setIsScopeSelectorOpen(false);
   }
 
+  /** 切换上下文包浮层；日志只记录数量和状态，不写入标题、正文、知识库名称或路径。 */
+  function handleToggleSessionContext() {
+    const nextOpen = !isSessionContextOpen;
+
+    logInfo("切换上下文包浮层。", {
+      category: "frontend",
+      event: "toggle_session_context",
+      status: nextOpen ? "opened" : "closed",
+      metadata: {
+        messageCount: activeSession.messages.length,
+        selectedScopeCount: activeSession.knowledgeBaseIds.length || 1,
+        hasActivePendingChange: activeSession.pendingChange?.status === "pending",
+      },
+    });
+    setIsSessionContextOpen(nextOpen);
+    setIsSessionListOpen(false);
+    setIsScopeSelectorOpen(false);
+  }
+
   /** 切换工具范围浮层；日志只记录数量和状态，不写入知识库名称或本地路径。 */
   function handleToggleScopeSelector() {
     const nextOpen = !isScopeSelectorOpen;
@@ -1994,11 +2013,7 @@ export function WorkspaceShell() {
           isSessionContextOpen={isSessionContextOpen}
           isScopeSelectorOpen={isScopeSelectorOpen}
           onToggleSessionList={handleToggleSessionList}
-          onToggleSessionContext={() => {
-            setIsSessionContextOpen((current) => !current);
-            setIsSessionListOpen(false);
-            setIsScopeSelectorOpen(false);
-          }}
+          onToggleSessionContext={handleToggleSessionContext}
           onToggleScopeSelector={handleToggleScopeSelector}
           onCreateSession={handleCreateSession}
           onSelectSession={handleSelectSession}
