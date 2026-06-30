@@ -1482,6 +1482,24 @@ export function WorkspaceShell() {
     setIsScopeSelectorOpen(false);
   }
 
+  /** 切换工具范围浮层；日志只记录数量和状态，不写入知识库名称或本地路径。 */
+  function handleToggleScopeSelector() {
+    const nextOpen = !isScopeSelectorOpen;
+
+    logInfo("切换工具范围浮层。", {
+      category: "frontend",
+      event: "toggle_scope_selector",
+      status: nextOpen ? "opened" : "closed",
+      metadata: {
+        knowledgeBaseCount: currentSnapshot.knowledgeBases.length,
+        selectedScopeCount: activeSession.knowledgeBaseIds.length || 1,
+      },
+    });
+    setIsScopeSelectorOpen(nextOpen);
+    setIsSessionListOpen(false);
+    setIsSessionContextOpen(false);
+  }
+
   /** 提交 Agent 输入，运行时会自行决定是否调用检索工具。 */
   async function handleSubmitPrompt(action: AgentActionType = "ask", presetPrompt?: string) {
     const prompt = (presetPrompt ?? agentPrompt).trim();
@@ -1981,11 +1999,7 @@ export function WorkspaceShell() {
             setIsSessionListOpen(false);
             setIsScopeSelectorOpen(false);
           }}
-          onToggleScopeSelector={() => {
-            setIsScopeSelectorOpen((current) => !current);
-            setIsSessionListOpen(false);
-            setIsSessionContextOpen(false);
-          }}
+          onToggleScopeSelector={handleToggleScopeSelector}
           onCreateSession={handleCreateSession}
           onSelectSession={handleSelectSession}
           onDeleteSession={handleDeleteSession}

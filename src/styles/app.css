@@ -1231,8 +1231,30 @@ textarea:disabled {
   overflow: hidden;
 }
 
+.scope-popover {
+  /* 工具范围列表同样不能参与 flex 排版，否则会被消息区和输入区挤压成不稳定高度。 */
+  position: absolute;
+  top: 18px;
+  bottom: 18px;
+  left: 18px;
+  right: 18px;
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr);
+  z-index: 10;
+  max-height: none;
+  overflow: hidden;
+}
+
 .context-popover {
   max-height: min(38vh, 320px);
+}
+
+.popover-header-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--text-muted);
+  font-size: 12px;
 }
 
 .session-list,
@@ -1245,6 +1267,13 @@ textarea:disabled {
 
 .session-list {
   /* 列表区域独立滚动，弹层标题和可用高度保持稳定。 */
+  align-content: start;
+  overflow: auto;
+  padding-right: 2px;
+}
+
+.scope-option-list {
+  /* 工具范围选项独立滚动，避免知识库数量或会话切换影响弹层高度。 */
   align-content: start;
   overflow: auto;
   padding-right: 2px;

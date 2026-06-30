@@ -214,9 +214,14 @@ export function AgentPanel({
               <p className="section-label">Scope</p>
               <h3>选择工具可访问知识库</h3>
             </div>
-            <span>
-              {selectedKnowledgeBaseIds.length} / {knowledgeBases.length}
-            </span>
+            <div className="popover-header-actions">
+              <span>
+                {selectedKnowledgeBaseIds.length} / {knowledgeBases.length}
+              </span>
+              <button className="icon-button" type="button" title="关闭工具范围" onClick={onToggleScopeSelector}>
+                <X size={15} />
+              </button>
+            </div>
           </div>
           <div className="scope-option-list">
             {knowledgeBases.map((knowledgeBase) => {
