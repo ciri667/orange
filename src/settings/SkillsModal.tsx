@@ -14,9 +14,9 @@ import type {
 /** Skills 列表来源筛选，all 用于展示完整合并结果。 */
 type SkillSourceFilter = "all" | AgentSkillSource;
 
-/** 用户目录中的文件式 skill 和旧版 user skill 都允许用户管理。 */
+/** 用户目录中的文件式 skill 允许用户编辑和删除。 */
 function isUserManagedSkill(skill: AgentSkill) {
-  return skill.source === "file" || skill.source === "user";
+  return skill.source === "file";
 }
 
 /** Skill 表单草稿，标签在 UI 中用逗号分隔编辑。 */
@@ -73,7 +73,7 @@ export function SkillsModal({
 }) {
   /** 搜索词同时匹配名称、说明和标签。 */
   const [searchTerm, setSearchTerm] = useState("");
-  /** 来源筛选帮助用户区分内置、文件扫描和 UI 创建的 skill。 */
+  /** 来源筛选帮助用户区分内置和用户目录文件式 skill。 */
   const [sourceFilter, setSourceFilter] = useState<SkillSourceFilter>("all");
   /** 标签筛选使用单选，避免多标签组合导致列表空状态难理解。 */
   const [activeTag, setActiveTag] = useState("");
@@ -97,7 +97,6 @@ export function SkillsModal({
       all: skills.length,
       "built-in": skills.filter((skill) => skill.source === "built-in").length,
       file: skills.filter((skill) => skill.source === "file").length,
-      user: skills.filter((skill) => skill.source === "user").length,
     }),
     [skills],
   );
@@ -188,8 +187,7 @@ export function SkillsModal({
       instructions: formDraft.instructions,
       tags: splitTerms(formDraft.tagsText),
       enabled: formDraft.enabled,
-      source: existingSkill?.source ?? "user",
-      allowAutoInvoke: existingSkill?.allowAutoInvoke ?? true,
+      source: existingSkill?.source ?? "file",
       createdAt: existingSkill?.createdAt ?? now,
       updatedAt: now,
       path: existingSkill?.path,
@@ -324,7 +322,7 @@ export function SkillsModal({
               <input value={searchTerm} onChange={(event) => setSearchTerm(event.target.value)} placeholder="搜索 skill" />
             </div>
             <div className="skill-source-filter" aria-label="Skill 来源筛选">
-              {(["all", "built-in", "file", "user"] as SkillSourceFilter[]).map((source) => (
+              {(["all", "built-in", "file"] as SkillSourceFilter[]).map((source) => (
                 <button
                   className={sourceFilter === source ? "active" : ""}
                   key={source}
@@ -493,7 +491,6 @@ function sourceLabel(source: AgentSkillSource) {
   const labels: Record<AgentSkillSource, string> = {
     "built-in": "内置",
     file: "文件",
-    user: "用户",
   };
 
   return labels[source];
@@ -513,7 +510,6 @@ function sourceHeading(skill: AgentSkill) {
   const labels: Record<AgentSkillSource, string> = {
     "built-in": "Built-in Skill",
     file: "File Skill",
-    user: "User Skill",
   };
 
   return isUserManagedSkill(skill) ? "User Skill" : labels[skill.source];

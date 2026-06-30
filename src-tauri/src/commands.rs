@@ -293,7 +293,7 @@ pub async fn save_agent_skill(
     result
 }
 
-/** 启停 skill；allowAutoInvoke 仅兼容旧客户端 payload。 */
+/** 启停 skill；启用的 skill 会以名称和描述进入 Agent system prompt。 */
 #[tauri::command]
 pub async fn toggle_agent_skill(
     app: AppHandle,
@@ -306,13 +306,7 @@ pub async fn toggle_agent_skill(
     let result = run_blocking("更新 Skill 状态", move || {
         let connection = storage::open_database(&skills_app)?;
 
-        skills::toggle_agent_skill(
-            &skills_app,
-            &connection,
-            &payload.skill_id,
-            payload.enabled,
-            payload.allow_auto_invoke,
-        )
+        skills::toggle_agent_skill(&skills_app, &connection, &payload.skill_id, payload.enabled)
     })
     .await;
 
@@ -1773,11 +1767,7 @@ pub async fn run_agent_turn(
     let request = payload.request;
     let session_id = request.session_id.clone();
     let active_knowledge_base_id = request.active_knowledge_base_id.clone();
-    let mut request_metadata = json!({ "action": request.action.clone() });
-
-    if let Some(selected_skill_id) = request.selected_skill_id.clone() {
-        request_metadata["selectedSkillId"] = json!(selected_skill_id);
-    }
+    let request_metadata = json!({ "action": request.action.clone() });
 
     logging::write_app_event_best_effort(
         &app,

@@ -49,9 +49,6 @@ const defaultBrowserUserSettings: UserSettings = {
   },
   privacyPolicy: "allow-selected-scope",
   writeConfirmationRequired: true,
-  skillSettings: {
-    activationMode: "auto",
-  },
 };
 
 /** 浏览器 fallback 的临时用户设置，仅用于 Vite 开发态模拟设置页交互。 */
@@ -136,7 +133,6 @@ const browserBuiltInSkills: AgentSkill[] = [
     tags: ["研究", "检索", "引用"],
     enabled: true,
     source: "built-in",
-    allowAutoInvoke: true,
     createdAt: "内置",
     updatedAt: "内置",
   },
@@ -150,7 +146,6 @@ const browserBuiltInSkills: AgentSkill[] = [
     tags: ["写作", "改写", "diff"],
     enabled: true,
     source: "built-in",
-    allowAutoInvoke: true,
     createdAt: "内置",
     updatedAt: "内置",
   },
@@ -164,7 +159,6 @@ const browserBuiltInSkills: AgentSkill[] = [
     tags: ["草稿", "生成", "Markdown"],
     enabled: true,
     source: "built-in",
-    allowAutoInvoke: true,
     createdAt: "内置",
     updatedAt: "内置",
   },
@@ -178,7 +172,6 @@ const browserBuiltInSkills: AgentSkill[] = [
     tags: ["整理", "标签", "目录"],
     enabled: true,
     source: "built-in",
-    allowAutoInvoke: true,
     createdAt: "内置",
     updatedAt: "内置",
   },
@@ -196,7 +189,6 @@ const browserFileSkills: AgentSkill[] = [
     tags: ["文件", "会议", "写作"],
     enabled: true,
     source: "file",
-    allowAutoInvoke: true,
     createdAt: "文件",
     updatedAt: "文件",
     path: "~/.cici-note/skills/meeting-note-polish/SKILL.md",
@@ -1543,7 +1535,6 @@ function cloneUserSettings(settings: UserSettings): UserSettings {
   return {
     ...settings,
     modelConfig: { ...settings.modelConfig },
-    skillSettings: settings.skillSettings ? { ...settings.skillSettings } : { activationMode: "auto" },
   };
 }
 
@@ -1563,7 +1554,6 @@ function normalizeBrowserFileSkill(skill: AgentSkill): AgentSkill {
     tags: normalizeBrowserTerms(skill.tags),
     enabled: skill.enabled,
     source: "file",
-    allowAutoInvoke: true,
     createdAt: skill.createdAt.trim() || now,
     updatedAt: now,
     path: `~/.cici-note/skills/${relativePath}`,
@@ -1604,7 +1594,6 @@ function installBrowserMockSkill(payload: InstallAgentSkillPayload): InstallAgen
     tags: ["安装", "模拟"],
     enabled: payload.enableAfterInstall,
     source: "file",
-    allowAutoInvoke: true,
     createdAt: now,
     updatedAt: now,
     metadata: {

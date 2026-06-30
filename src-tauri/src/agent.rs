@@ -263,7 +263,6 @@ mod tests {
             active_knowledge_base_id: "kb-a".to_owned(),
             active_note_id: "note-a".to_owned(),
             client_message_id: None,
-            selected_skill_id: None,
         };
         let response = build_local_response(&request, &[], &[]);
 
@@ -280,7 +279,6 @@ mod tests {
             active_knowledge_base_id: "kb-a".to_owned(),
             active_note_id: "note-a".to_owned(),
             client_message_id: None,
-            selected_skill_id: None,
         };
         let response = build_local_response(&request, &[], &[]);
 
@@ -318,7 +316,6 @@ mod tests {
             active_knowledge_base_id: "kb-a".to_owned(),
             active_note_id: String::new(),
             client_message_id: Some("user-client".to_owned()),
-            selected_skill_id: None,
         };
 
         ensure_user_message_for_turn(&mut session, &request);

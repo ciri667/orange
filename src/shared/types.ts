@@ -63,11 +63,8 @@ export interface KnowledgeBase {
 /** Skill 启用状态，供设置页筛选和展示启用数量。 */
 export type AgentSkillStatus = "enabled" | "disabled";
 
-/** Skill 来源，内置和文件能力只能禁用，用户自建能力允许编辑和删除。 */
-export type AgentSkillSource = "built-in" | "file" | "user";
-
-/** 旧版 Skill 参考模式兼容字段；当前运行时始终注入已启用 Skill 的名称和描述。 */
-export type AgentSkillActivationMode = "auto" | "manual";
+/** Skill 来源，内置能力只能禁用，文件能力来自用户 Skills 目录并允许管理。 */
+export type AgentSkillSource = "built-in" | "file";
 
 /** Skill 安装来源类型，URL、本地文件夹和本地 zip 走不同的后端准备流程。 */
 export type SkillInstallSourceType = "url" | "localFolder" | "localArchive";
@@ -85,21 +82,14 @@ export interface AgentSkill {
   tags: string[];
   enabled: boolean;
   source: AgentSkillSource;
-  /** 旧版 allowAutoInvoke 兼容字段，当前产品逻辑只使用 enabled。 */
-  allowAutoInvoke: boolean;
   createdAt: string;
   updatedAt: string;
-  /** 文件式 skill 的 SKILL.md 绝对路径，内置和表单式用户 skill 为空。 */
+  /** 文件式 skill 的 SKILL.md 绝对路径，内置 skill 为空。 */
   path?: string;
   /** 文件式 skill 相对用户 skills 根目录的路径，用于列表展示和排序。 */
   relativePath?: string;
   /** 文件式 skill 的解析元数据，首版只记录覆盖来源等轻量信息。 */
   metadata?: Record<string, string>;
-}
-
-/** 旧版 Skill 全局设置兼容字段，当前产品逻辑只使用单个 skill 的 enabled。 */
-export interface SkillSettings {
-  activationMode: AgentSkillActivationMode;
 }
 
 /** 第三方 skill 安装请求；本地来源 source 为空时桌面端会打开系统选择器。 */
@@ -266,7 +256,6 @@ export interface UserSettings {
   modelConfig: ModelConfig;
   privacyPolicy: PrivacyPolicy;
   writeConfirmationRequired: boolean;
-  skillSettings: SkillSettings;
 }
 
 /** 模型密钥状态只说明是否可读取，不包含明文密钥。 */
@@ -363,8 +352,6 @@ export interface AgentTurnRequest {
   activeNoteId: string;
   /** 前端已乐观渲染并持久化的用户消息 ID，运行时复用它避免重复追加。 */
   clientMessageId?: string;
-  /** 预留给未来 /skill 显式指定；当前 UI 不发送该字段。 */
-  selectedSkillId?: string;
 }
 
 /** Agent 单轮返回结果，包含更新后的完整工作台状态。 */

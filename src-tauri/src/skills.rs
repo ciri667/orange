@@ -1,6 +1,4 @@
-use crate::domain::{
-    AgentSkill, AgentTurnRequest, InstallAgentSkillResult, SkillSettings, UserSettings,
-};
+use crate::domain::{AgentSkill, InstallAgentSkillResult};
 use crate::storage::{create_id, format_local_datetime, lock_database_writer};
 use rusqlite::{params, Connection};
 use sha2::{Digest, Sha256};
@@ -16,9 +14,6 @@ use zip::ZipArchive;
 /** 内置 skill 来源标记，决定设置页只能禁用不能删除。 */
 pub const BUILT_IN_SKILL_SOURCE: &str = "built-in";
 
-/** 旧版用户自建 skill 来源标记；新建 skill 会迁移为文件式 SKILL.md。 */
-pub const USER_SKILL_SOURCE: &str = "user";
-
 /** 文件式 skill 来源标记，来自 Cici Note 用户目录中的 SKILL.md。 */
 pub const FILE_SKILL_SOURCE: &str = "file";
 
@@ -33,12 +28,6 @@ const MEMORY_DIRECTORY_NAME: &str = "memory";
 
 /** Skill 摘要目录注入模型的最大字符数，避免用户安装大量 skill 后挤占上下文。 */
 const MAX_SKILL_CATALOG_PROMPT_CHARS: usize = 8_000;
-
-/** 历史版本写入 SKILL.md 的自动选择字段；加载时只用于迁移删除，不再进入领域模型。 */
-const LEGACY_SKILL_ACTIVATION_FIELD: &str = "triggers";
-
-/** 历史描述只剩选择条件时使用的中性兜底，避免把固定词条语义继续暴露给模型。 */
-const DEFAULT_SANITIZED_SKILL_DESCRIPTION: &str = "该 Skill 提供用户自定义能力。";
 
 /** 第三方 skill 安装时允许复制的最大普通文件数量。 */
 const MAX_SKILL_INSTALL_FILE_COUNT: usize = 512;
@@ -124,7 +113,7 @@ pub fn user_skills_root(app: &AppHandle) -> Result<PathBuf, String> {
     Ok(skills_root)
 }
 
-/** 从 SQLite 和用户目录读取 skill，并按内置、文件、用户自建顺序合并。 */
+/** 从 SQLite 状态覆盖和用户目录读取 skill，并按内置、文件顺序合并。 */
 pub fn load_agent_skills(
     app: &AppHandle,
     connection: &Connection,
@@ -146,7 +135,6 @@ pub fn load_agent_skills_from_roots(
             if let Some(saved_skill) = persisted_skills.remove(&skill.id) {
                 // 内置 skill 的说明始终以代码版本为准，只继承用户启停状态。
                 skill.enabled = saved_skill.enabled;
-                skill.allow_auto_invoke = saved_skill.allow_auto_invoke;
                 skill.updated_at = saved_skill.updated_at;
             }
 
@@ -154,23 +142,10 @@ pub fn load_agent_skills_from_roots(
         })
         .collect::<Vec<_>>();
 
-    if let Some(primary_root) = file_skill_roots.first() {
-        migrate_legacy_user_skills(connection, primary_root, &mut persisted_skills);
-    }
-
     let mut file_skills = scan_file_skills(file_skill_roots, &mut persisted_skills);
 
     file_skills.sort_by(|left, right| left.relative_path.cmp(&right.relative_path));
     skills.extend(file_skills);
-
-    let mut user_skills = persisted_skills
-        .into_values()
-        .filter(|skill| skill.source == USER_SKILL_SOURCE)
-        .map(normalize_user_skill)
-        .collect::<Result<Vec<_>, String>>()?;
-
-    user_skills.sort_by(|left, right| right.updated_at.cmp(&left.updated_at));
-    skills.extend(user_skills);
 
     Ok(skills)
 }
@@ -212,7 +187,6 @@ pub fn save_user_skill_to_root(
         load_file_skill(skills_root, &skill_markdown_path, &mut persisted_skills)?;
 
     saved_skill.enabled = normalized_skill.enabled;
-    saved_skill.allow_auto_invoke = normalized_skill.allow_auto_invoke;
     saved_skill.updated_at = format_local_datetime();
     if let Some(previous_skill_id) = previous_skill_id.filter(|id| id != &saved_skill.id) {
         // name 改动会改变 SKILL.md 路径和 file skill ID，需要清理旧路径上的状态覆盖。
@@ -223,13 +197,12 @@ pub fn save_user_skill_to_root(
     Ok(saved_skill)
 }
 
-/** 启停任意 skill；SQLite 只保存启停等兼容状态，不保存文件式 skill 正文。 */
+/** 启停任意 skill；SQLite 只保存启停状态，不保存文件式 skill 正文。 */
 pub fn toggle_agent_skill(
     app: &AppHandle,
     connection: &Connection,
     skill_id: &str,
     enabled: bool,
-    allow_auto_invoke: Option<bool>,
 ) -> Result<AgentSkill, String> {
     let mut skill = load_agent_skills(app, connection)?
         .into_iter()
@@ -237,9 +210,6 @@ pub fn toggle_agent_skill(
         .ok_or_else(|| "找不到要更新的 skill。".to_owned())?;
 
     skill.enabled = enabled;
-    if let Some(allow_auto_invoke) = allow_auto_invoke {
-        skill.allow_auto_invoke = allow_auto_invoke;
-    }
     skill.updated_at = format_local_datetime();
     upsert_skill_state_override(connection, &skill)?;
 
@@ -279,19 +249,7 @@ pub fn delete_user_skill_from_root(
         return Ok(());
     }
 
-    let _write_guard = lock_database_writer()?;
-    let affected = connection
-        .execute(
-            "DELETE FROM agent_skills WHERE id = ?1 AND source = ?2",
-            params![skill_id, USER_SKILL_SOURCE],
-        )
-        .map_err(|error| format!("无法删除 skill：{error}"))?;
-
-    if affected == 0 {
-        return Err("找不到可删除的用户 skill。".to_owned());
-    }
-
-    Ok(())
+    Err("找不到可删除的用户 skill。".to_owned())
 }
 
 /** 安装来源已经准备成目录后，将其中的标准 SKILL.md 包复制到用户 skills 根目录。 */
@@ -454,40 +412,8 @@ pub fn prepare_skill_archive_bytes(bytes: &[u8]) -> Result<TempDir, String> {
     Ok(temp_dir)
 }
 
-/** 根据用户显式选择决定本轮完整 skill；未选择时只给模型可用 skill 名称和描述。 */
-pub fn resolve_active_skill(
-    skills: &[AgentSkill],
-    _settings: &UserSettings,
-    request: &AgentTurnRequest,
-) -> Option<AgentSkill> {
-    if let Some(selected_skill_id) = request.selected_skill_id.as_deref() {
-        let selected_skill = skills
-            .iter()
-            .find(|skill| skill.enabled && skill.id == selected_skill_id)
-            .cloned();
-
-        if selected_skill.is_none() {
-            log::warn!(
-                target: "agent_skill",
-                "显式选择的 Skill 不可用或已禁用：skill_id={selected_skill_id}"
-            );
-        }
-
-        return selected_skill;
-    }
-
-    log::debug!(
-        target: "agent_skill",
-        "未显式指定 Skill，Runtime 不预先选择 Skill：action={} enabled_skill_count={}",
-        request.action,
-        skills.iter().filter(|skill| skill.enabled).count()
-    );
-
-    None
-}
-
 /** 生成注入模型 system prompt 的启用 skill 名称和描述，供 Agent 自主决定是否使用。 */
-pub fn skill_catalog_prompt(skills: &[AgentSkill], _settings: &SkillSettings) -> String {
+pub fn skill_catalog_prompt(skills: &[AgentSkill]) -> String {
     let enabled_summaries = skills
         .iter()
         .filter(|skill| skill.enabled)
@@ -512,33 +438,23 @@ pub fn skill_catalog_prompt(skills: &[AgentSkill], _settings: &SkillSettings) ->
     }
 }
 
-/** 生成本轮显式指定 skill 的完整说明；未来 /skill 命令会复用这条路径。 */
-pub fn active_skill_prompt(active_skill: Option<&AgentSkill>) -> String {
-    active_skill
-        .map(|skill| {
-            format!(
-                "用户显式指定 Skill：{} (`{}`)\n说明：{}\n执行要求：{}",
-                skill.display_name, skill.name, skill.description, skill.instructions
-            )
-        })
-        .unwrap_or_else(|| {
-            "用户未显式指定 Skill；Agent 只能依据可用 Skills 的名称和描述自行判断。".to_owned()
-        })
-}
+/** 构造 UI 和审计日志可见的 skill 目录状态。 */
+pub fn skill_summary(skills: &[AgentSkill]) -> String {
+    let enabled_skill_names = skills
+        .iter()
+        .filter(|skill| skill.enabled)
+        .map(|skill| skill.display_name.clone())
+        .collect::<Vec<_>>();
 
-/** 构造 UI 和审计日志可见的 skill 指定状态。 */
-pub fn skill_summary(active_skill: Option<&AgentSkill>) -> String {
-    active_skill
-        .map(|skill| {
-            skill
-                .path
-                .as_deref()
-                .map(|path| format!("用户显式指定 Skill：{}（{}）", skill.display_name, path))
-                .unwrap_or_else(|| format!("用户显式指定 Skill：{}", skill.display_name))
-        })
-        .unwrap_or_else(|| {
-            "用户未显式指定 Skill；Agent 按启用 Skills 的名称和描述自主判断".to_owned()
-        })
+    if enabled_skill_names.is_empty() {
+        "未启用 Skill；Agent 不接收 Skill 目录。".to_owned()
+    } else {
+        format!(
+            "已注入 {} 个启用 Skill 的名称和描述；Agent 自主判断是否使用：{}",
+            enabled_skill_names.len(),
+            enabled_skill_names.join("、")
+        )
+    }
 }
 
 /** 创建一条内置 skill，统一填充稳定元数据。 */
@@ -559,7 +475,6 @@ fn built_in_skill(
         tags: tags.iter().map(|tag| (*tag).to_owned()).collect(),
         enabled: true,
         source: BUILT_IN_SKILL_SOURCE.to_owned(),
-        allow_auto_invoke: true,
         created_at: "内置".to_owned(),
         updated_at: "内置".to_owned(),
         path: None,
@@ -631,15 +546,6 @@ fn load_file_skill(
     let content = fs::read_to_string(skill_markdown_path)
         .map_err(|error| format!("无法读取 SKILL.md：{error}"))?;
     let parsed_skill = parse_skill_markdown(&content)?;
-    let sanitized_description =
-        sanitize_skill_description(&parsed_skill.description, &parsed_skill.name);
-
-    migrate_legacy_skill_markdown(
-        skill_markdown_path,
-        &content,
-        &parsed_skill.description,
-        &sanitized_description,
-    );
     let metadata = read_openai_yaml_metadata(
         skill_markdown_path
             .parent()
@@ -664,12 +570,6 @@ fn load_file_skill(
             "agents/openai.yaml".to_owned(),
         );
     }
-    if metadata.allow_auto_invoke_override.is_some() {
-        metadata_map.insert(
-            "allowAutoInvokeSource".to_owned(),
-            "agents/openai.yaml".to_owned(),
-        );
-    }
 
     let mut skill = AgentSkill {
         id: create_file_skill_id(&absolute_path),
@@ -678,12 +578,11 @@ fn load_file_skill(
             .display_name_override
             .or(parsed_skill.display_name)
             .unwrap_or_else(|| parsed_skill.name.clone()),
-        description: sanitized_description,
+        description: parsed_skill.description,
         instructions: parsed_skill.instructions,
         tags: normalize_terms(parsed_skill.tags),
         enabled: true,
         source: FILE_SKILL_SOURCE.to_owned(),
-        allow_auto_invoke: metadata.allow_auto_invoke_override.unwrap_or(true),
         created_at: "文件".to_owned(),
         updated_at: format_local_datetime(),
         path: Some(absolute_path.to_string_lossy().to_string()),
@@ -698,7 +597,6 @@ fn load_file_skill(
     if let Some(saved_skill) = persisted_skills.remove(&skill.id) {
         // 文件正文永远以磁盘为准，只继承用户在 UI 中保存的状态覆盖。
         skill.enabled = saved_skill.enabled;
-        skill.allow_auto_invoke = saved_skill.allow_auto_invoke;
         skill.updated_at = saved_skill.updated_at;
     }
 
@@ -715,11 +613,10 @@ struct ParsedSkillMarkdown {
     tags: Vec<String>,
 }
 
-/** agents/openai.yaml 中首版支持的 UI 与策略覆盖字段。 */
+/** agents/openai.yaml 中首版支持的 UI 覆盖字段。 */
 #[derive(Default)]
 struct OpenAiSkillMetadata {
     display_name_override: Option<String>,
-    allow_auto_invoke_override: Option<bool>,
 }
 
 /** 安装管线的显式选项，调用方负责把 URL、本地目录或压缩包准备成目录。 */
@@ -813,359 +710,6 @@ fn parse_skill_markdown(content: &str) -> Result<ParsedSkillMarkdown, String> {
     })
 }
 
-/** 迁移历史 SKILL.md 元数据，移除旧选择字段并落盘清理后的能力描述。 */
-fn migrate_legacy_skill_markdown(
-    path: &Path,
-    content: &str,
-    original_description: &str,
-    sanitized_description: &str,
-) {
-    let mut next_content = content.to_owned();
-    let mut changed_fields = Vec::new();
-
-    if let Some(content_without_activation_field) =
-        remove_yaml_frontmatter_field(&next_content, LEGACY_SKILL_ACTIVATION_FIELD)
-    {
-        next_content = content_without_activation_field;
-        changed_fields.push(LEGACY_SKILL_ACTIVATION_FIELD);
-    }
-
-    if original_description != sanitized_description {
-        if let Some(content_with_sanitized_description) = replace_yaml_frontmatter_string_field(
-            &next_content,
-            "description",
-            sanitized_description,
-        ) {
-            next_content = content_with_sanitized_description;
-            changed_fields.push("description");
-        }
-    }
-
-    if changed_fields.is_empty() {
-        return;
-    }
-
-    if let Err(error) = fs::write(path, next_content) {
-        log::warn!(
-            target: "skill",
-            "迁移旧版 Skill 元数据失败：path={} fields={} error={error}",
-            path.display(),
-            changed_fields.join(",")
-        );
-        return;
-    }
-
-    log::info!(
-        target: "skill",
-        "已迁移旧版 Skill 元数据：path={} fields={}",
-        path.display(),
-        changed_fields.join(",")
-    );
-}
-
-/** 替换 YAML frontmatter 中的单行字符串字段，用于把清理后的描述同步回磁盘。 */
-fn replace_yaml_frontmatter_string_field(
-    content: &str,
-    field_name: &str,
-    next_value: &str,
-) -> Option<String> {
-    let normalized_content = content.strip_prefix('\u{feff}').unwrap_or(content);
-
-    if !normalized_content.starts_with("---") {
-        return None;
-    }
-
-    let mut lines = normalized_content.lines();
-    let first_line = lines.next()?;
-
-    if first_line.trim() != "---" {
-        return None;
-    }
-
-    let mut next_lines = vec![first_line.to_owned()];
-    let mut in_frontmatter = true;
-    let mut replaced = false;
-
-    for line in lines {
-        if in_frontmatter && line.trim() == "---" {
-            in_frontmatter = false;
-            next_lines.push(line.to_owned());
-            continue;
-        }
-
-        if in_frontmatter && is_yaml_frontmatter_field(line, field_name) {
-            next_lines.push(format!("{field_name}: {}", yaml_quote(next_value)));
-            replaced = true;
-            continue;
-        }
-
-        next_lines.push(line.to_owned());
-    }
-
-    if !replaced {
-        return None;
-    }
-
-    let mut next_content = next_lines.join("\n");
-
-    if content.ends_with('\n') {
-        next_content.push('\n');
-    }
-
-    Some(next_content)
-}
-
-/** 移除 YAML frontmatter 的单个顶层字段，支持标量值和缩进列表值。 */
-fn remove_yaml_frontmatter_field(content: &str, field_name: &str) -> Option<String> {
-    let normalized_content = content.strip_prefix('\u{feff}').unwrap_or(content);
-
-    if !normalized_content.starts_with("---") {
-        return None;
-    }
-
-    let mut lines = normalized_content.lines();
-    let first_line = lines.next()?;
-
-    if first_line.trim() != "---" {
-        return None;
-    }
-
-    let mut frontmatter_lines = Vec::new();
-    let mut body_lines = Vec::new();
-    let mut in_frontmatter = true;
-
-    for line in lines {
-        if in_frontmatter && line.trim() == "---" {
-            in_frontmatter = false;
-            continue;
-        }
-
-        if in_frontmatter {
-            frontmatter_lines.push(line);
-        } else {
-            body_lines.push(line);
-        }
-    }
-
-    if in_frontmatter {
-        return None;
-    }
-
-    let mut next_frontmatter = Vec::new();
-    let mut index = 0usize;
-    let mut removed = false;
-
-    while index < frontmatter_lines.len() {
-        let line = frontmatter_lines[index];
-
-        if is_yaml_frontmatter_field(line, field_name) {
-            removed = true;
-            index += 1;
-
-            // 多行 YAML 值通常缩进在字段下方，需要一并跳过到下一个顶层字段。
-            while index < frontmatter_lines.len()
-                && is_yaml_continuation_line(frontmatter_lines[index])
-            {
-                index += 1;
-            }
-
-            continue;
-        }
-
-        next_frontmatter.push(line);
-        index += 1;
-    }
-
-    if !removed {
-        return None;
-    }
-
-    let body_text = body_lines.join("\n");
-    let mut next_content = format!("---\n{}\n---", next_frontmatter.join("\n"));
-
-    if !body_text.is_empty() {
-        next_content.push_str("\n\n");
-        next_content.push_str(&body_text);
-    }
-
-    if content.ends_with('\n') {
-        next_content.push('\n');
-    }
-
-    Some(next_content)
-}
-
-/** 判断某行是否是 YAML frontmatter 顶层字段，忽略缩进行避免误删正文块。 */
-fn is_yaml_frontmatter_field(line: &str, field_name: &str) -> bool {
-    if line.starts_with(' ') || line.starts_with('\t') {
-        return false;
-    }
-
-    let Some((key, _value)) = line.split_once(':') else {
-        return false;
-    };
-
-    trim_yaml_scalar(key) == field_name
-}
-
-/** 判断某行是否属于前一个 YAML 顶层字段的缩进值。 */
-fn is_yaml_continuation_line(line: &str) -> bool {
-    line.trim().is_empty() || line.starts_with(' ') || line.starts_with('\t')
-}
-
-/** 清理历史 Skill 描述中的选择条件，确保可见描述和 prompt 只表达能力本身。 */
-fn sanitize_skill_description(description: &str, skill_name: &str) -> String {
-    let description_without_activation_notes = strip_legacy_activation_bracket_notes(description);
-
-    if description_without_activation_notes == description
-        && !is_legacy_activation_phrase(description.trim())
-    {
-        return description.trim().to_owned();
-    }
-
-    let mut sanitized_parts = Vec::new();
-
-    for raw_part in split_description_clauses(&description_without_activation_notes) {
-        let mut part = raw_part.trim().to_owned();
-
-        // 用户常把选择条件写在括号里；整段括号只描述选择条件时直接丢弃。
-        part = trim_matching_description_brackets(&part);
-
-        if part.is_empty() || is_legacy_activation_phrase(&part) {
-            continue;
-        }
-
-        sanitized_parts.push(part);
-    }
-
-    let sanitized = sanitized_parts.join("，").trim().to_owned();
-
-    if sanitized.is_empty() {
-        log::debug!(
-            target: "skill",
-            "Skill 描述只包含历史自动选择语义，已使用中性描述：skill={}",
-            skill_name
-        );
-        DEFAULT_SANITIZED_SKILL_DESCRIPTION.to_owned()
-    } else {
-        sanitized
-    }
-}
-
-/** 删除描述中括号包裹的旧版选择条件，保留括号外的真实能力说明。 */
-fn strip_legacy_activation_bracket_notes(description: &str) -> String {
-    let mut result = String::new();
-    let mut chars = description.chars().peekable();
-
-    while let Some(character) = chars.next() {
-        let Some(right_bracket) = matching_right_bracket(character) else {
-            result.push(character);
-            continue;
-        };
-        let mut bracket_content = String::new();
-        let mut closed = false;
-
-        for next_character in chars.by_ref() {
-            if next_character == right_bracket {
-                closed = true;
-                break;
-            }
-
-            bracket_content.push(next_character);
-        }
-
-        // 只丢弃明确表达“按某输入选择”的括号内容；普通补充说明仍原样保留。
-        if closed && is_legacy_activation_phrase(&bracket_content) {
-            continue;
-        }
-
-        result.push(character);
-        result.push_str(&bracket_content);
-        if closed {
-            result.push(right_bracket);
-        }
-    }
-
-    result
-}
-
-/** 返回左括号对应的右括号，供描述清理函数识别局部括号说明。 */
-fn matching_right_bracket(character: char) -> Option<char> {
-    match character {
-        '（' => Some('）'),
-        '(' => Some(')'),
-        '【' => Some('】'),
-        '[' => Some(']'),
-        _ => None,
-    }
-}
-
-/** 按常见中英文分隔符拆开描述，便于只移除包含历史选择语义的子句。 */
-fn split_description_clauses(description: &str) -> Vec<&str> {
-    description
-        .split(['。', '；', ';', '\n'])
-        .flat_map(|part| part.split(['，', ',']).collect::<Vec<_>>())
-        .collect()
-}
-
-/** 去掉包住整段描述的一层括号，保留普通描述中的局部括号内容。 */
-fn trim_matching_description_brackets(value: &str) -> String {
-    let trimmed = value.trim();
-    let bracket_pairs = [('（', '）'), ('(', ')'), ('【', '】'), ('[', ']')];
-
-    for (left, right) in bracket_pairs {
-        if trimmed.starts_with(left) && trimmed.ends_with(right) {
-            return trimmed
-                .trim_start_matches(left)
-                .trim_end_matches(right)
-                .trim()
-                .to_owned();
-        }
-    }
-
-    trimmed.to_owned()
-}
-
-/** 识别旧版“满足某输入就选用 Skill”的描述，不再把这类语义提供给模型。 */
-fn is_legacy_activation_phrase(value: &str) -> bool {
-    let normalized = value
-        .chars()
-        .filter(|character| !character.is_whitespace())
-        .collect::<String>()
-        .to_lowercase();
-    let has_selection_verb = [
-        "触发", "激活", "启用", "调用", "选用", "使用", "命中", "trigger", "activate", "invoke",
-        "use", "selected",
-    ]
-    .iter()
-    .any(|keyword| normalized.contains(keyword));
-
-    if !has_selection_verb {
-        return false;
-    }
-
-    [
-        "用户输入",
-        "输入",
-        "用户说",
-        "用户提到",
-        "包含",
-        "关键词",
-        "关键字",
-        "命令",
-        "prompt",
-        "message",
-        "whenuser",
-        "ifuser",
-        "userasks",
-        "userinput",
-        "keyword",
-        "command",
-    ]
-    .iter()
-    .any(|keyword| normalized.contains(keyword))
-}
-
 /** 从 YAML mapping 中读取字符串标量字段；非字符串字段会被忽略。 */
 fn yaml_mapping_string(mapping: &serde_yaml::Mapping, key: &str) -> Option<String> {
     mapping
@@ -1201,7 +745,7 @@ fn yaml_mapping_list(mapping: &serde_yaml::Mapping, key: &str) -> Vec<String> {
     }
 }
 
-/** 读取 agents/openai.yaml 的 display_name 和 allow_implicit_invocation 覆盖。 */
+/** 读取 agents/openai.yaml 的 display_name 覆盖。 */
 fn read_openai_yaml_metadata(skill_dir: &Path) -> OpenAiSkillMetadata {
     let metadata_path = skill_dir.join("agents").join("openai.yaml");
     let Ok(content) = fs::read_to_string(&metadata_path) else {
@@ -1225,11 +769,6 @@ fn read_openai_yaml_metadata(skill_dir: &Path) -> OpenAiSkillMetadata {
 
         if current_section == "interface" && trimmed_line.starts_with("display_name:") {
             metadata.display_name_override = parse_yaml_value_after_colon(trimmed_line);
-        }
-
-        if current_section == "policy" && trimmed_line.starts_with("allow_implicit_invocation:") {
-            metadata.allow_auto_invoke_override = parse_yaml_value_after_colon(trimmed_line)
-                .map(|value| value.to_lowercase() != "false");
         }
     }
 
@@ -1272,7 +811,7 @@ fn trim_yaml_scalar(value: &str) -> String {
 fn normalize_file_skill_input(mut skill: AgentSkill) -> Result<AgentSkill, String> {
     skill.name = normalize_skill_name(&skill.name);
     skill.display_name = skill.display_name.trim().to_owned();
-    skill.description = sanitize_skill_description(&skill.description, &skill.name);
+    skill.description = skill.description.trim().to_owned();
     skill.instructions = skill.instructions.trim().to_owned();
     skill.tags = normalize_terms(skill.tags);
     skill.source = FILE_SKILL_SOURCE.to_owned();
@@ -1466,7 +1005,6 @@ fn build_skill_markdown(skill: &AgentSkill) -> String {
         frontmatter.push(("tags", yaml_array(&skill.tags)));
     }
 
-    // 旧版 triggers/隐式选择字段不再写入，SKILL.md 只保留能力描述和执行说明。
     let frontmatter_text = frontmatter
         .into_iter()
         .map(|(key, value)| format!("{key}: {value}"))
@@ -1479,7 +1017,7 @@ fn build_skill_markdown(skill: &AgentSkill) -> String {
     )
 }
 
-/** displayName 写到 agents/openai.yaml，旧版 policy 字段只读取兼容不再新写。 */
+/** displayName 写到 agents/openai.yaml，供文件式 skill 保留展示名称。 */
 fn write_openai_yaml_override(skill_dir: &Path, skill: &AgentSkill) -> Result<(), String> {
     let agents_dir = skill_dir.join("agents");
     let metadata_path = agents_dir.join("openai.yaml");
@@ -1635,7 +1173,6 @@ fn install_discovered_skill(
         load_file_skill(skills_root, &skill_markdown_path, &mut persisted_skills)?;
 
     installed_skill.enabled = options.enable_after_install;
-    installed_skill.allow_auto_invoke = options.enable_after_install;
     installed_skill.updated_at = format_local_datetime();
     upsert_skill_state_override(connection, &installed_skill)?;
 
@@ -1822,39 +1359,6 @@ fn delete_skill_override(connection: &Connection, skill_id: &str) -> Result<(), 
         .map_err(|error| format!("无法清理 skill 状态覆盖：{error}"))?;
 
     Ok(())
-}
-
-/** 把历史版本保存在 SQLite 的 user skill 写回用户 skills 目录。 */
-fn migrate_legacy_user_skills(
-    connection: &Connection,
-    skills_root: &Path,
-    persisted_skills: &mut HashMap<String, AgentSkill>,
-) {
-    let legacy_skill_ids = persisted_skills
-        .values()
-        .filter(|skill| skill.source == USER_SKILL_SOURCE)
-        .map(|skill| skill.id.clone())
-        .collect::<Vec<_>>();
-
-    for legacy_skill_id in legacy_skill_ids {
-        let Some(legacy_skill) = persisted_skills.remove(&legacy_skill_id) else {
-            continue;
-        };
-
-        match save_user_skill_to_root(connection, skills_root, legacy_skill) {
-            Ok(saved_skill) => {
-                // 当前 load 流程已经读过 SQLite，需要把新文件 skill 的状态覆盖补回内存映射。
-                let override_skill = skill_state_override_payload(&saved_skill);
-                persisted_skills.insert(override_skill.id.clone(), override_skill);
-                if let Err(error) = delete_skill_override(connection, &legacy_skill_id) {
-                    log::warn!(target: "skill", "迁移旧版 user skill 后清理 SQLite 失败：{error}");
-                }
-            }
-            Err(error) => {
-                log::warn!(target: "skill", "迁移旧版 user skill 失败：{error}");
-            }
-        }
-    }
 }
 
 /** 生成简单 YAML 字符串标量，避免冒号、引号或中文破坏 frontmatter。 */
@@ -2099,7 +1603,7 @@ fn read_persisted_skills(connection: &Connection) -> Result<HashMap<String, Agen
     Ok(skills)
 }
 
-/** 写入或更新 skill payload；仅用于旧版 user skill 兼容迁移，不作为文件 skill 正文来源。 */
+/** 写入或更新 skill 状态 payload；文件式 skill 正文始终来自 SKILL.md。 */
 fn upsert_skill(connection: &Connection, skill: &AgentSkill) -> Result<(), String> {
     let payload_json =
         serde_json::to_string(skill).map_err(|error| format!("无法序列化 skill：{error}"))?;
@@ -2122,7 +1626,7 @@ fn upsert_skill_state_override(connection: &Connection, skill: &AgentSkill) -> R
     upsert_skill(connection, &override_skill)
 }
 
-/** 构造最小状态覆盖 payload，读取时只使用 enabled、旧版 allowAutoInvoke 和 updatedAt。 */
+/** 构造最小状态覆盖 payload，读取时只使用 enabled 和 updatedAt。 */
 fn skill_state_override_payload(skill: &AgentSkill) -> AgentSkill {
     AgentSkill {
         id: skill.id.clone(),
@@ -2133,56 +1637,12 @@ fn skill_state_override_payload(skill: &AgentSkill) -> AgentSkill {
         tags: Vec::new(),
         enabled: skill.enabled,
         source: skill.source.clone(),
-        allow_auto_invoke: skill.allow_auto_invoke,
         created_at: String::new(),
         updated_at: skill.updated_at.clone(),
         path: None,
         relative_path: None,
         metadata: None,
     }
-}
-
-/** 归一化用户 skill，避免空字段进入 Runtime prompt。 */
-fn normalize_user_skill(mut skill: AgentSkill) -> Result<AgentSkill, String> {
-    skill.name = normalize_skill_name(&skill.name);
-    skill.display_name = skill.display_name.trim().to_owned();
-    skill.description = sanitize_skill_description(&skill.description, &skill.name);
-    skill.instructions = skill.instructions.trim().to_owned();
-    skill.tags = normalize_terms(skill.tags);
-    skill.source = USER_SKILL_SOURCE.to_owned();
-    skill.path = None;
-    skill.relative_path = None;
-    skill.metadata = None;
-
-    if skill.id.trim().is_empty() {
-        skill.id = create_id("skill");
-    }
-
-    if skill.name.is_empty() {
-        skill.name = skill.id.clone();
-    }
-
-    if skill.display_name.is_empty() {
-        return Err("Skill 名称不能为空。".to_owned());
-    }
-
-    if skill.description.is_empty() {
-        return Err("Skill 描述不能为空。".to_owned());
-    }
-
-    if skill.instructions.is_empty() {
-        return Err("Skill 执行说明不能为空。".to_owned());
-    }
-
-    if skill.created_at.trim().is_empty() {
-        skill.created_at = format_local_datetime();
-    }
-
-    if skill.updated_at.trim().is_empty() {
-        skill.updated_at = format_local_datetime();
-    }
-
-    Ok(skill)
 }
 
 /** 把用户输入的 name 归一化为适合 prompt、选择器和持久化使用的稳定标识。 */
@@ -2282,6 +1742,23 @@ mod tests {
         format!("---\nname: {name}\ndescription: {description}\n---\n\n{instructions}\n")
     }
 
+    /** 从临时目录加载单个文件式 skill，便于验证扫描后的领域模型。 */
+    fn load_file_skill_from_markdown(name: &str, description: &str) -> AgentSkill {
+        let temp_dir = tempdir().expect("create tempdir");
+        let root = temp_dir.path().join("skills");
+        let connection = test_connection();
+
+        write_skill_markdown(
+            &root,
+            "demo",
+            &valid_skill_markdown(name, description, "执行测试 skill。"),
+        );
+
+        file_skills(&load_agent_skills_from_roots(&connection, &[root]).expect("load skills"))
+            .pop()
+            .expect("file skill exists")
+    }
+
     /** 构造表单提交的用户 skill，测试保存逻辑会将它转换成文件式 skill。 */
     fn draft_user_skill(name: &str) -> AgentSkill {
         AgentSkill {
@@ -2292,8 +1769,7 @@ mod tests {
             instructions: "执行测试 skill。".to_owned(),
             tags: vec!["测试".to_owned()],
             enabled: true,
-            source: USER_SKILL_SOURCE.to_owned(),
-            allow_auto_invoke: true,
+            source: FILE_SKILL_SOURCE.to_owned(),
             created_at: String::new(),
             updated_at: String::new(),
             path: None,
@@ -2328,47 +1804,6 @@ mod tests {
         writer.finish().expect("finish zip").into_inner()
     }
 
-    /** 未显式选择时不再根据 action 或提示文本选择 Skill。 */
-    #[test]
-    fn does_not_activate_skill_without_explicit_selection() {
-        let settings = crate::storage::default_user_settings();
-        let request = AgentTurnRequest {
-            prompt: "请处理当前笔记".to_owned(),
-            action: "rewrite".to_owned(),
-            session_id: "session-a".to_owned(),
-            active_knowledge_base_id: "kb-a".to_owned(),
-            active_note_id: "note-a".to_owned(),
-            client_message_id: None,
-            selected_skill_id: None,
-        };
-
-        let active_skill = resolve_active_skill(&built_in_skills(), &settings, &request);
-
-        assert!(active_skill.is_none());
-    }
-
-    /** 显式选择必须注入完整 Skill，方便用户主动指定工作流。 */
-    #[test]
-    fn explicit_skill_selection_wins() {
-        let settings = crate::storage::default_user_settings();
-        let request = AgentTurnRequest {
-            prompt: "请改写当前笔记".to_owned(),
-            action: "rewrite".to_owned(),
-            session_id: "session-a".to_owned(),
-            active_knowledge_base_id: "kb-a".to_owned(),
-            active_note_id: "note-a".to_owned(),
-            client_message_id: None,
-            selected_skill_id: Some("skill-note-research".to_owned()),
-        };
-
-        let active_skill = resolve_active_skill(&built_in_skills(), &settings, &request);
-
-        assert_eq!(
-            active_skill.map(|skill| skill.name),
-            Some("note-research".to_owned())
-        );
-    }
-
     /** 用户目录中的 SKILL.md 应被扫描为 file 来源 skill，并保留稳定路径信息。 */
     #[test]
     fn scans_file_skill_from_user_root() {
@@ -2398,37 +1833,13 @@ mod tests {
         assert!(skill.id.starts_with("skill-file-"));
     }
 
-    /** 普通能力描述不应被清理函数重排或改写标点。 */
+    /** 普通能力描述按原文进入 Skill 目录，不做额外语义改写。 */
     #[test]
     fn keeps_regular_skill_description_unchanged() {
         let description = "用于整理会议纪要、提取行动项；保留原始事实。";
+        let skill = load_file_skill_from_markdown("meeting-skill", description);
 
-        assert_eq!(
-            sanitize_skill_description(description, "meeting-skill"),
-            description
-        );
-    }
-
-    /** 扫描文件式 skill 时会同步迁移删除旧版 triggers 字段。 */
-    #[test]
-    fn scanning_file_skill_removes_legacy_triggers_from_disk() {
-        let temp_dir = tempdir().expect("create tempdir");
-        let root = temp_dir.path().join("skills");
-        let skill_path = write_skill_markdown(
-            &root,
-            "legacy",
-            "---\nname: legacy-skill\ndescription: \"演示技能（用户输入测试时触发）\"\ntriggers: [测试]\n---\n\n执行 legacy 文件技能。\n",
-        );
-        let connection = test_connection();
-        let skills =
-            load_agent_skills_from_roots(&connection, &[root.clone()]).expect("load skills");
-        let files = file_skills(&skills);
-        let markdown = fs::read_to_string(skill_path).expect("read migrated SKILL.md");
-
-        assert_eq!(files.len(), 1);
-        assert_eq!(files[0].description, "演示技能");
-        assert!(!markdown.contains("triggers"));
-        assert!(markdown.contains("description: \"演示技能\""));
+        assert_eq!(skill.description, description);
     }
 
     /** 标准 YAML frontmatter 支持 display_name 和数组字段。 */
@@ -2452,35 +1863,6 @@ tags:
         assert_eq!(parsed.name, "yaml-demo");
         assert_eq!(parsed.display_name.as_deref(), Some("YAML 展示名"));
         assert_eq!(parsed.tags, vec!["写作", "研究"]);
-    }
-
-    /** 旧版 triggers 字段只做迁移删除，不再保留到解析结果或重新写入。 */
-    #[test]
-    fn removes_legacy_triggers_frontmatter_field() {
-        let content = "---\nname: legacy\ndescription: 演示技能\ntriggers:\n  - 测试\n  - test\ntags: [演示]\n---\n\n执行演示技能。\n";
-        let sanitized = remove_yaml_frontmatter_field(content, LEGACY_SKILL_ACTIVATION_FIELD)
-            .expect("legacy field removed");
-
-        assert!(!sanitized.contains("triggers"));
-        assert!(sanitized.contains("tags: [演示]"));
-        assert!(sanitized.contains("执行演示技能。"));
-    }
-
-    /** 历史触发条件描述会被替换为中性能力描述，避免进入 UI 和 system prompt。 */
-    #[test]
-    fn sanitizes_description_that_only_contains_activation_phrase() {
-        let description = sanitize_skill_description("当用户输入“测试”时触发", "test-skill");
-
-        assert_eq!(description, DEFAULT_SANITIZED_SKILL_DESCRIPTION);
-    }
-
-    /** 描述中的括号触发条件会被剥离，但前面的真实能力说明仍保留。 */
-    #[test]
-    fn strips_activation_note_from_description_parentheses() {
-        let description =
-            sanitize_skill_description("测试用 Skill（用户输入\"测试\"时触发）", "test-skill");
-
-        assert_eq!(description, "测试用 Skill");
     }
 
     /** 安装本地多 skill 包时，应复制到用户目录并默认停用。 */
@@ -2520,10 +1902,6 @@ tags:
             .join(SKILL_MARKDOWN_FILE_NAME)
             .exists());
         assert!(result.installed_skills.iter().all(|skill| !skill.enabled));
-        assert!(result
-            .installed_skills
-            .iter()
-            .all(|skill| !skill.allow_auto_invoke));
     }
 
     /** 安装包中的 scripts 目录会保留但给出不会执行的提示。 */
@@ -2698,9 +2076,9 @@ tags:
         assert_eq!(files[0].name, "valid-skill");
     }
 
-    /** agents/openai.yaml 可以覆盖展示名称，并保留旧版 allowAutoInvoke 兼容状态。 */
+    /** agents/openai.yaml 只覆盖展示名称，不参与 Skill 是否可被模型参考。 */
     #[test]
-    fn openai_yaml_can_disable_file_skill_auto_invocation() {
+    fn openai_yaml_can_override_display_name_only() {
         let temp_dir = tempdir().expect("create tempdir");
         let root = temp_dir.path().join("skills");
 
@@ -2712,19 +2090,18 @@ tags:
         write_openai_yaml(
             &root,
             "demo",
-            "interface:\n  display_name: \"演示 Skill\"\npolicy:\n  allow_implicit_invocation: false\n",
+            "interface:\n  display_name: \"演示 Skill\"\n",
         );
         let connection = test_connection();
         let skills = load_agent_skills_from_roots(&connection, &[root]).expect("load skills");
         let skill = file_skills(&skills).pop().expect("file skill exists");
 
         assert_eq!(skill.display_name, "演示 Skill");
-        assert!(!skill.allow_auto_invoke);
         assert_eq!(
             skill
                 .metadata
                 .as_ref()
-                .and_then(|metadata| metadata.get("allowAutoInvokeSource"))
+                .and_then(|metadata| metadata.get("displayNameSource"))
                 .map(String::as_str),
             Some("agents/openai.yaml")
         );
@@ -2751,10 +2128,8 @@ tags:
         assert!(markdown.contains("description: \"用于验证文件式保存。\""));
         assert!(markdown.contains("执行测试 skill。"));
         assert!(metadata.contains("display_name: \"测试 Skill\""));
-        assert!(!metadata.contains("allow_implicit_invocation"));
         assert_eq!(override_skill.source, FILE_SKILL_SOURCE);
         assert!(override_skill.instructions.is_empty());
-        assert!(override_skill.allow_auto_invoke);
     }
 
     /** 编辑已有文件式 skill 改动 name 时，应同步迁移目录并清理旧路径状态覆盖。 */
@@ -2811,7 +2186,7 @@ tags:
         assert!(!persisted.contains_key(&saved.id));
     }
 
-    /** 文件 skill 的启停和旧版 allowAutoInvoke 状态应按路径 ID 保存在 SQLite 中并在重新加载时生效。 */
+    /** 文件 skill 的启停状态应按路径 ID 保存在 SQLite 中并在重新加载时生效。 */
     #[test]
     fn file_skill_toggle_override_persists_across_loads() {
         let temp_dir = tempdir().expect("create tempdir");
@@ -2830,7 +2205,6 @@ tags:
         .expect("file skill exists");
 
         skill.enabled = false;
-        skill.allow_auto_invoke = false;
         skill.updated_at = "覆盖时间".to_owned();
         upsert_skill_state_override(&connection, &skill).expect("persist override");
 
@@ -2842,40 +2216,7 @@ tags:
 
         assert_eq!(reloaded.id, skill.id);
         assert!(!reloaded.enabled);
-        assert!(!reloaded.allow_auto_invoke);
         assert_eq!(reloaded.updated_at, "覆盖时间");
-    }
-
-    /** 历史 SQLite user skill 会在加载时迁移到文件目录，并保留禁用状态。 */
-    #[test]
-    fn legacy_user_skill_migrates_to_file_skill_on_load() {
-        let temp_dir = tempdir().expect("create tempdir");
-        let root = temp_dir.path().join("skills");
-        let connection = test_connection();
-        let mut legacy = draft_user_skill("legacy-skill");
-
-        legacy.id = "legacy-user-skill".to_owned();
-        legacy.enabled = false;
-        legacy.allow_auto_invoke = false;
-        legacy.updated_at = "旧时间".to_owned();
-        upsert_skill(&connection, &legacy).expect("insert legacy user skill");
-
-        let loaded =
-            load_agent_skills_from_roots(&connection, &[root.clone()]).expect("load skills");
-        let migrated = file_skills(&loaded)
-            .into_iter()
-            .find(|skill| skill.name == "legacy-skill")
-            .expect("migrated file skill");
-        let persisted = read_persisted_skills(&connection).expect("read persisted after migration");
-
-        assert!(root
-            .join("legacy-skill")
-            .join(SKILL_MARKDOWN_FILE_NAME)
-            .exists());
-        assert!(!migrated.enabled);
-        assert!(!migrated.allow_auto_invoke);
-        assert!(!persisted.contains_key("legacy-user-skill"));
-        assert!(persisted.contains_key(&migrated.id));
     }
 
     /** 文件式 skill 的正文每次从磁盘读取，修改 SKILL.md 后下一次加载应返回新 instructions。 */

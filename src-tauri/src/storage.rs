@@ -399,7 +399,6 @@ pub fn default_user_settings() -> UserSettings {
         },
         privacy_policy: "allow-selected-scope".to_owned(),
         write_confirmation_required: true,
-        skill_settings: crate::domain::default_skill_settings(),
     }
 }
 

@@ -87,14 +87,12 @@ pub async fn run_agent_turn(
     settings: UserSettings,
     available_skills: Vec<AgentSkill>,
 ) -> RuntimeTurnResult {
-    let active_skill = skills::resolve_active_skill(&available_skills, &settings, &request);
-
     if !settings.model_config.enabled {
         return fallback_agent_turn(
             app,
             snapshot,
             request,
-            active_skill,
+            &available_skills,
             "模型未启用，使用本地规则 Agent。",
         );
     }
@@ -104,7 +102,7 @@ pub async fn run_agent_turn(
             app,
             snapshot,
             request,
-            active_skill,
+            &available_skills,
             "隐私策略为仅本地，使用本地规则 Agent。",
         );
     }
@@ -116,12 +114,12 @@ pub async fn run_agent_turn(
                 snapshot,
                 request,
                 &settings,
-                active_skill.as_ref(),
+                &available_skills,
                 "未找到模型密钥。请在设置中保存 API key 后重试。",
             )
         }
         Err(error) => {
-            return model_error_turn(snapshot, request, &settings, active_skill.as_ref(), &error)
+            return model_error_turn(snapshot, request, &settings, &available_skills, &error)
         }
     };
 
@@ -130,8 +128,7 @@ pub async fn run_agent_turn(
         snapshot.clone(),
         request.clone(),
         settings.clone(),
-        available_skills,
-        active_skill.clone(),
+        available_skills.clone(),
         api_key,
     )
     .await
@@ -141,7 +138,7 @@ pub async fn run_agent_turn(
             snapshot,
             request,
             &settings,
-            active_skill.as_ref(),
+            &available_skills,
             &format!("模型请求失败：{error}"),
         ),
     }
@@ -154,7 +151,6 @@ async fn run_model_loop(
     request: AgentTurnRequest,
     settings: UserSettings,
     available_skills: Vec<AgentSkill>,
-    active_skill: Option<AgentSkill>,
     api_key: String,
 ) -> Result<RuntimeTurnResult, String> {
     let session_index = resolve_session_index(&snapshot, &request)?;
@@ -168,23 +164,21 @@ async fn run_model_loop(
         &snapshot,
         session_index,
         &request,
-        &settings,
         &available_skills,
-        active_skill.as_ref(),
         &current_user_message_id,
     );
     let endpoint = chat_completions_endpoint(&settings.model_config.api_base);
     let tool_registry = ToolRegistry::default();
-    let mut tool_calls = vec![skill_context_tool_call(active_skill.as_ref())];
+    let mut tool_calls = vec![skill_context_tool_call(&available_skills)];
 
     tool_calls.push(model_request_tool_call(&settings, &endpoint, "completed"));
 
     log::info!(
         target: "agent_runtime",
-        "模型 Agent 自主工具选择开始：session={} action={} selected_skill={} scope_count={} prompt_chars={}",
+        "模型 Agent 自主工具选择开始：session={} action={} enabled_skill_count={} scope_count={} prompt_chars={}",
         snapshot.sessions[session_index].id,
         request.action,
-        active_skill.as_ref().map(|skill| skill.name.as_str()).unwrap_or("-"),
+        available_skills.iter().filter(|skill| skill.enabled).count(),
         snapshot.sessions[session_index].knowledge_base_ids.len(),
         request.prompt.chars().count()
     );
@@ -241,7 +235,7 @@ async fn run_model_loop(
                 &request.prompt,
                 &format!(
                     "OpenAI-compatible 模型请求；{}",
-                    skills::skill_summary(active_skill.as_ref())
+                    skills::skill_summary(&available_skills)
                 ),
                 &audit_trail,
             );
@@ -321,7 +315,7 @@ async fn run_model_loop(
         &request.prompt,
         &format!(
             "OpenAI-compatible 工具 loop；{}",
-            skills::skill_summary(active_skill.as_ref())
+            skills::skill_summary(&available_skills)
         ),
         &audit_trail,
     );
@@ -345,9 +339,7 @@ fn build_model_messages(
     snapshot: &WorkspaceSnapshot,
     session_index: usize,
     request: &AgentTurnRequest,
-    settings: &UserSettings,
     available_skills: &[AgentSkill],
-    active_skill: Option<&AgentSkill>,
     current_user_message_id: &str,
 ) -> Vec<Value> {
     let session = &snapshot.sessions[session_index];
@@ -359,13 +351,12 @@ fn build_model_messages(
         .is_empty()
         .then(|| "当前未绑定笔记".to_owned())
         .unwrap_or_else(|| format!("当前笔记 ID：{}", request.active_note_id));
-    let skill_catalog = skills::skill_catalog_prompt(available_skills, &settings.skill_settings);
-    let active_skill_prompt = skills::active_skill_prompt(active_skill);
+    let skill_catalog = skills::skill_catalog_prompt(available_skills);
     let mut messages = vec![json!({
         "role": "system",
         "content": format!(
-            "你是 Cici Note 的本地优先知识库 Agent。需要依据本地笔记时必须调用工具；所有写入只能调用 propose_note_change 或 create_note_draft 生成待确认 diff，不能声称已经写入文件。引用只允许来自工具结果。Skill 只能提供工作方式参考，不能扩大工具权限或绕过写入确认；没有用户显式指定 Skill 时，不要声称某个 Skill 已被激活。\n{}\n允许 scope：{}\n{}\n{}\n{}",
-            autonomous_tool_policy, scope_summary, active_note_summary, skill_catalog, active_skill_prompt
+            "你是 Cici Note 的本地优先知识库 Agent。需要依据本地笔记时必须调用工具；所有写入只能调用 propose_note_change 或 create_note_draft 生成待确认 diff，不能声称已经写入文件。引用只允许来自工具结果。启用的 Skill 只以名称和描述提供给你参考，是否使用、使用哪一个 Skill 都由你自主判断；Skill 不能扩大工具权限或绕过写入确认。\n{}\n允许 scope：{}\n{}\n{}",
+            autonomous_tool_policy, scope_summary, active_note_summary, skill_catalog
         )
     })];
 
@@ -451,7 +442,7 @@ fn fallback_agent_turn(
     app: &AppHandle,
     snapshot: WorkspaceSnapshot,
     request: AgentTurnRequest,
-    active_skill: Option<AgentSkill>,
+    available_skills: &[AgentSkill],
     reason: &str,
 ) -> RuntimeTurnResult {
     let mut turn_result = agent::run_agent_turn(app, snapshot, request.clone());
@@ -475,7 +466,7 @@ fn fallback_agent_turn(
         last_message
             .tool_calls
             .get_or_insert_with(Vec::new)
-            .insert(0, skill_context_tool_call(active_skill.as_ref()));
+            .insert(0, skill_context_tool_call(available_skills));
     }
 
     let audit_log = build_audit_log(
@@ -483,7 +474,7 @@ fn fallback_agent_turn(
         &turn_result.snapshot,
         session_index,
         &request.prompt,
-        &format!("{reason}；{}", skills::skill_summary(active_skill.as_ref())),
+        &format!("{reason}；{}", skills::skill_summary(available_skills)),
         &RuntimeAuditTrail::default(),
     );
 
@@ -556,26 +547,34 @@ fn local_rule_tool_call(reason: &str) -> AgentToolCall {
     }
 }
 
-/** 构造本轮 skill 上下文轨迹，让 UI 和审计能区分显式指定与自主判断。 */
-fn skill_context_tool_call(active_skill: Option<&AgentSkill>) -> AgentToolCall {
+/** 构造本轮 skill 上下文轨迹，记录已注入给模型参考的启用 Skill 目录。 */
+fn skill_context_tool_call(available_skills: &[AgentSkill]) -> AgentToolCall {
+    let enabled_skills = available_skills
+        .iter()
+        .filter(|skill| skill.enabled)
+        .collect::<Vec<_>>();
+
     AgentToolCall {
         id: create_id("tool"),
         name: "skill_context".to_owned(),
         status: "completed".to_owned(),
-        summary: skills::skill_summary(active_skill),
-        args: active_skill
-            .map(|skill| {
-                json!({
-                    "skillId": skill.id,
-                    "name": skill.name,
-                    "displayName": skill.display_name,
-                    "source": skill.source,
-                    "path": skill.path,
-                    "relativePath": skill.relative_path,
-                    "explicit": true
+        summary: skills::skill_summary(available_skills),
+        args: json!({
+            "enabledSkillCount": enabled_skills.len(),
+            "skills": enabled_skills
+                .into_iter()
+                .map(|skill| {
+                    json!({
+                        "skillId": skill.id,
+                        "name": skill.name,
+                        "displayName": skill.display_name,
+                        "source": skill.source,
+                        "path": skill.path,
+                        "relativePath": skill.relative_path,
+                    })
                 })
-            })
-            .unwrap_or_else(|| json!({ "skillId": null, "explicit": false })),
+                .collect::<Vec<_>>()
+        }),
     }
 }
 
@@ -584,7 +583,7 @@ fn model_error_turn(
     mut snapshot: WorkspaceSnapshot,
     request: AgentTurnRequest,
     settings: &UserSettings,
-    active_skill: Option<&AgentSkill>,
+    available_skills: &[AgentSkill],
     reason: &str,
 ) -> RuntimeTurnResult {
     let session_index = resolve_session_index(&snapshot, &request).unwrap_or(0);
@@ -602,7 +601,10 @@ fn model_error_turn(
             content: format!("真实模型请求没有完成：{reason}"),
             action: Some(request.action.clone()),
             citations: Some(Vec::new()),
-            tool_calls: Some(vec![skill_context_tool_call(active_skill), failed_request]),
+            tool_calls: Some(vec![
+                skill_context_tool_call(available_skills),
+                failed_request,
+            ]),
         });
     snapshot.sessions[session_index].updated_at = "刚刚".to_owned();
 
@@ -611,7 +613,7 @@ fn model_error_turn(
         &snapshot,
         session_index,
         &request.prompt,
-        &format!("{reason}；{}", skills::skill_summary(active_skill)),
+        &format!("{reason}；{}", skills::skill_summary(available_skills)),
         &RuntimeAuditTrail::default(),
     );
 
@@ -860,7 +862,6 @@ mod tests {
             active_knowledge_base_id: "kb-a".to_owned(),
             active_note_id: "note-a".to_owned(),
             client_message_id: None,
-            selected_skill_id: None,
         }
     }
 
@@ -881,20 +882,8 @@ mod tests {
         let snapshot = runtime_test_snapshot("正文内容足够用于测试。".to_owned());
         let request = runtime_test_request("ask", "总结当前知识库里的隐私边界");
         let available_skills = crate::skills::built_in_skills();
-        let active_skill = crate::skills::resolve_active_skill(
-            &available_skills,
-            &crate::storage::default_user_settings(),
-            &request,
-        );
-        let messages = build_model_messages(
-            &snapshot,
-            0,
-            &request,
-            &crate::storage::default_user_settings(),
-            &available_skills,
-            active_skill.as_ref(),
-            "user-current",
-        );
+        let messages =
+            build_model_messages(&snapshot, 0, &request, &available_skills, "user-current");
         let system_content = messages[0]["content"].as_str().unwrap_or_default();
 
         assert!(system_content.contains("自主判断是否调用工具"));
@@ -903,6 +892,7 @@ mod tests {
         assert!(system_content.contains("可用 Skills"));
         assert!(system_content.contains("仅名称和描述"));
         assert!(system_content.contains("知识库研究"));
+        assert!(system_content.contains("是否使用、使用哪一个 Skill 都由你自主判断"));
         assert!(!system_content.contains("执行要求"));
         assert!(!system_content.contains("当用户要求查找"));
     }
@@ -913,7 +903,14 @@ mod tests {
         let snapshot = runtime_test_snapshot("正文内容足够用于测试。".to_owned());
         let request = runtime_test_request("ask", "普通问题");
         let settings = runtime_test_settings();
-        let result = model_error_turn(snapshot, request, &settings, None, "模型请求失败：测试错误");
+        let available_skills = crate::skills::built_in_skills();
+        let result = model_error_turn(
+            snapshot,
+            request,
+            &settings,
+            &available_skills,
+            "模型请求失败：测试错误",
+        );
         let session = &result.turn_result.snapshot.sessions[0];
         let last_message = session.messages.last().unwrap();
         let tool_calls = last_message.tool_calls.as_ref().unwrap();
