@@ -553,10 +553,15 @@ textarea:disabled {
   color: var(--danger);
 }
 
-.create-action-menu {
+.export-menu-wrapper {
+  position: relative;
+  display: inline-flex;
+}
+
+.create-action-menu,
+.export-action-menu {
   position: absolute;
   z-index: 10;
-  top: 30px;
   right: 0;
   display: grid;
   min-width: 132px;
@@ -567,7 +572,17 @@ textarea:disabled {
   box-shadow: 0 10px 24px rgba(17, 27, 33, 0.12);
 }
 
-.create-action-menu button {
+.create-action-menu {
+  top: 30px;
+}
+
+.export-action-menu {
+  top: calc(100% + 6px);
+  min-width: 148px;
+}
+
+.create-action-menu button,
+.export-action-menu button {
   display: inline-flex;
   align-items: center;
   gap: 7px;
@@ -581,7 +596,8 @@ textarea:disabled {
   text-align: left;
 }
 
-.create-action-menu button:hover {
+.create-action-menu button:hover,
+.export-action-menu button:hover {
   background: var(--surface-muted);
 }
 

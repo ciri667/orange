@@ -1,6 +1,25 @@
 import { convertFileSrc } from "@tauri-apps/api/core";
-import { Clock3, Eye, FilePenLine, FileText, Save, Trash2 } from "lucide-react";
-import type { DocumentPreview, KnowledgeBase, WorkspaceDocument } from "../shared/types";
+import { ChevronDown, Clock3, Eye, FileDown, FilePenLine, FileText, Save, Trash2 } from "lucide-react";
+import { useState } from "react";
+import type { DocumentFileType, DocumentPreview, ExportFormat, KnowledgeBase, WorkspaceDocument } from "../shared/types";
+
+/** 单个文档类型对应的导出菜单项，确保 PDF 不展示转 Markdown。 */
+const DOCUMENT_EXPORT_OPTIONS: Record<DocumentFileType, Array<{ format: ExportFormat; label: string }>> = {
+  txt: [
+    { format: "original", label: "原文件 .txt" },
+    { format: "markdown", label: "转为 .md" },
+    { format: "pdf", label: "转为 .pdf" },
+  ],
+  docx: [
+    { format: "original", label: "原文件 .docx" },
+    { format: "markdown", label: "转为 .md" },
+    { format: "pdf", label: "转为 .pdf" },
+  ],
+  pdf: [
+    { format: "original", label: "原文件 .pdf" },
+    { format: "pdf", label: "转为 .pdf" },
+  ],
+};
 
 /** 格式化纯文本文档的阅读统计，用于保持 txt 编辑体验与 Markdown 面板一致。 */
 function getTextStats(content: string) {
@@ -32,6 +51,7 @@ export function DocumentPane({
   isDirty,
   onSaveDocument,
   onContentChange,
+  onExportFile,
   onRenameDocument,
   onDeleteDocument,
 }: {
@@ -44,9 +64,13 @@ export function DocumentPane({
   isDirty: boolean;
   onSaveDocument: () => void;
   onContentChange: (content: string) => void;
+  onExportFile: (format: ExportFormat) => void | Promise<void>;
   onRenameDocument: () => void;
   onDeleteDocument: () => void;
 }) {
+  /** 导出菜单是文档面板局部交互状态，切换文件时随组件自然重置。 */
+  const [isExportMenuOpen, setIsExportMenuOpen] = useState(false);
+
   if (!document) {
     return (
       <section className="editor-pane" aria-label="文档预览">
@@ -68,6 +92,7 @@ export function DocumentPane({
   const content = document.content ?? "";
   const stats = getTextStats(content);
   const isTextDocument = document.fileType === "txt";
+  const exportOptions = DOCUMENT_EXPORT_OPTIONS[document.fileType];
 
   return (
     <section className="editor-pane" aria-label="普通文档">
@@ -79,6 +104,39 @@ export function DocumentPane({
           <h2>{document.title}</h2>
         </div>
         <div className="editor-actions">
+          <div className="export-menu-wrapper">
+            <button
+              className="text-button"
+              type="button"
+              title="导出当前文档"
+              aria-haspopup="menu"
+              aria-expanded={isExportMenuOpen}
+              onClick={() => setIsExportMenuOpen((isOpen) => !isOpen)}
+              disabled={isBusy}
+            >
+              <FileDown size={16} />
+              导出
+              <ChevronDown size={14} />
+            </button>
+            {isExportMenuOpen && (
+              <div className="export-action-menu" role="menu">
+                {exportOptions.map((option) => (
+                  <button
+                    key={option.format}
+                    type="button"
+                    role="menuitem"
+                    onClick={() => {
+                      setIsExportMenuOpen(false);
+                      void onExportFile(option.format);
+                    }}
+                  >
+                    <FileDown size={14} />
+                    {option.label}
+                  </button>
+                ))}
+              </div>
+            )}
+          </div>
           {isTextDocument && (
             <>
               <button className="text-button" type="button" onClick={onSaveDocument} disabled={isBusy || !isDirty}>

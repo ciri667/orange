@@ -1,5 +1,6 @@
 import { convertFileSrc } from "@tauri-apps/api/core";
-import { Clock3, Columns2, Eye, FilePenLine, PencilLine, Save, Tags, Trash2, Wand2 } from "lucide-react";
+import { ChevronDown, Clock3, Columns2, Eye, FileDown, FilePenLine, PencilLine, Save, Tags, Trash2, Wand2 } from "lucide-react";
+import { useState } from "react";
 import type { ClipboardEventHandler, RefObject, UIEventHandler } from "react";
 import ReactMarkdown, { defaultUrlTransform } from "react-markdown";
 import type { UrlTransform } from "react-markdown";
@@ -7,7 +8,7 @@ import rehypeSanitize, { defaultSchema } from "rehype-sanitize";
 import type { Options as RehypeSanitizeOptions } from "rehype-sanitize";
 import remarkGfm from "remark-gfm";
 import { DiffPanel } from "../diff/DiffPanel";
-import type { KnowledgeBase, MarkdownViewMode, Note, ProposedChange } from "../shared/types";
+import type { ExportFormat, KnowledgeBase, MarkdownViewMode, Note, ProposedChange } from "../shared/types";
 import { useSyncedMarkdownScroll } from "./useSyncedMarkdownScroll";
 
 /** 编辑器视图切换按钮配置，集中维护标签、图标和 aria 文案。 */
@@ -15,6 +16,12 @@ const MARKDOWN_VIEW_OPTIONS: Array<{ mode: MarkdownViewMode; label: string; titl
   { mode: "edit", label: "编辑", title: "切换到编辑模式", icon: PencilLine },
   { mode: "preview", label: "预览", title: "切换到 Markdown 预览", icon: Eye },
   { mode: "split", label: "分屏", title: "切换到编辑和预览分屏", icon: Columns2 },
+];
+
+/** Markdown 文件支持的导出菜单项；PDF 由后端生成阅读版。 */
+const MARKDOWN_EXPORT_OPTIONS: Array<{ format: ExportFormat; label: string }> = [
+  { format: "original", label: "原文件 .md" },
+  { format: "pdf", label: "转为 .pdf" },
 ];
 
 /** 允许图片预览读取本地资源协议；链接等其他 URL 仍保留 rehype-sanitize 默认规则。 */
@@ -58,6 +65,7 @@ export function EditorPane({
   onSaveNote,
   onContentChange,
   onPasteImages,
+  onExportFile,
   onRequestRewrite,
   onRenameNote,
   onDeleteNote,
@@ -74,6 +82,7 @@ export function EditorPane({
   onSaveNote: () => void;
   onContentChange: (content: string) => void;
   onPasteImages: (files: File[], selectionStart: number, selectionEnd: number) => void;
+  onExportFile: (format: ExportFormat) => void | Promise<void>;
   onRequestRewrite: () => void;
   onRenameNote: () => void;
   onDeleteNote: () => void;
@@ -82,6 +91,8 @@ export function EditorPane({
 }) {
   /** 分屏模式下同步源码和预览滚动；非分屏时 hook 会保持静默。 */
   const { editorRef, previewRef, handleEditorScroll, handlePreviewScroll } = useSyncedMarkdownScroll(viewMode === "split");
+  /** 导出菜单只在当前编辑器头部短暂展开，不写入全局工作台状态。 */
+  const [isExportMenuOpen, setIsExportMenuOpen] = useState(false);
 
   if (!note) {
     return (
@@ -153,6 +164,39 @@ export function EditorPane({
             <Save size={16} />
             {isDirty ? "保存草稿" : "已保存"}
           </button>
+          <div className="export-menu-wrapper">
+            <button
+              className="text-button"
+              type="button"
+              title="导出当前 Markdown"
+              aria-haspopup="menu"
+              aria-expanded={isExportMenuOpen}
+              onClick={() => setIsExportMenuOpen((isOpen) => !isOpen)}
+              disabled={isBusy}
+            >
+              <FileDown size={16} />
+              导出
+              <ChevronDown size={14} />
+            </button>
+            {isExportMenuOpen && (
+              <div className="export-action-menu" role="menu">
+                {MARKDOWN_EXPORT_OPTIONS.map((option) => (
+                  <button
+                    key={option.format}
+                    type="button"
+                    role="menuitem"
+                    onClick={() => {
+                      setIsExportMenuOpen(false);
+                      void onExportFile(option.format);
+                    }}
+                  >
+                    <FileDown size={14} />
+                    {option.label}
+                  </button>
+                ))}
+              </div>
+            )}
+          </div>
           <button className="text-button" type="button" title="重命名当前笔记" onClick={onRenameNote} disabled={isBusy}>
             <FilePenLine size={18} />
             重命名
