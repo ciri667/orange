@@ -2,6 +2,7 @@ mod agent;
 mod agent_tools;
 mod commands;
 mod domain;
+mod export;
 mod logging;
 mod runtime;
 mod skills;
@@ -97,6 +98,7 @@ pub fn run() {
             commands::save_note_image_attachments,
             commands::save_document_content,
             commands::load_document_preview,
+            export::export_current_file,
             commands::remove_knowledge_base,
             commands::run_agent_turn,
             commands::apply_proposed_change,
