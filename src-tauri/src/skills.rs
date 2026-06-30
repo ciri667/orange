@@ -14,13 +14,13 @@ use zip::ZipArchive;
 /** 内置 skill 来源标记，决定设置页只能禁用不能删除。 */
 pub const BUILT_IN_SKILL_SOURCE: &str = "built-in";
 
-/** 文件式 skill 来源标记，来自 Cici Note 用户目录中的 SKILL.md。 */
-pub const FILE_SKILL_SOURCE: &str = "file";
+/** 自定义 skill 来源标记，来自 Cici Note 用户目录中的 SKILL.md。 */
+pub const CUSTOM_SKILL_SOURCE: &str = "custom";
 
 /** Cici Note 自有用户目录名，避免污染或误读用户真实 Codex 配置。 */
 const CICI_HOME_DIRECTORY_NAME: &str = ".cici-note";
 
-/** 文件式 skill 的主说明文件名，沿用 Codex 的目录化体验。 */
+/** 自定义 skill 的主说明文件名，沿用 Codex 的目录化体验。 */
 const SKILL_MARKDOWN_FILE_NAME: &str = "SKILL.md";
 
 /** 预留记忆目录名，首版只创建但不读取、不注入 Runtime。 */
@@ -91,7 +91,7 @@ pub fn built_in_skills() -> Vec<AgentSkill> {
     ]
 }
 
-/** 获取用户文件式 skills 根目录，并创建预留 memory 目录。 */
+/** 获取用户自定义 skills 根目录，并创建预留 memory 目录。 */
 pub fn user_skills_root(app: &AppHandle) -> Result<PathBuf, String> {
     let cici_home = user_cici_home(app)?;
     let skills_root = cici_home.join("skills");
@@ -113,7 +113,7 @@ pub fn user_skills_root(app: &AppHandle) -> Result<PathBuf, String> {
     Ok(skills_root)
 }
 
-/** 从 SQLite 状态覆盖和用户目录读取 skill，并按内置、文件顺序合并。 */
+/** 从 SQLite 状态覆盖和用户目录读取 skill，并按内置、自定义顺序合并。 */
 pub fn load_agent_skills(
     app: &AppHandle,
     connection: &Connection,
@@ -126,7 +126,7 @@ pub fn load_agent_skills(
 /** 从指定目录读取 skill，测试可传入临时根目录模拟 ~/.cici-note/skills。 */
 pub fn load_agent_skills_from_roots(
     connection: &Connection,
-    file_skill_roots: &[PathBuf],
+    custom_skill_roots: &[PathBuf],
 ) -> Result<Vec<AgentSkill>, String> {
     let mut persisted_skills = read_persisted_skills(connection)?;
     let mut skills = built_in_skills()
@@ -142,10 +142,10 @@ pub fn load_agent_skills_from_roots(
         })
         .collect::<Vec<_>>();
 
-    let mut file_skills = scan_file_skills(file_skill_roots, &mut persisted_skills);
+    let mut custom_skills = scan_custom_skills(custom_skill_roots, &mut persisted_skills);
 
-    file_skills.sort_by(|left, right| left.relative_path.cmp(&right.relative_path));
-    skills.extend(file_skills);
+    custom_skills.sort_by(|left, right| left.relative_path.cmp(&right.relative_path));
+    skills.extend(custom_skills);
 
     Ok(skills)
 }
@@ -171,12 +171,12 @@ pub fn save_user_skill_to_root(
         return Err("内置 skill 不能编辑，只能启用或禁用。".to_owned());
     }
 
-    let normalized_skill = normalize_file_skill_input(skill)?;
+    let normalized_skill = normalize_custom_skill_input(skill)?;
     let previous_skill_markdown_path =
         resolve_existing_skill_markdown_path(skills_root, &normalized_skill)?;
     let previous_skill_id = previous_skill_markdown_path
         .as_ref()
-        .map(|path| create_file_skill_id(&stable_absolute_path(path)));
+        .map(|path| create_custom_skill_id(&stable_absolute_path(path)));
     let skill_markdown_path = write_skill_files(
         skills_root,
         &normalized_skill,
@@ -184,12 +184,12 @@ pub fn save_user_skill_to_root(
     )?;
     let mut persisted_skills = read_persisted_skills(connection)?;
     let mut saved_skill =
-        load_file_skill(skills_root, &skill_markdown_path, &mut persisted_skills)?;
+        load_custom_skill(skills_root, &skill_markdown_path, &mut persisted_skills)?;
 
     saved_skill.enabled = normalized_skill.enabled;
     saved_skill.updated_at = format_local_datetime();
     if let Some(previous_skill_id) = previous_skill_id.filter(|id| id != &saved_skill.id) {
-        // name 改动会改变 SKILL.md 路径和 file skill ID，需要清理旧路径上的状态覆盖。
+        // name 改动会改变 SKILL.md 路径和 custom skill ID，需要清理旧路径上的状态覆盖。
         delete_skill_override(connection, &previous_skill_id)?;
     }
     upsert_skill_state_override(connection, &saved_skill)?;
@@ -197,7 +197,7 @@ pub fn save_user_skill_to_root(
     Ok(saved_skill)
 }
 
-/** 启停任意 skill；SQLite 只保存启停状态，不保存文件式 skill 正文。 */
+/** 启停任意 skill；SQLite 只保存启停状态，不保存自定义 skill 正文。 */
 pub fn toggle_agent_skill(
     app: &AppHandle,
     connection: &Connection,
@@ -227,7 +227,7 @@ pub fn delete_user_skill(
     delete_user_skill_from_root(connection, &skills_root, skill_id)
 }
 
-/** 删除指定 skills 根目录中的用户 skill；文件式 skill 会移除对应目录。 */
+/** 删除指定 skills 根目录中的用户 skill；自定义 skill 会移除对应目录。 */
 pub fn delete_user_skill_from_root(
     connection: &Connection,
     skills_root: &Path,
@@ -238,12 +238,12 @@ pub fn delete_user_skill_from_root(
     }
 
     let mut persisted_skills = read_persisted_skills(connection)?;
-    let file_skill = scan_file_skills(&[skills_root.to_path_buf()], &mut persisted_skills)
+    let custom_skill = scan_custom_skills(&[skills_root.to_path_buf()], &mut persisted_skills)
         .into_iter()
         .find(|skill| skill.id == skill_id);
 
-    if let Some(skill) = file_skill {
-        delete_file_skill_directory(skills_root, &skill)?;
+    if let Some(skill) = custom_skill {
+        delete_custom_skill_directory(skills_root, &skill)?;
         delete_skill_override(connection, skill_id)?;
 
         return Ok(());
@@ -302,7 +302,7 @@ pub fn install_agent_skills_from_prepared_root(
     let mut persisted_skills = read_persisted_skills(connection)?;
     let mut installed_skills = installed_skill_paths
         .iter()
-        .map(|skill_path| load_file_skill(skills_root, skill_path, &mut persisted_skills))
+        .map(|skill_path| load_custom_skill(skills_root, skill_path, &mut persisted_skills))
         .collect::<Result<Vec<_>, String>>()?;
 
     installed_skills.sort_by(|left, right| left.relative_path.cmp(&right.relative_path));
@@ -483,8 +483,8 @@ fn built_in_skill(
     }
 }
 
-/** 解析用户目录中的文件式 skills；无效 SKILL.md 只跳过并写日志，不阻塞其他 skill。 */
-fn scan_file_skills(
+/** 解析用户目录中的自定义 skills；无效 SKILL.md 只跳过并写日志，不阻塞其他 skill。 */
+fn scan_custom_skills(
     roots: &[PathBuf],
     persisted_skills: &mut HashMap<String, AgentSkill>,
 ) -> Vec<AgentSkill> {
@@ -505,13 +505,13 @@ fn scan_file_skills(
                 continue;
             }
 
-            // 单个 SKILL.md 解析失败不能影响同目录下其他文件式 skill 的加载。
-            match load_file_skill(root, entry.path(), persisted_skills) {
+            // 单个 SKILL.md 解析失败不能影响同目录下其他自定义 skill 的加载。
+            match load_custom_skill(root, entry.path(), persisted_skills) {
                 Ok(skill) => skills.push(skill),
                 Err(error) => {
                     log::warn!(
                         target: "skill",
-                        "跳过无效文件 skill {}：{error}",
+                        "跳过无效自定义 skill {}：{error}",
                         entry.path().display()
                     );
                 }
@@ -522,7 +522,7 @@ fn scan_file_skills(
     skills
 }
 
-/** 判断文件 skill 扫描是否继续进入目录，避免递归隐藏目录和常见依赖目录。 */
+/** 判断自定义 skill 扫描是否继续进入目录，避免递归隐藏目录和常见依赖目录。 */
 fn should_walk_skill_entry(entry: &walkdir::DirEntry) -> bool {
     if entry.depth() == 0 || !entry.file_type().is_dir() {
         return true;
@@ -535,8 +535,8 @@ fn should_walk_skill_entry(entry: &walkdir::DirEntry) -> bool {
     !name.starts_with('.') && !matches!(name, "node_modules" | "target" | "dist" | "build")
 }
 
-/** 从单个 SKILL.md 读取文件式 skill，并合并 SQLite 中的启停覆盖。 */
-fn load_file_skill(
+/** 从单个 SKILL.md 读取自定义 skill，并合并 SQLite 中的启停覆盖。 */
+fn load_custom_skill(
     root: &Path,
     skill_markdown_path: &Path,
     persisted_skills: &mut HashMap<String, AgentSkill>,
@@ -572,7 +572,7 @@ fn load_file_skill(
     }
 
     let mut skill = AgentSkill {
-        id: create_file_skill_id(&absolute_path),
+        id: create_custom_skill_id(&absolute_path),
         name: normalize_skill_name(&parsed_skill.name),
         display_name: metadata
             .display_name_override
@@ -582,8 +582,8 @@ fn load_file_skill(
         instructions: parsed_skill.instructions,
         tags: normalize_terms(parsed_skill.tags),
         enabled: true,
-        source: FILE_SKILL_SOURCE.to_owned(),
-        created_at: "文件".to_owned(),
+        source: CUSTOM_SKILL_SOURCE.to_owned(),
+        created_at: "自定义".to_owned(),
         updated_at: format_local_datetime(),
         path: Some(absolute_path.to_string_lossy().to_string()),
         relative_path: Some(relative_path),
@@ -595,7 +595,7 @@ fn load_file_skill(
     }
 
     if let Some(saved_skill) = persisted_skills.remove(&skill.id) {
-        // 文件正文永远以磁盘为准，只继承用户在 UI 中保存的状态覆盖。
+        // 自定义 skill 正文永远以磁盘为准，只继承用户在 UI 中保存的状态覆盖。
         skill.enabled = saved_skill.enabled;
         skill.updated_at = saved_skill.updated_at;
     }
@@ -603,7 +603,7 @@ fn load_file_skill(
     Ok(skill)
 }
 
-/** 文件式 skill 的 frontmatter 解析结果，正文即完整执行说明。 */
+/** 自定义 skill 的 frontmatter 解析结果，正文即完整执行说明。 */
 #[derive(Clone, Debug)]
 struct ParsedSkillMarkdown {
     name: String,
@@ -807,14 +807,14 @@ fn trim_yaml_scalar(value: &str) -> String {
         .to_owned()
 }
 
-/** 把 UI 表单提交的 skill 归一化为可写入 SKILL.md 的文件式定义。 */
-fn normalize_file_skill_input(mut skill: AgentSkill) -> Result<AgentSkill, String> {
+/** 把 UI 表单提交的 skill 归一化为可写入 SKILL.md 的自定义定义。 */
+fn normalize_custom_skill_input(mut skill: AgentSkill) -> Result<AgentSkill, String> {
     skill.name = normalize_skill_name(&skill.name);
     skill.display_name = skill.display_name.trim().to_owned();
     skill.description = skill.description.trim().to_owned();
     skill.instructions = skill.instructions.trim().to_owned();
     skill.tags = normalize_terms(skill.tags);
-    skill.source = FILE_SKILL_SOURCE.to_owned();
+    skill.source = CUSTOM_SKILL_SOURCE.to_owned();
     skill.metadata = None;
 
     if skill.name.is_empty() {
@@ -979,7 +979,7 @@ fn safe_relative_skill_folder(relative_path: &Path) -> Result<String, String> {
         };
         let part = part.to_string_lossy().to_string();
 
-        // 文件式 skill 目录只允许普通相对组件，避免相对路径覆盖用户目录外内容。
+        // 自定义 skill 目录只允许普通相对组件，避免相对路径覆盖用户目录外内容。
         if part.is_empty() || part == "." || part == ".." || part.starts_with('.') {
             return Err("Skill 目录名无效。".to_owned());
         }
@@ -1017,7 +1017,7 @@ fn build_skill_markdown(skill: &AgentSkill) -> String {
     )
 }
 
-/** displayName 写到 agents/openai.yaml，供文件式 skill 保留展示名称。 */
+/** displayName 写到 agents/openai.yaml，供自定义 skill 保留展示名称。 */
 fn write_openai_yaml_override(skill_dir: &Path, skill: &AgentSkill) -> Result<(), String> {
     let agents_dir = skill_dir.join("agents");
     let metadata_path = agents_dir.join("openai.yaml");
@@ -1170,7 +1170,7 @@ fn install_discovered_skill(
     let skill_markdown_path = target_dir.join(SKILL_MARKDOWN_FILE_NAME);
     let mut persisted_skills = read_persisted_skills(connection)?;
     let mut installed_skill =
-        load_file_skill(skills_root, &skill_markdown_path, &mut persisted_skills)?;
+        load_custom_skill(skills_root, &skill_markdown_path, &mut persisted_skills)?;
 
     installed_skill.enabled = options.enable_after_install;
     installed_skill.updated_at = format_local_datetime();
@@ -1325,12 +1325,12 @@ fn write_cici_install_metadata(
         .map_err(|error| format!("无法写入 skill 安装元数据：{error}"))
 }
 
-/** 删除用户 skills 根目录中的单个文件式 skill 目录，并限制只能删除根目录内路径。 */
-fn delete_file_skill_directory(skills_root: &Path, skill: &AgentSkill) -> Result<(), String> {
+/** 删除用户 skills 根目录中的单个自定义 skill 目录，并限制只能删除根目录内路径。 */
+fn delete_custom_skill_directory(skills_root: &Path, skill: &AgentSkill) -> Result<(), String> {
     let path = skill
         .path
         .as_deref()
-        .ok_or_else(|| "文件 skill 缺少路径，无法删除。".to_owned())?;
+        .ok_or_else(|| "自定义 skill 缺少路径，无法删除。".to_owned())?;
     let skill_markdown_path = stable_absolute_path(Path::new(path));
     let absolute_root = stable_absolute_path(skills_root);
 
@@ -1378,15 +1378,15 @@ fn yaml_array(values: &[String]) -> String {
     )
 }
 
-/** 文件 skill ID 使用绝对 SKILL.md 路径 hash，文件内容变化不会改变用户覆盖状态。 */
-fn create_file_skill_id(skill_markdown_path: &Path) -> String {
+/** 自定义 skill ID 使用绝对 SKILL.md 路径 hash，文件内容变化不会改变用户覆盖状态。 */
+fn create_custom_skill_id(skill_markdown_path: &Path) -> String {
     let mut hasher = Sha256::new();
 
     hasher.update(skill_markdown_path.to_string_lossy().as_bytes());
 
     let digest = format!("{:x}", hasher.finalize());
 
-    format!("skill-file-{}", &digest[..24])
+    format!("skill-custom-{}", &digest[..24])
 }
 
 /** 计算 skill 目录内容 hash，安装日志和元数据只记录摘要，不记录正文。 */
@@ -1603,7 +1603,7 @@ fn read_persisted_skills(connection: &Connection) -> Result<HashMap<String, Agen
     Ok(skills)
 }
 
-/** 写入或更新 skill 状态 payload；文件式 skill 正文始终来自 SKILL.md。 */
+/** 写入或更新 skill 状态 payload；自定义 skill 正文始终来自 SKILL.md。 */
 fn upsert_skill(connection: &Connection, skill: &AgentSkill) -> Result<(), String> {
     let payload_json =
         serde_json::to_string(skill).map_err(|error| format!("无法序列化 skill：{error}"))?;
@@ -1708,7 +1708,7 @@ mod tests {
         connection
     }
 
-    /** 写入一个文件式 skill 目录，并返回生成的 SKILL.md 路径。 */
+    /** 写入一个自定义 skill 目录，并返回生成的 SKILL.md 路径。 */
     fn write_skill_markdown(root: &Path, folder: &str, markdown: &str) -> PathBuf {
         let skill_dir = root.join(folder);
 
@@ -1728,11 +1728,11 @@ mod tests {
         fs::write(metadata_dir.join("openai.yaml"), yaml).expect("write openai.yaml");
     }
 
-    /** 从合并列表中过滤文件式 skill，便于测试关注扫描结果。 */
-    fn file_skills(skills: &[AgentSkill]) -> Vec<AgentSkill> {
+    /** 从合并列表中过滤自定义 skill，便于测试关注扫描结果。 */
+    fn custom_skills(skills: &[AgentSkill]) -> Vec<AgentSkill> {
         skills
             .iter()
-            .filter(|skill| skill.source == FILE_SKILL_SOURCE)
+            .filter(|skill| skill.source == CUSTOM_SKILL_SOURCE)
             .cloned()
             .collect()
     }
@@ -1742,8 +1742,8 @@ mod tests {
         format!("---\nname: {name}\ndescription: {description}\n---\n\n{instructions}\n")
     }
 
-    /** 从临时目录加载单个文件式 skill，便于验证扫描后的领域模型。 */
-    fn load_file_skill_from_markdown(name: &str, description: &str) -> AgentSkill {
+    /** 从临时目录加载单个自定义 skill，便于验证扫描后的领域模型。 */
+    fn load_custom_skill_from_markdown(name: &str, description: &str) -> AgentSkill {
         let temp_dir = tempdir().expect("create tempdir");
         let root = temp_dir.path().join("skills");
         let connection = test_connection();
@@ -1754,22 +1754,22 @@ mod tests {
             &valid_skill_markdown(name, description, "执行测试 skill。"),
         );
 
-        file_skills(&load_agent_skills_from_roots(&connection, &[root]).expect("load skills"))
+        custom_skills(&load_agent_skills_from_roots(&connection, &[root]).expect("load skills"))
             .pop()
-            .expect("file skill exists")
+            .expect("custom skill exists")
     }
 
-    /** 构造表单提交的用户 skill，测试保存逻辑会将它转换成文件式 skill。 */
+    /** 构造表单提交的用户 skill，测试保存逻辑会将它转换成自定义 skill。 */
     fn draft_user_skill(name: &str) -> AgentSkill {
         AgentSkill {
             id: String::new(),
             name: name.to_owned(),
             display_name: "测试 Skill".to_owned(),
-            description: "用于验证文件式保存。".to_owned(),
+            description: "用于验证自定义保存。".to_owned(),
             instructions: "执行测试 skill。".to_owned(),
             tags: vec!["测试".to_owned()],
             enabled: true,
-            source: FILE_SKILL_SOURCE.to_owned(),
+            source: CUSTOM_SKILL_SOURCE.to_owned(),
             created_at: String::new(),
             updated_at: String::new(),
             path: None,
@@ -1804,40 +1804,40 @@ mod tests {
         writer.finish().expect("finish zip").into_inner()
     }
 
-    /** 用户目录中的 SKILL.md 应被扫描为 file 来源 skill，并保留稳定路径信息。 */
+    /** 用户目录中的 SKILL.md 应被扫描为 custom 来源 skill，并保留稳定路径信息。 */
     #[test]
-    fn scans_file_skill_from_user_root() {
+    fn scans_custom_skill_from_user_root() {
         let temp_dir = tempdir().expect("create tempdir");
         let root = temp_dir.path().join("skills");
         let skill_path = write_skill_markdown(
             &root,
             "demo",
-            &valid_skill_markdown("demo-skill", "演示文件技能", "执行 demo 文件技能。"),
+            &valid_skill_markdown("demo-skill", "演示自定义技能", "执行 demo 自定义技能。"),
         );
         let connection = test_connection();
         let skills =
             load_agent_skills_from_roots(&connection, &[root.clone()]).expect("load skills");
-        let files = file_skills(&skills);
-        let skill = files.first().expect("file skill exists");
+        let files = custom_skills(&skills);
+        let skill = files.first().expect("custom skill exists");
 
         assert_eq!(files.len(), 1);
         assert_eq!(skill.name, "demo-skill");
         assert_eq!(skill.display_name, "demo-skill");
-        assert_eq!(skill.description, "演示文件技能");
-        assert!(skill.instructions.contains("执行 demo 文件技能"));
+        assert_eq!(skill.description, "演示自定义技能");
+        assert!(skill.instructions.contains("执行 demo 自定义技能"));
         assert_eq!(skill.relative_path.as_deref(), Some("demo/SKILL.md"));
         assert_eq!(
             skill.path.as_deref(),
             Some(stable_absolute_path(&skill_path).to_string_lossy().as_ref())
         );
-        assert!(skill.id.starts_with("skill-file-"));
+        assert!(skill.id.starts_with("skill-custom-"));
     }
 
     /** 普通能力描述按原文进入 Skill 目录，不做额外语义改写。 */
     #[test]
     fn keeps_regular_skill_description_unchanged() {
         let description = "用于整理会议纪要、提取行动项；保留原始事实。";
-        let skill = load_file_skill_from_markdown("meeting-skill", description);
+        let skill = load_custom_skill_from_markdown("meeting-skill", description);
 
         assert_eq!(skill.description, description);
     }
@@ -2052,9 +2052,9 @@ tags:
         assert_eq!(clone_url.source_summary, "github.com/obra/superpowers");
     }
 
-    /** 单个无效 SKILL.md 只会被跳过，不应阻塞同根目录下其他有效文件式 skill。 */
+    /** 单个无效 SKILL.md 只会被跳过，不应阻塞同根目录下其他有效自定义 skill。 */
     #[test]
-    fn skips_invalid_file_skill_without_blocking_valid_skills() {
+    fn skips_invalid_custom_skill_without_blocking_valid_skills() {
         let temp_dir = tempdir().expect("create tempdir");
         let root = temp_dir.path().join("skills");
 
@@ -2070,7 +2070,7 @@ tags:
         );
         let connection = test_connection();
         let skills = load_agent_skills_from_roots(&connection, &[root]).expect("load skills");
-        let files = file_skills(&skills);
+        let files = custom_skills(&skills);
 
         assert_eq!(files.len(), 1);
         assert_eq!(files[0].name, "valid-skill");
@@ -2085,7 +2085,7 @@ tags:
         write_skill_markdown(
             &root,
             "demo",
-            &valid_skill_markdown("demo-skill", "演示文件技能", "执行 demo 文件技能。"),
+            &valid_skill_markdown("demo-skill", "演示自定义技能", "执行 demo 自定义技能。"),
         );
         write_openai_yaml(
             &root,
@@ -2094,7 +2094,7 @@ tags:
         );
         let connection = test_connection();
         let skills = load_agent_skills_from_roots(&connection, &[root]).expect("load skills");
-        let skill = file_skills(&skills).pop().expect("file skill exists");
+        let skill = custom_skills(&skills).pop().expect("custom skill exists");
 
         assert_eq!(skill.display_name, "演示 Skill");
         assert_eq!(
@@ -2122,19 +2122,19 @@ tags:
         let persisted = read_persisted_skills(&connection).expect("read persisted override");
         let override_skill = persisted.get(&saved.id).expect("override exists");
 
-        assert_eq!(saved.source, FILE_SKILL_SOURCE);
+        assert_eq!(saved.source, CUSTOM_SKILL_SOURCE);
         assert_eq!(saved.relative_path.as_deref(), Some("custom-save/SKILL.md"));
         assert!(markdown.contains("name: \"custom-save\""));
-        assert!(markdown.contains("description: \"用于验证文件式保存。\""));
+        assert!(markdown.contains("description: \"用于验证自定义保存。\""));
         assert!(markdown.contains("执行测试 skill。"));
         assert!(metadata.contains("display_name: \"测试 Skill\""));
-        assert_eq!(override_skill.source, FILE_SKILL_SOURCE);
+        assert_eq!(override_skill.source, CUSTOM_SKILL_SOURCE);
         assert!(override_skill.instructions.is_empty());
     }
 
-    /** 编辑已有文件式 skill 改动 name 时，应同步迁移目录并清理旧路径状态覆盖。 */
+    /** 编辑已有自定义 skill 改动 name 时，应同步迁移目录并清理旧路径状态覆盖。 */
     #[test]
-    fn editing_file_skill_renames_directory_when_name_changes() {
+    fn editing_custom_skill_renames_directory_when_name_changes() {
         let temp_dir = tempdir().expect("create tempdir");
         let root = temp_dir.path().join("skills");
         let connection = test_connection();
@@ -2165,9 +2165,9 @@ tags:
         assert!(persisted.contains_key(&resaved.id));
     }
 
-    /** 删除文件式 skill 应删除整个用户 skill 目录，并清理 SQLite 状态覆盖。 */
+    /** 删除自定义 skill 应删除整个用户 skill 目录，并清理 SQLite 状态覆盖。 */
     #[test]
-    fn delete_user_file_skill_removes_directory_and_override() {
+    fn delete_user_custom_skill_removes_directory_and_override() {
         let temp_dir = tempdir().expect("create tempdir");
         let root = temp_dir.path().join("skills");
         let connection = test_connection();
@@ -2179,93 +2179,93 @@ tags:
             .join(SKILL_MARKDOWN_FILE_NAME)
             .exists());
 
-        delete_user_skill_from_root(&connection, &root, &saved.id).expect("delete file skill");
+        delete_user_skill_from_root(&connection, &root, &saved.id).expect("delete custom skill");
         let persisted = read_persisted_skills(&connection).expect("read persisted after delete");
 
         assert!(!root.join("delete-me").exists());
         assert!(!persisted.contains_key(&saved.id));
     }
 
-    /** 文件 skill 的启停状态应按路径 ID 保存在 SQLite 中并在重新加载时生效。 */
+    /** 自定义 skill 的启停状态应按路径 ID 保存在 SQLite 中并在重新加载时生效。 */
     #[test]
-    fn file_skill_toggle_override_persists_across_loads() {
+    fn custom_skill_toggle_override_persists_across_loads() {
         let temp_dir = tempdir().expect("create tempdir");
         let root = temp_dir.path().join("skills");
 
         write_skill_markdown(
             &root,
             "demo",
-            &valid_skill_markdown("demo-skill", "演示文件技能", "执行 demo 文件技能。"),
+            &valid_skill_markdown("demo-skill", "演示自定义技能", "执行 demo 自定义技能。"),
         );
         let connection = test_connection();
-        let mut skill = file_skills(
+        let mut skill = custom_skills(
             &load_agent_skills_from_roots(&connection, &[root.clone()]).expect("load skills"),
         )
         .pop()
-        .expect("file skill exists");
+        .expect("custom skill exists");
 
         skill.enabled = false;
         skill.updated_at = "覆盖时间".to_owned();
         upsert_skill_state_override(&connection, &skill).expect("persist override");
 
-        let reloaded = file_skills(
+        let reloaded = custom_skills(
             &load_agent_skills_from_roots(&connection, &[root]).expect("reload skills"),
         )
         .pop()
-        .expect("file skill still exists");
+        .expect("custom skill still exists");
 
         assert_eq!(reloaded.id, skill.id);
         assert!(!reloaded.enabled);
         assert_eq!(reloaded.updated_at, "覆盖时间");
     }
 
-    /** 文件式 skill 的正文每次从磁盘读取，修改 SKILL.md 后下一次加载应返回新 instructions。 */
+    /** 自定义 skill 的正文每次从磁盘读取，修改 SKILL.md 后下一次加载应返回新 instructions。 */
     #[test]
-    fn file_skill_instructions_refresh_when_markdown_changes() {
+    fn custom_skill_instructions_refresh_when_markdown_changes() {
         let temp_dir = tempdir().expect("create tempdir");
         let root = temp_dir.path().join("skills");
         let skill_path = write_skill_markdown(
             &root,
             "demo",
-            &valid_skill_markdown("demo-skill", "演示文件技能", "第一版 instructions。"),
+            &valid_skill_markdown("demo-skill", "演示自定义技能", "第一版 instructions。"),
         );
         let connection = test_connection();
-        let first = file_skills(
+        let first = custom_skills(
             &load_agent_skills_from_roots(&connection, &[root.clone()]).expect("load first"),
         )
         .pop()
-        .expect("first file skill");
+        .expect("first custom skill");
 
         fs::write(
             &skill_path,
-            valid_skill_markdown("demo-skill", "演示文件技能", "第二版 instructions。"),
+            valid_skill_markdown("demo-skill", "演示自定义技能", "第二版 instructions。"),
         )
         .expect("rewrite SKILL.md");
 
         let second =
-            file_skills(&load_agent_skills_from_roots(&connection, &[root]).expect("load second"))
+            custom_skills(&load_agent_skills_from_roots(&connection, &[root]).expect("load second"))
                 .pop()
-                .expect("second file skill");
+                .expect("second custom skill");
 
         assert_eq!(second.id, first.id);
         assert!(second.instructions.contains("第二版"));
         assert!(!second.instructions.contains("第一版"));
     }
 
-    /** 删除磁盘上的 SKILL.md 后，下一次加载不应继续展示旧的文件式 skill。 */
+    /** 删除磁盘上的 SKILL.md 后，下一次加载不应继续展示旧的自定义 skill。 */
     #[test]
-    fn removed_file_skill_disappears_from_loaded_catalog() {
+    fn removed_custom_skill_disappears_from_loaded_catalog() {
         let temp_dir = tempdir().expect("create tempdir");
         let root = temp_dir.path().join("skills");
         let skill_path = write_skill_markdown(
             &root,
             "demo",
-            &valid_skill_markdown("demo-skill", "演示文件技能", "执行 demo 文件技能。"),
+            &valid_skill_markdown("demo-skill", "演示自定义技能", "执行 demo 自定义技能。"),
         );
         let connection = test_connection();
 
         assert_eq!(
-            file_skills(
+            custom_skills(
                 &load_agent_skills_from_roots(&connection, &[root.clone()]).expect("load skills")
             )
             .len(),
@@ -2274,7 +2274,7 @@ tags:
 
         fs::remove_file(skill_path).expect("remove SKILL.md");
 
-        assert!(file_skills(
+        assert!(custom_skills(
             &load_agent_skills_from_roots(&connection, &[root]).expect("reload skills")
         )
         .is_empty());

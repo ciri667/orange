@@ -71,13 +71,13 @@ pub enum AgentSkillStatus {
     Disabled,
 }
 
-/** Skill 来源类型；内置 skill 由应用提供，文件 skill 来自用户 Skills 目录。 */
+/** Skill 来源类型；内置 skill 由应用提供，自定义 skill 来自用户 Skills 目录。 */
 #[allow(dead_code)]
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum AgentSkillSource {
     BuiltIn,
-    File,
+    Custom,
 }
 
 /** Skill 安装来源类型，URL、本地目录和本地压缩包走不同的准备流程。 */
