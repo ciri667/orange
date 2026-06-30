@@ -19,6 +19,9 @@ import type {
   AppEventLogCategory,
   AppEventLogLevel,
   DocumentPreview,
+  ExportFileResult,
+  ExportFormat,
+  ExportTargetKind,
   FolderEntry,
   InstallAgentSkillPayload,
   InstallAgentSkillResult,
@@ -1217,6 +1220,22 @@ export async function loadDocumentPreview(snapshot: WorkspaceSnapshot, documentI
   }
 
   return invokeLogged<DocumentPreview>("load_document_preview", { payload: { snapshot, documentId } });
+}
+
+/** 导出当前打开文件；真实文件写入只允许在 Tauri 桌面端通过系统保存对话框完成。 */
+export async function exportCurrentFile(
+  snapshot: WorkspaceSnapshot,
+  targetKind: ExportTargetKind,
+  targetId: string,
+  format: ExportFormat,
+): Promise<ExportFileResult | null> {
+  if (!isTauriRuntime()) {
+    throw new Error("浏览器开发态不能导出本地文件，请在 Tauri 桌面端使用导出。");
+  }
+
+  return invokeLogged<ExportFileResult | null>("export_current_file", {
+    payload: { snapshot, targetKind, targetId, format },
+  });
 }
 
 /** 移除知识库授权和索引缓存；不会删除用户本地文档。 */
