@@ -23,6 +23,7 @@ import {
   deleteAgentSkill,
   deleteDocument,
   deleteNote,
+  exportCurrentFile,
   deleteSession,
   loadDocumentPreview,
   loadAppEventLogs,
@@ -61,6 +62,7 @@ import type {
   AppEventLogCategory,
   AppEventLogLevel,
   DocumentPreview,
+  ExportFormat,
   InstallAgentSkillPayload,
   InstallAgentSkillResult,
   KnowledgeBase,
@@ -1023,6 +1025,123 @@ export function WorkspaceShell() {
     }
   }
 
+  /** 导出前保存当前脏草稿；保存冲突会抛出错误并阻止后续导出。 */
+  async function saveCurrentDirtyFileBeforeExport(targetKind: "note" | "document", targetId: string) {
+    let snapshotForExport = currentSnapshot;
+
+    if (targetKind === "note") {
+      const noteForExport = snapshotForExport.notes.find((note) => note.id === targetId);
+
+      if (!noteForExport) {
+        throw new Error("找不到要导出的 Markdown 笔记。");
+      }
+
+      if (dirtyNoteIds.has(targetId)) {
+        const expectedHash = editingBaseHashes[targetId] ?? noteForExport.contentHash;
+        const nextDirtyNoteIds = new Set(dirtyNoteIds);
+
+        // 导出必须基于本地磁盘版本，先复用现有保存命令执行 hash 冲突检测和原子写入。
+        snapshotForExport = await saveNoteContent(snapshotForExport, targetId, noteForExport.content, expectedHash);
+        nextDirtyNoteIds.delete(targetId);
+        commitSnapshot(snapshotForExport, nextDirtyNoteIds, dirtyDocumentIds);
+      }
+
+      return snapshotForExport;
+    }
+
+    const documentForExport = snapshotForExport.documents.find((document) => document.id === targetId);
+
+    if (!documentForExport) {
+      throw new Error("找不到要导出的文档。");
+    }
+
+    if (documentForExport.fileType === "txt" && dirtyDocumentIds.has(targetId)) {
+      const expectedHash = editingBaseDocumentHashes[targetId] ?? documentForExport.contentHash;
+      const nextDirtyDocumentIds = new Set(dirtyDocumentIds);
+
+      // 只有 TXT 可编辑；DOCX/PDF 是只读源文件，不需要也不能执行保存命令。
+      snapshotForExport = await saveDocumentContent(
+        snapshotForExport,
+        targetId,
+        documentForExport.content ?? "",
+        expectedHash,
+      );
+      nextDirtyDocumentIds.delete(targetId);
+      commitSnapshot(snapshotForExport, dirtyNoteIds, nextDirtyDocumentIds);
+    }
+
+    return snapshotForExport;
+  }
+
+  /** 导出当前打开文件；保存对话框取消返回 null，前端只给普通提示不报错。 */
+  async function handleExportActiveFile(format: ExportFormat) {
+    const targetKind = activeDocument ? "document" : "note";
+    const targetId = activeDocument?.id ?? activeNote?.id ?? "";
+    const sourceType = activeDocument?.fileType ?? "markdown";
+
+    if (!targetId) {
+      return;
+    }
+
+    const startedAt = performance.now();
+    const logMetadata = {
+      format,
+      targetKind,
+      sourceType,
+      dirtyBeforeExport:
+        targetKind === "note" ? Boolean(activeNote && dirtyNoteIds.has(activeNote.id)) : Boolean(activeDocument && dirtyDocumentIds.has(activeDocument.id)),
+    };
+
+    logInfo("开始导出当前文件。", {
+      category: "frontend",
+      event: "export_file",
+      status: "started",
+      metadata: logMetadata,
+    });
+    beginBusy("正在导出当前文件...");
+
+    try {
+      const snapshotForExport = await saveCurrentDirtyFileBeforeExport(targetKind, targetId);
+      const result = await exportCurrentFile(snapshotForExport, targetKind, targetId, format);
+
+      if (!result) {
+        setNotice("已取消导出。");
+        logInfo("当前文件导出已取消。", {
+          category: "frontend",
+          event: "export_file",
+          status: "cancelled",
+          durationMs: performance.now() - startedAt,
+          metadata: logMetadata,
+        });
+        return;
+      }
+
+      setNotice(`已导出「${result.fileName}」。`);
+      logInfo("当前文件导出完成。", {
+        category: "frontend",
+        event: "export_file",
+        status: "completed",
+        durationMs: performance.now() - startedAt,
+        metadata: {
+          ...logMetadata,
+          byteSize: result.byteSize,
+        },
+      });
+    } catch (error) {
+      setNotice(formatErrorMessage(error));
+      logError("当前文件导出失败。", {
+        category: "frontend",
+        event: "export_file",
+        status: "failed",
+        durationMs: performance.now() - startedAt,
+        error,
+        metadata: logMetadata,
+      });
+    } finally {
+      endBusy();
+    }
+  }
+
   /** 打开重命名弹窗；存在未保存草稿时先阻止，避免本地文件版本语义不清。 */
   function openRenameDialog(noteId = activeNote?.id ?? "") {
     const note = currentSnapshot.notes.find((item) => item.id === noteId);
@@ -1797,6 +1916,7 @@ export function WorkspaceShell() {
             isDirty={isActiveDocumentDirty}
             onSaveDocument={handleSaveActiveDocument}
             onContentChange={handleDocumentContentChange}
+            onExportFile={handleExportActiveFile}
             onRenameDocument={() => openRenameDocumentDialog()}
             onDeleteDocument={() => handleDeleteDocument()}
           />
@@ -1812,6 +1932,7 @@ export function WorkspaceShell() {
             onSaveNote={handleSaveActiveNote}
             onContentChange={handleContentChange}
             onPasteImages={handlePasteImages}
+            onExportFile={handleExportActiveFile}
             onRequestRewrite={() => handleSubmitPrompt("rewrite", "改写当前笔记的核心段落")}
             onRenameNote={() => openRenameDialog()}
             onDeleteNote={() => handleDeleteNote()}
