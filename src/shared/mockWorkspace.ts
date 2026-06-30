@@ -425,28 +425,9 @@ export function createMockKnowledgeBaseSelection(count: number): KnowledgeBaseSe
   };
 }
 
-/** 判断本轮 Agent 是否需要调用检索工具，避免把检索做成固定前置流程。 */
-function shouldUseSearchTool(prompt: string, action: AgentActionType) {
-  const normalizedPrompt = prompt.toLowerCase();
-  const knowledgeIntentWords = [
-    "查找",
-    "搜索",
-    "引用",
-    "来源",
-    "知识库",
-    "笔记",
-    "文档",
-    "资料",
-    "总结",
-    "关于",
-    "为什么",
-    "哪些",
-    "markdown",
-    "rag",
-    "检索",
-  ];
-
-  return action === "find" || knowledgeIntentWords.some((word) => normalizedPrompt.includes(word));
+/** 浏览器 mock 没有真实模型，只响应显式工具入口，避免用关键词假装 Agent 自主判断。 */
+function shouldUseSearchTool(action: AgentActionType) {
+  return action === "find";
 }
 
 /** 根据当前会话范围执行 mock 检索工具，返回可追溯引用。 */
@@ -539,7 +520,7 @@ function getScopeLabel(snapshot: WorkspaceSnapshot, session: AgentSession) {
   return `${selectedNames.length} 个已选知识库`;
 }
 
-/** 执行浏览器开发态 Agent loop，核心规则是由 Agent 决定是否调用检索工具。 */
+/** 执行浏览器开发态 Agent loop；无真实模型时只模拟显式工具动作，不做关键词意图路由。 */
 export function runMockAgentTurn(
   snapshot: WorkspaceSnapshot,
   prompt: string,
@@ -578,8 +559,9 @@ export function runMockAgentTurn(
             source: activeSkill.source,
             path: activeSkill.path,
             relativePath: activeSkill.relativePath,
+            explicit: true,
           }
-        : { skillId: null },
+        : { skillId: null, explicit: false },
     ),
   ];
   let citations: Citation[] = [];
@@ -672,7 +654,7 @@ export function runMockAgentTurn(
       );
       content = `建议继续把《${activeNote.title}》保留在「${activeKnowledgeBase.name}」中，并补充更稳定的标签和相关链接。该建议不涉及写入。`;
     }
-  } else if (shouldUseSearchTool(prompt, action)) {
+  } else if (shouldUseSearchTool(action)) {
     citations = searchNotes(nextSnapshot, session, prompt);
     toolCalls.push(
       createToolCall("search_notes", `在 ${getScopeLabel(nextSnapshot, session)} 中检索到 ${citations.length} 条候选引用`, {
@@ -693,7 +675,7 @@ export function runMockAgentTurn(
       ? `我调用了检索工具，并只在 ${getScopeLabel(nextSnapshot, session)} 范围内组织回答：本地优先的关键是把 Markdown 文件作为用户拥有的主数据源，索引和模型请求都只是辅助层；写入必须先形成 diff，确认后才落盘。`
       : `我调用了检索工具，但在 ${getScopeLabel(nextSnapshot, session)} 中没有找到足够相关的笔记。`;
   } else {
-    content = "这类问题不需要访问你的本地知识库。我会作为知识库助手先给出通用建议；如果你希望我基于笔记回答，可以明确要求我查找或总结某个知识库范围。";
+    content = "浏览器开发态没有真实模型，因此不会根据关键词自动调用工具。桌面端启用模型后，Agent 会自行判断是否检索、读取或生成待确认 diff。";
   }
 
   session.messages.push({

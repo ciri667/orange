@@ -427,7 +427,7 @@ export async function saveAgentSkill(skill: AgentSkill): Promise<AgentSkill> {
   return invokeLogged<AgentSkill>("save_agent_skill", { payload: { skill } });
 }
 
-/** 启停任意 skill；allowAutoInvoke 不传时保留原自动触发设置。 */
+/** 启停任意 skill；allowAutoInvoke 不传时保留原模型参考设置。 */
 export async function toggleAgentSkill(
   skillId: string,
   enabled: boolean,
@@ -1697,7 +1697,7 @@ function normalizeBrowserSkillName(name: string) {
     .join("-");
 }
 
-/** 清理标签和触发词，去重并限制数量，避免 mock prompt 摘要失控。 */
+/** 清理标签和语义线索，去重并限制数量，避免 mock prompt 摘要失控。 */
 function normalizeBrowserTerms(terms: string[]) {
   const seenTerms = new Set<string>();
 
@@ -1717,47 +1717,44 @@ function normalizeBrowserTerms(terms: string[]) {
     .slice(0, 16);
 }
 
-/** 浏览器 mock 中根据显式选择或自动规则解析本轮激活 skill。 */
+/** 浏览器 mock 中只根据显式选择注入完整 skill；未选择时由 Agent 语义参考能力目录。 */
 function resolveBrowserActiveSkill(
   skills: AgentSkill[],
   settings: UserSettings,
   request: AgentTurnRequest,
 ): AgentSkill | undefined {
   if (request.selectedSkillId) {
-    return skills.find((skill) => skill.enabled && skill.id === request.selectedSkillId);
+    const selectedSkill = skills.find((skill) => skill.enabled && skill.id === request.selectedSkillId);
+
+    if (!selectedSkill) {
+      logError("显式选择的 Skill 不可用或已禁用。", {
+        category: "frontend",
+        event: "resolve_skill",
+        status: "failed",
+        metadata: {
+          skillId: request.selectedSkillId,
+        },
+      });
+    }
+
+    return selectedSkill;
   }
 
   if (settings.skillSettings.activationMode !== "auto") {
     return undefined;
   }
 
-  const normalizedPrompt = request.prompt.toLowerCase();
-  const normalizedAction = request.action.toLowerCase();
-  const enabledAutoSkills = skills.filter((skill) => skill.enabled && skill.allowAutoInvoke);
-  const actionMatchedSkill = enabledAutoSkills.find((skill) => browserActionMatchesSkill(skill.name, normalizedAction));
+  logDebug("未显式选择 Skill，浏览器 mock 不做关键词路由。", {
+    category: "frontend",
+    event: "resolve_skill",
+    status: "skipped",
+    metadata: {
+      action: request.action,
+      enabledSkillCount: skills.filter((skill) => skill.enabled).length,
+    },
+  });
 
-  if (actionMatchedSkill) {
-    return actionMatchedSkill;
-  }
-
-  return enabledAutoSkills.find((skill) => browserSkillMatches(skill, normalizedPrompt, normalizedAction));
-}
-
-/** 首版 mock 自动匹配规则与 Rust 保持一致：触发词、标签、描述和 action 映射都可命中。 */
-function browserSkillMatches(skill: AgentSkill, prompt: string, action: string) {
-  const candidateTerms = [...skill.triggers, ...skill.tags, skill.name, skill.description].map((term) => term.toLowerCase());
-
-  return candidateTerms.some((term) => term.trim() && (prompt.includes(term) || action.includes(term)));
-}
-
-/** 固定 Agent action 到内置 skill 的映射，降低纯按钮触发时的漏匹配。 */
-function browserActionMatchesSkill(skillName: string, action: string) {
-  return (
-    (skillName === "note-research" && (action === "ask" || action === "find")) ||
-    (skillName === "note-rewrite" && action === "rewrite") ||
-    (skillName === "draft-from-context" && action === "create") ||
-    (skillName === "organize-knowledge" && action === "organize")
-  );
+  return undefined;
 }
 
 /** 浏览器 fallback 清理会话中的失效知识库和笔记引用，模拟后端持久化入口的归一化。 */
