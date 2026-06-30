@@ -34,6 +34,12 @@ const MEMORY_DIRECTORY_NAME: &str = "memory";
 /** Skill 摘要目录注入模型的最大字符数，避免用户安装大量 skill 后挤占上下文。 */
 const MAX_SKILL_CATALOG_PROMPT_CHARS: usize = 8_000;
 
+/** 历史版本写入 SKILL.md 的自动选择字段；加载时只用于迁移删除，不再进入领域模型。 */
+const LEGACY_SKILL_ACTIVATION_FIELD: &str = "triggers";
+
+/** 历史描述只剩选择条件时使用的中性兜底，避免把固定词条语义继续暴露给模型。 */
+const DEFAULT_SANITIZED_SKILL_DESCRIPTION: &str = "该 Skill 提供用户自定义能力。";
+
 /** 第三方 skill 安装时允许复制的最大普通文件数量。 */
 const MAX_SKILL_INSTALL_FILE_COUNT: usize = 512;
 
@@ -68,7 +74,6 @@ pub fn built_in_skills() -> Vec<AgentSkill> {
             "基于已选知识库检索、阅读笔记，并给出带引用的回答。",
             "当用户要求查找、总结、对比或引用本地笔记时，先调用 search_notes、read_note 或 list_tree 获取依据。回答中只引用工具返回的材料；如果工具没有结果，明确说明未找到依据，不要编造来源。",
             &["研究", "检索", "引用"],
-            &["查找", "搜索", "检索", "引用", "来源", "总结", "知识库", "笔记", "资料"],
         ),
         built_in_skill(
             "skill-note-rewrite",
@@ -77,7 +82,6 @@ pub fn built_in_skills() -> Vec<AgentSkill> {
             "改写当前笔记内容，并通过待确认 diff 交给用户决定是否写入。",
             "当用户要求润色、改写、压缩或扩写当前笔记时，先读取当前笔记或目标笔记。只能调用 propose_note_change 生成待确认 diff；不能声称已经修改文件，也不能绕过 original 唯一命中校验。",
             &["写作", "改写", "diff"],
-            &["改写", "润色", "重写", "优化", "扩写", "压缩", "rewrite"],
         ),
         built_in_skill(
             "skill-draft-from-context",
@@ -86,7 +90,6 @@ pub fn built_in_skills() -> Vec<AgentSkill> {
             "基于已选 scope 创建新的 Markdown 草稿，写入前仍需用户确认。",
             "当用户要求生成新笔记、清单、总结稿或草稿时，可以先检索或读取相关笔记，再调用 create_note_draft。目标路径必须在当前会话允许的知识库内，正文应是完整 Markdown。",
             &["草稿", "生成", "Markdown"],
-            &["创建", "新建", "草稿", "生成", "清单", "draft", "markdown"],
         ),
         built_in_skill(
             "skill-organize-knowledge",
@@ -95,7 +98,6 @@ pub fn built_in_skills() -> Vec<AgentSkill> {
             "给出标签、标题、目录和关联笔记建议，不直接移动或改写文件。",
             "当用户要求整理知识库、补标签、规划目录或建立关联时，优先调用 list_tree、search_notes 或 read_note 获取结构与内容，再调用 suggest_organization 输出建议。该 skill 不执行文件移动或直接写入。",
             &["整理", "标签", "目录"],
-            &["整理", "归档", "标签", "目录", "分类", "关联", "组织", "organize"],
         ),
     ]
 }
@@ -142,7 +144,7 @@ pub fn load_agent_skills_from_roots(
         .into_iter()
         .map(|mut skill| {
             if let Some(saved_skill) = persisted_skills.remove(&skill.id) {
-                // 内置 skill 的说明始终以代码版本为准，只继承用户启停和模型参考偏好。
+                // 内置 skill 的说明始终以代码版本为准，只继承用户启停状态。
                 skill.enabled = saved_skill.enabled;
                 skill.allow_auto_invoke = saved_skill.allow_auto_invoke;
                 skill.updated_at = saved_skill.updated_at;
@@ -221,7 +223,7 @@ pub fn save_user_skill_to_root(
     Ok(saved_skill)
 }
 
-/** 启停任意 skill；SQLite 只保存启停和模型参考覆盖，不保存文件式 skill 正文。 */
+/** 启停任意 skill；SQLite 只保存启停等兼容状态，不保存文件式 skill 正文。 */
 pub fn toggle_agent_skill(
     app: &AppHandle,
     connection: &Connection,
@@ -452,7 +454,7 @@ pub fn prepare_skill_archive_bytes(bytes: &[u8]) -> Result<TempDir, String> {
     Ok(temp_dir)
 }
 
-/** 根据用户显式选择决定本轮激活的完整 skill；未选择时由模型参考能力目录自主判断。 */
+/** 根据用户显式选择决定本轮完整 skill；未选择时只给模型可用 skill 名称和描述。 */
 pub fn resolve_active_skill(
     skills: &[AgentSkill],
     _settings: &UserSettings,
@@ -476,7 +478,7 @@ pub fn resolve_active_skill(
 
     log::debug!(
         target: "agent_skill",
-        "未显式选择 Skill，Runtime 不做关键词路由：action={} enabled_skill_count={}",
+        "未显式指定 Skill，Runtime 不预先选择 Skill：action={} enabled_skill_count={}",
         request.action,
         skills.iter().filter(|skill| skill.enabled).count()
     );
@@ -484,41 +486,25 @@ pub fn resolve_active_skill(
     None
 }
 
-/** 生成注入模型 system prompt 的可用 skill 目录，由模型按语义自主参考而非宿主关键词匹配。 */
-pub fn skill_catalog_prompt(skills: &[AgentSkill], settings: &SkillSettings) -> String {
-    if settings.activation_mode != "auto" {
-        return "可用 Skills：自动参考已关闭；只有用户显式选择的 Skill 会注入完整执行说明。"
-            .to_owned();
-    }
-
+/** 生成注入模型 system prompt 的启用 skill 名称和描述，供 Agent 自主决定是否使用。 */
+pub fn skill_catalog_prompt(skills: &[AgentSkill], _settings: &SkillSettings) -> String {
     let enabled_summaries = skills
         .iter()
-        .filter(|skill| skill.enabled && skill.allow_auto_invoke)
+        .filter(|skill| skill.enabled)
         .map(|skill| {
-            let path_summary = skill
-                .path
-                .as_deref()
-                .map(|path| format!("；路径：{path}"))
-                .unwrap_or_default();
-
             format!(
-                "- {} (`{}`): {}{}；执行要求：{}；语义线索：{}",
-                skill.display_name,
-                skill.name,
-                skill.description,
-                path_summary,
-                truncate_chars(&skill.instructions, 900),
-                skill.triggers.join("、")
+                "- {} (`{}`): {}",
+                skill.display_name, skill.name, skill.description
             )
         })
         .collect::<Vec<_>>();
 
     if enabled_summaries.is_empty() {
-        "可用 Skills：没有允许自动参考的已启用 Skill。".to_owned()
+        "可用 Skills：没有已启用 Skill。".to_owned()
     } else {
         truncate_chars(
             &format!(
-                "可用 Skills（模型按语义自主参考；宿主不会按关键词强制激活）：\n{}",
+                "可用 Skills（仅名称和描述；由 Agent 自主判断是否使用，宿主只提供目录，不预先选择 Skill）：\n{}",
                 enabled_summaries.join("\n")
             ),
             MAX_SKILL_CATALOG_PROMPT_CHARS,
@@ -526,29 +512,33 @@ pub fn skill_catalog_prompt(skills: &[AgentSkill], settings: &SkillSettings) -> 
     }
 }
 
-/** 生成本轮显式激活 skill 的完整说明，未选择时不再由宿主关键词命中。 */
+/** 生成本轮显式指定 skill 的完整说明；未来 /skill 命令会复用这条路径。 */
 pub fn active_skill_prompt(active_skill: Option<&AgentSkill>) -> String {
     active_skill
         .map(|skill| {
             format!(
-                "本轮激活 Skill：{} (`{}`)\n说明：{}\n执行要求：{}",
+                "用户显式指定 Skill：{} (`{}`)\n说明：{}\n执行要求：{}",
                 skill.display_name, skill.name, skill.description, skill.instructions
             )
         })
-        .unwrap_or_else(|| "本轮未激活 Skill；按普通 Agent 工具边界处理。".to_owned())
+        .unwrap_or_else(|| {
+            "用户未显式指定 Skill；Agent 只能依据可用 Skills 的名称和描述自行判断。".to_owned()
+        })
 }
 
-/** 构造 UI 和审计日志可见的 skill 激活轨迹。 */
+/** 构造 UI 和审计日志可见的 skill 指定状态。 */
 pub fn skill_summary(active_skill: Option<&AgentSkill>) -> String {
     active_skill
         .map(|skill| {
             skill
                 .path
                 .as_deref()
-                .map(|path| format!("已激活 Skill：{}（{}）", skill.display_name, path))
-                .unwrap_or_else(|| format!("已激活 Skill：{}", skill.display_name))
+                .map(|path| format!("用户显式指定 Skill：{}（{}）", skill.display_name, path))
+                .unwrap_or_else(|| format!("用户显式指定 Skill：{}", skill.display_name))
         })
-        .unwrap_or_else(|| "未显式选择 Skill；模型按能力目录和工具边界自主判断".to_owned())
+        .unwrap_or_else(|| {
+            "用户未显式指定 Skill；Agent 按启用 Skills 的名称和描述自主判断".to_owned()
+        })
 }
 
 /** 创建一条内置 skill，统一填充稳定元数据。 */
@@ -559,7 +549,6 @@ fn built_in_skill(
     description: &str,
     instructions: &str,
     tags: &[&str],
-    triggers: &[&str],
 ) -> AgentSkill {
     AgentSkill {
         id: id.to_owned(),
@@ -568,10 +557,6 @@ fn built_in_skill(
         description: description.to_owned(),
         instructions: instructions.to_owned(),
         tags: tags.iter().map(|tag| (*tag).to_owned()).collect(),
-        triggers: triggers
-            .iter()
-            .map(|trigger| (*trigger).to_owned())
-            .collect(),
         enabled: true,
         source: BUILT_IN_SKILL_SOURCE.to_owned(),
         allow_auto_invoke: true,
@@ -646,6 +631,15 @@ fn load_file_skill(
     let content = fs::read_to_string(skill_markdown_path)
         .map_err(|error| format!("无法读取 SKILL.md：{error}"))?;
     let parsed_skill = parse_skill_markdown(&content)?;
+    let sanitized_description =
+        sanitize_skill_description(&parsed_skill.description, &parsed_skill.name);
+
+    migrate_legacy_skill_markdown(
+        skill_markdown_path,
+        &content,
+        &parsed_skill.description,
+        &sanitized_description,
+    );
     let metadata = read_openai_yaml_metadata(
         skill_markdown_path
             .parent()
@@ -684,18 +678,9 @@ fn load_file_skill(
             .display_name_override
             .or(parsed_skill.display_name)
             .unwrap_or_else(|| parsed_skill.name.clone()),
-        description: parsed_skill.description,
+        description: sanitized_description,
         instructions: parsed_skill.instructions,
         tags: normalize_terms(parsed_skill.tags),
-        triggers: {
-            let normalized_triggers = normalize_terms(parsed_skill.triggers);
-
-            if normalized_triggers.is_empty() {
-                derive_file_skill_triggers(&parsed_skill.name)
-            } else {
-                normalized_triggers
-            }
-        },
         enabled: true,
         source: FILE_SKILL_SOURCE.to_owned(),
         allow_auto_invoke: metadata.allow_auto_invoke_override.unwrap_or(true),
@@ -728,7 +713,6 @@ struct ParsedSkillMarkdown {
     description: String,
     instructions: String,
     tags: Vec<String>,
-    triggers: Vec<String>,
 }
 
 /** agents/openai.yaml 中首版支持的 UI 与策略覆盖字段。 */
@@ -814,7 +798,6 @@ fn parse_skill_markdown(content: &str) -> Result<ParsedSkillMarkdown, String> {
     let display_name = yaml_mapping_string(&frontmatter, "display_name")
         .or_else(|| yaml_mapping_string(&frontmatter, "title"));
     let tags = yaml_mapping_list(&frontmatter, "tags");
-    let triggers = yaml_mapping_list(&frontmatter, "triggers");
     let instructions = body_lines.join("\n").trim().to_owned();
 
     if instructions.is_empty() {
@@ -827,8 +810,360 @@ fn parse_skill_markdown(content: &str) -> Result<ParsedSkillMarkdown, String> {
         description,
         instructions,
         tags,
-        triggers,
     })
+}
+
+/** 迁移历史 SKILL.md 元数据，移除旧选择字段并落盘清理后的能力描述。 */
+fn migrate_legacy_skill_markdown(
+    path: &Path,
+    content: &str,
+    original_description: &str,
+    sanitized_description: &str,
+) {
+    let mut next_content = content.to_owned();
+    let mut changed_fields = Vec::new();
+
+    if let Some(content_without_activation_field) =
+        remove_yaml_frontmatter_field(&next_content, LEGACY_SKILL_ACTIVATION_FIELD)
+    {
+        next_content = content_without_activation_field;
+        changed_fields.push(LEGACY_SKILL_ACTIVATION_FIELD);
+    }
+
+    if original_description != sanitized_description {
+        if let Some(content_with_sanitized_description) = replace_yaml_frontmatter_string_field(
+            &next_content,
+            "description",
+            sanitized_description,
+        ) {
+            next_content = content_with_sanitized_description;
+            changed_fields.push("description");
+        }
+    }
+
+    if changed_fields.is_empty() {
+        return;
+    }
+
+    if let Err(error) = fs::write(path, next_content) {
+        log::warn!(
+            target: "skill",
+            "迁移旧版 Skill 元数据失败：path={} fields={} error={error}",
+            path.display(),
+            changed_fields.join(",")
+        );
+        return;
+    }
+
+    log::info!(
+        target: "skill",
+        "已迁移旧版 Skill 元数据：path={} fields={}",
+        path.display(),
+        changed_fields.join(",")
+    );
+}
+
+/** 替换 YAML frontmatter 中的单行字符串字段，用于把清理后的描述同步回磁盘。 */
+fn replace_yaml_frontmatter_string_field(
+    content: &str,
+    field_name: &str,
+    next_value: &str,
+) -> Option<String> {
+    let normalized_content = content.strip_prefix('\u{feff}').unwrap_or(content);
+
+    if !normalized_content.starts_with("---") {
+        return None;
+    }
+
+    let mut lines = normalized_content.lines();
+    let first_line = lines.next()?;
+
+    if first_line.trim() != "---" {
+        return None;
+    }
+
+    let mut next_lines = vec![first_line.to_owned()];
+    let mut in_frontmatter = true;
+    let mut replaced = false;
+
+    for line in lines {
+        if in_frontmatter && line.trim() == "---" {
+            in_frontmatter = false;
+            next_lines.push(line.to_owned());
+            continue;
+        }
+
+        if in_frontmatter && is_yaml_frontmatter_field(line, field_name) {
+            next_lines.push(format!("{field_name}: {}", yaml_quote(next_value)));
+            replaced = true;
+            continue;
+        }
+
+        next_lines.push(line.to_owned());
+    }
+
+    if !replaced {
+        return None;
+    }
+
+    let mut next_content = next_lines.join("\n");
+
+    if content.ends_with('\n') {
+        next_content.push('\n');
+    }
+
+    Some(next_content)
+}
+
+/** 移除 YAML frontmatter 的单个顶层字段，支持标量值和缩进列表值。 */
+fn remove_yaml_frontmatter_field(content: &str, field_name: &str) -> Option<String> {
+    let normalized_content = content.strip_prefix('\u{feff}').unwrap_or(content);
+
+    if !normalized_content.starts_with("---") {
+        return None;
+    }
+
+    let mut lines = normalized_content.lines();
+    let first_line = lines.next()?;
+
+    if first_line.trim() != "---" {
+        return None;
+    }
+
+    let mut frontmatter_lines = Vec::new();
+    let mut body_lines = Vec::new();
+    let mut in_frontmatter = true;
+
+    for line in lines {
+        if in_frontmatter && line.trim() == "---" {
+            in_frontmatter = false;
+            continue;
+        }
+
+        if in_frontmatter {
+            frontmatter_lines.push(line);
+        } else {
+            body_lines.push(line);
+        }
+    }
+
+    if in_frontmatter {
+        return None;
+    }
+
+    let mut next_frontmatter = Vec::new();
+    let mut index = 0usize;
+    let mut removed = false;
+
+    while index < frontmatter_lines.len() {
+        let line = frontmatter_lines[index];
+
+        if is_yaml_frontmatter_field(line, field_name) {
+            removed = true;
+            index += 1;
+
+            // 多行 YAML 值通常缩进在字段下方，需要一并跳过到下一个顶层字段。
+            while index < frontmatter_lines.len()
+                && is_yaml_continuation_line(frontmatter_lines[index])
+            {
+                index += 1;
+            }
+
+            continue;
+        }
+
+        next_frontmatter.push(line);
+        index += 1;
+    }
+
+    if !removed {
+        return None;
+    }
+
+    let body_text = body_lines.join("\n");
+    let mut next_content = format!("---\n{}\n---", next_frontmatter.join("\n"));
+
+    if !body_text.is_empty() {
+        next_content.push_str("\n\n");
+        next_content.push_str(&body_text);
+    }
+
+    if content.ends_with('\n') {
+        next_content.push('\n');
+    }
+
+    Some(next_content)
+}
+
+/** 判断某行是否是 YAML frontmatter 顶层字段，忽略缩进行避免误删正文块。 */
+fn is_yaml_frontmatter_field(line: &str, field_name: &str) -> bool {
+    if line.starts_with(' ') || line.starts_with('\t') {
+        return false;
+    }
+
+    let Some((key, _value)) = line.split_once(':') else {
+        return false;
+    };
+
+    trim_yaml_scalar(key) == field_name
+}
+
+/** 判断某行是否属于前一个 YAML 顶层字段的缩进值。 */
+fn is_yaml_continuation_line(line: &str) -> bool {
+    line.trim().is_empty() || line.starts_with(' ') || line.starts_with('\t')
+}
+
+/** 清理历史 Skill 描述中的选择条件，确保可见描述和 prompt 只表达能力本身。 */
+fn sanitize_skill_description(description: &str, skill_name: &str) -> String {
+    let description_without_activation_notes = strip_legacy_activation_bracket_notes(description);
+
+    if description_without_activation_notes == description
+        && !is_legacy_activation_phrase(description.trim())
+    {
+        return description.trim().to_owned();
+    }
+
+    let mut sanitized_parts = Vec::new();
+
+    for raw_part in split_description_clauses(&description_without_activation_notes) {
+        let mut part = raw_part.trim().to_owned();
+
+        // 用户常把选择条件写在括号里；整段括号只描述选择条件时直接丢弃。
+        part = trim_matching_description_brackets(&part);
+
+        if part.is_empty() || is_legacy_activation_phrase(&part) {
+            continue;
+        }
+
+        sanitized_parts.push(part);
+    }
+
+    let sanitized = sanitized_parts.join("，").trim().to_owned();
+
+    if sanitized.is_empty() {
+        log::debug!(
+            target: "skill",
+            "Skill 描述只包含历史自动选择语义，已使用中性描述：skill={}",
+            skill_name
+        );
+        DEFAULT_SANITIZED_SKILL_DESCRIPTION.to_owned()
+    } else {
+        sanitized
+    }
+}
+
+/** 删除描述中括号包裹的旧版选择条件，保留括号外的真实能力说明。 */
+fn strip_legacy_activation_bracket_notes(description: &str) -> String {
+    let mut result = String::new();
+    let mut chars = description.chars().peekable();
+
+    while let Some(character) = chars.next() {
+        let Some(right_bracket) = matching_right_bracket(character) else {
+            result.push(character);
+            continue;
+        };
+        let mut bracket_content = String::new();
+        let mut closed = false;
+
+        for next_character in chars.by_ref() {
+            if next_character == right_bracket {
+                closed = true;
+                break;
+            }
+
+            bracket_content.push(next_character);
+        }
+
+        // 只丢弃明确表达“按某输入选择”的括号内容；普通补充说明仍原样保留。
+        if closed && is_legacy_activation_phrase(&bracket_content) {
+            continue;
+        }
+
+        result.push(character);
+        result.push_str(&bracket_content);
+        if closed {
+            result.push(right_bracket);
+        }
+    }
+
+    result
+}
+
+/** 返回左括号对应的右括号，供描述清理函数识别局部括号说明。 */
+fn matching_right_bracket(character: char) -> Option<char> {
+    match character {
+        '（' => Some('）'),
+        '(' => Some(')'),
+        '【' => Some('】'),
+        '[' => Some(']'),
+        _ => None,
+    }
+}
+
+/** 按常见中英文分隔符拆开描述，便于只移除包含历史选择语义的子句。 */
+fn split_description_clauses(description: &str) -> Vec<&str> {
+    description
+        .split(['。', '；', ';', '\n'])
+        .flat_map(|part| part.split(['，', ',']).collect::<Vec<_>>())
+        .collect()
+}
+
+/** 去掉包住整段描述的一层括号，保留普通描述中的局部括号内容。 */
+fn trim_matching_description_brackets(value: &str) -> String {
+    let trimmed = value.trim();
+    let bracket_pairs = [('（', '）'), ('(', ')'), ('【', '】'), ('[', ']')];
+
+    for (left, right) in bracket_pairs {
+        if trimmed.starts_with(left) && trimmed.ends_with(right) {
+            return trimmed
+                .trim_start_matches(left)
+                .trim_end_matches(right)
+                .trim()
+                .to_owned();
+        }
+    }
+
+    trimmed.to_owned()
+}
+
+/** 识别旧版“满足某输入就选用 Skill”的描述，不再把这类语义提供给模型。 */
+fn is_legacy_activation_phrase(value: &str) -> bool {
+    let normalized = value
+        .chars()
+        .filter(|character| !character.is_whitespace())
+        .collect::<String>()
+        .to_lowercase();
+    let has_selection_verb = [
+        "触发", "激活", "启用", "调用", "选用", "使用", "命中", "trigger", "activate", "invoke",
+        "use", "selected",
+    ]
+    .iter()
+    .any(|keyword| normalized.contains(keyword));
+
+    if !has_selection_verb {
+        return false;
+    }
+
+    [
+        "用户输入",
+        "输入",
+        "用户说",
+        "用户提到",
+        "包含",
+        "关键词",
+        "关键字",
+        "命令",
+        "prompt",
+        "message",
+        "whenuser",
+        "ifuser",
+        "userasks",
+        "userinput",
+        "keyword",
+        "command",
+    ]
+    .iter()
+    .any(|keyword| normalized.contains(keyword))
 }
 
 /** 从 YAML mapping 中读取字符串标量字段；非字符串字段会被忽略。 */
@@ -908,7 +1243,7 @@ fn parse_yaml_value_after_colon(line: &str) -> Option<String> {
         .filter(|value| !value.is_empty())
 }
 
-/** 解析 frontmatter 中的逗号分隔或简单数组字段，用于保留 UI 表单里的标签和语义线索。 */
+/** 解析 frontmatter 中的逗号分隔或简单数组字段，用于保留标签。 */
 fn parse_frontmatter_list(value: &str) -> Vec<String> {
     let trimmed_value = value.trim();
     let list_body = trimmed_value
@@ -937,10 +1272,9 @@ fn trim_yaml_scalar(value: &str) -> String {
 fn normalize_file_skill_input(mut skill: AgentSkill) -> Result<AgentSkill, String> {
     skill.name = normalize_skill_name(&skill.name);
     skill.display_name = skill.display_name.trim().to_owned();
-    skill.description = skill.description.trim().to_owned();
+    skill.description = sanitize_skill_description(&skill.description, &skill.name);
     skill.instructions = skill.instructions.trim().to_owned();
     skill.tags = normalize_terms(skill.tags);
-    skill.triggers = normalize_terms(skill.triggers);
     skill.source = FILE_SKILL_SOURCE.to_owned();
     skill.metadata = None;
 
@@ -1121,7 +1455,7 @@ fn safe_relative_skill_folder(relative_path: &Path) -> Result<String, String> {
     Ok(parts.join("/"))
 }
 
-/** 构造写入磁盘的 SKILL.md，保留 tags/triggers 作为 Cici Note frontmatter 扩展字段。 */
+/** 构造写入磁盘的 SKILL.md，保留 tags 作为 Cici Note frontmatter 扩展字段。 */
 fn build_skill_markdown(skill: &AgentSkill) -> String {
     let mut frontmatter = vec![
         ("name", yaml_quote(&skill.name)),
@@ -1131,10 +1465,8 @@ fn build_skill_markdown(skill: &AgentSkill) -> String {
     if !skill.tags.is_empty() {
         frontmatter.push(("tags", yaml_array(&skill.tags)));
     }
-    if !skill.triggers.is_empty() {
-        frontmatter.push(("triggers", yaml_array(&skill.triggers)));
-    }
 
+    // 旧版 triggers/隐式选择字段不再写入，SKILL.md 只保留能力描述和执行说明。
     let frontmatter_text = frontmatter
         .into_iter()
         .map(|(key, value)| format!("{key}: {value}"))
@@ -1147,18 +1479,13 @@ fn build_skill_markdown(skill: &AgentSkill) -> String {
     )
 }
 
-/** displayName 和模型参考偏好写到 agents/openai.yaml，保持 SKILL.md 兼容 Codex 风格。 */
+/** displayName 写到 agents/openai.yaml，旧版 policy 字段只读取兼容不再新写。 */
 fn write_openai_yaml_override(skill_dir: &Path, skill: &AgentSkill) -> Result<(), String> {
     let agents_dir = skill_dir.join("agents");
     let metadata_path = agents_dir.join("openai.yaml");
     let content = format!(
-        "interface:\n  display_name: {}\npolicy:\n  allow_implicit_invocation: {}\n",
-        yaml_quote(&skill.display_name),
-        if skill.allow_auto_invoke {
-            "true"
-        } else {
-            "false"
-        }
+        "interface:\n  display_name: {}\n",
+        yaml_quote(&skill.display_name)
     );
 
     fs::create_dir_all(&agents_dir).map_err(|error| {
@@ -1720,11 +2047,6 @@ fn normalize_github_repo_name(repo: &str) -> Result<String, String> {
     Ok(repo_name.to_owned())
 }
 
-/** 给文件 skill 派生基础语义线索，仅用于展示和模型能力目录，不参与宿主关键词路由。 */
-fn derive_file_skill_triggers(name: &str) -> Vec<String> {
-    normalize_terms(vec![name.to_owned(), normalize_skill_name(name)])
-}
-
 /** 获取稳定绝对路径；canonicalize 失败时仍尽量基于当前路径生成稳定 ID。 */
 fn stable_absolute_path(path: &Path) -> PathBuf {
     path.canonicalize().unwrap_or_else(|_| {
@@ -1800,7 +2122,7 @@ fn upsert_skill_state_override(connection: &Connection, skill: &AgentSkill) -> R
     upsert_skill(connection, &override_skill)
 }
 
-/** 构造最小状态覆盖 payload，读取时只使用 enabled、allowAutoInvoke 和 updatedAt。 */
+/** 构造最小状态覆盖 payload，读取时只使用 enabled、旧版 allowAutoInvoke 和 updatedAt。 */
 fn skill_state_override_payload(skill: &AgentSkill) -> AgentSkill {
     AgentSkill {
         id: skill.id.clone(),
@@ -1809,7 +2131,6 @@ fn skill_state_override_payload(skill: &AgentSkill) -> AgentSkill {
         description: String::new(),
         instructions: String::new(),
         tags: Vec::new(),
-        triggers: Vec::new(),
         enabled: skill.enabled,
         source: skill.source.clone(),
         allow_auto_invoke: skill.allow_auto_invoke,
@@ -1825,10 +2146,9 @@ fn skill_state_override_payload(skill: &AgentSkill) -> AgentSkill {
 fn normalize_user_skill(mut skill: AgentSkill) -> Result<AgentSkill, String> {
     skill.name = normalize_skill_name(&skill.name);
     skill.display_name = skill.display_name.trim().to_owned();
-    skill.description = skill.description.trim().to_owned();
+    skill.description = sanitize_skill_description(&skill.description, &skill.name);
     skill.instructions = skill.instructions.trim().to_owned();
     skill.tags = normalize_terms(skill.tags);
-    skill.triggers = normalize_terms(skill.triggers);
     skill.source = USER_SKILL_SOURCE.to_owned();
     skill.path = None;
     skill.relative_path = None;
@@ -1884,7 +2204,7 @@ fn normalize_skill_name(name: &str) -> String {
         .join("-")
 }
 
-/** 清理标签或语义线索，去重后限制数量，避免单个 skill 占用过多 prompt。 */
+/** 清理标签，去重后限制数量，避免单个 skill 元数据失控。 */
 fn normalize_terms(terms: Vec<String>) -> Vec<String> {
     let mut seen_terms = HashSet::new();
 
@@ -1971,7 +2291,6 @@ mod tests {
             description: "用于验证文件式保存。".to_owned(),
             instructions: "执行测试 skill。".to_owned(),
             tags: vec!["测试".to_owned()],
-            triggers: vec!["触发".to_owned()],
             enabled: true,
             source: USER_SKILL_SOURCE.to_owned(),
             allow_auto_invoke: true,
@@ -2009,7 +2328,7 @@ mod tests {
         writer.finish().expect("finish zip").into_inner()
     }
 
-    /** 未显式选择时不再根据 action 或触发词激活 Skill。 */
+    /** 未显式选择时不再根据 action 或提示文本选择 Skill。 */
     #[test]
     fn does_not_activate_skill_without_explicit_selection() {
         let settings = crate::storage::default_user_settings();
@@ -2079,6 +2398,39 @@ mod tests {
         assert!(skill.id.starts_with("skill-file-"));
     }
 
+    /** 普通能力描述不应被清理函数重排或改写标点。 */
+    #[test]
+    fn keeps_regular_skill_description_unchanged() {
+        let description = "用于整理会议纪要、提取行动项；保留原始事实。";
+
+        assert_eq!(
+            sanitize_skill_description(description, "meeting-skill"),
+            description
+        );
+    }
+
+    /** 扫描文件式 skill 时会同步迁移删除旧版 triggers 字段。 */
+    #[test]
+    fn scanning_file_skill_removes_legacy_triggers_from_disk() {
+        let temp_dir = tempdir().expect("create tempdir");
+        let root = temp_dir.path().join("skills");
+        let skill_path = write_skill_markdown(
+            &root,
+            "legacy",
+            "---\nname: legacy-skill\ndescription: \"演示技能（用户输入测试时触发）\"\ntriggers: [测试]\n---\n\n执行 legacy 文件技能。\n",
+        );
+        let connection = test_connection();
+        let skills =
+            load_agent_skills_from_roots(&connection, &[root.clone()]).expect("load skills");
+        let files = file_skills(&skills);
+        let markdown = fs::read_to_string(skill_path).expect("read migrated SKILL.md");
+
+        assert_eq!(files.len(), 1);
+        assert_eq!(files[0].description, "演示技能");
+        assert!(!markdown.contains("triggers"));
+        assert!(markdown.contains("description: \"演示技能\""));
+    }
+
     /** 标准 YAML frontmatter 支持 display_name 和数组字段。 */
     #[test]
     fn parses_standard_yaml_frontmatter_fields() {
@@ -2090,7 +2442,6 @@ description: 标准 YAML 描述
 tags:
   - 写作
   - 研究
-triggers: ["总结", "summary"]
 ---
 
 执行 YAML skill。
@@ -2101,7 +2452,35 @@ triggers: ["总结", "summary"]
         assert_eq!(parsed.name, "yaml-demo");
         assert_eq!(parsed.display_name.as_deref(), Some("YAML 展示名"));
         assert_eq!(parsed.tags, vec!["写作", "研究"]);
-        assert_eq!(parsed.triggers, vec!["总结", "summary"]);
+    }
+
+    /** 旧版 triggers 字段只做迁移删除，不再保留到解析结果或重新写入。 */
+    #[test]
+    fn removes_legacy_triggers_frontmatter_field() {
+        let content = "---\nname: legacy\ndescription: 演示技能\ntriggers:\n  - 测试\n  - test\ntags: [演示]\n---\n\n执行演示技能。\n";
+        let sanitized = remove_yaml_frontmatter_field(content, LEGACY_SKILL_ACTIVATION_FIELD)
+            .expect("legacy field removed");
+
+        assert!(!sanitized.contains("triggers"));
+        assert!(sanitized.contains("tags: [演示]"));
+        assert!(sanitized.contains("执行演示技能。"));
+    }
+
+    /** 历史触发条件描述会被替换为中性能力描述，避免进入 UI 和 system prompt。 */
+    #[test]
+    fn sanitizes_description_that_only_contains_activation_phrase() {
+        let description = sanitize_skill_description("当用户输入“测试”时触发", "test-skill");
+
+        assert_eq!(description, DEFAULT_SANITIZED_SKILL_DESCRIPTION);
+    }
+
+    /** 描述中的括号触发条件会被剥离，但前面的真实能力说明仍保留。 */
+    #[test]
+    fn strips_activation_note_from_description_parentheses() {
+        let description =
+            sanitize_skill_description("测试用 Skill（用户输入\"测试\"时触发）", "test-skill");
+
+        assert_eq!(description, "测试用 Skill");
     }
 
     /** 安装本地多 skill 包时，应复制到用户目录并默认停用。 */
@@ -2319,7 +2698,7 @@ triggers: ["总结", "summary"]
         assert_eq!(files[0].name, "valid-skill");
     }
 
-    /** agents/openai.yaml 可以覆盖展示名称，并关闭隐式模型参考。 */
+    /** agents/openai.yaml 可以覆盖展示名称，并保留旧版 allowAutoInvoke 兼容状态。 */
     #[test]
     fn openai_yaml_can_disable_file_skill_auto_invocation() {
         let temp_dir = tempdir().expect("create tempdir");
@@ -2357,10 +2736,8 @@ triggers: ["总结", "summary"]
         let temp_dir = tempdir().expect("create tempdir");
         let root = temp_dir.path().join("skills");
         let connection = test_connection();
-        let mut draft = draft_user_skill("custom-save");
-
-        draft.allow_auto_invoke = false;
-        let saved = save_user_skill_to_root(&connection, &root, draft).expect("save user skill");
+        let saved = save_user_skill_to_root(&connection, &root, draft_user_skill("custom-save"))
+            .expect("save user skill");
         let skill_path = root.join("custom-save").join(SKILL_MARKDOWN_FILE_NAME);
         let metadata_path = root.join("custom-save").join("agents").join("openai.yaml");
         let markdown = fs::read_to_string(&skill_path).expect("read written SKILL.md");
@@ -2374,10 +2751,10 @@ triggers: ["总结", "summary"]
         assert!(markdown.contains("description: \"用于验证文件式保存。\""));
         assert!(markdown.contains("执行测试 skill。"));
         assert!(metadata.contains("display_name: \"测试 Skill\""));
-        assert!(metadata.contains("allow_implicit_invocation: false"));
+        assert!(!metadata.contains("allow_implicit_invocation"));
         assert_eq!(override_skill.source, FILE_SKILL_SOURCE);
         assert!(override_skill.instructions.is_empty());
-        assert!(!override_skill.allow_auto_invoke);
+        assert!(override_skill.allow_auto_invoke);
     }
 
     /** 编辑已有文件式 skill 改动 name 时，应同步迁移目录并清理旧路径状态覆盖。 */
@@ -2434,7 +2811,7 @@ triggers: ["总结", "summary"]
         assert!(!persisted.contains_key(&saved.id));
     }
 
-    /** 文件 skill 的启停和模型参考偏好应按路径 ID 保存在 SQLite 中并在重新加载时生效。 */
+    /** 文件 skill 的启停和旧版 allowAutoInvoke 状态应按路径 ID 保存在 SQLite 中并在重新加载时生效。 */
     #[test]
     fn file_skill_toggle_override_persists_across_loads() {
         let temp_dir = tempdir().expect("create tempdir");

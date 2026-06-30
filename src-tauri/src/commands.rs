@@ -293,7 +293,7 @@ pub async fn save_agent_skill(
     result
 }
 
-/** 启停 skill，并可同步修改是否允许模型参考。 */
+/** 启停 skill；allowAutoInvoke 仅兼容旧客户端 payload。 */
 #[tauri::command]
 pub async fn toggle_agent_skill(
     app: AppHandle,
@@ -328,9 +328,7 @@ pub async fn toggle_agent_skill(
             )
             .duration(started_at.elapsed())
             .entity("skill", skill.id.clone())
-            .metadata(
-                json!({ "enabled": skill.enabled, "allowAutoInvoke": skill.allow_auto_invoke }),
-            ),
+            .metadata(json!({ "enabled": skill.enabled })),
         ),
         Err(error) => logging::write_app_event_best_effort(
             &app,
@@ -1775,6 +1773,11 @@ pub async fn run_agent_turn(
     let request = payload.request;
     let session_id = request.session_id.clone();
     let active_knowledge_base_id = request.active_knowledge_base_id.clone();
+    let mut request_metadata = json!({ "action": request.action.clone() });
+
+    if let Some(selected_skill_id) = request.selected_skill_id.clone() {
+        request_metadata["selectedSkillId"] = json!(selected_skill_id);
+    }
 
     logging::write_app_event_best_effort(
         &app,
@@ -1788,7 +1791,7 @@ pub async fn run_agent_turn(
         .operation_id(operation_id.clone())
         .session_id(session_id.clone())
         .knowledge_base_id(active_knowledge_base_id.clone())
-        .metadata(json!({ "action": request.action.clone(), "selectedSkillId": request.selected_skill_id.clone() })),
+        .metadata(request_metadata),
     );
 
     let settings_app = app.clone();

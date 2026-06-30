@@ -307,7 +307,6 @@ pub struct AgentSkill {
     pub description: String,
     pub instructions: String,
     pub tags: Vec<String>,
-    pub triggers: Vec<String>,
     pub enabled: bool,
     pub source: String,
     pub allow_auto_invoke: bool,
@@ -321,14 +320,14 @@ pub struct AgentSkill {
     pub metadata: Option<HashMap<String, String>>,
 }
 
-/** Skill 全局设置，控制未显式选择时是否把能力目录交给模型参考。 */
+/** 旧版 Skill 全局设置兼容字段；当前运行时始终注入已启用 Skill 的名称和描述。 */
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SkillSettings {
     pub activation_mode: String,
 }
 
-/** 旧版用户设置缺少 skillSettings 时默认允许模型参考能力目录。 */
+/** 旧版用户设置缺少 skillSettings 时使用兼容默认值。 */
 pub fn default_skill_settings() -> SkillSettings {
     SkillSettings {
         activation_mode: "auto".to_owned(),
@@ -725,7 +724,7 @@ pub struct SaveAgentSkillPayload {
     pub skill: AgentSkill,
 }
 
-/** 启停 skill 的命令入参，allowAutoInvoke 缺省时保留当前模型参考配置。 */
+/** 启停 skill 的命令入参，allowAutoInvoke 仅保留旧客户端兼容性。 */
 #[derive(Clone, Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ToggleAgentSkillPayload {
