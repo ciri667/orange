@@ -291,8 +291,6 @@ export function WorkspaceShell() {
   const [appEventLogs, setAppEventLogs] = useState<AppEventLog[]>([]);
   const [searchTerm, setSearchTerm] = useState("");
   const [agentPrompt, setAgentPrompt] = useState("");
-  /** 当前输入区显式选择的 skill；空字符串表示由模型按能力目录自主参考。 */
-  const [selectedSkillId, setSelectedSkillId] = useState("");
   const [collapsedFolderPaths, setCollapsedFolderPaths] = useState<Set<string>>(new Set());
   const [isSessionListOpen, setIsSessionListOpen] = useState(false);
   const [isSessionContextOpen, setIsSessionContextOpen] = useState(false);
@@ -1605,7 +1603,6 @@ export function WorkspaceShell() {
         prompt,
         action,
         optimisticMessage.id,
-        selectedSkillId || undefined,
       );
 
       commitSnapshot(result.snapshot);
@@ -1736,7 +1733,6 @@ export function WorkspaceShell() {
       const nextSkills = await loadAgentSkills();
 
       setAgentSkills(nextSkills);
-      setSelectedSkillId((currentSkillId) => (currentSkillId === skill.id ? savedSkill.id : currentSkillId));
       setNotice("已保存 Skill。");
 
       return savedSkill;
@@ -1754,12 +1750,8 @@ export function WorkspaceShell() {
 
     try {
       const result = await installAgentSkill(payload);
-      const firstInstalledSkill = result.installedSkills[0];
 
       setAgentSkills(result.skills);
-      if (firstInstalledSkill) {
-        setSelectedSkillId(firstInstalledSkill.id);
-      }
       setNotice(buildSkillInstallNotice(result, payload.enableAfterInstall));
 
       return result;
@@ -1773,18 +1765,15 @@ export function WorkspaceShell() {
     }
   }
 
-  /** 启停 skill 或切换模型参考状态，禁用后也会清除输入区的显式选择。 */
-  async function handleToggleSkill(skillId: string, enabled: boolean, allowAutoInvoke?: boolean) {
+  /** 启停 skill 后刷新列表；启用的 skill 会以名称和描述进入 Agent system prompt。 */
+  async function handleToggleSkill(skillId: string, enabled: boolean) {
     beginBusy("正在更新 Skill...");
 
     try {
-      await toggleAgentSkill(skillId, enabled, allowAutoInvoke);
+      await toggleAgentSkill(skillId, enabled);
       const nextSkills = await loadAgentSkills();
 
       setAgentSkills(nextSkills);
-      if (!enabled && selectedSkillId === skillId) {
-        setSelectedSkillId("");
-      }
       setNotice("已更新 Skill。");
     } catch (error) {
       setNotice(error instanceof Error ? error.message : String(error));
@@ -1802,9 +1791,6 @@ export function WorkspaceShell() {
       const nextSkills = await deleteAgentSkill(skillId);
 
       setAgentSkills(nextSkills);
-      if (selectedSkillId === skillId) {
-        setSelectedSkillId("");
-      }
       setNotice("已删除 Skill。");
     } catch (error) {
       setNotice(error instanceof Error ? error.message : String(error));
@@ -2006,7 +1992,6 @@ export function WorkspaceShell() {
           notes={currentSnapshot.notes}
           prompt={agentPrompt}
           skills={agentSkills}
-          selectedSkillId={selectedSkillId}
           isBusy={isBusy}
           isSessionListOpen={isSessionListOpen}
           isSessionContextOpen={isSessionContextOpen}
@@ -2019,7 +2004,6 @@ export function WorkspaceShell() {
           onDeleteSession={handleDeleteSession}
           onToggleScopeKnowledgeBase={handleToggleScopeKnowledgeBase}
           onPromptChange={setAgentPrompt}
-          onSelectedSkillChange={setSelectedSkillId}
           onSubmitPrompt={() => handleSubmitPrompt("ask")}
         />
       </main>

@@ -92,7 +92,7 @@ export function SettingsDrawer({
   onSaveSettings: (settings: UserSettings) => Promise<void> | void;
   onSaveSkill: (skill: AgentSkill) => Promise<AgentSkill | void> | AgentSkill | void;
   onInstallSkill: (payload: InstallAgentSkillPayload) => Promise<InstallAgentSkillResult> | InstallAgentSkillResult;
-  onToggleSkill: (skillId: string, enabled: boolean, allowAutoInvoke?: boolean) => Promise<void> | void;
+  onToggleSkill: (skillId: string, enabled: boolean) => Promise<void> | void;
   onDeleteSkill: (skillId: string) => Promise<void> | void;
   onOpenUserSkillsFolder: () => Promise<void> | void;
   onSaveApiKey: (apiKey: string) => Promise<void> | void;
@@ -116,8 +116,6 @@ export function SettingsDrawer({
   const [eventLogCategory, setEventLogCategory] = useState<AppEventLogCategory | "">("");
   /** 已启用 skill 数量，用于设置摘要快速说明能力状态。 */
   const enabledSkillCount = skills.filter((skill) => skill.enabled).length;
-  /** 允许模型语义参考的已启用 skill 数量，用于提示能力目录覆盖范围。 */
-  const autoSkillCount = skills.filter((skill) => skill.enabled && skill.allowAutoInvoke).length;
   /** 文件式 skill 数量用于确认用户目录扫描是否已生效。 */
   const fileSkillCount = skills.filter((skill) => skill.source === "file").length;
   /** 左侧导航项只汇总脱敏状态和轻量计数，避免路径、密钥或请求内容进入 UI 状态元数据。 */
@@ -145,10 +143,10 @@ export function SettingsDrawer({
         id: "skills",
         group: "配置",
         label: "Skills 能力",
-        description: "模型语义参考和能力管理",
+        description: "启用状态和能力管理",
         meta: `${enabledSkillCount}/${skills.length}`,
         icon: Sparkles,
-        tone: settingsDraft.skillSettings.activationMode === "auto" ? "success" : "neutral",
+        tone: enabledSkillCount > 0 ? "success" : "neutral",
       },
       {
         id: "eventLogs",
@@ -175,7 +173,6 @@ export function SettingsDrawer({
       enabledSkillCount,
       knowledgeBases,
       settingsDraft.modelConfig.enabled,
-      settingsDraft.skillSettings.activationMode,
       skills.length,
     ],
   );
@@ -199,7 +196,7 @@ export function SettingsDrawer({
       metadata: {
         modelEnabled: nextSettings.modelConfig.enabled,
         privacyPolicy: nextSettings.privacyPolicy,
-        skillActivationMode: nextSettings.skillSettings.activationMode,
+        enabledSkillCount,
       },
     });
 
@@ -517,29 +514,14 @@ export function SettingsDrawer({
               </strong>
             </div>
             <div>
-              <span>模型参考</span>
-              <strong>{settingsDraft.skillSettings.activationMode === "auto" ? `${autoSkillCount} 个` : "已关闭"}</strong>
+              <span>Prompt 注入</span>
+              <strong>{enabledSkillCount} 个</strong>
             </div>
             <div>
               <span>文件 Skills</span>
               <strong>{fileSkillCount} 个</strong>
             </div>
           </div>
-          <label className="toggle-row">
-            <input
-              checked={settingsDraft.skillSettings.activationMode === "auto"}
-              onChange={(event) =>
-                setSettingsDraft((currentSettings) => ({
-                  ...currentSettings,
-                  skillSettings: {
-                    activationMode: event.target.checked ? "auto" : "manual",
-                  },
-                }))
-              }
-              type="checkbox"
-            />
-            <span>允许未显式选择时让模型参考 Skill 目录</span>
-          </label>
         </section>
       );
     }

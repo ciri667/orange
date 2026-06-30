@@ -1754,14 +1754,10 @@ textarea:disabled {
   font-weight: 700;
 }
 
-.skill-select select {
-  min-width: 0;
-  max-width: 210px;
-  border: 0;
-  outline: 0;
-  background: transparent;
+.skill-select strong {
   color: #24323c;
   font-size: 12px;
+  font-weight: 700;
 }
 
 .agent-input textarea {

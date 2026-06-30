@@ -7,9 +7,9 @@ import {
   MessageSquareText,
   PanelRightOpen,
   Plus,
-  Sparkles,
   Trash2,
   X,
+  Sparkles,
 } from "lucide-react";
 import ReactMarkdown from "react-markdown";
 import rehypeSanitize from "rehype-sanitize";
@@ -33,7 +33,6 @@ export function AgentPanel({
   notes,
   prompt,
   skills,
-  selectedSkillId,
   isBusy,
   isSessionListOpen,
   isSessionContextOpen,
@@ -46,7 +45,6 @@ export function AgentPanel({
   onDeleteSession,
   onToggleScopeKnowledgeBase,
   onPromptChange,
-  onSelectedSkillChange,
   onSubmitPrompt,
 }: {
   sessions: AgentSession[];
@@ -56,7 +54,6 @@ export function AgentPanel({
   notes: Note[];
   prompt: string;
   skills: AgentSkill[];
-  selectedSkillId: string;
   isBusy: boolean;
   isSessionListOpen: boolean;
   isSessionContextOpen: boolean;
@@ -69,7 +66,6 @@ export function AgentPanel({
   onDeleteSession: (sessionId: string) => void;
   onToggleScopeKnowledgeBase: (knowledgeBaseId: string) => void;
   onPromptChange: (value: string) => void;
-  onSelectedSkillChange: (skillId: string) => void;
   onSubmitPrompt: () => void;
 }) {
   /** 当前会话选中的知识库 ID，用于驱动范围摘要和多选列表。 */
@@ -82,10 +78,8 @@ export function AgentPanel({
   const selectedScopeLabel = getScopeSummaryLabel(activeSession, knowledgeBases);
   /** 当前会话的写入状态，用不可点击标签展示，避免和上下文弹窗入口混淆。 */
   const writeStatus = activeSession.pendingChange?.status === "pending" ? "待确认 diff" : "写入需确认";
-  /** 只有已启用 skill 可以显式参与本轮；禁用项不会出现在输入区选择器中。 */
-  const enabledSkills = skills.filter((skill) => skill.enabled);
-  /** 当前选择必须存在于已启用列表，否则回退到自动，避免安装后停用 skill 造成 select 值游离。 */
-  const visibleSelectedSkillId = enabledSkills.some((skill) => skill.id === selectedSkillId) ? selectedSkillId : "";
+  /** 已启用 skill 会以名称和描述进入 system prompt，具体是否使用交给 Agent 判断。 */
+  const enabledSkillCount = skills.filter((skill) => skill.enabled).length;
 
   return (
     <aside className="agent-panel" aria-label="AI 侧栏">
@@ -267,23 +261,11 @@ export function AgentPanel({
 
       <footer className="agent-input">
         <div className="agent-input-toolbar">
-          <label className="skill-select">
+          <div className="skill-select" aria-label="当前启用 Skills">
             <Sparkles size={14} />
             <span>Skill</span>
-            <select
-              value={visibleSelectedSkillId}
-              onChange={(event) => onSelectedSkillChange(event.target.value)}
-              disabled={isBusy}
-              aria-label="选择本轮 Agent Skill"
-            >
-              <option value="">自动</option>
-              {enabledSkills.map((skill) => (
-                <option key={skill.id} value={skill.id}>
-                  {skill.displayName}
-                </option>
-              ))}
-            </select>
-          </label>
+            <strong>{enabledSkillCount} 个已启用</strong>
+          </div>
         </div>
         <textarea
           value={prompt}

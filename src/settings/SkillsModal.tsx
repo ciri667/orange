@@ -19,7 +19,7 @@ function isUserManagedSkill(skill: AgentSkill) {
   return skill.source === "file" || skill.source === "user";
 }
 
-/** Skill 表单草稿，标签和语义线索在 UI 中用逗号分隔编辑。 */
+/** Skill 表单草稿，标签在 UI 中用逗号分隔编辑。 */
 interface SkillFormDraft {
   id: string;
   name: string;
@@ -27,9 +27,7 @@ interface SkillFormDraft {
   description: string;
   instructions: string;
   tagsText: string;
-  triggersText: string;
   enabled: boolean;
-  allowAutoInvoke: boolean;
 }
 
 /** Skill 安装表单草稿；本地来源 source 留空时由 Tauri 打开系统选择器。 */
@@ -68,12 +66,12 @@ export function SkillsModal({
   isBusy: boolean;
   onSaveSkill: (skill: AgentSkill) => Promise<AgentSkill | void> | AgentSkill | void;
   onInstallSkill: (payload: InstallAgentSkillPayload) => Promise<InstallAgentSkillResult> | InstallAgentSkillResult;
-  onToggleSkill: (skillId: string, enabled: boolean, allowAutoInvoke?: boolean) => Promise<void> | void;
+  onToggleSkill: (skillId: string, enabled: boolean) => Promise<void> | void;
   onDeleteSkill: (skillId: string) => Promise<void> | void;
   onOpenUserSkillsFolder: () => Promise<void> | void;
   onClose: () => void;
 }) {
-  /** 搜索词同时匹配名称、说明、标签和语义线索。 */
+  /** 搜索词同时匹配名称、说明和标签。 */
   const [searchTerm, setSearchTerm] = useState("");
   /** 来源筛选帮助用户区分内置、文件扫描和 UI 创建的 skill。 */
   const [sourceFilter, setSourceFilter] = useState<SkillSourceFilter>("all");
@@ -116,7 +114,6 @@ export function SkillsModal({
           skill.path ?? "",
           skill.relativePath ?? "",
           ...skill.tags,
-          ...skill.triggers,
           ...Object.values(skill.metadata ?? {}),
         ]
           .join(" ")
@@ -132,7 +129,7 @@ export function SkillsModal({
   /** 当前详情 skill；列表过滤后仍保留原选择，避免搜索时误清空表单。 */
   const selectedSkill = skills.find((skill) => skill.id === selectedSkillId) ?? filteredSkills[0] ?? skills[0];
 
-  /** 打开新建用户 skill 表单，默认允许模型参考但不预填语义线索。 */
+  /** 打开新建用户 skill 表单，默认启用。 */
   function handleCreateSkill() {
     setSelectedSkillId("");
     setInstallDraft(null);
@@ -143,9 +140,7 @@ export function SkillsModal({
       description: "",
       instructions: "",
       tagsText: "",
-      triggersText: "",
       enabled: true,
-      allowAutoInvoke: true,
     });
   }
 
@@ -164,9 +159,7 @@ export function SkillsModal({
       description: skill.description,
       instructions: skill.instructions,
       tagsText: skill.tags.join(", "),
-      triggersText: skill.triggers.join(", "),
       enabled: skill.enabled,
-      allowAutoInvoke: skill.allowAutoInvoke,
     });
   }
 
@@ -194,10 +187,9 @@ export function SkillsModal({
       description: formDraft.description,
       instructions: formDraft.instructions,
       tags: splitTerms(formDraft.tagsText),
-      triggers: splitTerms(formDraft.triggersText),
       enabled: formDraft.enabled,
       source: existingSkill?.source ?? "user",
-      allowAutoInvoke: formDraft.allowAutoInvoke,
+      allowAutoInvoke: existingSkill?.allowAutoInvoke ?? true,
       createdAt: existingSkill?.createdAt ?? now,
       updatedAt: now,
       path: existingSkill?.path,
@@ -428,7 +420,7 @@ export function SkillsModal({
   );
 }
 
-/** Skill 详情页，展示完整说明并提供启停与模型参考开关。 */
+/** Skill 详情页，展示完整说明并提供启停开关。 */
 function SkillDetail({
   skill,
   isBusy,
@@ -438,7 +430,7 @@ function SkillDetail({
 }: {
   skill: AgentSkill;
   isBusy: boolean;
-  onToggleSkill: (skillId: string, enabled: boolean, allowAutoInvoke?: boolean) => Promise<void> | void;
+  onToggleSkill: (skillId: string, enabled: boolean) => Promise<void> | void;
   onEditSkill: (skill: AgentSkill) => void;
   onDeleteSkill: (skill: AgentSkill) => Promise<void> | void;
 }) {
@@ -482,15 +474,6 @@ function SkillDetail({
           />
           <span>启用 Skill</span>
         </label>
-        <label className="toggle-row">
-          <input
-            checked={skill.allowAutoInvoke}
-            onChange={(event) => onToggleSkill(skill.id, skill.enabled, event.target.checked)}
-            type="checkbox"
-            disabled={isBusy || !skill.enabled}
-          />
-          <span>允许模型参考</span>
-        </label>
       </div>
       <div className="skill-tags">
         {skill.tags.map((tag) => (
@@ -500,10 +483,6 @@ function SkillDetail({
       <section className="skill-instructions">
         <h4>执行说明</h4>
         <p>{skill.instructions}</p>
-      </section>
-      <section className="skill-instructions">
-        <h4>语义线索</h4>
-        <p>{skill.triggers.length ? skill.triggers.join("、") : "未设置语义线索。"}</p>
       </section>
     </article>
   );
@@ -704,26 +683,10 @@ function SkillForm({
         <span>标签</span>
         <input value={draft.tagsText} onChange={(event) => updateDraft("tagsText", event.target.value)} placeholder="写作, 研究" />
       </label>
-      <label>
-        <span>语义线索</span>
-        <input
-          value={draft.triggersText}
-          onChange={(event) => updateDraft("triggersText", event.target.value)}
-          placeholder="改写, 总结, 引用"
-        />
-      </label>
       <div className="skill-switches">
         <label className="toggle-row">
           <input checked={draft.enabled} onChange={(event) => updateDraft("enabled", event.target.checked)} type="checkbox" />
           <span>启用</span>
-        </label>
-        <label className="toggle-row">
-          <input
-            checked={draft.allowAutoInvoke}
-            onChange={(event) => updateDraft("allowAutoInvoke", event.target.checked)}
-            type="checkbox"
-          />
-          <span>允许模型参考</span>
         </label>
       </div>
       <div className="modal-actions">
