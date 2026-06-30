@@ -2,6 +2,8 @@ import { convertFileSrc } from "@tauri-apps/api/core";
 import { ChevronDown, Clock3, Eye, FileDown, FilePenLine, FileText, Save, Trash2 } from "lucide-react";
 import { useState } from "react";
 import type { DocumentFileType, DocumentPreview, ExportFormat, KnowledgeBase, WorkspaceDocument } from "../shared/types";
+import { LineNumberedTextarea } from "./LineNumberedTextarea";
+import { countLogicalLines } from "./lineNumberUtils";
 
 /** 单个文档类型对应的导出菜单项，确保 PDF 不展示转 Markdown。 */
 const DOCUMENT_EXPORT_OPTIONS: Record<DocumentFileType, Array<{ format: ExportFormat; label: string }>> = {
@@ -24,7 +26,7 @@ const DOCUMENT_EXPORT_OPTIONS: Record<DocumentFileType, Array<{ format: ExportFo
 /** 格式化纯文本文档的阅读统计，用于保持 txt 编辑体验与 Markdown 面板一致。 */
 function getTextStats(content: string) {
   const words = content.replace(/\s+/g, "").length;
-  const lines = content ? content.split(/\r?\n/).length : 0;
+  const lines = countLogicalLines(content);
 
   return { words, lines };
 }
@@ -185,8 +187,9 @@ export function DocumentPane({
       </div>
 
       {isTextDocument ? (
-        <textarea
-          className="markdown-editor plain-text-editor"
+        <LineNumberedTextarea
+          className="plain-text-editor"
+          fileType="txt"
           value={content}
           onChange={(event) => onContentChange(event.target.value)}
           onKeyDown={(event) => {
@@ -197,7 +200,7 @@ export function DocumentPane({
             }
           }}
           spellCheck={false}
-          aria-label="当前 TXT 文档内容"
+          ariaLabel="当前 TXT 文档内容"
         />
       ) : (
         <DocumentPreviewView

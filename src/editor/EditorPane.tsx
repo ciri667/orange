@@ -9,6 +9,7 @@ import type { Options as RehypeSanitizeOptions } from "rehype-sanitize";
 import remarkGfm from "remark-gfm";
 import { DiffPanel } from "../diff/DiffPanel";
 import type { ExportFormat, KnowledgeBase, MarkdownViewMode, Note, ProposedChange } from "../shared/types";
+import { LineNumberedTextarea } from "./LineNumberedTextarea";
 import { useSyncedMarkdownScroll } from "./useSyncedMarkdownScroll";
 
 /** 编辑器视图切换按钮配置，集中维护标签、图标和 aria 文案。 */
@@ -227,9 +228,9 @@ export function EditorPane({
 
       <div className={`editor-body mode-${viewMode}`}>
         {shouldShowEditor && (
-          <textarea
-            className="markdown-editor"
+          <LineNumberedTextarea
             ref={editorRef}
+            fileType="markdown"
             value={note.content}
             onChange={(event) => onContentChange(event.target.value)}
             onPaste={handlePaste}
@@ -242,7 +243,7 @@ export function EditorPane({
             }}
             onScroll={handleEditorScroll}
             spellCheck={false}
-            aria-label="当前 Markdown 笔记内容"
+            ariaLabel="当前 Markdown 笔记内容"
           />
         )}
         {shouldShowPreview && (
