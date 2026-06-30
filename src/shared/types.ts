@@ -63,8 +63,8 @@ export interface KnowledgeBase {
 /** Skill 启用状态，供设置页筛选和展示启用数量。 */
 export type AgentSkillStatus = "enabled" | "disabled";
 
-/** Skill 来源，内置能力只能禁用，文件能力来自用户 Skills 目录并允许管理。 */
-export type AgentSkillSource = "built-in" | "file";
+/** Skill 来源，内置能力只能禁用，自定义能力来自用户 Skills 目录并允许管理。 */
+export type AgentSkillSource = "built-in" | "custom";
 
 /** Skill 安装来源类型，URL、本地文件夹和本地 zip 走不同的后端准备流程。 */
 export type SkillInstallSourceType = "url" | "localFolder" | "localArchive";
@@ -84,11 +84,11 @@ export interface AgentSkill {
   source: AgentSkillSource;
   createdAt: string;
   updatedAt: string;
-  /** 文件式 skill 的 SKILL.md 绝对路径，内置 skill 为空。 */
+  /** 自定义 skill 的 SKILL.md 绝对路径，内置 skill 为空。 */
   path?: string;
-  /** 文件式 skill 相对用户 skills 根目录的路径，用于列表展示和排序。 */
+  /** 自定义 skill 相对用户 skills 根目录的路径，用于列表展示和排序。 */
   relativePath?: string;
-  /** 文件式 skill 的解析元数据，首版只记录覆盖来源等轻量信息。 */
+  /** 自定义 skill 的解析元数据，首版只记录覆盖来源等轻量信息。 */
   metadata?: Record<string, string>;
 }
 

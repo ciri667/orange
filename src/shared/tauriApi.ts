@@ -177,20 +177,20 @@ const browserBuiltInSkills: AgentSkill[] = [
   },
 ];
 
-/** 浏览器开发态模拟的文件式 skill，验证 UI 能展示 SKILL.md 来源和路径。 */
-const browserFileSkills: AgentSkill[] = [
+/** 浏览器开发态模拟的自定义 skill，验证 UI 能展示 SKILL.md 来源和路径。 */
+const browserCustomSkills: AgentSkill[] = [
   {
-    id: "skill-file-browser-demo",
+    id: "skill-custom-browser-demo",
     name: "meeting-note-polish",
     displayName: "会议纪要润色",
-    description: "来自 ~/.cici-note/skills 的示例 SKILL.md，用于模拟文件式 skill 扫描结果。",
+    description: "来自 ~/.cici-note/skills 的示例 SKILL.md，用于模拟自定义 skill 扫描结果。",
     instructions:
       "读取当前会议纪要上下文，保持事实和行动项不变，输出更清晰的 Markdown 结构。涉及写入时必须生成待确认 diff。",
-    tags: ["文件", "会议", "写作"],
+    tags: ["自定义", "会议", "写作"],
     enabled: true,
-    source: "file",
-    createdAt: "文件",
-    updatedAt: "文件",
+    source: "custom",
+    createdAt: "自定义",
+    updatedAt: "自定义",
     path: "~/.cici-note/skills/meeting-note-polish/SKILL.md",
     relativePath: "meeting-note-polish/SKILL.md",
     metadata: {
@@ -200,7 +200,7 @@ const browserFileSkills: AgentSkill[] = [
 ];
 
 /** 浏览器 fallback 的临时 skills 状态，模拟桌面端 SQLite 持久化结果。 */
-let browserAgentSkills: AgentSkill[] = cloneAgentSkills([...browserBuiltInSkills, ...browserFileSkills]);
+let browserAgentSkills: AgentSkill[] = cloneAgentSkills([...browserBuiltInSkills, ...browserCustomSkills]);
 
 declare global {
   interface Window {
@@ -393,7 +393,7 @@ export async function saveAgentSkill(skill: AgentSkill): Promise<AgentSkill> {
       throw new Error("内置 skill 不能编辑，只能启用或禁用。");
     }
 
-    const normalizedSkill = normalizeBrowserFileSkill(skill);
+    const normalizedSkill = normalizeBrowserCustomSkill(skill);
     const existingIndex = browserAgentSkills.findIndex((item) => item.id === normalizedSkill.id);
     const hasNameConflict = existingIndex >= 0 && browserAgentSkills[existingIndex].id !== skill.id;
     const skillsWithoutPrevious = browserAgentSkills.filter((item) => item.id !== skill.id);
@@ -442,7 +442,7 @@ export async function toggleAgentSkill(
   });
 }
 
-/** 删除用户自建 skill；文件式 skill 会移除对应 SKILL.md 目录。 */
+/** 删除用户自建 skill；自定义 skill 会移除对应 SKILL.md 目录。 */
 export async function deleteAgentSkill(skillId: string): Promise<AgentSkill[]> {
   if (!isTauriRuntime()) {
     const skill = browserAgentSkills.find((item) => item.id === skillId);
@@ -1538,12 +1538,12 @@ function cloneUserSettings(settings: UserSettings): UserSettings {
   };
 }
 
-/** 归一化浏览器开发态用户 skill，并模拟桌面端写入 SKILL.md 后返回 file 来源。 */
-function normalizeBrowserFileSkill(skill: AgentSkill): AgentSkill {
+/** 归一化浏览器开发态用户 skill，并模拟桌面端写入 SKILL.md 后返回 custom 来源。 */
+function normalizeBrowserCustomSkill(skill: AgentSkill): AgentSkill {
   const now = formatLocalDateTime();
   const normalizedName = normalizeBrowserSkillName(skill.name || skill.displayName || skill.id);
   const relativePath = `${normalizedName}/SKILL.md`;
-  const nextId = `skill-file-browser-${normalizedName || createLocalId("skill")}`;
+  const nextId = `skill-custom-browser-${normalizedName || createLocalId("skill")}`;
   const normalizedSkill: AgentSkill = {
     ...skill,
     id: nextId,
@@ -1553,7 +1553,7 @@ function normalizeBrowserFileSkill(skill: AgentSkill): AgentSkill {
     instructions: skill.instructions.trim(),
     tags: normalizeBrowserTerms(skill.tags),
     enabled: skill.enabled,
-    source: "file",
+    source: "custom",
     createdAt: skill.createdAt.trim() || now,
     updatedAt: now,
     path: `~/.cici-note/skills/${relativePath}`,
@@ -1584,7 +1584,7 @@ function installBrowserMockSkill(payload: InstallAgentSkillPayload): InstallAgen
   const now = formatLocalDateTime();
   const sourceSummary = summarizeBrowserSkillInstallSource(payload);
   const skillName = buildBrowserInstalledSkillName(payload);
-  const normalizedSkill = normalizeBrowserFileSkill({
+  const normalizedSkill = normalizeBrowserCustomSkill({
     id: "",
     name: skillName,
     displayName: `安装 Skill ${skillName}`,
@@ -1593,7 +1593,7 @@ function installBrowserMockSkill(payload: InstallAgentSkillPayload): InstallAgen
       "这是浏览器开发态的安装模拟能力。真实桌面端会在安装后默认停用第三方 skill，用户审阅并启用后才会进入 Runtime。",
     tags: ["安装", "模拟"],
     enabled: payload.enableAfterInstall,
-    source: "file",
+    source: "custom",
     createdAt: now,
     updatedAt: now,
     metadata: {

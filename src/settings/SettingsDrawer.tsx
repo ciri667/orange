@@ -116,8 +116,8 @@ export function SettingsDrawer({
   const [eventLogCategory, setEventLogCategory] = useState<AppEventLogCategory | "">("");
   /** 已启用 skill 数量，用于设置摘要快速说明能力状态。 */
   const enabledSkillCount = skills.filter((skill) => skill.enabled).length;
-  /** 文件式 skill 数量用于确认用户目录扫描是否已生效。 */
-  const fileSkillCount = skills.filter((skill) => skill.source === "file").length;
+  /** 自定义 skill 数量用于确认用户目录扫描是否已生效。 */
+  const customSkillCount = skills.filter((skill) => skill.source === "custom").length;
   /** 左侧导航项只汇总脱敏状态和轻量计数，避免路径、密钥或请求内容进入 UI 状态元数据。 */
   const settingsNavItems = useMemo<SettingsSectionNavItem[]>(
     () => [
@@ -518,8 +518,8 @@ export function SettingsDrawer({
               <strong>{enabledSkillCount} 个</strong>
             </div>
             <div>
-              <span>文件 Skills</span>
-              <strong>{fileSkillCount} 个</strong>
+              <span>自定义 Skills</span>
+              <strong>{customSkillCount} 个</strong>
             </div>
           </div>
         </section>

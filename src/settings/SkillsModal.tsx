@@ -14,9 +14,9 @@ import type {
 /** Skills 列表来源筛选，all 用于展示完整合并结果。 */
 type SkillSourceFilter = "all" | AgentSkillSource;
 
-/** 用户目录中的文件式 skill 允许用户编辑和删除。 */
+/** 用户目录中的自定义 skill 允许用户编辑和删除。 */
 function isUserManagedSkill(skill: AgentSkill) {
-  return skill.source === "file";
+  return skill.source === "custom";
 }
 
 /** Skill 表单草稿，标签在 UI 中用逗号分隔编辑。 */
@@ -73,7 +73,7 @@ export function SkillsModal({
 }) {
   /** 搜索词同时匹配名称、说明和标签。 */
   const [searchTerm, setSearchTerm] = useState("");
-  /** 来源筛选帮助用户区分内置和用户目录文件式 skill。 */
+  /** 来源筛选帮助用户区分内置和用户目录自定义 skill。 */
   const [sourceFilter, setSourceFilter] = useState<SkillSourceFilter>("all");
   /** 标签筛选使用单选，避免多标签组合导致列表空状态难理解。 */
   const [activeTag, setActiveTag] = useState("");
@@ -96,11 +96,11 @@ export function SkillsModal({
     () => ({
       all: skills.length,
       "built-in": skills.filter((skill) => skill.source === "built-in").length,
-      file: skills.filter((skill) => skill.source === "file").length,
+      custom: skills.filter((skill) => skill.source === "custom").length,
     }),
     [skills],
   );
-  /** 根据搜索词、来源和标签得到展示列表，后端已保证内置、文件、用户的合并顺序。 */
+  /** 根据搜索词、来源和标签得到展示列表，后端已保证内置、自定义的合并顺序。 */
   const filteredSkills = useMemo(
     () =>
       skills.filter((skill) => {
@@ -187,7 +187,7 @@ export function SkillsModal({
       instructions: formDraft.instructions,
       tags: splitTerms(formDraft.tagsText),
       enabled: formDraft.enabled,
-      source: existingSkill?.source ?? "file",
+      source: existingSkill?.source ?? "custom",
       createdAt: existingSkill?.createdAt ?? now,
       updatedAt: now,
       path: existingSkill?.path,
@@ -265,7 +265,7 @@ export function SkillsModal({
     }
   }
 
-  /** 删除用户自建 skill 前二次确认，文件式 skill 会移除用户目录中的对应文件夹。 */
+  /** 删除用户自建 skill 前二次确认，自定义 skill 会移除用户目录中的对应文件夹。 */
   async function handleDeleteSkill(skill: AgentSkill) {
     if (!isUserManagedSkill(skill)) {
       return;
@@ -273,7 +273,7 @@ export function SkillsModal({
 
     setPendingConfirmation({
       title: "删除 Skill",
-      message: `删除 Skill「${skill.displayName}」？文件式 Skill 会移除用户 Skills 目录中的对应文件夹。`,
+      message: `删除 Skill「${skill.displayName}」？自定义 Skill 会移除用户 Skills 目录中的对应文件夹。`,
       confirmLabel: "删除 Skill",
       cancelLabel: "取消",
       tone: "danger",
@@ -322,7 +322,7 @@ export function SkillsModal({
               <input value={searchTerm} onChange={(event) => setSearchTerm(event.target.value)} placeholder="搜索 skill" />
             </div>
             <div className="skill-source-filter" aria-label="Skill 来源筛选">
-              {(["all", "built-in", "file"] as SkillSourceFilter[]).map((source) => (
+              {(["all", "built-in", "custom"] as SkillSourceFilter[]).map((source) => (
                 <button
                   className={sourceFilter === source ? "active" : ""}
                   key={source}
@@ -456,7 +456,7 @@ function SkillDetail({
         </div>
       </div>
       <p>{skill.description}</p>
-      {skill.source === "file" && (
+      {skill.source === "custom" && (
         <section className="skill-path-block">
           <h4>SKILL.md 路径</h4>
           <code>{skill.path ?? skill.relativePath ?? "未返回路径"}</code>
@@ -490,7 +490,7 @@ function SkillDetail({
 function sourceLabel(source: AgentSkillSource) {
   const labels: Record<AgentSkillSource, string> = {
     "built-in": "内置",
-    file: "文件",
+    custom: "自定义",
   };
 
   return labels[source];
@@ -505,14 +505,14 @@ function sourceFilterLabel(source: SkillSourceFilter) {
   return sourceLabel(source);
 }
 
-/** 详情页来源标题使用英文短标签，用户目录文件 skill 和只读外部文件 skill 分开说明。 */
+/** 详情页来源标题使用英文短标签，用户目录自定义 skill 展示为可管理项。 */
 function sourceHeading(skill: AgentSkill) {
   const labels: Record<AgentSkillSource, string> = {
     "built-in": "Built-in Skill",
-    file: "File Skill",
+    custom: "Custom Skill",
   };
 
-  return isUserManagedSkill(skill) ? "User Skill" : labels[skill.source];
+  return isUserManagedSkill(skill) ? "Custom Skill" : labels[skill.source];
 }
 
 /** 第三方 skill 安装表单，支持 URL、本地文件夹和本地 zip 三种来源。 */
