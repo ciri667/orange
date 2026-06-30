@@ -1160,6 +1160,7 @@ textarea:disabled {
 }
 
 .agent-panel {
+  position: relative;
   display: flex;
   min-width: 0;
   gap: 12px;
@@ -1216,12 +1217,37 @@ textarea:disabled {
   box-shadow: var(--shadow);
 }
 
+.session-popover {
+  /* 会话历史必须脱离右侧栏 flex 流，避免切换会话时被消息区和输入区压缩。 */
+  position: absolute;
+  top: 18px;
+  bottom: 18px;
+  left: 18px;
+  right: 18px;
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr);
+  z-index: 10;
+  max-height: none;
+  overflow: hidden;
+}
+
+.context-popover {
+  max-height: min(38vh, 320px);
+}
+
 .session-list,
 .scope-option-list,
 .settings-kb-list {
   display: grid;
   gap: 8px;
   margin-top: 12px;
+}
+
+.session-list {
+  /* 列表区域独立滚动，弹层标题和可用高度保持稳定。 */
+  align-content: start;
+  overflow: auto;
+  padding-right: 2px;
 }
 
 .session-row {

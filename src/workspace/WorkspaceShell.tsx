@@ -1464,6 +1464,24 @@ export function WorkspaceShell() {
     }
   }
 
+  /** 切换会话历史浮层；日志只记录状态和数量，不写入会话标题、消息正文或路径。 */
+  function handleToggleSessionList() {
+    const nextOpen = !isSessionListOpen;
+
+    logInfo("切换会话历史浮层。", {
+      category: "frontend",
+      event: "toggle_session_list",
+      status: nextOpen ? "opened" : "closed",
+      metadata: {
+        sessionCount: currentSnapshot.sessions.length,
+        hasActivePendingChange: activeSession.pendingChange?.status === "pending",
+      },
+    });
+    setIsSessionListOpen(nextOpen);
+    setIsSessionContextOpen(false);
+    setIsScopeSelectorOpen(false);
+  }
+
   /** 提交 Agent 输入，运行时会自行决定是否调用检索工具。 */
   async function handleSubmitPrompt(action: AgentActionType = "ask", presetPrompt?: string) {
     const prompt = (presetPrompt ?? agentPrompt).trim();
@@ -1957,11 +1975,7 @@ export function WorkspaceShell() {
           isSessionListOpen={isSessionListOpen}
           isSessionContextOpen={isSessionContextOpen}
           isScopeSelectorOpen={isScopeSelectorOpen}
-          onToggleSessionList={() => {
-            setIsSessionListOpen((current) => !current);
-            setIsSessionContextOpen(false);
-            setIsScopeSelectorOpen(false);
-          }}
+          onToggleSessionList={handleToggleSessionList}
           onToggleSessionContext={() => {
             setIsSessionContextOpen((current) => !current);
             setIsSessionListOpen(false);
