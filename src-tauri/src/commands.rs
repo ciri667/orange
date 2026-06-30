@@ -293,7 +293,7 @@ pub async fn save_agent_skill(
     result
 }
 
-/** 启停 skill，并可同步修改是否允许自动触发。 */
+/** 启停 skill，并可同步修改是否允许模型参考。 */
 #[tauri::command]
 pub async fn toggle_agent_skill(
     app: AppHandle,

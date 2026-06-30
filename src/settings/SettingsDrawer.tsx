@@ -116,7 +116,7 @@ export function SettingsDrawer({
   const [eventLogCategory, setEventLogCategory] = useState<AppEventLogCategory | "">("");
   /** 已启用 skill 数量，用于设置摘要快速说明能力状态。 */
   const enabledSkillCount = skills.filter((skill) => skill.enabled).length;
-  /** 允许自动触发的已启用 skill 数量，用于提示自动匹配覆盖范围。 */
+  /** 允许模型语义参考的已启用 skill 数量，用于提示能力目录覆盖范围。 */
   const autoSkillCount = skills.filter((skill) => skill.enabled && skill.allowAutoInvoke).length;
   /** 文件式 skill 数量用于确认用户目录扫描是否已生效。 */
   const fileSkillCount = skills.filter((skill) => skill.source === "file").length;
@@ -145,7 +145,7 @@ export function SettingsDrawer({
         id: "skills",
         group: "配置",
         label: "Skills 能力",
-        description: "自动匹配和能力管理入口",
+        description: "模型语义参考和能力管理",
         meta: `${enabledSkillCount}/${skills.length}`,
         icon: Sparkles,
         tone: settingsDraft.skillSettings.activationMode === "auto" ? "success" : "neutral",
@@ -517,7 +517,7 @@ export function SettingsDrawer({
               </strong>
             </div>
             <div>
-              <span>自动触发</span>
+              <span>模型参考</span>
               <strong>{settingsDraft.skillSettings.activationMode === "auto" ? `${autoSkillCount} 个` : "已关闭"}</strong>
             </div>
             <div>
@@ -538,7 +538,7 @@ export function SettingsDrawer({
               }
               type="checkbox"
             />
-            <span>允许未显式选择时自动匹配 skill</span>
+            <span>允许未显式选择时让模型参考 Skill 目录</span>
           </label>
         </section>
       );

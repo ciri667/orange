@@ -291,7 +291,7 @@ export function WorkspaceShell() {
   const [appEventLogs, setAppEventLogs] = useState<AppEventLog[]>([]);
   const [searchTerm, setSearchTerm] = useState("");
   const [agentPrompt, setAgentPrompt] = useState("");
-  /** 当前输入区显式选择的 skill；空字符串表示交给 Runtime 自动匹配。 */
+  /** 当前输入区显式选择的 skill；空字符串表示由模型按能力目录自主参考。 */
   const [selectedSkillId, setSelectedSkillId] = useState("");
   const [collapsedFolderPaths, setCollapsedFolderPaths] = useState<Set<string>>(new Set());
   const [isSessionListOpen, setIsSessionListOpen] = useState(false);
@@ -1773,7 +1773,7 @@ export function WorkspaceShell() {
     }
   }
 
-  /** 启停 skill 或切换自动触发状态，禁用后也会清除输入区的显式选择。 */
+  /** 启停 skill 或切换模型参考状态，禁用后也会清除输入区的显式选择。 */
   async function handleToggleSkill(skillId: string, enabled: boolean, allowAutoInvoke?: boolean) {
     beginBusy("正在更新 Skill...");
 

@@ -65,7 +65,7 @@ export type AgentSkillStatus = "enabled" | "disabled";
 /** Skill 来源，内置和文件能力只能禁用，用户自建能力允许编辑和删除。 */
 export type AgentSkillSource = "built-in" | "file" | "user";
 
-/** Skill 默认触发模式，auto 允许 Runtime 根据输入轻量匹配。 */
+/** Skill 参考模式，auto 表示模型可参考能力目录，manual 表示仅显式选择。 */
 export type AgentSkillActivationMode = "auto" | "manual";
 
 /** Skill 安装来源类型，URL、本地文件夹和本地 zip 走不同的后端准备流程。 */
@@ -74,7 +74,7 @@ export type SkillInstallSourceType = "url" | "localFolder" | "localArchive";
 /** Skill 安装同名冲突策略，fail 保守失败，replace 由用户明确替换。 */
 export type SkillInstallConflictStrategy = "fail" | "replace";
 
-/** Agent skill 是可启停、可显式选择、可自动匹配的指令型工作流。 */
+/** Agent skill 是可启停、可显式选择、可被模型语义参考的指令型工作流。 */
 export interface AgentSkill {
   id: string;
   name: string;
@@ -96,7 +96,7 @@ export interface AgentSkill {
   metadata?: Record<string, string>;
 }
 
-/** Skill 全局设置，控制未显式选择时是否自动匹配。 */
+/** Skill 全局设置，控制未显式选择时是否把能力目录交给模型参考。 */
 export interface SkillSettings {
   activationMode: AgentSkillActivationMode;
 }

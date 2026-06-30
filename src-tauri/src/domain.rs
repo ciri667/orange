@@ -81,7 +81,7 @@ pub enum AgentSkillSource {
     User,
 }
 
-/** Skill 触发模式，用于设置默认是自动匹配还是仅显式选择。 */
+/** Skill 参考模式，用于设置模型可参考能力目录还是仅显式选择。 */
 #[allow(dead_code)]
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "kebab-case")]
@@ -321,14 +321,14 @@ pub struct AgentSkill {
     pub metadata: Option<HashMap<String, String>>,
 }
 
-/** Skill 全局设置，控制未显式选择时是否允许 Runtime 自动匹配。 */
+/** Skill 全局设置，控制未显式选择时是否把能力目录交给模型参考。 */
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SkillSettings {
     pub activation_mode: String,
 }
 
-/** 旧版用户设置缺少 skillSettings 时使用自动匹配作为首版默认行为。 */
+/** 旧版用户设置缺少 skillSettings 时默认允许模型参考能力目录。 */
 pub fn default_skill_settings() -> SkillSettings {
     SkillSettings {
         activation_mode: "auto".to_owned(),
@@ -725,7 +725,7 @@ pub struct SaveAgentSkillPayload {
     pub skill: AgentSkill,
 }
 
-/** 启停 skill 的命令入参，allowAutoInvoke 缺省时保留当前自动触发配置。 */
+/** 启停 skill 的命令入参，allowAutoInvoke 缺省时保留当前模型参考配置。 */
 #[derive(Clone, Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ToggleAgentSkillPayload {

@@ -19,7 +19,7 @@ function isUserManagedSkill(skill: AgentSkill) {
   return skill.source === "file" || skill.source === "user";
 }
 
-/** Skill 表单草稿，标签和触发词在 UI 中用逗号分隔编辑。 */
+/** Skill 表单草稿，标签和语义线索在 UI 中用逗号分隔编辑。 */
 interface SkillFormDraft {
   id: string;
   name: string;
@@ -73,7 +73,7 @@ export function SkillsModal({
   onOpenUserSkillsFolder: () => Promise<void> | void;
   onClose: () => void;
 }) {
-  /** 搜索词同时匹配名称、说明、标签和触发词。 */
+  /** 搜索词同时匹配名称、说明、标签和语义线索。 */
   const [searchTerm, setSearchTerm] = useState("");
   /** 来源筛选帮助用户区分内置、文件扫描和 UI 创建的 skill。 */
   const [sourceFilter, setSourceFilter] = useState<SkillSourceFilter>("all");
@@ -132,7 +132,7 @@ export function SkillsModal({
   /** 当前详情 skill；列表过滤后仍保留原选择，避免搜索时误清空表单。 */
   const selectedSkill = skills.find((skill) => skill.id === selectedSkillId) ?? filteredSkills[0] ?? skills[0];
 
-  /** 打开新建用户 skill 表单，默认启用自动触发但不预填触发词。 */
+  /** 打开新建用户 skill 表单，默认允许模型参考但不预填语义线索。 */
   function handleCreateSkill() {
     setSelectedSkillId("");
     setInstallDraft(null);
@@ -428,7 +428,7 @@ export function SkillsModal({
   );
 }
 
-/** Skill 详情页，展示完整说明并提供启停与自动触发开关。 */
+/** Skill 详情页，展示完整说明并提供启停与模型参考开关。 */
 function SkillDetail({
   skill,
   isBusy,
@@ -489,7 +489,7 @@ function SkillDetail({
             type="checkbox"
             disabled={isBusy || !skill.enabled}
           />
-          <span>允许自动触发</span>
+          <span>允许模型参考</span>
         </label>
       </div>
       <div className="skill-tags">
@@ -502,8 +502,8 @@ function SkillDetail({
         <p>{skill.instructions}</p>
       </section>
       <section className="skill-instructions">
-        <h4>触发词</h4>
-        <p>{skill.triggers.length ? skill.triggers.join("、") : "未设置触发词。"}</p>
+        <h4>语义线索</h4>
+        <p>{skill.triggers.length ? skill.triggers.join("、") : "未设置语义线索。"}</p>
       </section>
     </article>
   );
@@ -705,7 +705,7 @@ function SkillForm({
         <input value={draft.tagsText} onChange={(event) => updateDraft("tagsText", event.target.value)} placeholder="写作, 研究" />
       </label>
       <label>
-        <span>触发词</span>
+        <span>语义线索</span>
         <input
           value={draft.triggersText}
           onChange={(event) => updateDraft("triggersText", event.target.value)}
@@ -723,7 +723,7 @@ function SkillForm({
             onChange={(event) => updateDraft("allowAutoInvoke", event.target.checked)}
             type="checkbox"
           />
-          <span>允许自动触发</span>
+          <span>允许模型参考</span>
         </label>
       </div>
       <div className="modal-actions">
