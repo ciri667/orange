@@ -603,6 +603,43 @@ pub struct LoadDocumentPreviewPayload {
     pub document_id: String,
 }
 
+/** 当前文件导出的目标类型，note 对应 Markdown，document 对应 TXT/DOCX/PDF。 */
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum ExportTargetKind {
+    Note,
+    Document,
+}
+
+/** 当前文件导出的格式；original 保留源文件，markdown/pdf 执行轻量转换。 */
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum ExportFormat {
+    Original,
+    Markdown,
+    Pdf,
+}
+
+/** 当前文件导出命令入参；正文内容只通过 snapshot 定位，不额外跨 IPC 传输。 */
+#[derive(Clone, Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ExportCurrentFilePayload {
+    pub snapshot: WorkspaceSnapshot,
+    pub target_kind: ExportTargetKind,
+    pub target_id: String,
+    pub format: ExportFormat,
+}
+
+/** 当前文件导出结果；targetPath 只返回给前端提示，不写入后端日志。 */
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ExportFileResult {
+    pub format: ExportFormat,
+    pub target_path: String,
+    pub file_name: String,
+    pub byte_size: u64,
+}
+
 /** 移除知识库授权记录的命令入参，不会删除用户 Markdown 文件。 */
 #[derive(Clone, Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
