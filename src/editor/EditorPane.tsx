@@ -1,5 +1,5 @@
 import { convertFileSrc } from "@tauri-apps/api/core";
-import { ChevronDown, Clock3, Columns2, Eye, FileDown, FilePenLine, PencilLine, Save, Tags, Trash2, Wand2 } from "lucide-react";
+import { ChevronDown, Clock3, Columns2, Eye, FileDown, FilePenLine, PencilLine, Save, Tags, Trash2 } from "lucide-react";
 import { useState } from "react";
 import type { ClipboardEventHandler, RefObject, UIEventHandler } from "react";
 import ReactMarkdown, { defaultUrlTransform } from "react-markdown";
@@ -66,7 +66,6 @@ export function EditorPane({
   onContentChange,
   onPasteImages,
   onExportFile,
-  onRequestRewrite,
   onRenameNote,
   onDeleteNote,
   onAcceptChange,
@@ -83,7 +82,6 @@ export function EditorPane({
   onContentChange: (content: string) => void;
   onPasteImages: (files: File[], selectionStart: number, selectionEnd: number) => void;
   onExportFile: (format: ExportFormat) => void | Promise<void>;
-  onRequestRewrite: () => void;
   onRenameNote: () => void;
   onDeleteNote: () => void;
   onAcceptChange: () => void;
@@ -204,10 +202,6 @@ export function EditorPane({
           <button className="text-button danger" type="button" title="删除当前笔记" onClick={onDeleteNote} disabled={isBusy}>
             <Trash2 size={18} />
             删除
-          </button>
-          <button className="text-button" type="button" onClick={onRequestRewrite} disabled={isBusy}>
-            <Wand2 size={16} />
-            改写段落
           </button>
         </div>
       </header>

@@ -1988,7 +1988,6 @@ export function WorkspaceShell() {
             onContentChange={handleContentChange}
             onPasteImages={handlePasteImages}
             onExportFile={handleExportActiveFile}
-            onRequestRewrite={() => handleSubmitPrompt("rewrite", "改写当前笔记的核心段落")}
             onRenameNote={() => openRenameDialog()}
             onDeleteNote={() => handleDeleteNote()}
             onAcceptChange={handleAcceptChange}
