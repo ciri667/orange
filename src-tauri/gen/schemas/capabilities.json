@@ -1,1 +1,1 @@
-{"default":{"identifier":"default","description":"Default permissions for Cici Note desktop shell","local":true,"windows":["main"],"permissions":["core:default","dialog:default","fs:default","log:default"]}}
+{"default":{"identifier":"default","description":"Default permissions for Cici Note desktop shell","local":true,"windows":["main"],"permissions":["core:default","dialog:default","fs:default","log:default","opener:allow-open-url","opener:allow-default-urls"]}}
