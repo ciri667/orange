@@ -24,6 +24,7 @@ import {
   getSessionNoteLabel,
   getSessionTypeLabel,
 } from "../shared/selectors";
+import { MarkdownLink } from "../shared/MarkdownLink";
 import { logDebug } from "../shared/logger";
 import type { AgentSession, AgentSkill, KnowledgeBase, ModelConfig, Note } from "../shared/types";
 
@@ -421,7 +422,13 @@ export function AgentPanel({
 function MessageMarkdown({ content }: { content: string }) {
   return (
     <div className="message-markdown">
-      <ReactMarkdown remarkPlugins={[remarkGfm]} rehypePlugins={[rehypeSanitize]}>
+      <ReactMarkdown
+        remarkPlugins={[remarkGfm]}
+        rehypePlugins={[rehypeSanitize]}
+        components={{
+          a: (props) => <MarkdownLink {...props} source="agent_message" />,
+        }}
+      >
         {content}
       </ReactMarkdown>
     </div>

@@ -9,6 +9,7 @@ import type { Options as RehypeSanitizeOptions } from "rehype-sanitize";
 import remarkGfm from "remark-gfm";
 import { DiffPanel } from "../diff/DiffPanel";
 import type { ReviewCommentDraft } from "../diff/DiffPanel";
+import { MarkdownLink } from "../shared/MarkdownLink";
 import type { ExportFormat, KnowledgeBase, MarkdownViewMode, Note, ProposedChange } from "../shared/types";
 import { LineNumberedTextarea } from "./LineNumberedTextarea";
 import { useSyncedMarkdownScroll } from "./useSyncedMarkdownScroll";
@@ -300,6 +301,9 @@ function MarkdownPreview({
           remarkPlugins={[remarkGfm]}
           rehypePlugins={[[rehypeSanitize, MARKDOWN_PREVIEW_SANITIZE_SCHEMA]]}
           urlTransform={imageUrlTransform}
+          components={{
+            a: (props) => <MarkdownLink {...props} source="editor_preview" />,
+          }}
         >
           {content}
         </ReactMarkdown>
