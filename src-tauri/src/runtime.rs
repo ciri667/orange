@@ -28,6 +28,19 @@ const MAX_AUDIT_FRAGMENTS: usize = 8;
 /** 云端模型请求超时时间，避免网络卡住后阻塞 Agent turn。 */
 const MODEL_HTTP_TIMEOUT_SECONDS: u64 = 60;
 
+/** DeepSeek 兼容服务有时把工具调用塞进正文 DSML 标签里，运行时需要兜底解析。 */
+const DSML_TOOL_CALL_OPEN_MARKERS: [&str; 2] = ["<｜｜DSML｜｜tool_calls>", "<||DSML||tool_calls>"];
+
+/** DSML 工具调用块结束标签，和 open marker 分开查找以兼容全角/半角竖线混用。 */
+const DSML_TOOL_CALL_CLOSE_MARKERS: [&str; 2] =
+    ["</｜｜DSML｜｜tool_calls>", "</||DSML||tool_calls>"];
+
+/** 从模型正文提取出的 DSML 工具调用，同时保留可展示正文。 */
+struct DsmlToolCallExtraction {
+    visible_content: String,
+    tool_calls: Vec<Value>,
+}
+
 /** 真实 Agent Runtime 的调度结果，包含可持久化快照和本轮请求审计摘要。 */
 pub struct RuntimeTurnResult {
     pub turn_result: AgentTurnResult,
@@ -247,6 +260,7 @@ async fn run_model_loop(
     let endpoint = model_provider::chat_completions_endpoint(&provider.api_base);
     let tool_registry = ToolRegistry::default();
     let mut tool_calls = vec![skill_context_tool_call(&available_skills)];
+    let mut last_failed_tool_summary: Option<String> = None;
 
     tool_calls.push(model_request_tool_call(&provider, &endpoint, "completed"));
 
@@ -281,24 +295,22 @@ async fn run_model_loop(
             .and_then(|choice| choice.get("message"))
             .cloned()
             .ok_or_else(|| "模型响应缺少 message。".to_owned())?;
-        let model_tool_calls = message
-            .get("tool_calls")
-            .and_then(Value::as_array)
-            .cloned()
-            .unwrap_or_default();
+        let extracted_tool_calls = extract_tool_calls_from_message(&message);
+        let model_tool_calls = extracted_tool_calls.tool_calls;
         log::debug!(
             target: "agent_runtime",
-            "模型返回工具调用：session={} tool_call_count={}",
+            "模型返回工具调用：session={} tool_call_count={} dsml_visible_chars={}",
             snapshot.sessions[session_index].id,
-            model_tool_calls.len()
+            model_tool_calls.len(),
+            extracted_tool_calls.visible_content.chars().count()
         );
 
         if model_tool_calls.is_empty() {
-            let content = message
-                .get("content")
-                .and_then(Value::as_str)
-                .unwrap_or("模型未返回可展示内容。")
-                .to_owned();
+            let content = if extracted_tool_calls.visible_content.is_empty() {
+                "模型未返回可展示内容。".to_owned()
+            } else {
+                extracted_tool_calls.visible_content
+            };
 
             push_assistant_message(
                 &mut snapshot,
@@ -326,7 +338,11 @@ async fn run_model_loop(
             });
         }
 
-        model_messages.push(message);
+        model_messages.push(normalize_assistant_tool_message(
+            message,
+            &model_tool_calls,
+            &extracted_tool_calls.visible_content,
+        ));
 
         for model_tool_call in model_tool_calls {
             let tool_outcome = {
@@ -351,6 +367,9 @@ async fn run_model_loop(
 
             audit_trail.record_sent_fragment(tool_outcome.audit_fragment);
             citations.extend(tool_outcome.citations);
+            if tool_outcome.call.status == "failed" {
+                last_failed_tool_summary = Some(tool_outcome.call.summary.clone());
+            }
             tool_calls.push(tool_outcome.call);
             model_messages.push(json!({
                 "role": "tool",
@@ -370,15 +389,30 @@ async fn run_model_loop(
         false,
     )
     .await?;
-    let content = response
+    let final_message = response
         .get("choices")
         .and_then(Value::as_array)
         .and_then(|choices| choices.first())
         .and_then(|choice| choice.get("message"))
-        .and_then(|message| message.get("content"))
-        .and_then(Value::as_str)
-        .unwrap_or("我已经完成工具调用，但模型没有返回最终说明。")
-        .to_owned();
+        .cloned();
+    let raw_final_content = final_message
+        .as_ref()
+        .map(extract_tool_calls_from_message)
+        .map(|extraction| extraction.visible_content)
+        .filter(|content| !content.trim().is_empty())
+        .or_else(|| {
+            final_message
+                .as_ref()
+                .and_then(|message| message.get("content"))
+                .and_then(Value::as_str)
+                .map(strip_dsml_tool_calls)
+        })
+        .filter(|content| !content.trim().is_empty())
+        .unwrap_or_else(|| "我已经完成工具调用，但模型没有返回最终说明。".to_owned());
+    let content = reconcile_final_content_with_tool_status(
+        raw_final_content,
+        last_failed_tool_summary.as_deref(),
+    );
 
     push_assistant_message(
         &mut snapshot,
@@ -404,6 +438,306 @@ async fn run_model_loop(
         turn_result: AgentTurnResult { snapshot },
         audit_log,
     })
+}
+
+/** 从模型 message 中提取标准 tool_calls，并兼容正文里的 DSML 伪工具调用。 */
+fn extract_tool_calls_from_message(message: &Value) -> DsmlToolCallExtraction {
+    let content = message
+        .get("content")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    let mut tool_calls = message
+        .get("tool_calls")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    let dsml_tool_calls = parse_dsml_tool_calls(content);
+
+    tool_calls.extend(dsml_tool_calls);
+
+    DsmlToolCallExtraction {
+        visible_content: strip_dsml_tool_calls(content).trim().to_owned(),
+        tool_calls,
+    }
+}
+
+/** 把 DSML 解析出的工具调用补回 assistant message，便于后续 tool role 消息满足协议顺序。 */
+fn normalize_assistant_tool_message(
+    mut message: Value,
+    tool_calls: &[Value],
+    visible_content: &str,
+) -> Value {
+    if tool_calls.is_empty() {
+        return message;
+    }
+
+    if let Some(message_object) = message.as_object_mut() {
+        message_object.insert("tool_calls".to_owned(), Value::Array(tool_calls.to_vec()));
+        message_object.insert(
+            "content".to_owned(),
+            if visible_content.trim().is_empty() {
+                Value::Null
+            } else {
+                Value::String(visible_content.trim().to_owned())
+            },
+        );
+    }
+
+    message
+}
+
+/** 移除正文里的 DSML 工具调用块，避免标签泄露到用户可见回答。 */
+fn strip_dsml_tool_calls(content: &str) -> String {
+    let mut output = String::with_capacity(content.len());
+    let mut cursor = 0usize;
+
+    while let Some((open_offset, open_marker)) =
+        find_next_marker(&content[cursor..], &DSML_TOOL_CALL_OPEN_MARKERS)
+    {
+        let open_start = cursor + open_offset;
+        let block_start = open_start + open_marker.len();
+
+        output.push_str(&content[cursor..open_start]);
+
+        if let Some((close_offset, close_marker)) =
+            find_next_marker(&content[block_start..], &DSML_TOOL_CALL_CLOSE_MARKERS)
+        {
+            cursor = block_start + close_offset + close_marker.len();
+        } else {
+            // 不完整 DSML 块通常来自模型截断；为了避免泄露伪标签，直接丢弃尾部。
+            cursor = content.len();
+        }
+    }
+
+    output.push_str(&content[cursor..]);
+    output
+}
+
+/** 解析 DSML tool_calls 块，转换为 OpenAI-compatible tool_call 结构。 */
+fn parse_dsml_tool_calls(content: &str) -> Vec<Value> {
+    let mut tool_calls = Vec::new();
+    let mut cursor = 0usize;
+
+    while let Some((open_offset, open_marker)) =
+        find_next_marker(&content[cursor..], &DSML_TOOL_CALL_OPEN_MARKERS)
+    {
+        let block_start = cursor + open_offset + open_marker.len();
+        let Some((close_offset, close_marker)) =
+            find_next_marker(&content[block_start..], &DSML_TOOL_CALL_CLOSE_MARKERS)
+        else {
+            break;
+        };
+        let block_end = block_start + close_offset;
+
+        tool_calls.extend(parse_dsml_invokes(&content[block_start..block_end]));
+        cursor = block_end + close_marker.len();
+    }
+
+    tool_calls
+}
+
+/** 在 DSML 工具块里解析一个或多个 invoke 标签。 */
+fn parse_dsml_invokes(block: &str) -> Vec<Value> {
+    let mut invokes = Vec::new();
+    let mut cursor = 0usize;
+
+    while let Some(open_tag) = find_dsml_open_tag(block, "invoke", cursor) {
+        let Some(close_tag) = find_dsml_close_tag(block, "invoke", open_tag.end) else {
+            break;
+        };
+        let invoke_body = &block[open_tag.end..close_tag.start];
+        let Some(name) = parse_dsml_attribute(open_tag.attributes, "name")
+            .filter(|value| !value.trim().is_empty())
+        else {
+            cursor = close_tag.end;
+            continue;
+        };
+        let args = parse_dsml_parameters(invoke_body);
+        let args_json = serde_json::to_string(&args).unwrap_or_else(|_| "{}".to_owned());
+
+        invokes.push(json!({
+            "id": create_id("dsml-tool-call"),
+            "type": "function",
+            "function": {
+                "name": name,
+                "arguments": args_json
+            }
+        }));
+        cursor = close_tag.end;
+    }
+
+    invokes
+}
+
+/** 在 invoke 内解析 parameter 标签，支持字符串和 JSON 数组/对象参数。 */
+fn parse_dsml_parameters(invoke_body: &str) -> Value {
+    let mut args = serde_json::Map::new();
+    let mut cursor = 0usize;
+
+    while let Some(open_tag) = find_dsml_open_tag(invoke_body, "parameter", cursor) {
+        let Some(close_tag) = find_dsml_close_tag(invoke_body, "parameter", open_tag.end) else {
+            break;
+        };
+        let raw_value = &invoke_body[open_tag.end..close_tag.start];
+
+        if let Some(name) = parse_dsml_attribute(open_tag.attributes, "name")
+            .filter(|value| !value.trim().is_empty())
+        {
+            args.insert(
+                name,
+                decode_dsml_parameter_value(raw_value, open_tag.attributes),
+            );
+        }
+
+        cursor = close_tag.end;
+    }
+
+    Value::Object(args)
+}
+
+/** DSML 参数值统一去掉标签排版带来的外层空白，并按声明尝试解析 JSON。 */
+fn decode_dsml_parameter_value(raw_value: &str, attributes: &str) -> Value {
+    let decoded = html_unescape_minimal(raw_value).trim().to_owned();
+    let is_string = parse_dsml_attribute(attributes, "string")
+        .map(|value| value.eq_ignore_ascii_case("true"))
+        .unwrap_or(false);
+
+    if !is_string {
+        if let Ok(value) = serde_json::from_str::<Value>(&decoded) {
+            return value;
+        }
+    }
+
+    Value::String(decoded)
+}
+
+/** DSML 标签位置，start/end 是原字符串的字节索引。 */
+struct DsmlTag<'a> {
+    end: usize,
+    attributes: &'a str,
+}
+
+/** 查找指定名称的 DSML 开始标签，兼容全角和半角竖线标记。 */
+fn find_dsml_open_tag<'a>(content: &'a str, tag_name: &str, cursor: usize) -> Option<DsmlTag<'a>> {
+    let mut search_start = cursor;
+
+    while search_start < content.len() {
+        let (prefix_offset, prefix) =
+            find_next_marker(&content[search_start..], &["<｜｜DSML｜｜", "<||DSML||"])?;
+        let start = search_start + prefix_offset;
+        let name_start = start + prefix.len();
+
+        if !content[name_start..].starts_with(tag_name) {
+            search_start = name_start;
+            continue;
+        }
+
+        let attributes_start = name_start + tag_name.len();
+        let next_char = content[attributes_start..].chars().next();
+
+        if !matches!(next_char, Some('>' | ' ' | '\t' | '\n' | '\r')) {
+            search_start = attributes_start;
+            continue;
+        }
+
+        let tag_end = content[attributes_start..].find('>')? + attributes_start;
+
+        return Some(DsmlTag {
+            end: tag_end + 1,
+            attributes: &content[attributes_start..tag_end],
+        });
+    }
+
+    None
+}
+
+/** 查找指定名称的 DSML 结束标签。 */
+fn find_dsml_close_tag(content: &str, tag_name: &str, cursor: usize) -> Option<DsmlCloseTag> {
+    let fullwidth_marker = format!("</｜｜DSML｜｜{tag_name}>");
+    let ascii_marker = format!("</||DSML||{tag_name}>");
+    let (offset, marker) = find_next_marker(
+        &content[cursor..],
+        &[fullwidth_marker.as_str(), ascii_marker.as_str()],
+    )?;
+    let start = cursor + offset;
+
+    Some(DsmlCloseTag {
+        start,
+        end: start + marker.len(),
+    })
+}
+
+/** DSML 结束标签位置。 */
+struct DsmlCloseTag {
+    start: usize,
+    end: usize,
+}
+
+/** 查找多个 marker 中最靠前的一项。 */
+fn find_next_marker<'a>(content: &str, markers: &[&'a str]) -> Option<(usize, &'a str)> {
+    markers
+        .iter()
+        .filter_map(|marker| content.find(marker).map(|offset| (offset, *marker)))
+        .min_by_key(|(offset, _)| *offset)
+}
+
+/** 从 DSML 标签属性里读取 name="value" 形式的值。 */
+fn parse_dsml_attribute(attributes: &str, name: &str) -> Option<String> {
+    let pattern = format!("{name}=");
+    let pattern_start = attributes.find(&pattern)?;
+    let mut value_source = attributes[pattern_start + pattern.len()..].trim_start();
+    let quote = value_source.chars().next()?;
+
+    if quote != '"' && quote != '\'' {
+        return None;
+    }
+
+    value_source = &value_source[quote.len_utf8()..];
+    let value_end = value_source.find(quote)?;
+
+    Some(html_unescape_minimal(&value_source[..value_end]))
+}
+
+/** 极小 HTML 反转义，覆盖模型常见的 DSML 参数转义，不引入额外依赖。 */
+fn html_unescape_minimal(value: &str) -> String {
+    value
+        .replace("&quot;", "\"")
+        .replace("&#34;", "\"")
+        .replace("&apos;", "'")
+        .replace("&#39;", "'")
+        .replace("&lt;", "<")
+        .replace("&gt;", ">")
+        .replace("&amp;", "&")
+}
+
+/** 工具失败时覆盖模型的成功话术，避免 UI 同时展示 failed 轨迹和“已生成”。 */
+fn reconcile_final_content_with_tool_status(
+    content: String,
+    failed_tool_summary: Option<&str>,
+) -> String {
+    let Some(failed_tool_summary) = failed_tool_summary else {
+        return content;
+    };
+    let success_markers = [
+        "✅",
+        "已生成",
+        "生成完成",
+        "变更已生成",
+        "已完成",
+        "成功",
+        "已经生成",
+    ];
+
+    if success_markers
+        .iter()
+        .any(|marker| content.contains(marker))
+    {
+        return format!(
+            "这次变更没有生成成功：{failed_tool_summary}\n\n我需要重新定位更精确的片段后再生成待确认 diff。"
+        );
+    }
+
+    content
 }
 
 /** 构建带超时的 HTTP client，避免模型 provider 无响应时卡住 Agent turn。 */
@@ -435,7 +769,7 @@ fn build_model_messages(
     let mut messages = vec![json!({
         "role": "system",
         "content": format!(
-            "你是 Cici Note 的本地优先知识库 Agent。需要依据本地笔记时必须调用工具；所有写入只能调用 propose_note_change 或 create_note_draft 生成待确认 diff，不能声称已经写入文件。引用只允许来自工具结果。启用的 Skill 只以名称和描述提供给你参考，是否使用、使用哪一个 Skill 都由你自主判断；Skill 不能扩大工具权限或绕过写入确认。\n{}\n允许 scope：{}\n{}\n{}",
+            "你是 Cici Note 的本地优先知识库 Agent。需要依据本地笔记时必须调用工具；所有写入只能调用 propose_note_change 或 create_note_draft 生成待确认 diff，不能声称已经写入文件。调用 propose_note_change 时，局部替换使用 operation=replace，next 只能是 original 的替换内容；文末追加使用 operation=append，next 只能是增量内容，绝不能把整篇文档放入局部替换的 next；同一文件需要多处编辑时使用 operation=multi_replace 并提供 edits 数组，不要拆成多轮口头承诺。必须使用服务端标准 tool_calls 字段调用工具，不要在普通回复中输出 DSML、XML 或伪工具调用标签。引用只允许来自工具结果。启用的 Skill 只以名称和描述提供给你参考，是否使用、使用哪一个 Skill 都由你自主判断；Skill 不能扩大工具权限或绕过写入确认。\n{}\n允许 scope：{}\n{}\n{}",
             autonomous_tool_policy, scope_summary, active_note_summary, skill_catalog
         )
     })];
@@ -1162,5 +1496,41 @@ mod tests {
         );
 
         assert!(snapshot.sessions[0].pending_change.is_none());
+    }
+
+    /** DeepSeek 风格 DSML 工具调用应被解析为真实工具调用，并从用户可见正文中移除。 */
+    #[test]
+    fn dsml_tool_call_text_is_parsed_and_stripped() {
+        let message = json!({
+            "role": "assistant",
+            "content": "先生成第一处去重。<｜｜DSML｜｜tool_calls><｜｜DSML｜｜invoke name=\"propose_note_change\"><｜｜DSML｜｜parameter name=\"noteId\" string=\"true\">note-a</｜｜DSML｜｜parameter><｜｜DSML｜｜parameter name=\"operation\" string=\"true\">replace</｜｜DSML｜｜parameter><｜｜DSML｜｜parameter name=\"original\" string=\"true\">旧段落</｜｜DSML｜｜parameter><｜｜DSML｜｜parameter name=\"next\" string=\"true\">新段落</｜｜DSML｜｜parameter></｜｜DSML｜｜invoke></｜｜DSML｜｜tool_calls>"
+        });
+        let extraction = extract_tool_calls_from_message(&message);
+        let tool_call = extraction.tool_calls.first().unwrap();
+        let args: Value = serde_json::from_str(
+            tool_call["function"]["arguments"]
+                .as_str()
+                .unwrap_or_default(),
+        )
+        .unwrap();
+
+        assert_eq!(extraction.visible_content, "先生成第一处去重。");
+        assert_eq!(tool_call["function"]["name"], "propose_note_change");
+        assert_eq!(args["noteId"], "note-a");
+        assert_eq!(args["operation"], "replace");
+        assert_eq!(args["original"], "旧段落");
+        assert_eq!(args["next"], "新段落");
+    }
+
+    /** 工具失败后模型若仍输出成功话术，运行时必须改成失败说明。 */
+    #[test]
+    fn final_content_success_claim_is_overridden_after_tool_failure() {
+        let content = reconcile_final_content_with_tool_status(
+            "✅ 去重变更已生成！".to_owned(),
+            Some("多处编辑第 1 处 original 在目标笔记中出现多次，请提供更长、更唯一的片段。"),
+        );
+
+        assert!(content.contains("这次变更没有生成成功"));
+        assert!(!content.contains("✅ 去重变更已生成"));
     }
 }
