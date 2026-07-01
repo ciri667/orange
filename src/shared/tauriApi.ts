@@ -204,7 +204,7 @@ const browserBuiltInSkills: AgentSkill[] = [
     displayName: "笔记改写",
     description: "改写当前笔记内容，并通过待确认 diff 交给用户决定是否写入。",
     instructions:
-      "当用户要求润色、改写、压缩或扩写当前笔记时，先读取当前笔记或目标笔记。只能调用 propose_note_change 生成待确认 diff；不能声称已经修改文件，也不能绕过 original 唯一命中校验。",
+      "当用户要求润色、改写、压缩、扩写、多处编辑或文末追加当前笔记时，先读取当前笔记或目标笔记。只能调用 propose_note_change 生成待确认 diff；不能声称已经修改文件，也不能绕过 original 唯一命中校验。局部改写使用 operation=replace，next 只能是 original 的替换内容；文末追加必须使用 operation=append，next 只能包含要追加的增量内容，不能传整篇文档；同一文件多处编辑使用 operation=multi_replace 并提供 edits 数组。",
     tags: ["写作", "改写", "diff"],
     enabled: true,
     source: "built-in",

@@ -1,4 +1,5 @@
 import { createContentHash, createLocalId } from "./id";
+import { buildMarkdownDiff } from "../diff/markdownDiff";
 import type {
   AgentActionType,
   AgentMessage,
@@ -495,6 +496,21 @@ function buildRewriteText(original: string) {
   return `这款产品面向长期处理资料、灵感和项目文档的个人知识工作者。它以本地 Markdown 目录作为可信数据源，在保留用户文件所有权的前提下，让 Agent 负责检索、总结、改写和生成笔记；任何写入都会先展示变更预览，并在用户确认后才落盘。\n\n原段落要点：${original}`;
 }
 
+/** 判断用户是否要求追加到文末，浏览器 mock 用它选择 append 语义。 */
+function shouldAppendToNote(prompt: string) {
+  return /追加|文末|末尾|最后|插入到.*(文末|末尾|最后)|append/i.test(prompt);
+}
+
+/** 判断用户是否要求同一文件多处编辑，浏览器 mock 用确定性策略模拟后端 multi_replace。 */
+function shouldMultiEditNote(prompt: string) {
+  return /多处|批量|全部|重复|去重|multi/i.test(prompt);
+}
+
+/** 生成浏览器 mock 的追加内容，避免把整篇原文误塞进 next。 */
+function buildAppendText(prompt: string) {
+  return `## 补充内容\n\n${prompt.trim() || "这里是 Agent 追加的补充内容。"}`;
+}
+
 /** 创建工具调用记录，帮助用户看清 Agent loop 做过哪些动作。 */
 function createToolCall(name: AgentToolCall["name"], summary: string, args: Record<string, unknown>): AgentToolCall {
   return {
@@ -575,27 +591,38 @@ export function runMockAgentTurn(
     if (!activeNote) {
       content = "当前没有可改写的 Markdown 笔记。";
     } else {
-      const original = getFirstBodyParagraph(activeNote.content);
+      const isAppend = shouldAppendToNote(prompt);
+      const isMultiEdit = !isAppend && shouldMultiEditNote(prompt);
+      const original = isAppend ? activeNote.content : getFirstBodyParagraph(activeNote.content);
 
       if (!original) {
         content = "我没有找到适合改写的正文段落。你可以先补充内容，再让我生成改写建议。";
       } else {
+        const appendText = isAppend ? buildAppendText(prompt) : "";
+        const nextContent = isMultiEdit
+          ? activeNote.content.replace(original, buildRewriteText(original)).replace(/重复/g, "")
+          : isAppend
+            ? `${activeNote.content.trimEnd()}\n\n${appendText}`
+            : buildRewriteText(original);
         const nextChange: ProposedChange = {
           id: createLocalId("change"),
           knowledgeBaseId: activeKnowledgeBase.id,
           noteId: activeNote.id,
           type: "rewrite",
-          title: `改写《${activeNote.title}》的核心段落`,
+          operation: isAppend ? "append" : isMultiEdit ? "multi_replace" : "replace",
+          title: isAppend ? `追加到《${activeNote.title}》文末` : isMultiEdit ? `多处编辑《${activeNote.title}》` : `改写《${activeNote.title}》的核心段落`,
           targetPath: activeNote.path,
-          original,
-          next: buildRewriteText(original),
+          original: isMultiEdit ? activeNote.content : original,
+          next: nextContent,
           originalHash: activeNote.contentHash,
           status: "pending",
         };
+        nextChange.diffStats = buildMarkdownDiff(nextChange.original, nextChange.next).stats;
         toolCalls.push(
           createToolCall("propose_note_change", `已为《${activeNote.title}》生成待确认改写 diff`, {
             noteId: activeNote.id,
             targetPath: activeNote.path,
+            operation: nextChange.operation,
           }),
         );
         session.pendingChange = nextChange;
@@ -610,6 +637,7 @@ export function runMockAgentTurn(
       id: createLocalId("change"),
       knowledgeBaseId: activeKnowledgeBase.id,
       type: "create",
+      operation: undefined,
       title: "创建《上线检查清单》草稿",
       targetPath,
       original: "",
@@ -627,6 +655,7 @@ export function runMockAgentTurn(
       originalHash: "",
       status: "pending",
     };
+    nextChange.diffStats = buildMarkdownDiff(nextChange.original, nextChange.next).stats;
     toolCalls.push(createToolCall("create_note_draft", `已生成 ${targetPath} 的待确认新建 diff`, { targetPath }));
     session.pendingChange = nextChange;
     content = "我已经生成新笔记草稿，但它还没有写入本地目录。确认 diff 后才会创建 Markdown 文件。";
@@ -713,7 +742,10 @@ export function acceptMockProposedChange(snapshot: WorkspaceSnapshot): Workspace
         return note;
       }
 
-      const nextContent = replaceUniqueForMock(note.content, pendingChange.original, pendingChange.next);
+      const nextContent =
+        pendingChange.operation === "append" || pendingChange.operation === "multi_replace"
+          ? applyAppendForMock(note.content, pendingChange.original, pendingChange.next)
+          : replaceUniqueForMock(note.content, pendingChange.original, pendingChange.next);
 
       return {
         ...note,
@@ -732,13 +764,22 @@ export function acceptMockProposedChange(snapshot: WorkspaceSnapshot): Workspace
     content: "已根据你的确认应用这次变更。正式桌面版会在这里完成路径校验、hash 校验和原子写入。",
     action: pendingChange.type,
     toolCalls: [
-      createToolCall("propose_note_change", "用户已确认 diff，mock 环境已更新内存中的笔记内容", {
+      createToolCall("review_change", "用户已确认审阅 diff，mock 环境已更新内存中的笔记内容", {
         changeId: pendingChange.id,
       }),
     ],
   });
 
   return nextSnapshot;
+}
+
+/** 浏览器开发态执行整篇追加 diff，保持与 Tauri 层 append 写入规则一致。 */
+function applyAppendForMock(content: string, original: string, next: string) {
+  if (content !== original) {
+    throw new Error("目标文件已变化，已阻止追加写入。请重新生成 diff。");
+  }
+
+  return next;
 }
 
 /** 浏览器开发态执行单处替换，保持与 Tauri 层 rewrite 写入规则一致。 */

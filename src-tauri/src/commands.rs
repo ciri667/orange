@@ -2033,6 +2033,13 @@ pub async fn apply_proposed_change(
 
     let accepted_change_id = change.id.clone();
     let accepted_change_type = change.r#type.clone();
+    let accepted_operation = change.operation.clone();
+    let accepted_review_comment_count = change
+        .review_comments
+        .as_ref()
+        .map(|comments| comments.len())
+        .unwrap_or_default();
+    let accepted_diff_hunk_count = change.diff_stats.as_ref().map(|stats| stats.hunk_count);
     let accepted_target_path = change.target_path.clone();
     snapshot.sessions[session_index].pending_change = Some(crate::domain::ProposedChange {
         status: "accepted".to_owned(),
@@ -2055,7 +2062,12 @@ pub async fn apply_proposed_change(
         .entity("change", accepted_change_id)
         .relative_path(accepted_target_path)
         .duration(started_at.elapsed())
-        .metadata(json!({ "changeType": accepted_change_type })),
+        .metadata(json!({
+            "changeType": accepted_change_type,
+            "operation": accepted_operation,
+            "reviewCommentCount": accepted_review_comment_count,
+            "diffHunkCount": accepted_diff_hunk_count,
+        })),
     );
 
     Ok(snapshot)
@@ -2071,6 +2083,25 @@ fn apply_rewrite_change(
     // hash 不一致说明文件可能被外部修改，必须阻止写入并要求用户重新生成 diff。
     if current_hash != change.original_hash && snapshot_hash != change.original_hash {
         return Err("目标文件已变化，已阻止写入。请重新生成 diff。".to_owned());
+    }
+
+    if matches!(
+        change.operation.as_deref(),
+        Some("append" | "multi_replace")
+    ) {
+        if current_content != change.original {
+            let action_label = if change.operation.as_deref() == Some("multi_replace") {
+                "多处编辑写入"
+            } else {
+                "追加写入"
+            };
+
+            return Err(format!(
+                "目标文件已变化，已阻止{action_label}。请重新生成 diff。"
+            ));
+        }
+
+        return Ok(change.next.clone());
     }
 
     replace_unique(current_content, &change.original, &change.next)
@@ -2111,6 +2142,13 @@ pub async fn reject_proposed_change(
     if let Some(change) = snapshot.sessions[session_index].pending_change.clone() {
         let rejected_change_id = change.id.clone();
         let rejected_change_type = change.r#type.clone();
+        let rejected_operation = change.operation.clone();
+        let rejected_review_comment_count = change
+            .review_comments
+            .as_ref()
+            .map(|comments| comments.len())
+            .unwrap_or_default();
+        let rejected_diff_hunk_count = change.diff_stats.as_ref().map(|stats| stats.hunk_count);
         let rejected_knowledge_base_id = change.knowledge_base_id.clone();
         let rejected_target_path = change.target_path.clone();
 
@@ -2134,7 +2172,12 @@ pub async fn reject_proposed_change(
             .entity("change", rejected_change_id)
             .relative_path(rejected_target_path)
             .duration(started_at.elapsed())
-            .metadata(json!({ "changeType": rejected_change_type })),
+            .metadata(json!({
+                "changeType": rejected_change_type,
+                "operation": rejected_operation,
+                "reviewCommentCount": rejected_review_comment_count,
+                "diffHunkCount": rejected_diff_hunk_count,
+            })),
         );
     }
 
@@ -2769,12 +2812,16 @@ mod tests {
                 knowledge_base_id: "kb-b".to_owned(),
                 note_id: Some("note-b".to_owned()),
                 r#type: "rewrite".to_owned(),
+                operation: Some("replace".to_owned()),
                 title: "改写 note-b".to_owned(),
                 target_path: "note-b.md".to_owned(),
                 original: "旧内容".to_owned(),
                 next: "新内容".to_owned(),
                 original_hash: storage::hash_content("旧内容"),
                 status: "pending".to_owned(),
+                review_comments: None,
+                review_state: None,
+                diff_stats: None,
             }),
             created_at: "刚刚".to_owned(),
             updated_at: "刚刚".to_owned(),
@@ -2790,12 +2837,16 @@ mod tests {
             knowledge_base_id: "kb-a".to_owned(),
             note_id: Some("note-a".to_owned()),
             r#type: "rewrite".to_owned(),
+            operation: Some("replace".to_owned()),
             title: "改写 note-a".to_owned(),
             target_path: "note-a.md".to_owned(),
             original: original.to_owned(),
             next: next.to_owned(),
             original_hash: original_hash.to_owned(),
             status: "pending".to_owned(),
+            review_comments: None,
+            review_state: None,
+            diff_stats: None,
         }
     }
 
@@ -2878,6 +2929,79 @@ mod tests {
         assert_eq!(
             result.unwrap_err(),
             "目标文件已变化，已阻止写入。请重新生成 diff。"
+        );
+    }
+
+    /** append 变更确认时按整篇原文替换为整篇新内容，不执行局部片段替换。 */
+    #[test]
+    fn apply_rewrite_change_accepts_append_operation() {
+        let current_content = "第一段\n第二段";
+        let current_hash = storage::hash_content(current_content);
+        let mut change =
+            test_rewrite_change(current_content, "第一段\n第二段\n\n新增段落", &current_hash);
+
+        change.operation = Some("append".to_owned());
+
+        let next_content =
+            apply_rewrite_change(current_content, &current_hash, &current_hash, &change).unwrap();
+
+        assert_eq!(next_content, "第一段\n第二段\n\n新增段落");
+    }
+
+    /** append 原文必须仍等于当前文件，避免基于过期整篇快照追加。 */
+    #[test]
+    fn apply_rewrite_change_rejects_stale_append_original() {
+        let current_content = "第一段\n第二段\n外部新增";
+        let snapshot_content = "第一段\n第二段";
+        let snapshot_hash = storage::hash_content(snapshot_content);
+        let current_hash = storage::hash_content(current_content);
+        let mut change = test_rewrite_change(
+            snapshot_content,
+            "第一段\n第二段\n\n新增段落",
+            &snapshot_hash,
+        );
+
+        change.operation = Some("append".to_owned());
+
+        let result = apply_rewrite_change(current_content, &current_hash, &snapshot_hash, &change);
+
+        assert_eq!(
+            result.unwrap_err(),
+            "目标文件已变化，已阻止追加写入。请重新生成 diff。"
+        );
+    }
+
+    /** multi_replace 变更确认时按整篇快照替换，避免再次执行局部替换造成重复或漏改。 */
+    #[test]
+    fn apply_rewrite_change_accepts_multi_replace_operation() {
+        let current_content = "标题\n重复一\n正文\n重复二\n结尾";
+        let current_hash = storage::hash_content(current_content);
+        let mut change = test_rewrite_change(current_content, "标题\n正文\n结尾", &current_hash);
+
+        change.operation = Some("multi_replace".to_owned());
+
+        let next_content =
+            apply_rewrite_change(current_content, &current_hash, &current_hash, &change).unwrap();
+
+        assert_eq!(next_content, "标题\n正文\n结尾");
+    }
+
+    /** multi_replace 必须拒绝过期整篇原文，避免基于旧快照覆盖用户新改动。 */
+    #[test]
+    fn apply_rewrite_change_rejects_stale_multi_replace_original() {
+        let snapshot_content = "标题\n重复一\n正文\n重复二\n结尾";
+        let current_content = "标题\n重复一\n正文\n用户新改动\n重复二\n结尾";
+        let snapshot_hash = storage::hash_content(snapshot_content);
+        let current_hash = storage::hash_content(current_content);
+        let mut change = test_rewrite_change(snapshot_content, "标题\n正文\n结尾", &snapshot_hash);
+
+        change.operation = Some("multi_replace".to_owned());
+
+        let result = apply_rewrite_change(current_content, &current_hash, &snapshot_hash, &change);
+
+        assert_eq!(
+            result.unwrap_err(),
+            "目标文件已变化，已阻止多处编辑写入。请重新生成 diff。"
         );
     }
 }

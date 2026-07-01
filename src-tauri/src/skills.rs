@@ -69,7 +69,7 @@ pub fn built_in_skills() -> Vec<AgentSkill> {
             "note-rewrite",
             "笔记改写",
             "改写当前笔记内容，并通过待确认 diff 交给用户决定是否写入。",
-            "当用户要求润色、改写、压缩或扩写当前笔记时，先读取当前笔记或目标笔记。只能调用 propose_note_change 生成待确认 diff；不能声称已经修改文件，也不能绕过 original 唯一命中校验。",
+            "当用户要求润色、改写、压缩、扩写、多处编辑或文末追加当前笔记时，先读取当前笔记或目标笔记。只能调用 propose_note_change 生成待确认 diff；不能声称已经修改文件，也不能绕过 original 唯一命中校验。局部改写使用 operation=replace，next 只能是 original 的替换内容；文末追加必须使用 operation=append，next 只能包含要追加的增量内容，不能传整篇文档；同一文件多处编辑使用 operation=multi_replace 并提供 edits 数组。",
             &["写作", "改写", "diff"],
         ),
         built_in_skill(
@@ -2242,10 +2242,11 @@ tags:
         )
         .expect("rewrite SKILL.md");
 
-        let second =
-            custom_skills(&load_agent_skills_from_roots(&connection, &[root]).expect("load second"))
-                .pop()
-                .expect("second custom skill");
+        let second = custom_skills(
+            &load_agent_skills_from_roots(&connection, &[root]).expect("load second"),
+        )
+        .pop()
+        .expect("second custom skill");
 
         assert_eq!(second.id, first.id);
         assert!(second.instructions.contains("第二版"));

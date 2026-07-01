@@ -2,7 +2,10 @@ use crate::domain::{
     AgentSession, AgentToolCall, AgentTurnRequest, Citation, ProposedChange, WorkspaceSnapshot,
 };
 use crate::storage::{create_id, hash_content};
-use crate::text_edit::{count_non_overlapping_matches, UniqueReplacementError};
+use crate::text_edit::{
+    count_non_overlapping_matches, replace_occurrence, replace_unique, OccurrenceReplacementError,
+    UniqueReplacementError,
+};
 use serde_json::{json, Value};
 use std::collections::HashSet;
 use tauri::AppHandle;
@@ -12,6 +15,14 @@ pub(crate) const MAX_READ_NOTE_CHARS: usize = 6000;
 
 /** list_tree 工具最多发送的目录和笔记摘要数量。 */
 const MAX_TREE_ITEMS: usize = 120;
+
+/** Agent 一次多处编辑中的单个片段，original 必须唯一命中，next 允许为空表示删除。 */
+#[derive(Clone, Debug)]
+struct ProposedTextEdit {
+    original: String,
+    next: String,
+    occurrence: Option<usize>,
+}
 
 /** Agent 工具执行时共享的受控上下文，所有工具都必须通过它访问会话 scope 和当前请求。 */
 pub struct AgentToolContext<'a> {
@@ -262,10 +273,32 @@ impl AgentTool for ProposeNoteChangeTool {
             "properties": {
                 "noteId": { "type": "string" },
                 "title": { "type": "string" },
+                "operation": {
+                    "type": "string",
+                    "enum": ["replace", "append", "multi_replace"],
+                    "description": "Use replace for one unique fragment, append for end-of-note additions, and multi_replace when one request needs multiple unique edits in the same note. For replace, next is only the replacement for original. For append, next is only the increment. For multi_replace, provide edits instead of a full document."
+                },
                 "original": { "type": "string" },
-                "next": { "type": "string" }
+                "next": { "type": "string", "description": "Replacement text for replace, or increment-only text for append. It may be empty for deletion in replace mode." },
+                "edits": {
+                    "type": "array",
+                    "description": "Multiple unique replacements to apply to the same note in one pending diff. Each original must match exactly once in the current note; next may be empty to delete that fragment.",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "original": { "type": "string" },
+                            "next": { "type": "string" },
+                            "occurrence": {
+                                "type": "integer",
+                                "minimum": 1,
+                                "description": "Optional 1-based match index. Use this only when original appears multiple times and the edit intentionally targets a specific occurrence, such as deleting duplicate paragraphs while keeping the first copy."
+                            }
+                        },
+                        "required": ["original", "next"]
+                    }
+                }
             },
-            "required": ["noteId", "next"]
+            "required": ["noteId"]
         })
     }
 
@@ -572,45 +605,23 @@ fn execute_propose_note_change(
     let Some(note) = scoped_note(snapshot, session_index, note_id).cloned() else {
         return ToolExecutionResult::failed("目标笔记不在当前会话允许范围内。");
     };
-    let original = args
-        .get("original")
+    let operation = args
+        .get("operation")
+        .or_else(|| args.get("mode"))
         .and_then(Value::as_str)
-        .filter(|value| !value.trim().is_empty())
-        .map(str::to_owned)
-        .unwrap_or_else(|| first_body_paragraph(&note.content));
-    let next = args
-        .get("next")
-        .and_then(Value::as_str)
-        .unwrap_or_default()
-        .trim()
-        .to_owned();
-
-    if original.is_empty() || next.is_empty() {
-        return ToolExecutionResult::failed("改写工具缺少 original 或 next 内容。");
-    }
-
-    match validate_unique_original(&note.content, &original) {
-        Ok(()) => {}
-        Err(UniqueReplacementError::NotFound) => {
-            return ToolExecutionResult::failed(
-                "改写工具的 original 未命中目标笔记，已拒绝生成不可应用 diff。",
-            );
-        }
-        Err(UniqueReplacementError::Ambiguous { .. }) => {
-            return ToolExecutionResult::failed(
-                "改写工具的 original 在目标笔记中出现多次，已拒绝生成模糊 diff。请提供更长、更唯一的原文片段。",
-            );
-        }
-        Err(UniqueReplacementError::EmptyOriginal) => {
-            return ToolExecutionResult::failed("改写工具缺少 original 或 next 内容。");
-        }
-    }
+        .filter(|value| matches!(*value, "append" | "replace" | "multi_replace"))
+        .unwrap_or("replace");
+    let (original, next) = match prepare_rewrite_content(&note.content, operation, args) {
+        Ok(prepared_change) => prepared_change,
+        Err(message) => return ToolExecutionResult::failed(&message),
+    };
 
     let change = ProposedChange {
         id: create_id("change"),
         knowledge_base_id: note.knowledge_base_id.clone(),
         note_id: Some(note.id.clone()),
         r#type: "rewrite".to_owned(),
+        operation: Some(operation.to_owned()),
         title: args
             .get("title")
             .and_then(Value::as_str)
@@ -621,12 +632,16 @@ fn execute_propose_note_change(
         next,
         original_hash: note.content_hash.clone(),
         status: "pending".to_owned(),
+        review_comments: None,
+        review_state: None,
+        diff_stats: None,
     };
 
     snapshot.sessions[session_index].pending_change = Some(change.clone());
     let audit_fragment = Some(format!(
-        "propose_note_change 为《{}》生成 diff，原文 {} 字符，建议 {} 字符",
+        "propose_note_change 为《{}》生成 {} diff，原文 {} 字符，建议 {} 字符",
         note.title,
+        operation,
         change.original.chars().count(),
         change.next.chars().count()
     ));
@@ -637,6 +652,189 @@ fn execute_propose_note_change(
         payload: json!({ "change": &change }),
         citations: Vec::new(),
         audit_fragment,
+    }
+}
+
+/** 根据 operation 准备待审阅 diff 的原文和建议内容，不在日志或错误里回显正文。 */
+fn prepare_rewrite_content(
+    content: &str,
+    operation: &str,
+    args: &Value,
+) -> Result<(String, String), String> {
+    match operation {
+        "append" => prepare_append_rewrite(content, args),
+        "multi_replace" => prepare_multi_replace_rewrite(content, args),
+        _ => prepare_single_replace_rewrite(content, args),
+    }
+}
+
+/** 准备单处替换，original 必须唯一命中，next 可以为空以支持删除。 */
+fn prepare_single_replace_rewrite(content: &str, args: &Value) -> Result<(String, String), String> {
+    let original = args
+        .get("original")
+        .and_then(Value::as_str)
+        .filter(|value| !value.trim().is_empty())
+        .map(str::to_owned)
+        .unwrap_or_else(|| first_body_paragraph(content));
+    let Some(next) = args.get("next").and_then(Value::as_str).map(str::to_owned) else {
+        return Err("改写工具缺少 next 内容；如需删除，请显式传入空字符串。".to_owned());
+    };
+
+    if original.is_empty() {
+        return Err("改写工具缺少 original 内容。".to_owned());
+    }
+
+    if looks_like_full_document_replacement_mismatch(content, &original, &next) {
+        return Err(
+            "改写工具疑似把整篇改后文档放进 next，但 original 只是一段局部内容。已拒绝生成会导致正文重复的 diff；如需文末追加，请使用 operation=append，并只把增量内容放入 next。"
+                .to_owned(),
+        );
+    }
+
+    validate_unique_original(content, &original).map_err(single_rewrite_validation_message)?;
+
+    Ok((original, next))
+}
+
+/** 准备文末追加，工具层合成整篇 diff，避免模型把整篇正文塞进局部替换。 */
+fn prepare_append_rewrite(content: &str, args: &Value) -> Result<(String, String), String> {
+    let addition = args
+        .get("next")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .trim()
+        .to_owned();
+
+    if addition.is_empty() {
+        return Err("文末追加工具缺少增量内容。".to_owned());
+    }
+
+    Ok((content.to_owned(), append_note_content(content, &addition)))
+}
+
+/** 准备同一文件内多处替换，先按唯一片段顺序应用到内存，再生成整篇待确认 diff。 */
+fn prepare_multi_replace_rewrite(content: &str, args: &Value) -> Result<(String, String), String> {
+    let edits = parse_text_edits(args)?;
+    let next = apply_multi_text_edits(content, &edits)?;
+
+    if next == content {
+        return Err("多处编辑没有产生内容变化，已拒绝生成空 diff。".to_owned());
+    }
+
+    Ok((content.to_owned(), next))
+}
+
+/** 从工具参数读取 edits/replacements，正文只保存在 pending diff，不进入日志。 */
+fn parse_text_edits(args: &Value) -> Result<Vec<ProposedTextEdit>, String> {
+    let Some(raw_edits_value) = args.get("edits").or_else(|| args.get("replacements")) else {
+        return Err("多处编辑需要提供 edits 数组。".to_owned());
+    };
+    let parsed_string_edits;
+    let raw_edits = if let Some(raw_edits) = raw_edits_value.as_array() {
+        raw_edits
+    } else if let Some(raw_edits_text) = raw_edits_value.as_str() {
+        // 某些 DSML 兼容服务会把数组参数作为字符串输出；这里仅解析 JSON，不记录原文内容。
+        parsed_string_edits = serde_json::from_str::<Value>(raw_edits_text)
+            .map_err(|_| "多处编辑的 edits 字符串不是有效 JSON 数组。".to_owned())?;
+        parsed_string_edits
+            .as_array()
+            .ok_or_else(|| "多处编辑的 edits 字符串不是 JSON 数组。".to_owned())?
+    } else {
+        return Err("多处编辑需要提供 edits 数组。".to_owned());
+    };
+    let mut edits = Vec::with_capacity(raw_edits.len());
+
+    for (index, raw_edit) in raw_edits.iter().enumerate() {
+        let original = raw_edit
+            .get("original")
+            .and_then(Value::as_str)
+            .filter(|value| !value.trim().is_empty())
+            .map(str::to_owned)
+            .ok_or_else(|| format!("多处编辑第 {} 处缺少 original。", index + 1))?;
+        let next = raw_edit
+            .get("next")
+            .or_else(|| raw_edit.get("replacement"))
+            .and_then(Value::as_str)
+            .map(str::to_owned)
+            .ok_or_else(|| format!("多处编辑第 {} 处缺少 next。", index + 1))?;
+        let occurrence = raw_edit
+            .get("occurrence")
+            .or_else(|| raw_edit.get("matchIndex"))
+            .or_else(|| raw_edit.get("match_index"))
+            .and_then(Value::as_u64)
+            .and_then(|value| usize::try_from(value).ok())
+            .filter(|value| *value > 0);
+
+        edits.push(ProposedTextEdit {
+            original,
+            next,
+            occurrence,
+        });
+    }
+
+    if edits.is_empty() {
+        Err("多处编辑需要至少包含一处 edit。".to_owned())
+    } else {
+        Ok(edits)
+    }
+}
+
+/** 顺序应用多处唯一替换；任一处定位失败都会拒绝整次 diff。 */
+fn apply_multi_text_edits(content: &str, edits: &[ProposedTextEdit]) -> Result<String, String> {
+    let mut next_content = content.to_owned();
+
+    for (index, edit) in edits.iter().enumerate() {
+        next_content = if let Some(occurrence) = edit.occurrence {
+            replace_occurrence(&next_content, &edit.original, &edit.next, occurrence)
+                .map_err(|error| occurrence_rewrite_validation_message(index + 1, error))?
+        } else {
+            replace_unique(&next_content, &edit.original, &edit.next)
+                .map_err(|error| multi_rewrite_validation_message(index + 1, error))?
+        };
+    }
+
+    Ok(next_content)
+}
+
+/** 单处替换定位失败时返回给模型的错误，禁止包含原文片段。 */
+fn single_rewrite_validation_message(error: UniqueReplacementError) -> String {
+    match error {
+        UniqueReplacementError::NotFound => {
+            "改写工具的 original 未命中目标笔记，已拒绝生成不可应用 diff。".to_owned()
+        }
+        UniqueReplacementError::Ambiguous { .. } => {
+            "改写工具的 original 在目标笔记中出现多次，已拒绝生成模糊 diff。请提供更长、更唯一的原文片段。"
+                .to_owned()
+        }
+        UniqueReplacementError::EmptyOriginal => "改写工具缺少 original 内容。".to_owned(),
+    }
+}
+
+/** 多处替换定位失败时带上序号，方便模型重试但不回显正文。 */
+fn multi_rewrite_validation_message(index: usize, error: UniqueReplacementError) -> String {
+    match error {
+        UniqueReplacementError::NotFound => {
+            format!("多处编辑第 {index} 处 original 未命中目标笔记，已拒绝生成 diff。")
+        }
+        UniqueReplacementError::Ambiguous { .. } => {
+            format!(
+                "多处编辑第 {index} 处 original 在目标笔记中出现多次，请提供更长、更唯一的片段。"
+            )
+        }
+        UniqueReplacementError::EmptyOriginal => format!("多处编辑第 {index} 处缺少 original。"),
+    }
+}
+
+/** occurrence 定位失败时返回可操作提示，不回显目标正文。 */
+fn occurrence_rewrite_validation_message(
+    index: usize,
+    error: OccurrenceReplacementError,
+) -> String {
+    match error {
+        OccurrenceReplacementError::OccurrenceOutOfRange { requested, count } => format!(
+            "多处编辑第 {index} 处指定第 {requested} 次命中，但当前只命中 {count} 次，已拒绝生成 diff。"
+        ),
+        OccurrenceReplacementError::EmptyOriginal => format!("多处编辑第 {index} 处缺少 original。"),
     }
 }
 
@@ -651,6 +849,38 @@ fn validate_unique_original(content: &str, original: &str) -> Result<(), UniqueR
         1 => Ok(()),
         count => Err(UniqueReplacementError::Ambiguous { count }),
     }
+}
+
+/** 判断模型是否把整篇改后文档误塞进局部替换 next，避免确认后出现正文重复。 */
+fn looks_like_full_document_replacement_mismatch(
+    content: &str,
+    original: &str,
+    next: &str,
+) -> bool {
+    let content_trimmed = content.trim();
+    let original_trimmed = original.trim();
+    let next_trimmed = next.trim();
+
+    if content_trimmed.is_empty() || original_trimmed.is_empty() || next_trimmed.is_empty() {
+        return false;
+    }
+
+    if original_trimmed == content_trimmed {
+        return false;
+    }
+
+    next_trimmed.starts_with(content_trimmed)
+}
+
+/** 将增量内容追加到笔记末尾，统一保留一个空行作为 Markdown 分隔。 */
+fn append_note_content(content: &str, addition: &str) -> String {
+    let trimmed_addition = addition.trim();
+
+    if content.trim().is_empty() {
+        return trimmed_addition.to_owned();
+    }
+
+    format!("{}\n\n{}", content.trim_end(), trimmed_addition)
 }
 
 /** 执行 create_note_draft，只创建待确认新建 diff。 */
@@ -714,6 +944,7 @@ fn execute_create_note_draft(
         knowledge_base_id,
         note_id: None,
         r#type: "create".to_owned(),
+        operation: None,
         title: args
             .get("title")
             .and_then(Value::as_str)
@@ -724,6 +955,9 @@ fn execute_create_note_draft(
         next: content,
         original_hash: hash_content(""),
         status: "pending".to_owned(),
+        review_comments: None,
+        review_state: None,
+        diff_stats: None,
     };
 
     snapshot.sessions[session_index].pending_change = Some(change.clone());
@@ -1052,6 +1286,117 @@ mod tests {
                 .map(|change| change.original.as_str()),
             Some("唯一段落")
         );
+    }
+
+    /** 局部 original 不能搭配整篇文档 next，否则确认后会把前文重复插入。 */
+    #[test]
+    fn propose_note_change_rejects_full_document_next_for_partial_replace() {
+        let registry = ToolRegistry::default();
+        let original_content = "第一段\n第二段\n第三段";
+        let mut snapshot = tool_test_snapshot(original_content.to_owned());
+        let request = tool_test_request("rewrite", "在文末追加内容");
+        let mut context = tool_test_context(&mut snapshot, &request);
+        let outcome = registry.execute_named(
+            &mut context,
+            "propose_note_change",
+            json!({
+                "noteId": "note-a",
+                "operation": "replace",
+                "original": "第二段",
+                "next": format!("{}\n\n新增段落", original_content)
+            }),
+        );
+
+        assert_eq!(outcome.call.status, "failed");
+        assert!(outcome.call.summary.contains("正文重复"));
+        assert!(context.snapshot.sessions[0].pending_change.is_none());
+    }
+
+    /** 文末追加必须使用 append，工具会把增量内容安全合成为整篇待确认 diff。 */
+    #[test]
+    fn propose_note_change_append_builds_full_note_replacement() {
+        let registry = ToolRegistry::default();
+        let mut snapshot = tool_test_snapshot("第一段\n第二段".to_owned());
+        let request = tool_test_request("rewrite", "在文末追加内容");
+        let mut context = tool_test_context(&mut snapshot, &request);
+        let outcome = registry.execute_named(
+            &mut context,
+            "propose_note_change",
+            json!({
+                "noteId": "note-a",
+                "operation": "append",
+                "next": "新增段落"
+            }),
+        );
+
+        let change = context.snapshot.sessions[0]
+            .pending_change
+            .as_ref()
+            .unwrap();
+
+        assert_eq!(outcome.call.status, "completed");
+        assert_eq!(change.operation.as_deref(), Some("append"));
+        assert_eq!(change.original, "第一段\n第二段");
+        assert_eq!(change.next, "第一段\n第二段\n\n新增段落");
+    }
+
+    /** 多处编辑应在工具层合成为整篇待确认 diff，避免模型拆成多个后续承诺。 */
+    #[test]
+    fn propose_note_change_multi_replace_builds_full_note_replacement() {
+        let registry = ToolRegistry::default();
+        let mut snapshot =
+            tool_test_snapshot("标题\n重复段落一\n正文\n重复段落二\n结尾".to_owned());
+        let request = tool_test_request("rewrite", "删除文档里的重复内容");
+        let mut context = tool_test_context(&mut snapshot, &request);
+        let outcome = registry.execute_named(
+            &mut context,
+            "propose_note_change",
+            json!({
+                "noteId": "note-a",
+                "operation": "multi_replace",
+                "edits": [
+                    { "original": "重复段落一\n", "next": "" },
+                    { "original": "重复段落二\n", "next": "" }
+                ]
+            }),
+        );
+        let change = context.snapshot.sessions[0]
+            .pending_change
+            .as_ref()
+            .unwrap();
+
+        assert_eq!(outcome.call.status, "completed");
+        assert_eq!(change.operation.as_deref(), Some("multi_replace"));
+        assert_eq!(change.original, "标题\n重复段落一\n正文\n重复段落二\n结尾");
+        assert_eq!(change.next, "标题\n正文\n结尾");
+    }
+
+    /** 多处编辑支持 occurrence 精确删除重复片段中的指定一次。 */
+    #[test]
+    fn propose_note_change_multi_replace_accepts_occurrence_for_duplicates() {
+        let registry = ToolRegistry::default();
+        let mut snapshot = tool_test_snapshot("开头\n重复段落\n中间\n重复段落\n结尾".to_owned());
+        let request = tool_test_request("rewrite", "删除后面的重复段落");
+        let mut context = tool_test_context(&mut snapshot, &request);
+        let outcome = registry.execute_named(
+            &mut context,
+            "propose_note_change",
+            json!({
+                "noteId": "note-a",
+                "operation": "multi_replace",
+                "edits": [
+                    { "original": "重复段落\n", "next": "", "occurrence": 2 }
+                ]
+            }),
+        );
+        let change = context.snapshot.sessions[0]
+            .pending_change
+            .as_ref()
+            .unwrap();
+
+        assert_eq!(outcome.call.status, "completed");
+        assert_eq!(change.operation.as_deref(), Some("multi_replace"));
+        assert_eq!(change.next, "开头\n重复段落\n中间\n结尾");
     }
 
     /** propose_note_change 必须拒绝 scope 外笔记。 */
