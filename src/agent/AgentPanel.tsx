@@ -12,6 +12,7 @@ import {
   X,
   Sparkles,
 } from "lucide-react";
+import { useRef, type CompositionEventHandler, type KeyboardEventHandler } from "react";
 import ReactMarkdown from "react-markdown";
 import rehypeSanitize from "rehype-sanitize";
 import remarkGfm from "remark-gfm";
@@ -23,10 +24,13 @@ import {
   getSessionNoteLabel,
   getSessionTypeLabel,
 } from "../shared/selectors";
+import { logDebug } from "../shared/logger";
 import type { AgentSession, AgentSkill, KnowledgeBase, ModelConfig, Note } from "../shared/types";
 
 /** 会话/本轮模型选择器统一使用的“跟随默认”占位值，不写入具体 providerId。 */
 const FOLLOW_DEFAULT_VALUE = "";
+/** 输入法结束组词后的短保护窗口；部分中文输入法会先触发 compositionend，再派发 Enter keydown。 */
+const PROMPT_IME_ENTER_GUARD_MS = 150;
 
 /** 右侧 Agent 侧栏，承载会话、工具调用、检索范围、引用和输入框。 */
 export function AgentPanel({
@@ -101,6 +105,78 @@ export function AgentPanel({
   const writeStatus = activeSession.pendingChange?.status === "pending" ? "待确认 diff" : "写入需确认";
   /** 已启用 skill 会以名称和描述进入 system prompt，具体是否使用交给 Agent 判断。 */
   const enabledSkillCount = skills.filter((skill) => skill.enabled).length;
+  /** 当前 Agent 输入框是否处于输入法组词状态，弥补不同浏览器 nativeEvent.isComposing 不一致的问题。 */
+  const isPromptComposingRef = useRef(false);
+  /** 最近一次输入法组词结束时间，用于过滤 compositionend 后紧邻的候选确认 Enter。 */
+  const lastPromptCompositionEndAtRef = useRef(0);
+  /** 记录已在组词阶段捕获到 Enter，避免常规事件顺序下过度拦截用户后续发送。 */
+  const didHandlePromptComposingEnterRef = useRef(false);
+  /** Agent 输入框开始组词时只更新本地状态，不记录正文内容。 */
+  const handlePromptCompositionStart: CompositionEventHandler<HTMLTextAreaElement> = () => {
+    isPromptComposingRef.current = true;
+    lastPromptCompositionEndAtRef.current = 0;
+    didHandlePromptComposingEnterRef.current = false;
+  };
+  /** Agent 输入框结束组词时开启短保护窗口，兼容输入法确认键和 keydown 顺序反转的情况。 */
+  const handlePromptCompositionEnd: CompositionEventHandler<HTMLTextAreaElement> = () => {
+    isPromptComposingRef.current = false;
+    lastPromptCompositionEndAtRef.current = didHandlePromptComposingEnterRef.current ? 0 : Date.now();
+    didHandlePromptComposingEnterRef.current = false;
+  };
+  /** Agent 输入框快捷键处理器；Enter 提交，Shift+Enter 继续使用 textarea 原生换行。 */
+  const handlePromptKeyDown: KeyboardEventHandler<HTMLTextAreaElement> = (event) => {
+    if (event.key !== "Enter" || event.shiftKey) {
+      return;
+    }
+
+    const promptLength = prompt.trim().length;
+    const timeSinceCompositionEnd = Date.now() - lastPromptCompositionEndAtRef.current;
+    const isRecentCompositionEnd =
+      lastPromptCompositionEndAtRef.current > 0 && timeSinceCompositionEnd >= 0 && timeSinceCompositionEnd <= PROMPT_IME_ENTER_GUARD_MS;
+    const isImeConfirmationEnter = isPromptComposingRef.current || event.nativeEvent.isComposing || event.keyCode === 229 || isRecentCompositionEnd;
+
+    // 输入法组词或刚结束组词时的 Enter 只用于确认候选词，不能触发消息发送。
+    if (isImeConfirmationEnter) {
+      didHandlePromptComposingEnterRef.current = true;
+
+      if (isRecentCompositionEnd) {
+        // compositionend 后补发的 Enter 已完成候选确认，这里阻止 textarea 额外插入换行。
+        event.preventDefault();
+        lastPromptCompositionEndAtRef.current = 0;
+      }
+
+      logDebug("忽略输入法确认用 Enter。", {
+        category: "frontend",
+        event: "agent_prompt_enter_ime_guard",
+        status: "ignored",
+        metadata: {
+          isNativeComposing: event.nativeEvent.isComposing,
+          isTrackedComposing: isPromptComposingRef.current,
+          promptLength,
+        },
+      });
+      return;
+    }
+
+    event.preventDefault();
+    logDebug("通过回车快捷键提交 Agent 输入。", {
+      category: "frontend",
+      event: "agent_prompt_enter_submit",
+      status: promptLength ? "submitted" : "ignored",
+      metadata: {
+        hasActivePendingChange: activeSession.pendingChange?.status === "pending",
+        messageCount: activeSession.messages.length,
+        promptLength,
+      },
+    });
+
+    // 空输入只吞掉回车，避免产生无意义空行；真正发送仍复用按钮的同一业务入口。
+    if (!promptLength) {
+      return;
+    }
+
+    onSubmitPrompt();
+  };
 
   return (
     <aside className="agent-panel" aria-label="AI 侧栏">
@@ -325,6 +401,9 @@ export function AgentPanel({
         <textarea
           value={prompt}
           onChange={(event) => onPromptChange(event.target.value)}
+          onCompositionStart={handlePromptCompositionStart}
+          onCompositionEnd={handlePromptCompositionEnd}
+          onKeyDown={handlePromptKeyDown}
           placeholder="和知识库助手对话；需要依据本地笔记时，Agent 会自行调用工具"
           aria-label="Agent 输入"
           disabled={isBusy}
