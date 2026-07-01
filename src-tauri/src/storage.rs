@@ -1,9 +1,10 @@
 use crate::domain::{
     AgentSession, AppEventLog, DocumentPreview, DocumentPreviewBlock, FolderEntry, KnowledgeBase,
-    KnowledgeBaseSelection, ModelApiKeyStatus, ModelConfig, Note, NoteImageAttachmentInput,
-    RequestAuditLog, SavedNoteImageAttachment, ScanReport, UserSettings, WorkspaceDocument,
-    WorkspaceSnapshot,
+    KnowledgeBaseSelection, LlmProviderConfig, ModelApiKeyStatus, ModelConfig, Note,
+    NoteImageAttachmentInput, RequestAuditLog, SavedNoteImageAttachment, ScanReport, UserSettings,
+    WorkspaceDocument, WorkspaceSnapshot,
 };
+use crate::model_provider;
 use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 use base64::Engine as _;
 use chrono::{Duration as ChronoDuration, Local, NaiveDateTime, TimeZone};
@@ -67,8 +68,8 @@ const PASTED_IMAGE_HASH_PREFIX_LENGTH: usize = 12;
 /** 附件目录没有可用笔记名时使用的兜底目录名。 */
 const DEFAULT_ATTACHMENT_NOTE_FOLDER_NAME: &str = "note";
 
-/** 当前桌面进程内的模型密钥缓存，用于减少同一会话内反复访问系统安全存储。 */
-static MODEL_API_KEY_CACHE: OnceLock<Mutex<Option<String>>> = OnceLock::new();
+/** 当前桌面进程内的模型密钥缓存，按 key 引用隔离，用于减少同一会话内反复访问系统安全存储。 */
+static MODEL_API_KEY_CACHE: OnceLock<Mutex<HashMap<String, String>>> = OnceLock::new();
 
 /** 当前桌面进程内的 SQLite 写锁，串行化索引刷新、会话保存和轻量迁移。 */
 static DATABASE_WRITE_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
@@ -389,13 +390,25 @@ fn normalize_audit_log_created_at(log: &mut RequestAuditLog) {
 
 /** 返回用户设置默认值；模型默认关闭，直到用户显式保存 BYOK 配置。 */
 pub fn default_user_settings() -> UserSettings {
+    let now = format_local_datetime();
+
     UserSettings {
         model_config: ModelConfig {
-            provider: "openai-compatible".to_owned(),
-            api_base: "https://api.openai.com/v1".to_owned(),
-            model: "gpt-4o-mini".to_owned(),
-            key_reference: MODEL_KEY_REFERENCE.to_owned(),
             enabled: false,
+            default_provider_id: model_provider::MIGRATED_DEFAULT_PROVIDER_ID.to_owned(),
+            providers: vec![LlmProviderConfig {
+                id: model_provider::MIGRATED_DEFAULT_PROVIDER_ID.to_owned(),
+                name: "默认 Provider".to_owned(),
+                provider: model_provider::DEFAULT_PROVIDER_TYPE.to_owned(),
+                api_base: "https://api.openai.com/v1".to_owned(),
+                model: "gpt-4o-mini".to_owned(),
+                key_reference: MODEL_KEY_REFERENCE.to_owned(),
+                enabled: false,
+                supports_tools: true,
+                requires_api_key: true,
+                created_at: now.clone(),
+                updated_at: now,
+            }],
         },
         privacy_policy: "allow-selected-scope".to_owned(),
         write_confirmation_required: true,
@@ -1204,18 +1217,33 @@ pub fn load_user_settings(app: &AppHandle) -> Result<UserSettings, String> {
         .ok();
 
     match payload_json {
-        Some(payload_json) => serde_json::from_str(&payload_json)
-            .map_err(|error| format!("无法解析用户设置：{error}")),
+        // 旧版单 provider JSON 在读取时自动迁移成 provider 集合，避免用户手动重新配置。
+        Some(payload_json) => model_provider::parse_or_migrate_user_settings_json(
+            &payload_json,
+            &format_local_datetime(),
+        ),
         None => Ok(default_user_settings()),
     }
 }
 
-/** 保存用户模型和隐私设置；密钥本身由单独命令写入系统安全存储。 */
-pub fn save_user_settings(app: &AppHandle, settings: &UserSettings) -> Result<(), String> {
+/** 保存用户模型和隐私设置；密钥本身由单独命令写入系统安全存储。
+ *
+ * 保存前强制按 providerId 重新计算每个 provider 的 key_reference，
+ * 避免前端携带的 key_reference（例如新增 provider 时的占位值）和
+ * `save_model_api_key` 实际写入 keyring 的引用不一致，导致密钥“已保存却找不到”。
+ * 返回归一化后的设置，供调用方直接回传给前端，避免前端状态和持久化状态出现分歧。 */
+pub fn save_user_settings(
+    app: &AppHandle,
+    settings: &UserSettings,
+) -> Result<UserSettings, String> {
     let connection = open_database(app)?;
     let _write_guard = lock_database_writer()?;
-    let payload_json =
-        serde_json::to_string(settings).map_err(|error| format!("无法序列化用户设置：{error}"))?;
+    let mut normalized_settings = settings.clone();
+
+    model_provider::normalize_model_config_key_references(&mut normalized_settings.model_config);
+
+    let payload_json = serde_json::to_string(&normalized_settings)
+        .map_err(|error| format!("无法序列化用户设置：{error}"))?;
 
     connection
         .execute(
@@ -1224,14 +1252,15 @@ pub fn save_user_settings(app: &AppHandle, settings: &UserSettings) -> Result<()
         )
         .map_err(|error| format!("无法保存用户设置：{error}"))?;
 
-    Ok(())
+    Ok(normalized_settings)
 }
 
-/** 把 BYOK 模型密钥保存到系统安全存储，避免明文进入 SQLite。 */
-pub fn save_model_api_key(api_key: &str) -> Result<ModelApiKeyStatus, String> {
+/** 把 BYOK 模型密钥保存到系统安全存储，按 providerId 隔离 key 引用，避免明文进入 SQLite。 */
+pub fn save_model_api_key(provider_id: &str, api_key: &str) -> Result<ModelApiKeyStatus, String> {
     ensure_persistent_model_keyring()?;
 
-    let entry = keyring::Entry::new("Cici Note", MODEL_KEY_REFERENCE)
+    let key_reference = model_provider::key_reference_for_provider(provider_id);
+    let entry = keyring::Entry::new("Cici Note", &key_reference)
         .map_err(|error| format!("无法打开系统安全存储：{error}"))?;
 
     entry
@@ -1247,29 +1276,30 @@ pub fn save_model_api_key(api_key: &str) -> Result<ModelApiKeyStatus, String> {
         return Err("模型密钥已提交但系统安全存储返回空值。".to_owned());
     }
 
-    store_model_api_key_in_cache(&saved_api_key)?;
+    store_model_api_key_in_cache(&key_reference, &saved_api_key)?;
 
     Ok(ModelApiKeyStatus {
-        key_reference: MODEL_KEY_REFERENCE.to_owned(),
+        provider_id: provider_id.to_owned(),
+        key_reference,
         configured: true,
         message: "模型密钥已保存、读回校验通过，并已载入当前桌面进程。".to_owned(),
     })
 }
 
-/** 从系统安全存储读取 BYOK 模型密钥；缺失时返回 None。 */
-pub fn load_model_api_key() -> Result<Option<String>, String> {
+/** 从系统安全存储按 key 引用读取 BYOK 模型密钥；缺失时返回 None。 */
+pub fn load_model_api_key(key_reference: &str) -> Result<Option<String>, String> {
     ensure_persistent_model_keyring()?;
 
-    if let Some(api_key) = load_model_api_key_from_cache()? {
+    if let Some(api_key) = load_model_api_key_from_cache(key_reference)? {
         return Ok(Some(api_key));
     }
 
-    let entry = keyring::Entry::new("Cici Note", MODEL_KEY_REFERENCE)
+    let entry = keyring::Entry::new("Cici Note", key_reference)
         .map_err(|error| format!("无法打开系统安全存储：{error}"))?;
 
     match entry.get_password() {
         Ok(api_key) if !api_key.trim().is_empty() => {
-            store_model_api_key_in_cache(&api_key)?;
+            store_model_api_key_in_cache(key_reference, &api_key)?;
             Ok(Some(api_key))
         }
         Ok(_) => Ok(None),
@@ -1286,9 +1316,12 @@ pub fn load_model_api_key() -> Result<Option<String>, String> {
     }
 }
 
-/** 查询模型密钥是否已经可读取；不会返回明文密钥。 */
-pub fn load_model_api_key_status() -> Result<ModelApiKeyStatus, String> {
-    let configured = load_model_api_key()?.is_some();
+/** 查询单个 provider 的模型密钥是否已经可读取；不会返回明文密钥。 */
+pub fn load_model_api_key_status(
+    provider_id: &str,
+    key_reference: &str,
+) -> Result<ModelApiKeyStatus, String> {
+    let configured = load_model_api_key(key_reference)?.is_some();
     let message = if configured {
         "系统安全存储中已找到模型密钥。"
     } else {
@@ -1296,10 +1329,21 @@ pub fn load_model_api_key_status() -> Result<ModelApiKeyStatus, String> {
     };
 
     Ok(ModelApiKeyStatus {
-        key_reference: MODEL_KEY_REFERENCE.to_owned(),
+        provider_id: provider_id.to_owned(),
+        key_reference: key_reference.to_owned(),
         configured,
         message: message.to_owned(),
     })
+}
+
+/** 批量查询设置中每个 provider 的密钥状态，供设置页一次性展示。 */
+pub fn load_model_api_key_statuses(
+    providers: &[LlmProviderConfig],
+) -> Result<Vec<ModelApiKeyStatus>, String> {
+    providers
+        .iter()
+        .map(|provider| load_model_api_key_status(&provider.id, &provider.key_reference))
+        .collect()
 }
 
 /** 确认当前 keyring 构建使用可跨进程持久化的系统安全存储。 */
@@ -1319,27 +1363,27 @@ fn model_keyring_persists_until_delete() -> bool {
     )
 }
 
-/** 把已验证密钥放入进程内缓存，避免同一桌面会话内反复访问 keychain。 */
-fn store_model_api_key_in_cache(api_key: &str) -> Result<(), String> {
-    let cache = MODEL_API_KEY_CACHE.get_or_init(|| Mutex::new(None));
-    let mut cached_api_key = cache
+/** 把已验证密钥按 key 引用放入进程内缓存，避免同一桌面会话内反复访问 keychain。 */
+fn store_model_api_key_in_cache(key_reference: &str, api_key: &str) -> Result<(), String> {
+    let cache = MODEL_API_KEY_CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+    let mut cached_api_keys = cache
         .lock()
         .map_err(|_| "模型密钥缓存已损坏。".to_owned())?;
 
     // 缓存只优化当前进程的重复读取，真实持久化仍完全依赖系统安全存储。
-    *cached_api_key = Some(api_key.to_owned());
+    cached_api_keys.insert(key_reference.to_owned(), api_key.to_owned());
 
     Ok(())
 }
 
-/** 从进程内缓存读取模型密钥；不命中时再访问系统安全存储。 */
-fn load_model_api_key_from_cache() -> Result<Option<String>, String> {
-    let cache = MODEL_API_KEY_CACHE.get_or_init(|| Mutex::new(None));
-    let cached_api_key = cache
+/** 按 key 引用从进程内缓存读取模型密钥；不命中时再访问系统安全存储。 */
+fn load_model_api_key_from_cache(key_reference: &str) -> Result<Option<String>, String> {
+    let cache = MODEL_API_KEY_CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+    let cached_api_keys = cache
         .lock()
         .map_err(|_| "模型密钥缓存已损坏。".to_owned())?;
 
-    Ok(cached_api_key.clone())
+    Ok(cached_api_keys.get(key_reference).cloned())
 }
 
 /** 识别不同系统 keyring 后端返回的“条目不存在”错误文案。 */
@@ -3269,6 +3313,7 @@ mod tests {
             created_at: created_at.to_owned(),
             updated_at: created_at.to_owned(),
             deleted_at: None,
+            model_provider_id: None,
         }
     }
 
@@ -3400,13 +3445,13 @@ mod tests {
         assert!(ensure_persistent_model_keyring().is_ok());
     }
 
-    /** 读回校验后的密钥会进入进程缓存，供同一桌面会话内的 Agent turn 复用。 */
+    /** 读回校验后的密钥会按 key 引用进入进程缓存，供同一桌面会话内的 Agent turn 复用。 */
     #[test]
     fn model_api_key_cache_round_trips_inside_process() {
-        store_model_api_key_in_cache("test-key-from-cache").unwrap();
+        store_model_api_key_in_cache("test-key-reference", "test-key-from-cache").unwrap();
 
         assert_eq!(
-            load_model_api_key_from_cache().unwrap(),
+            load_model_api_key_from_cache("test-key-reference").unwrap(),
             Some("test-key-from-cache".to_owned())
         );
     }

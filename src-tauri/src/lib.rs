@@ -4,6 +4,7 @@ mod commands;
 mod domain;
 mod export;
 mod logging;
+mod model_provider;
 mod runtime;
 mod skills;
 mod storage;
@@ -80,7 +81,8 @@ pub fn run() {
             commands::delete_agent_skill,
             commands::install_agent_skill,
             commands::save_model_api_key,
-            commands::load_model_api_key_status,
+            commands::load_model_api_key_statuses,
+            commands::load_llm_provider_templates,
             commands::load_request_audit_logs,
             commands::load_app_event_logs,
             commands::clear_app_event_logs,

@@ -12,6 +12,7 @@ use crate::domain::{
     UpdateSessionScopePayload, UserSettings, WorkspaceSnapshot,
 };
 use crate::logging::{self, AppEventBuilder, AppLogCategory, AppLogLevel};
+use crate::model_provider::{self, ProviderTemplate};
 use crate::runtime;
 use crate::skills;
 use crate::storage;
@@ -152,11 +153,13 @@ pub async fn save_user_settings(
     let settings_app = app.clone();
     let started_at = Instant::now();
     let model_enabled = saved_settings.model_config.enabled;
-    let model_name = saved_settings.model_config.model.clone();
+    let provider_count = saved_settings.model_config.providers.len();
+    let default_provider_id = saved_settings.model_config.default_provider_id.clone();
 
     let result = run_blocking("保存用户设置", move || {
-        storage::save_user_settings(&settings_app, &saved_settings)?;
-        Ok(saved_settings)
+        // 返回值使用归一化后的设置（key_reference 已按 providerId 重新计算），
+        // 避免前端状态和实际持久化、keyring 写入位置出现分歧。
+        storage::save_user_settings(&settings_app, &saved_settings)
     })
     .await;
 
@@ -171,7 +174,11 @@ pub async fn save_user_settings(
                 "已保存用户设置。",
             )
             .duration(started_at.elapsed())
-            .metadata(json!({ "modelEnabled": model_enabled, "model": model_name })),
+            .metadata(json!({
+                "modelEnabled": model_enabled,
+                "providerCount": provider_count,
+                "defaultProviderId": default_provider_id,
+            })),
         ),
         Err(error) => logging::write_app_event_best_effort(
             &app,
@@ -489,15 +496,16 @@ pub async fn install_agent_skill(
     result
 }
 
-/** 保存 BYOK 模型密钥到系统安全存储，SQLite 只保存 keyReference。 */
+/** 保存 BYOK 模型密钥到系统安全存储，按 providerId 隔离，SQLite 只保存 keyReference。 */
 #[tauri::command]
 pub async fn save_model_api_key(
     app: AppHandle,
     payload: SaveModelApiKeyPayload,
 ) -> Result<ModelApiKeyStatus, String> {
     let started_at = Instant::now();
+    let provider_id = payload.provider_id.clone();
     let result = run_blocking("保存模型密钥", move || {
-        storage::save_model_api_key(&payload.api_key)
+        storage::save_model_api_key(&payload.provider_id, &payload.api_key)
     })
     .await;
 
@@ -512,7 +520,11 @@ pub async fn save_model_api_key(
                 "已更新模型密钥状态。",
             )
             .duration(started_at.elapsed())
-            .metadata(json!({ "configured": status.configured, "keyReference": status.key_reference.clone() })),
+            .metadata(json!({
+                "providerId": status.provider_id.clone(),
+                "configured": status.configured,
+                "keyReference": status.key_reference.clone(),
+            })),
         ),
         Err(error) => logging::write_app_event_best_effort(
             &app,
@@ -523,17 +535,29 @@ pub async fn save_model_api_key(
                 "failed",
                 error,
             )
-            .duration(started_at.elapsed()),
+            .duration(started_at.elapsed())
+            .metadata(json!({ "providerId": provider_id })),
         ),
     }
 
     result
 }
 
-/** 读取 BYOK 模型密钥状态，只返回是否已配置，不返回明文。 */
+/** 批量读取每个 provider 的 BYOK 模型密钥状态，只返回是否已配置，不返回明文。 */
 #[tauri::command]
-pub async fn load_model_api_key_status() -> Result<ModelApiKeyStatus, String> {
-    run_blocking("读取模型密钥状态", storage::load_model_api_key_status).await
+pub async fn load_model_api_key_statuses(app: AppHandle) -> Result<Vec<ModelApiKeyStatus>, String> {
+    run_blocking("读取模型密钥状态", move || {
+        let settings = storage::load_user_settings(&app)?;
+
+        storage::load_model_api_key_statuses(&settings.model_config.providers)
+    })
+    .await
+}
+
+/** 读取内置 LLM Provider 模板，供设置页“新增 Provider”入口预填参数。 */
+#[tauri::command]
+pub async fn load_llm_provider_templates() -> Result<Vec<ProviderTemplate>, String> {
+    Ok(model_provider::provider_templates())
 }
 
 /** 读取最近模型请求和工具调用审计摘要，用于设置页解释发送边界。 */
@@ -2755,6 +2779,7 @@ mod tests {
             created_at: "刚刚".to_owned(),
             updated_at: "刚刚".to_owned(),
             deleted_at: None,
+            model_provider_id: None,
         }
     }
 

@@ -263,6 +263,7 @@ mod tests {
             active_knowledge_base_id: "kb-a".to_owned(),
             active_note_id: "note-a".to_owned(),
             client_message_id: None,
+            model_provider_id: None,
         };
         let response = build_local_response(&request, &[], &[]);
 
@@ -279,6 +280,7 @@ mod tests {
             active_knowledge_base_id: "kb-a".to_owned(),
             active_note_id: "note-a".to_owned(),
             client_message_id: None,
+            model_provider_id: None,
         };
         let response = build_local_response(&request, &[], &[]);
 
@@ -308,6 +310,7 @@ mod tests {
             created_at: "刚刚".to_owned(),
             updated_at: "刚刚".to_owned(),
             deleted_at: None,
+            model_provider_id: None,
         };
         let request = AgentTurnRequest {
             prompt: "已发送消息".to_owned(),
@@ -316,6 +319,7 @@ mod tests {
             active_knowledge_base_id: "kb-a".to_owned(),
             active_note_id: String::new(),
             client_message_id: Some("user-client".to_owned()),
+            model_provider_id: None,
         };
 
         ensure_user_message_for_turn(&mut session, &request);

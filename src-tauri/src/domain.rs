@@ -45,14 +45,6 @@ pub enum AgentToolCallStatus {
     Failed,
 }
 
-/** 首版云端模型提供商，M3 先固定 OpenAI-compatible BYOK 协议。 */
-#[allow(dead_code)]
-#[derive(Clone, Debug, Deserialize, Serialize)]
-#[serde(rename_all = "kebab-case")]
-pub enum ModelProvider {
-    OpenaiCompatible,
-}
-
 /** 用户选择的隐私策略，决定模型请求是否允许携带本地笔记片段。 */
 #[allow(dead_code)]
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -274,17 +266,42 @@ pub struct AgentSession {
     pub updated_at: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub deleted_at: Option<String>,
+    /** 会话默认使用的 LLM Provider；缺省时回退到全局默认 provider。 */
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model_provider_id: Option<String>,
 }
 
-/** 云端模型配置只保存 key 引用，不在普通 SQLite payload 中保存明文密钥。 */
+/** 默认要求配置 API key；只有本地免鉴权服务（例如 Ollama）会显式关闭。 */
+fn default_requires_api_key() -> bool {
+    true
+}
+
+/** 单个 LLM Provider 实例配置；用户可以配置多个 provider 并按需切换。 */
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub struct ModelConfig {
+pub struct LlmProviderConfig {
+    pub id: String,
+    pub name: String,
     pub provider: String,
     pub api_base: String,
     pub model: String,
     pub key_reference: String,
     pub enabled: bool,
+    pub supports_tools: bool,
+    /** 是否需要配置 API key；本地免鉴权服务可以标记为 false 跳过 key 校验。 */
+    #[serde(default = "default_requires_api_key")]
+    pub requires_api_key: bool,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+/** 云端模型设置聚合多个 Provider；默认 Provider 决定未显式选择时使用哪一个。 */
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ModelConfig {
+    pub enabled: bool,
+    pub default_provider_id: String,
+    pub providers: Vec<LlmProviderConfig>,
 }
 
 /** Agent skill 是可启停的指令型工作流包，首版不携带脚本或外部命令。 */
@@ -322,6 +339,7 @@ pub struct UserSettings {
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ModelApiKeyStatus {
+    pub provider_id: String,
     pub key_reference: String,
     pub configured: bool,
     pub message: String,
@@ -421,6 +439,9 @@ pub struct AgentTurnRequest {
     pub active_note_id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub client_message_id: Option<String>,
+    /** 本轮显式选择的 Provider；优先级高于会话默认和全局默认。 */
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model_provider_id: Option<String>,
 }
 
 /** Agent 单轮返回结果。 */
@@ -681,10 +702,11 @@ pub struct SaveUserSettingsPayload {
     pub settings: UserSettings,
 }
 
-/** 保存 BYOK 模型密钥的命令入参；密钥只进入系统安全存储。 */
+/** 保存 BYOK 模型密钥的命令入参；密钥只进入系统安全存储，按 providerId 隔离。 */
 #[derive(Clone, Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SaveModelApiKeyPayload {
+    pub provider_id: String,
     pub api_key: String,
 }
 
