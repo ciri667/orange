@@ -16,6 +16,7 @@ export type AgentToolName =
   | "skill_context"
   | "model_request"
   | "local_rule_agent"
+  | "review_change"
   | "search_notes"
   | "read_note"
   | "list_tree"
@@ -212,18 +213,56 @@ export interface AgentMessage {
   toolCalls?: AgentToolCall[];
 }
 
+/** 审阅评论绑定到 diff 的一侧和行号，正文只进入会话消息，不进入诊断日志。 */
+export interface ReviewComment {
+  id: string;
+  changeId: string;
+  lineSide: "original" | "next";
+  lineNumber: number;
+  lineTextPreview: string;
+  body: string;
+  status: "draft" | "submitted" | "resolved";
+  createdAt: string;
+}
+
+/** 待写入变更的审阅状态，只记录交互进度，不影响最终整次应用策略。 */
+export interface ProposedChangeReviewState {
+  selectedCommentId?: string;
+  selectedLineSide?: ReviewComment["lineSide"];
+  selectedLineNumber?: number;
+  commentCount: number;
+  submittedCommentCount: number;
+  updatedAt: string;
+}
+
+/** diff 摘要统计，供审阅头部和日志使用，避免记录正文内容。 */
+export interface ProposedChangeDiffStats {
+  addedLines: number;
+  removedLines: number;
+  contextLines: number;
+  hunkCount: number;
+  originalLineCount: number;
+  nextLineCount: number;
+  originalCharCount: number;
+  nextCharCount: number;
+}
+
 /** Agent 对笔记提出的待确认变更，确认前不能修改本地 Markdown。 */
 export interface ProposedChange {
   id: string;
   knowledgeBaseId: string;
   noteId?: string;
   type: "rewrite" | "create" | "organize";
+  operation?: "replace" | "append" | "multi_replace";
   title: string;
   targetPath: string;
   original: string;
   next: string;
   originalHash: string;
   status: "pending" | "accepted" | "rejected";
+  reviewComments?: ReviewComment[];
+  reviewState?: ProposedChangeReviewState;
+  diffStats?: ProposedChangeDiffStats;
 }
 
 /** Agent 会话是上下文容器，绑定知识库范围、笔记、消息和待确认写入。 */

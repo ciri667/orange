@@ -242,12 +242,63 @@ pub struct ProposedChange {
     pub knowledge_base_id: String,
     pub note_id: Option<String>,
     pub r#type: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub operation: Option<String>,
     pub title: String,
     pub target_path: String,
     pub original: String,
     pub next: String,
     pub original_hash: String,
     pub status: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub review_comments: Option<Vec<ReviewComment>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub review_state: Option<ProposedChangeReviewState>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub diff_stats: Option<ProposedChangeDiffStats>,
+}
+
+/** 审阅评论绑定到 diff 的一侧和行号，正文只随会话 payload 传递。 */
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ReviewComment {
+    pub id: String,
+    pub change_id: String,
+    pub line_side: String,
+    pub line_number: usize,
+    pub line_text_preview: String,
+    pub body: String,
+    pub status: String,
+    pub created_at: String,
+}
+
+/** 待写入变更的审阅状态，供前端恢复选择和评论数量。 */
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProposedChangeReviewState {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub selected_comment_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub selected_line_side: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub selected_line_number: Option<usize>,
+    pub comment_count: usize,
+    pub submitted_comment_count: usize,
+    pub updated_at: String,
+}
+
+/** diff 摘要统计只记录数量，不保存正文。 */
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProposedChangeDiffStats {
+    pub added_lines: usize,
+    pub removed_lines: usize,
+    pub context_lines: usize,
+    pub hunk_count: usize,
+    pub original_line_count: usize,
+    pub next_line_count: usize,
+    pub original_char_count: usize,
+    pub next_char_count: usize,
 }
 
 /** Agent 会话上下文容器。 */

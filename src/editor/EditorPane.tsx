@@ -8,6 +8,7 @@ import rehypeSanitize, { defaultSchema } from "rehype-sanitize";
 import type { Options as RehypeSanitizeOptions } from "rehype-sanitize";
 import remarkGfm from "remark-gfm";
 import { DiffPanel } from "../diff/DiffPanel";
+import type { ReviewCommentDraft } from "../diff/DiffPanel";
 import type { ExportFormat, KnowledgeBase, MarkdownViewMode, Note, ProposedChange } from "../shared/types";
 import { LineNumberedTextarea } from "./LineNumberedTextarea";
 import { useSyncedMarkdownScroll } from "./useSyncedMarkdownScroll";
@@ -71,6 +72,8 @@ export function EditorPane({
   onDeleteNote,
   onAcceptChange,
   onRejectChange,
+  onAddReviewComment,
+  onSubmitReviewComments,
 }: {
   note?: Note;
   knowledgeBase: KnowledgeBase;
@@ -87,6 +90,8 @@ export function EditorPane({
   onDeleteNote: () => void;
   onAcceptChange: () => void;
   onRejectChange: () => void;
+  onAddReviewComment: (comment: ReviewCommentDraft) => void;
+  onSubmitReviewComments: () => void;
 }) {
   /** 分屏模式下同步源码和预览滚动；非分屏时 hook 会保持静默。 */
   const { editorRef, previewRef, handleEditorScroll, handlePreviewScroll } = useSyncedMarkdownScroll(viewMode === "split");
@@ -258,7 +263,14 @@ export function EditorPane({
       </div>
 
       {proposedChange?.status === "pending" && (
-        <DiffPanel change={proposedChange} onAccept={onAcceptChange} onReject={onRejectChange} isBusy={isBusy} />
+        <DiffPanel
+          change={proposedChange}
+          onAccept={onAcceptChange}
+          onReject={onRejectChange}
+          onAddComment={onAddReviewComment}
+          onSubmitComments={onSubmitReviewComments}
+          isBusy={isBusy}
+        />
       )}
     </section>
   );

@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { AgentPanel } from "../agent/AgentPanel";
 import { DocumentPane } from "../editor/DocumentPane";
 import { EditorPane } from "../editor/EditorPane";
@@ -6,6 +6,7 @@ import { buildFileTree } from "../knowledge-base/treeUtils";
 import { KnowledgeBaseSidebar } from "../knowledge-base/KnowledgeBaseSidebar";
 import { SettingsDrawer } from "../settings/SettingsDrawer";
 import { ConfirmDialog, type ConfirmDialogConfig } from "../shared/ConfirmDialog";
+import { buildMarkdownDiff } from "../diff/markdownDiff";
 import { createContentHash, createLocalId, formatLocalDateTime } from "../shared/id";
 import { logError, logInfo, logWarn } from "../shared/logger";
 import {
@@ -71,12 +72,15 @@ import type {
   ModelApiKeyStatus,
   Note,
   NoteImageAttachmentInput,
+  ProposedChange,
   ProviderTemplate,
   RequestAuditLog,
+  ReviewComment,
   UserSettings,
   WorkspaceDocument,
   WorkspaceSnapshot,
 } from "../shared/types";
+import type { ReviewCommentDraft } from "../diff/DiffPanel";
 import { TopBar } from "./TopBar";
 import { useResizableWorkspaceLayout } from "./useResizableWorkspaceLayout";
 
@@ -276,6 +280,51 @@ function appendUserMessageToSession(
   };
 }
 
+/** 创建审阅状态摘要，避免各入口重复计算评论数量。 */
+function buildReviewState(comments: ReviewComment[], selected?: ReviewComment) {
+  return {
+    selectedCommentId: selected?.id,
+    selectedLineSide: selected?.lineSide,
+    selectedLineNumber: selected?.lineNumber,
+    commentCount: comments.length,
+    submittedCommentCount: comments.filter((comment) => comment.status === "submitted").length,
+    updatedAt: formatLocalDateTime(),
+  };
+}
+
+/** 更新当前会话的 pending diff；调用方负责决定是否持久化。 */
+function updateActivePendingChange(snapshot: WorkspaceSnapshot, nextChange: ProposedChange) {
+  return {
+    ...snapshot,
+    sessions: snapshot.sessions.map((session) =>
+      session.id === snapshot.activeSessionId
+        ? {
+            ...session,
+            pendingChange: nextChange,
+            updatedAt: formatLocalDateTime(),
+          }
+        : session,
+    ),
+  };
+}
+
+/** 生成发送给 Agent 的审阅反馈消息，包含行号和评论正文，但不进入诊断日志。 */
+function buildReviewFeedbackPrompt(change: ProposedChange, comments: ReviewComment[]) {
+  const lines = comments.map((comment, index) => {
+    const sideLabel = comment.lineSide === "next" ? "建议内容" : "原文";
+
+    return `${index + 1}. ${sideLabel} L${comment.lineNumber}: ${comment.body}`;
+  });
+
+  return [
+    `请根据我对「${change.title}」的逐行审阅反馈，重新生成待确认 diff。`,
+    `目标路径：${change.targetPath}`,
+    "审阅反馈：",
+    ...lines,
+    "保持未被评论的合理改动，仍然只生成待确认 diff，不要直接写入文件。",
+  ].join("\n");
+}
+
 /** 正式工作台根组件，集中编排知识库、编辑器、Agent loop 和设置状态。 */
 export function WorkspaceShell() {
   const [snapshot, setSnapshot] = useState<WorkspaceSnapshot | null>(null);
@@ -324,6 +373,8 @@ export function WorkspaceShell() {
   const [pendingConfirmation, setPendingConfirmation] = useState<PendingConfirmation | null>(null);
   /** 主工作台三栏布局偏好，负责拖拽分隔条、键盘调整和本机持久化。 */
   const { workspaceRef, gridTemplateColumns, resizingPane, getSeparatorProps } = useResizableWorkspaceLayout();
+  /** 记录已上报打开事件的 change，避免保存评论等快照刷新造成日志噪声。 */
+  const loggedReviewOpenChangeIdRef = useRef("");
 
   useEffect(() => {
     let isMounted = true;
@@ -381,18 +432,33 @@ export function WorkspaceShell() {
   }, [snapshot?.activeDocumentId, snapshot?.documents]);
 
   useEffect(() => {
-    if (!turnModelProviderId || !userSettings) {
+    const pendingChange = snapshot?.sessions
+      .find((session) => session.id === snapshot.activeSessionId)
+      ?.pendingChange;
+
+    if (!pendingChange || pendingChange.status !== "pending") {
       return;
     }
 
-    const stillSelectable = userSettings.modelConfig.providers.some(
-      (provider) => provider.id === turnModelProviderId && provider.enabled,
-    );
-
-    if (!stillSelectable) {
-      setTurnModelProviderId("");
+    if (loggedReviewOpenChangeIdRef.current === pendingChange.id) {
+      return;
     }
-  }, [turnModelProviderId, userSettings]);
+
+    loggedReviewOpenChangeIdRef.current = pendingChange.id;
+    logInfo("打开 diff 审阅工作台。", {
+      category: "frontend",
+      event: "review_change_open",
+      status: "completed",
+      metadata: {
+        changeId: pendingChange.id,
+        sessionId: snapshot.activeSessionId,
+        changeType: pendingChange.type,
+        commentCount: pendingChange.reviewComments?.length ?? 0,
+        addedLines: pendingChange.diffStats?.addedLines,
+        removedLines: pendingChange.diffStats?.removedLines,
+      },
+    });
+  }, [snapshot?.activeSessionId, snapshot?.sessions]);
 
   /** 加载首屏必需数据；诊断日志失败不阻断进入工作台。 */
   async function loadInitialData(shouldCommit: () => boolean = () => true) {
@@ -498,8 +564,6 @@ export function WorkspaceShell() {
 
   /** 已加载的工作台快照，供事件闭包使用，避免 nullable state 进入业务逻辑。 */
   const currentSnapshot = snapshot;
-  /** 已加载的用户设置，供后续事件闭包读取时避开 nullable state 分支。 */
-  const currentUserSettings = userSettings;
 
   if (!currentSnapshot.knowledgeBases.length) {
     return (
@@ -1571,8 +1635,14 @@ export function WorkspaceShell() {
   }
 
   /** 提交 Agent 输入，运行时会自行决定是否调用检索工具。 */
-  async function handleSubmitPrompt(action: AgentActionType = "ask", presetPrompt?: string) {
+  async function handleSubmitPrompt(action: AgentActionType = "ask", presetPrompt?: string, sourceSnapshot = currentSnapshot) {
     const prompt = (presetPrompt ?? agentPrompt).trim();
+    const sourceActiveSession = sourceSnapshot.sessions.find((session) => session.id === sourceSnapshot.activeSessionId) ?? activeSession;
+    const sourceActiveKnowledgeBase =
+      sourceSnapshot.knowledgeBases.find((knowledgeBase) => knowledgeBase.id === sourceSnapshot.activeKnowledgeBaseId) ?? activeKnowledgeBase;
+    const sourceActiveNote = sourceSnapshot.notes.find((note) => note.id === sourceSnapshot.activeNoteId) ?? activeNote;
+    const sourceActiveDocument =
+      sourceSnapshot.documents.find((document) => document.id === sourceSnapshot.activeDocumentId) ?? activeDocument;
 
     // 空输入不创建消息，避免侧栏出现无意义的对话记录。
     if (!prompt) {
@@ -1586,17 +1656,17 @@ export function WorkspaceShell() {
     beginBusy("Agent 正在处理...");
 
     try {
-      let snapshotForTurn = currentSnapshot;
-      let sessionForTurn = activeSession;
+      let snapshotForTurn = sourceSnapshot;
+      let sessionForTurn = sourceActiveSession;
 
-      if (!isPersistedSession(currentSnapshot, activeSession)) {
+      if (!isPersistedSession(sourceSnapshot, sourceActiveSession)) {
         sessionForTurn = buildAgentSession({
-          knowledgeBase: activeKnowledgeBase,
+          knowledgeBase: sourceActiveKnowledgeBase,
           title: buildTitleFromFirstPrompt(prompt),
         });
         snapshotForTurn = {
-          ...currentSnapshot,
-          sessions: [sessionForTurn, ...currentSnapshot.sessions],
+          ...sourceSnapshot,
+          sessions: [sessionForTurn, ...sourceSnapshot.sessions],
           activeSessionId: sessionForTurn.id,
         };
         logInfo("准备创建草稿会话。", {
@@ -1604,12 +1674,12 @@ export function WorkspaceShell() {
           event: "bootstrap_session",
           status: "started",
           metadata: {
-            knowledgeBaseId: activeKnowledgeBase.id,
+            knowledgeBaseId: sourceActiveKnowledgeBase.id,
             promptLength: prompt.length,
           },
         });
-      } else if (shouldUseFirstPromptAsTitle(activeSession)) {
-        const titled = applyFirstPromptTitle(currentSnapshot, activeSession, prompt);
+      } else if (shouldUseFirstPromptAsTitle(sourceActiveSession)) {
+        const titled = applyFirstPromptTitle(sourceSnapshot, sourceActiveSession, prompt);
 
         sessionForTurn = titled.session;
         snapshotForTurn = titled.snapshot;
@@ -1618,7 +1688,7 @@ export function WorkspaceShell() {
           event: "title_session",
           status: "completed",
           metadata: {
-            knowledgeBaseId: activeKnowledgeBase.id,
+            knowledgeBaseId: sourceActiveKnowledgeBase.id,
             promptLength: prompt.length,
           },
         });
@@ -1647,21 +1717,16 @@ export function WorkspaceShell() {
       const turnSnapshot = {
         ...snapshotForTurn,
         activeSessionId: sessionForTurn.id,
-        activeKnowledgeBaseId: activeKnowledgeBase.id,
-        activeNoteId: activeNote?.id ?? "",
-        activeDocumentId: activeDocument?.id ?? "",
+        activeKnowledgeBaseId: sourceActiveKnowledgeBase.id,
+        activeNoteId: sourceActiveNote?.id ?? "",
+        activeDocumentId: sourceActiveDocument?.id ?? "",
       };
-      const selectedTurnProviderId = currentUserSettings.modelConfig.providers.some(
-        (provider) => provider.id === turnModelProviderId && provider.enabled,
-      )
-        ? turnModelProviderId
-        : "";
       const result = await runAgentTurn(
         turnSnapshot,
         prompt,
         action,
         optimisticMessage.id,
-        selectedTurnProviderId || undefined,
+        turnModelProviderId || undefined,
       );
 
       commitSnapshot(result.snapshot);
@@ -1671,12 +1736,147 @@ export function WorkspaceShell() {
       setAppEventLogs(nextAppEventLogs);
     } catch (error) {
       if (!didPersistOptimisticMessage) {
-        commitSnapshot(currentSnapshot);
+        commitSnapshot(sourceSnapshot);
         setAgentPrompt(promptBeforeSubmit);
       }
       setNotice(error instanceof Error ? error.message : String(error));
     } finally {
       endBusy();
+    }
+  }
+
+  /** 为当前待写入 diff 添加行评论；日志只记录行号、侧别和计数，不记录评论正文。 */
+  async function handleAddReviewComment(commentDraft: ReviewCommentDraft) {
+    const pendingChange = activeSession.pendingChange;
+
+    if (!pendingChange || pendingChange.status !== "pending" || !isPersistedSession(currentSnapshot, activeSession)) {
+      return;
+    }
+
+    const nextComment: ReviewComment = {
+      id: createLocalId("review-comment"),
+      changeId: pendingChange.id,
+      lineSide: commentDraft.lineSide,
+      lineNumber: commentDraft.lineNumber,
+      lineTextPreview: commentDraft.lineTextPreview,
+      body: commentDraft.body,
+      status: "draft",
+      createdAt: formatLocalDateTime(),
+    };
+    const nextComments = [...(pendingChange.reviewComments ?? []), nextComment];
+    const nextChange: ProposedChange = {
+      ...pendingChange,
+      reviewComments: nextComments,
+      reviewState: buildReviewState(nextComments, nextComment),
+      diffStats: pendingChange.diffStats ?? buildMarkdownDiff(pendingChange.original, pendingChange.next).stats,
+    };
+    const nextSession = {
+      ...activeSession,
+      pendingChange: nextChange,
+      updatedAt: formatLocalDateTime(),
+    };
+    const nextSnapshot = updateActivePendingChange(currentSnapshot, nextChange);
+
+    commitSnapshot(nextSnapshot);
+    logInfo("添加 diff 行评论。", {
+      category: "frontend",
+      event: "review_comment_add",
+      status: "completed",
+      metadata: {
+        changeId: pendingChange.id,
+        sessionId: activeSession.id,
+        lineSide: commentDraft.lineSide,
+        lineNumber: commentDraft.lineNumber,
+        commentCount: nextComments.length,
+      },
+    });
+
+    try {
+      commitSnapshot(await saveSession(nextSnapshot, nextSession));
+    } catch (error) {
+      logWarn("保存 diff 行评论失败。", {
+        category: "frontend",
+        event: "review_comment_save",
+        status: "failed",
+        error,
+        metadata: {
+          changeId: pendingChange.id,
+          sessionId: activeSession.id,
+        },
+      });
+      setNotice(error instanceof Error ? error.message : String(error));
+    }
+  }
+
+  /** 把待发送审阅评论转成用户消息，让 Agent 基于定位反馈重新生成 pending diff。 */
+  async function handleSubmitReviewComments() {
+    const pendingChange = activeSession.pendingChange;
+    const draftComments = pendingChange?.reviewComments?.filter((comment) => comment.status === "draft") ?? [];
+
+    if (!pendingChange || pendingChange.status !== "pending" || !draftComments.length || !isPersistedSession(currentSnapshot, activeSession)) {
+      return;
+    }
+
+    const submittedAt = formatLocalDateTime();
+    const nextComments = (pendingChange.reviewComments ?? []).map((comment) =>
+      comment.status === "draft" ? { ...comment, status: "submitted" as const, createdAt: comment.createdAt || submittedAt } : comment,
+    );
+    const nextChange: ProposedChange = {
+      ...pendingChange,
+      reviewComments: nextComments,
+      reviewState: buildReviewState(nextComments),
+      diffStats: pendingChange.diffStats ?? buildMarkdownDiff(pendingChange.original, pendingChange.next).stats,
+    };
+    const nextSession = {
+      ...activeSession,
+      pendingChange: nextChange,
+      updatedAt: submittedAt,
+    };
+    const nextSnapshot = updateActivePendingChange(currentSnapshot, nextChange);
+
+    commitSnapshot(nextSnapshot);
+    logInfo("提交 diff 审阅评论给 Agent。", {
+      category: "frontend",
+      event: "review_comments_submit",
+      status: "started",
+      metadata: {
+        changeId: pendingChange.id,
+        sessionId: activeSession.id,
+        commentCount: draftComments.length,
+      },
+    });
+
+    try {
+      const savedSnapshot = await saveSession(nextSnapshot, nextSession);
+
+      commitSnapshot(savedSnapshot);
+      await handleSubmitPrompt(
+        pendingChange.type === "create" ? "create" : "rewrite",
+        buildReviewFeedbackPrompt(pendingChange, draftComments),
+        savedSnapshot,
+      );
+      logInfo("diff 审阅评论已交给 Agent。", {
+        category: "frontend",
+        event: "review_comments_submit",
+        status: "completed",
+        metadata: {
+          changeId: pendingChange.id,
+          sessionId: activeSession.id,
+          commentCount: draftComments.length,
+        },
+      });
+    } catch (error) {
+      logWarn("提交 diff 审阅评论失败。", {
+        category: "frontend",
+        event: "review_comments_submit",
+        status: "failed",
+        error,
+        metadata: {
+          changeId: pendingChange.id,
+          sessionId: activeSession.id,
+        },
+      });
+      setNotice(error instanceof Error ? error.message : String(error));
     }
   }
 
@@ -1741,14 +1941,47 @@ export function WorkspaceShell() {
 
   /** 接受 Agent diff，真实桌面版会在 Tauri 层做路径、hash 和原子写入校验。 */
   async function handleAcceptChange() {
+    const pendingChange = activeSession.pendingChange;
+
+    if (pendingChange) {
+      logInfo("准备确认写入审阅 diff。", {
+        category: "frontend",
+        event: "review_change_accept",
+        status: "started",
+        metadata: {
+          changeId: pendingChange.id,
+          sessionId: activeSession.id,
+          changeType: pendingChange.type,
+          operation: pendingChange.operation ?? "replace",
+          commentCount: pendingChange.reviewComments?.length ?? 0,
+        },
+      });
+    }
+
     beginBusy("正在应用 diff...");
 
     try {
       const nextSnapshot = await acceptProposedChange(currentSnapshot);
 
       commitSnapshot(nextSnapshot);
+      const nextAppEventLogs = await loadAppEventLogs();
+
+      setAppEventLogs(nextAppEventLogs);
       setNotice("已应用本次 diff。");
     } catch (error) {
+      if (pendingChange) {
+        logWarn("确认写入审阅 diff 失败。", {
+          category: "frontend",
+          event: "review_change_accept",
+          status: "failed",
+          error,
+          metadata: {
+            changeId: pendingChange.id,
+            sessionId: activeSession.id,
+            operation: pendingChange.operation ?? "replace",
+          },
+        });
+      }
       setNotice(error instanceof Error ? error.message : String(error));
     } finally {
       endBusy();
@@ -1757,12 +1990,45 @@ export function WorkspaceShell() {
 
   /** 取消 Agent diff，保持原始 Markdown 内容不变。 */
   async function handleRejectChange() {
+    const pendingChange = activeSession.pendingChange;
+
+    if (pendingChange) {
+      logInfo("准备取消审阅 diff。", {
+        category: "frontend",
+        event: "review_change_reject",
+        status: "started",
+        metadata: {
+          changeId: pendingChange.id,
+          sessionId: activeSession.id,
+          changeType: pendingChange.type,
+          operation: pendingChange.operation ?? "replace",
+          commentCount: pendingChange.reviewComments?.length ?? 0,
+        },
+      });
+    }
+
     beginBusy("正在取消 diff...");
 
     try {
       commitSnapshot(await rejectProposedChange(currentSnapshot));
+      const nextAppEventLogs = await loadAppEventLogs();
+
+      setAppEventLogs(nextAppEventLogs);
       setNotice("已取消本次 diff。");
     } catch (error) {
+      if (pendingChange) {
+        logWarn("取消审阅 diff 失败。", {
+          category: "frontend",
+          event: "review_change_reject",
+          status: "failed",
+          error,
+          metadata: {
+            changeId: pendingChange.id,
+            sessionId: activeSession.id,
+            operation: pendingChange.operation ?? "replace",
+          },
+        });
+      }
       setNotice(error instanceof Error ? error.message : String(error));
     } finally {
       endBusy();
@@ -2041,6 +2307,8 @@ export function WorkspaceShell() {
             onDeleteNote={() => handleDeleteNote()}
             onAcceptChange={handleAcceptChange}
             onRejectChange={handleRejectChange}
+            onAddReviewComment={handleAddReviewComment}
+            onSubmitReviewComments={handleSubmitReviewComments}
           />
         )}
         <div
