@@ -10,11 +10,14 @@ import {
   Settings2,
   ShieldCheck,
   Sparkles,
+  Star,
   Trash2,
   X,
 } from "lucide-react";
 import type { LucideIcon } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
+import { ConfirmDialog } from "../shared/ConfirmDialog";
+import { createLocalId, formatLocalDateTime } from "../shared/id";
 import { logDebug, logError, logInfo } from "../shared/logger";
 import type {
   AgentSkill,
@@ -24,7 +27,9 @@ import type {
   InstallAgentSkillPayload,
   InstallAgentSkillResult,
   KnowledgeBase,
+  LlmProviderConfig,
   ModelApiKeyStatus,
+  ProviderTemplate,
   RequestAuditLog,
   UserSettings,
 } from "../shared/types";
@@ -56,7 +61,8 @@ export function SettingsDrawer({
   activeKnowledgeBaseId,
   settings,
   skills,
-  modelApiKeyStatus,
+  modelApiKeyStatuses,
+  providerTemplates,
   auditLogs,
   appEventLogs,
   isBusy,
@@ -81,7 +87,8 @@ export function SettingsDrawer({
   activeKnowledgeBaseId: string;
   settings: UserSettings;
   skills: AgentSkill[];
-  modelApiKeyStatus: ModelApiKeyStatus | null;
+  modelApiKeyStatuses: ModelApiKeyStatus[];
+  providerTemplates: ProviderTemplate[];
   auditLogs: RequestAuditLog[];
   appEventLogs: AppEventLog[];
   isBusy: boolean;
@@ -95,7 +102,7 @@ export function SettingsDrawer({
   onToggleSkill: (skillId: string, enabled: boolean) => Promise<void> | void;
   onDeleteSkill: (skillId: string) => Promise<void> | void;
   onOpenUserSkillsFolder: () => Promise<void> | void;
-  onSaveApiKey: (apiKey: string) => Promise<void> | void;
+  onSaveApiKey: (providerId: string, apiKey: string) => Promise<void> | void;
   onRefreshAuditLogs: () => Promise<void> | void;
   onRefreshAppEventLogs: (filters?: { level?: AppEventLogLevel | ""; category?: AppEventLogCategory | "" }) => Promise<void> | void;
   onClearAppEventLogs: (filters?: { level?: AppEventLogLevel | ""; category?: AppEventLogCategory | "" }) => Promise<void> | void;
@@ -104,8 +111,12 @@ export function SettingsDrawer({
 }) {
   /** 模型设置表单草稿，用户保存前不影响正在运行的 Agent Runtime。 */
   const [settingsDraft, setSettingsDraft] = useState<UserSettings>(settings);
-  /** API key 草稿只保留在输入框中，保存后由外层写入系统安全存储。 */
-  const [apiKeyDraft, setApiKeyDraft] = useState("");
+  /** 每个 provider 的 API key 草稿只保留在输入框中，保存后由外层写入系统安全存储。 */
+  const [apiKeyDraftByProvider, setApiKeyDraftByProvider] = useState<Record<string, string>>({});
+  /** “新增 Provider”入口当前选中的内置模板 ID。 */
+  const [selectedTemplateId, setSelectedTemplateId] = useState(providerTemplates[0]?.templateId ?? "");
+  /** 待确认移除的 provider ID；非默认 provider 删除前需要用户二次确认。 */
+  const [providerPendingRemoval, setProviderPendingRemoval] = useState<string | null>(null);
   /** Skills 管理弹窗状态，避免设置抽屉内一次性铺开完整管理页。 */
   const [isSkillsModalOpen, setIsSkillsModalOpen] = useState(false);
   /** 当前设置分区，驱动左侧导航高亮和右侧单页内容渲染。 */
@@ -181,6 +192,12 @@ export function SettingsDrawer({
     setSettingsDraft(settings);
   }, [settings]);
 
+  useEffect(() => {
+    if (providerTemplates.length && !providerTemplates.some((template) => template.templateId === selectedTemplateId)) {
+      setSelectedTemplateId(providerTemplates[0].templateId);
+    }
+  }, [providerTemplates, selectedTemplateId]);
+
   /** 保存模型、隐私和 skill 设置；日志只记录状态和耗时，不记录端点、模型名或密钥。 */
   async function handleSaveSettings() {
     const startedAt = performance.now();
@@ -195,6 +212,8 @@ export function SettingsDrawer({
       status: "started",
       metadata: {
         modelEnabled: nextSettings.modelConfig.enabled,
+        providerCount: nextSettings.modelConfig.providers.length,
+        defaultProviderId: nextSettings.modelConfig.defaultProviderId,
         privacyPolicy: nextSettings.privacyPolicy,
         enabledSkillCount,
       },
@@ -220,27 +239,30 @@ export function SettingsDrawer({
     }
   }
 
-  /** 保存 BYOK key 后清空输入框，日志只记录是否提交了输入，不记录密钥内容。 */
-  async function handleSaveApiKey() {
+  /** 保存指定 provider 的 BYOK key 后清空对应输入框，日志只记录是否提交了输入，不记录密钥内容。 */
+  async function handleSaveApiKey(providerId: string) {
     const startedAt = performance.now();
+    const apiKeyDraft = apiKeyDraftByProvider[providerId] ?? "";
 
     logInfo("设置页保存模型密钥。", {
       category: "settings",
       event: "model_api_key_save",
       status: "started",
       metadata: {
+        providerId,
         hasInput: Boolean(apiKeyDraft.trim()),
       },
     });
 
     try {
-      await onSaveApiKey(apiKeyDraft);
-      setApiKeyDraft("");
+      await onSaveApiKey(providerId, apiKeyDraft);
+      setApiKeyDraftByProvider((current) => ({ ...current, [providerId]: "" }));
       logInfo("设置页模型密钥保存完成。", {
         category: "settings",
         event: "model_api_key_save",
         status: "completed",
         durationMs: performance.now() - startedAt,
+        metadata: { providerId },
       });
     } catch (error) {
       // 外层已经把失败原因写入全局 notice；这里保留输入，方便用户修正后重试。
@@ -249,13 +271,14 @@ export function SettingsDrawer({
         event: "model_api_key_save",
         status: "failed",
         durationMs: performance.now() - startedAt,
+        metadata: { providerId },
         error,
       });
     }
   }
 
-  /** 更新模型配置草稿中的单个字段，保持其他设置不变。 */
-  function updateModelConfig(field: keyof UserSettings["modelConfig"], value: string | boolean) {
+  /** 更新模型配置草稿中的全局字段（启用开关等），保持 provider 列表不变。 */
+  function updateModelConfig(field: "enabled", value: boolean) {
     setSettingsDraft((currentSettings) => ({
       ...currentSettings,
       modelConfig: {
@@ -263,6 +286,131 @@ export function SettingsDrawer({
         [field]: value,
       },
     }));
+  }
+
+  /** 更新草稿中单个 provider 的字段，其余 provider 保持不变。 */
+  function updateProviderField(providerId: string, field: keyof LlmProviderConfig, value: string | boolean) {
+    setSettingsDraft((currentSettings) => ({
+      ...currentSettings,
+      modelConfig: {
+        ...currentSettings.modelConfig,
+        providers: currentSettings.modelConfig.providers.map((provider) =>
+          provider.id === providerId
+            ? {
+                ...provider,
+                [field]: value,
+                // 默认 Provider 必须保持启用，否则全局默认解析会固定落到停用项并阻断 Agent。
+                enabled:
+                  field === "enabled" && provider.id === currentSettings.modelConfig.defaultProviderId
+                    ? true
+                    : field === "enabled"
+                      ? Boolean(value)
+                      : provider.enabled,
+                updatedAt: formatLocalDateTime(),
+              }
+            : provider,
+        ),
+      },
+    }));
+  }
+
+  /** 将草稿中某个 provider 设为默认 provider，未显式选择模型的请求会回退到它。 */
+  function setDefaultProvider(providerId: string) {
+    setSettingsDraft((currentSettings) => ({
+      ...currentSettings,
+      modelConfig: {
+        ...currentSettings.modelConfig,
+        defaultProviderId: providerId,
+        providers: currentSettings.modelConfig.providers.map((provider) =>
+          provider.id === providerId
+            ? { ...provider, enabled: true, updatedAt: formatLocalDateTime() }
+            : provider,
+        ),
+      },
+    }));
+  }
+
+  /** 依据内置模板在草稿中新增一个 provider 实例，新增后立即可编辑名称、端点和模型。 */
+  function addProviderFromTemplate(templateId: string) {
+    const template = providerTemplates.find((item) => item.templateId === templateId);
+
+    if (!template) {
+      return;
+    }
+
+    const now = formatLocalDateTime();
+    const providerId = createLocalId("provider");
+    const newProvider: LlmProviderConfig = {
+      id: providerId,
+      name: template.name,
+      provider: template.provider,
+      apiBase: template.apiBase,
+      model: template.model,
+      // 后端保存设置时会强制按 providerId 重新计算 key_reference（见 model_provider::normalize_model_config_key_references），
+      // 这里保持同样的派生格式只是为了让草稿状态在保存前也保持一致，不作为最终依据。
+      keyReference: `cici-note-llm-provider-${providerId}-api-key`,
+      enabled: true,
+      supportsTools: true,
+      requiresApiKey: template.requiresApiKey,
+      createdAt: now,
+      updatedAt: now,
+    };
+
+    setSettingsDraft((currentSettings) => {
+      const providers = [...currentSettings.modelConfig.providers, newProvider];
+      const hasDefault = providers.some((provider) => provider.id === currentSettings.modelConfig.defaultProviderId);
+
+      return {
+        ...currentSettings,
+        modelConfig: {
+          ...currentSettings.modelConfig,
+          providers,
+          defaultProviderId: hasDefault ? currentSettings.modelConfig.defaultProviderId : newProvider.id,
+        },
+      };
+    });
+
+    logInfo("设置页新增 Provider。", {
+      category: "settings",
+      event: "provider_add",
+      status: "completed",
+      metadata: { templateId },
+    });
+  }
+
+  /** 默认 provider 不允许直接删除，需要先把其他 provider 设为默认。 */
+  function requestRemoveProvider(providerId: string) {
+    if (providerId === settingsDraft.modelConfig.defaultProviderId) {
+      setProviderPendingRemoval(null);
+      return;
+    }
+
+    setProviderPendingRemoval(providerId);
+  }
+
+  /** 用户在确认弹窗中确认后才真正从草稿中移除该 provider。 */
+  function confirmRemoveProvider() {
+    const providerId = providerPendingRemoval;
+
+    if (!providerId) {
+      return;
+    }
+
+    setSettingsDraft((currentSettings) => ({
+      ...currentSettings,
+      modelConfig: {
+        ...currentSettings.modelConfig,
+        providers: currentSettings.modelConfig.providers.filter((provider) => provider.id !== providerId),
+      },
+    }));
+
+    logInfo("设置页移除 Provider。", {
+      category: "settings",
+      event: "provider_remove",
+      status: "completed",
+      metadata: { providerId },
+    });
+    setProviderPendingRemoval(null);
   }
 
   /** 切换设置分区并写入低频调试日志，便于诊断导航状态但不影响渲染性能。 */
@@ -395,13 +543,15 @@ export function SettingsDrawer({
     }
 
     if (activeSection === "model") {
+      const providers = settingsDraft.modelConfig.providers;
+
       return (
         <section className="settings-section" aria-labelledby="model-settings-title">
           <div className="settings-section-title settings-content-title">
             <div>
               <p className="section-label">Configuration</p>
               <h3 id="model-settings-title">模型与隐私</h3>
-              <p>配置 OpenAI-compatible BYOK、发送边界和写入确认策略。</p>
+              <p>管理多个 OpenAI-compatible Provider，选择默认 Provider 和发送边界。</p>
             </div>
             <button className="primary-button compact" type="button" onClick={handleSaveSettings} disabled={isBusy}>
               <Save size={14} />
@@ -415,13 +565,7 @@ export function SettingsDrawer({
                 onChange={(event) => updateModelConfig("enabled", event.target.checked)}
                 type="checkbox"
               />
-              <span>启用云端模型</span>
-            </label>
-            <label>
-              <span>Provider</span>
-              <select value={settingsDraft.modelConfig.provider} disabled>
-                <option value="openai-compatible">OpenAI-compatible</option>
-              </select>
+              <span>启用云端模型（关闭后 Agent 只使用本地规则回复）</span>
             </label>
             <label>
               <span>隐私策略</span>
@@ -438,46 +582,143 @@ export function SettingsDrawer({
                 <option value="local-only">仅本地规则 Agent</option>
               </select>
             </label>
-            <label>
-              <span>API base</span>
-              <input
-                value={settingsDraft.modelConfig.apiBase}
-                onChange={(event) => updateModelConfig("apiBase", event.target.value)}
-                placeholder="https://api.openai.com/v1"
-              />
-            </label>
-            <label>
-              <span>模型</span>
-              <input
-                value={settingsDraft.modelConfig.model}
-                onChange={(event) => updateModelConfig("model", event.target.value)}
-                placeholder="gpt-4o-mini"
-              />
-            </label>
-            <label>
-              <span>Key reference</span>
-              <input value={settingsDraft.modelConfig.keyReference} readOnly />
-            </label>
-            <label className="settings-full-row">
-              <span>API key</span>
-              <div className="key-save-row">
-                <input
-                  value={apiKeyDraft}
-                  onChange={(event) => setApiKeyDraft(event.target.value)}
-                  placeholder="sk-..."
-                  type="password"
-                />
-                <button type="button" onClick={handleSaveApiKey} disabled={isBusy || !apiKeyDraft.trim()}>
-                  <KeyRound size={13} />
-                  保存密钥
-                </button>
-              </div>
-              <div className={`key-status ${modelApiKeyStatus?.configured ? "verified" : "missing"}`}>
-                <KeyRound size={13} />
-                <span>{modelApiKeyStatus?.message ?? "尚未读取模型密钥状态。"}</span>
-              </div>
-            </label>
           </div>
+
+          <div className="provider-add-row">
+            <select value={selectedTemplateId} onChange={(event) => setSelectedTemplateId(event.target.value)}>
+              {providerTemplates.map((template) => (
+                <option key={template.templateId} value={template.templateId}>
+                  {template.name}
+                </option>
+              ))}
+            </select>
+            <button
+              className="ghost-button"
+              type="button"
+              onClick={() => addProviderFromTemplate(selectedTemplateId)}
+              disabled={!selectedTemplateId}
+            >
+              <Plus size={14} />
+              新增 Provider
+            </button>
+          </div>
+
+          <div className="provider-list">
+            {providers.length ? (
+              providers.map((provider) => {
+                const keyStatus = modelApiKeyStatuses.find((status) => status.providerId === provider.id) ?? null;
+                const isDefault = provider.id === settingsDraft.modelConfig.defaultProviderId;
+                const apiKeyDraft = apiKeyDraftByProvider[provider.id] ?? "";
+
+                return (
+                  <article className="provider-card" key={provider.id}>
+                    <div className="provider-card-header">
+                      <input
+                        className="provider-name-input"
+                        value={provider.name}
+                        onChange={(event) => updateProviderField(provider.id, "name", event.target.value)}
+                        placeholder="Provider 名称"
+                      />
+                      <div className="provider-card-badges">
+                        {isDefault ? (
+                          <span className="provider-badge default">
+                            <Star size={12} />
+                            默认
+                          </span>
+                        ) : (
+                          <button className="ghost-button compact" type="button" onClick={() => setDefaultProvider(provider.id)}>
+                            设为默认
+                          </button>
+                        )}
+                        <label className="toggle-row compact">
+                          <input
+                            checked={provider.enabled}
+                            onChange={(event) => updateProviderField(provider.id, "enabled", event.target.checked)}
+                            disabled={isDefault}
+                            type="checkbox"
+                          />
+                          <span>启用</span>
+                        </label>
+                        <button
+                          className="icon-button danger"
+                          type="button"
+                          title={isDefault ? "默认 Provider 不能直接删除，请先设为默认后再移除" : "移除 Provider"}
+                          onClick={() => requestRemoveProvider(provider.id)}
+                          disabled={isDefault || providers.length <= 1}
+                        >
+                          <Trash2 size={14} />
+                        </button>
+                      </div>
+                    </div>
+                    <div className="provider-card-grid">
+                      <label>
+                        <span>API base</span>
+                        <input
+                          value={provider.apiBase}
+                          onChange={(event) => updateProviderField(provider.id, "apiBase", event.target.value)}
+                          placeholder="https://api.openai.com/v1"
+                        />
+                      </label>
+                      <label>
+                        <span>模型</span>
+                        <input
+                          value={provider.model}
+                          onChange={(event) => updateProviderField(provider.id, "model", event.target.value)}
+                          placeholder="gpt-4o-mini"
+                        />
+                      </label>
+                      <label className="toggle-row compact">
+                        <input
+                          checked={provider.supportsTools}
+                          onChange={(event) => updateProviderField(provider.id, "supportsTools", event.target.checked)}
+                          type="checkbox"
+                        />
+                        <span>支持工具调用（Function Calling）</span>
+                      </label>
+                      <label className="toggle-row compact">
+                        <input
+                          checked={provider.requiresApiKey}
+                          onChange={(event) => updateProviderField(provider.id, "requiresApiKey", event.target.checked)}
+                          type="checkbox"
+                        />
+                        <span>需要 API key（本地免鉴权服务可关闭）</span>
+                      </label>
+                      {provider.requiresApiKey && (
+                        <label className="settings-full-row">
+                          <span>API key</span>
+                          <div className="key-save-row">
+                            <input
+                              value={apiKeyDraft}
+                              onChange={(event) =>
+                                setApiKeyDraftByProvider((current) => ({ ...current, [provider.id]: event.target.value }))
+                              }
+                              placeholder="sk-..."
+                              type="password"
+                            />
+                            <button
+                              type="button"
+                              onClick={() => handleSaveApiKey(provider.id)}
+                              disabled={isBusy || !apiKeyDraft.trim()}
+                            >
+                              <KeyRound size={13} />
+                              保存密钥
+                            </button>
+                          </div>
+                          <div className={`key-status ${keyStatus?.configured ? "verified" : "missing"}`}>
+                            <KeyRound size={13} />
+                            <span>{keyStatus?.message ?? "尚未读取模型密钥状态。"}</span>
+                          </div>
+                        </label>
+                      )}
+                    </div>
+                  </article>
+                );
+              })
+            ) : (
+              <p className="settings-empty">暂无 Provider，先从上方模板新增一个。</p>
+            )}
+          </div>
+
           <div className="policy-row">
             <ShieldCheck size={16} />
             <span>Agent 写入工具只能生成 diff；用户确认后才执行路径校验、hash 校验和原子写入。</span>
@@ -648,6 +889,18 @@ export function SettingsDrawer({
             onDeleteSkill={onDeleteSkill}
             onOpenUserSkillsFolder={onOpenUserSkillsFolder}
             onClose={() => setIsSkillsModalOpen(false)}
+          />
+        )}
+        {providerPendingRemoval && (
+          <ConfirmDialog
+            title="移除 Provider"
+            message={`确认移除「${
+              settingsDraft.modelConfig.providers.find((provider) => provider.id === providerPendingRemoval)?.name ?? "该 Provider"
+            }」？移除后需要重新新增才能恢复配置，已保存的 API key 不会被读取。`}
+            confirmLabel="移除"
+            tone="danger"
+            onCancel={() => setProviderPendingRemoval(null)}
+            onConfirm={confirmRemoveProvider}
           />
         )}
       </aside>

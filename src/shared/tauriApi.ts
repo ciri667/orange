@@ -27,10 +27,12 @@ import type {
   InstallAgentSkillResult,
   KnowledgeBase,
   KnowledgeBaseSelection,
+  LlmProviderConfig,
   ModelApiKeyStatus,
   Note,
   NoteImageAttachmentInput,
   ProposedChange,
+  ProviderTemplate,
   RequestAuditLog,
   SavedNoteImageAttachment,
   UserSettings,
@@ -38,18 +40,78 @@ import type {
   WorkspaceSnapshot,
 } from "./types";
 
+/** 迁移出的默认 provider 固定 ID，和后端 MIGRATED_DEFAULT_PROVIDER_ID 保持一致。 */
+const DEFAULT_PROVIDER_ID = "default";
+
+/** 浏览器开发态默认 provider 实例；桌面端真实设置由 SQLite 和系统 keyring 保存。 */
+const defaultBrowserProvider: LlmProviderConfig = {
+  id: DEFAULT_PROVIDER_ID,
+  name: "默认 Provider",
+  provider: "openai-compatible",
+  apiBase: "https://api.openai.com/v1",
+  model: "gpt-4o-mini",
+  keyReference: "cici-note-openai-compatible-api-key",
+  enabled: false,
+  supportsTools: true,
+  requiresApiKey: true,
+  createdAt: "刚刚",
+  updatedAt: "刚刚",
+};
+
 /** 浏览器开发态的默认模型设置；桌面端真实设置由 SQLite 和系统 keyring 保存。 */
 const defaultBrowserUserSettings: UserSettings = {
   modelConfig: {
-    provider: "openai-compatible",
-    apiBase: "https://api.openai.com/v1",
-    model: "gpt-4o-mini",
-    keyReference: "cici-note-openai-compatible-api-key",
     enabled: false,
+    defaultProviderId: DEFAULT_PROVIDER_ID,
+    providers: [defaultBrowserProvider],
   },
   privacyPolicy: "allow-selected-scope",
   writeConfirmationRequired: true,
 };
+
+/** 浏览器开发态镜像后端内置模板，只用于模拟设置页“新增 Provider”入口。 */
+const browserProviderTemplates: ProviderTemplate[] = [
+  {
+    templateId: "openai",
+    name: "OpenAI",
+    provider: "openai-compatible",
+    apiBase: "https://api.openai.com/v1",
+    model: "gpt-4o-mini",
+    requiresApiKey: true,
+  },
+  {
+    templateId: "deepseek",
+    name: "DeepSeek",
+    provider: "openai-compatible",
+    apiBase: "https://api.deepseek.com/v1",
+    model: "deepseek-chat",
+    requiresApiKey: true,
+  },
+  {
+    templateId: "openrouter",
+    name: "OpenRouter",
+    provider: "openai-compatible",
+    apiBase: "https://openrouter.ai/api/v1",
+    model: "openai/gpt-4o-mini",
+    requiresApiKey: true,
+  },
+  {
+    templateId: "ollama",
+    name: "Ollama（本地）",
+    provider: "openai-compatible",
+    apiBase: "http://localhost:11434/v1",
+    model: "llama3.1",
+    requiresApiKey: false,
+  },
+  {
+    templateId: "custom",
+    name: "自定义兼容服务",
+    provider: "openai-compatible",
+    apiBase: "",
+    model: "",
+    requiresApiKey: true,
+  },
+];
 
 /** 浏览器 fallback 的临时用户设置，仅用于 Vite 开发态模拟设置页交互。 */
 let browserUserSettings: UserSettings = defaultBrowserUserSettings;
@@ -349,7 +411,7 @@ export async function restoreSessionContext(snapshot: WorkspaceSnapshot, session
 /** 读取用户模型、隐私和写入设置；浏览器开发态返回内存默认值。 */
 export async function loadUserSettings(): Promise<UserSettings> {
   if (!isTauriRuntime()) {
-    return { ...browserUserSettings, modelConfig: { ...browserUserSettings.modelConfig } };
+    return cloneUserSettings(browserUserSettings);
   }
 
   return invokeLogged<UserSettings>("load_user_settings");
@@ -515,26 +577,36 @@ export async function installAgentSkill(payload: InstallAgentSkillPayload): Prom
   }
 }
 
-/** 保存 BYOK 模型密钥；桌面端写入系统安全存储并返回读回校验状态。 */
-export async function saveModelApiKey(apiKey: string): Promise<ModelApiKeyStatus> {
+/** 保存 BYOK 模型密钥；桌面端按 providerId 写入系统安全存储并返回读回校验状态。 */
+export async function saveModelApiKey(providerId: string, apiKey: string): Promise<ModelApiKeyStatus> {
   if (!isTauriRuntime()) {
     throw new Error("浏览器开发态不能保存模型密钥，请在 Tauri 桌面端配置。");
   }
 
-  return invokeLogged<ModelApiKeyStatus>("save_model_api_key", { payload: { apiKey } });
+  return invokeLogged<ModelApiKeyStatus>("save_model_api_key", { payload: { providerId, apiKey } });
 }
 
-/** 读取 BYOK 模型密钥状态；不返回明文密钥。 */
-export async function loadModelApiKeyStatus(): Promise<ModelApiKeyStatus> {
+/** 批量读取每个 provider 的 BYOK 模型密钥状态；不返回明文密钥。 */
+export async function loadModelApiKeyStatuses(): Promise<ModelApiKeyStatus[]> {
   if (!isTauriRuntime()) {
-    return {
-      keyReference: defaultBrowserUserSettings.modelConfig.keyReference,
+    return browserUserSettings.modelConfig.providers.map((provider) => ({
+      providerId: provider.id,
+      keyReference: provider.keyReference,
       configured: false,
       message: "浏览器开发态未连接系统安全存储。",
-    };
+    }));
   }
 
-  return invokeLogged<ModelApiKeyStatus>("load_model_api_key_status");
+  return invokeLogged<ModelApiKeyStatus[]>("load_model_api_key_statuses");
+}
+
+/** 读取内置 LLM Provider 模板，供设置页“新增 Provider”入口预填参数。 */
+export async function loadLlmProviderTemplates(): Promise<ProviderTemplate[]> {
+  if (!isTauriRuntime()) {
+    return browserProviderTemplates;
+  }
+
+  return invokeLogged<ProviderTemplate[]>("load_llm_provider_templates");
 }
 
 /** 读取最近请求审计日志，用于展示模型发送范围和工具调用摘要。 */
@@ -1278,6 +1350,7 @@ export async function runAgentTurn(
   prompt: string,
   action: AgentActionType,
   clientMessageId?: string,
+  modelProviderId?: string,
 ): Promise<AgentTurnResult> {
   const request: AgentTurnRequest = {
     prompt,
@@ -1286,6 +1359,7 @@ export async function runAgentTurn(
     activeKnowledgeBaseId: snapshot.activeKnowledgeBaseId,
     activeNoteId: snapshot.activeNoteId,
     clientMessageId,
+    modelProviderId,
   };
 
   if (!isTauriRuntime()) {
@@ -1534,7 +1608,10 @@ function cloneAgentSkills(skills: AgentSkill[]) {
 function cloneUserSettings(settings: UserSettings): UserSettings {
   return {
     ...settings,
-    modelConfig: { ...settings.modelConfig },
+    modelConfig: {
+      ...settings.modelConfig,
+      providers: settings.modelConfig.providers.map((provider) => ({ ...provider })),
+    },
   };
 }
 

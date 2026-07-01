@@ -1,5 +1,6 @@
 import {
   ArrowRight,
+  BrainCircuit,
   Check,
   Database,
   History,
@@ -22,7 +23,10 @@ import {
   getSessionNoteLabel,
   getSessionTypeLabel,
 } from "../shared/selectors";
-import type { AgentSession, AgentSkill, KnowledgeBase, Note } from "../shared/types";
+import type { AgentSession, AgentSkill, KnowledgeBase, ModelConfig, Note } from "../shared/types";
+
+/** 会话/本轮模型选择器统一使用的“跟随默认”占位值，不写入具体 providerId。 */
+const FOLLOW_DEFAULT_VALUE = "";
 
 /** 右侧 Agent 侧栏，承载会话、工具调用、检索范围、引用和输入框。 */
 export function AgentPanel({
@@ -33,6 +37,8 @@ export function AgentPanel({
   notes,
   prompt,
   skills,
+  modelConfig,
+  turnModelProviderId,
   isBusy,
   isSessionListOpen,
   isSessionContextOpen,
@@ -46,6 +52,8 @@ export function AgentPanel({
   onToggleScopeKnowledgeBase,
   onPromptChange,
   onSubmitPrompt,
+  onTurnModelProviderChange,
+  onSetSessionModelProvider,
 }: {
   sessions: AgentSession[];
   activeSession: AgentSession;
@@ -54,6 +62,9 @@ export function AgentPanel({
   notes: Note[];
   prompt: string;
   skills: AgentSkill[];
+  modelConfig: ModelConfig;
+  /** 本轮显式选择的 Provider，空字符串表示跟随会话/全局默认。 */
+  turnModelProviderId: string;
   isBusy: boolean;
   isSessionListOpen: boolean;
   isSessionContextOpen: boolean;
@@ -67,7 +78,17 @@ export function AgentPanel({
   onToggleScopeKnowledgeBase: (knowledgeBaseId: string) => void;
   onPromptChange: (value: string) => void;
   onSubmitPrompt: () => void;
+  onTurnModelProviderChange: (providerId: string) => void;
+  onSetSessionModelProvider: (providerId: string) => void;
 }) {
+  /** 已启用的 Provider 列表；未启用的 provider 不出现在选择器中。 */
+  const enabledProviders = modelConfig.providers.filter((provider) => provider.enabled);
+  /** 全局默认 provider 名称，用于“跟随默认”选项的说明文案。 */
+  const defaultProvider = modelConfig.providers.find((provider) => provider.id === modelConfig.defaultProviderId);
+  /** 会话当前设置的默认 provider（可能未设置，回退到全局默认）。 */
+  const sessionProvider = activeSession.modelProviderId
+    ? modelConfig.providers.find((provider) => provider.id === activeSession.modelProviderId)
+    : undefined;
   /** 当前会话选中的知识库 ID，用于驱动范围摘要和多选列表。 */
   const selectedKnowledgeBaseIds = activeSession.knowledgeBaseIds.length
     ? activeSession.knowledgeBaseIds
@@ -105,6 +126,7 @@ export function AgentPanel({
         <span>{getSessionTypeLabel(activeSession.type)}</span>
         <span>{selectedScopeLabel}</span>
         <span>{getSessionNoteLabel(activeSession, notes)}</span>
+        {modelConfig.enabled && <span>模型：{sessionProvider?.name ?? defaultProvider?.name ?? "未配置"}</span>}
         <span className={`session-write-status ${activeSession.pendingChange?.status === "pending" ? "pending" : ""}`}>
           {writeStatus}
         </span>
@@ -183,6 +205,24 @@ export function AgentPanel({
                 <strong>{writeStatus}</strong>
               </div>
             </div>
+            {modelConfig.enabled && (
+              <label className="context-model-select">
+                <span>会话默认模型</span>
+                <select
+                  value={activeSession.modelProviderId ?? FOLLOW_DEFAULT_VALUE}
+                  onChange={(event) => onSetSessionModelProvider(event.target.value)}
+                >
+                  <option value={FOLLOW_DEFAULT_VALUE}>
+                    跟随全局默认{defaultProvider ? `（${defaultProvider.name}）` : ""}
+                  </option>
+                  {enabledProviders.map((provider) => (
+                    <option key={provider.id} value={provider.id}>
+                      {provider.name}
+                    </option>
+                  ))}
+                </select>
+              </label>
+            )}
             <p className="context-note">
               Agent 只有调用 `search_notes` 或 `read_note` 工具后，才会展示知识库引用。
             </p>
@@ -266,6 +306,21 @@ export function AgentPanel({
             <span>Skill</span>
             <strong>{enabledSkillCount} 个已启用</strong>
           </div>
+          {modelConfig.enabled && enabledProviders.length > 0 && (
+            <label className="turn-model-select" aria-label="本轮使用的模型">
+              <BrainCircuit size={14} />
+              <select value={turnModelProviderId} onChange={(event) => onTurnModelProviderChange(event.target.value)}>
+                <option value={FOLLOW_DEFAULT_VALUE}>
+                  本轮：跟随会话默认{sessionProvider ? `（${sessionProvider.name}）` : defaultProvider ? `（${defaultProvider.name}）` : ""}
+                </option>
+                {enabledProviders.map((provider) => (
+                  <option key={provider.id} value={provider.id}>
+                    本轮：{provider.name}
+                  </option>
+                ))}
+              </select>
+            </label>
+          )}
         </div>
         <textarea
           value={prompt}

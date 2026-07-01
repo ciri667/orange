@@ -240,15 +240,41 @@ export interface AgentSession {
   updatedAt: string;
   /** 逻辑删除时间；有值的会话只保留在持久化记录中，不再进入普通会话列表。 */
   deletedAt?: string;
+  /** 会话默认使用的 LLM Provider；缺省时回退到全局默认 provider。 */
+  modelProviderId?: string;
 }
 
-/** 云端模型配置只保存 key 引用，不在普通 SQLite payload 中保存明文密钥。 */
-export interface ModelConfig {
+/** 单个 LLM Provider 实例配置；用户可以配置多个 provider 并按需切换。 */
+export interface LlmProviderConfig {
+  id: string;
+  name: string;
   provider: ModelProvider;
   apiBase: string;
   model: string;
   keyReference: string;
   enabled: boolean;
+  supportsTools: boolean;
+  /** 是否需要配置 API key；本地免鉴权服务（如 Ollama）可以关闭 key 校验。 */
+  requiresApiKey: boolean;
+  createdAt: string;
+  updatedAt: string;
+}
+
+/** 设置页“新增 Provider”入口使用的预置模板，来自后端内置模板注册表。 */
+export interface ProviderTemplate {
+  templateId: string;
+  name: string;
+  provider: ModelProvider;
+  apiBase: string;
+  model: string;
+  requiresApiKey: boolean;
+}
+
+/** 云端模型设置聚合多个 Provider；默认 Provider 决定未显式选择时使用哪一个。 */
+export interface ModelConfig {
+  enabled: boolean;
+  defaultProviderId: string;
+  providers: LlmProviderConfig[];
 }
 
 /** 用户设置聚合模型、隐私和写入确认策略，供 M3 Runtime 读取。 */
@@ -258,8 +284,9 @@ export interface UserSettings {
   writeConfirmationRequired: boolean;
 }
 
-/** 模型密钥状态只说明是否可读取，不包含明文密钥。 */
+/** 模型密钥状态只说明是否可读取，不包含明文密钥；按 providerId 隔离。 */
 export interface ModelApiKeyStatus {
+  providerId: string;
   keyReference: string;
   configured: boolean;
   message: string;
@@ -352,6 +379,8 @@ export interface AgentTurnRequest {
   activeNoteId: string;
   /** 前端已乐观渲染并持久化的用户消息 ID，运行时复用它避免重复追加。 */
   clientMessageId?: string;
+  /** 本轮显式选择的 Provider；优先级高于会话默认和全局默认。 */
+  modelProviderId?: string;
 }
 
 /** Agent 单轮返回结果，包含更新后的完整工作台状态。 */

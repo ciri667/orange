@@ -29,7 +29,8 @@ import {
   loadAppEventLogs,
   loadAgentSkills,
   installAgentSkill,
-  loadModelApiKeyStatus,
+  loadLlmProviderTemplates,
+  loadModelApiKeyStatuses,
   loadRequestAuditLogs,
   loadUserSettings,
   loadWorkspaceState,
@@ -70,6 +71,7 @@ import type {
   ModelApiKeyStatus,
   Note,
   NoteImageAttachmentInput,
+  ProviderTemplate,
   RequestAuditLog,
   UserSettings,
   WorkspaceDocument,
@@ -280,8 +282,12 @@ export function WorkspaceShell() {
   const [userSettings, setUserSettings] = useState<UserSettings | null>(null);
   /** Agent skills 列表由后端合并内置与用户自建定义，前端只保存展示状态。 */
   const [agentSkills, setAgentSkills] = useState<AgentSkill[]>([]);
-  /** 模型密钥状态只保存是否可读，不包含明文 API key。 */
-  const [modelApiKeyStatus, setModelApiKeyStatus] = useState<ModelApiKeyStatus | null>(null);
+  /** 模型密钥状态按 providerId 隔离，只保存是否可读，不包含明文 API key。 */
+  const [modelApiKeyStatuses, setModelApiKeyStatuses] = useState<ModelApiKeyStatus[]>([]);
+  /** 内置 LLM Provider 模板，驱动设置页“新增 Provider”入口。 */
+  const [providerTemplates, setProviderTemplates] = useState<ProviderTemplate[]>([]);
+  /** 本轮显式选择的 Provider；空字符串表示跟随会话/全局默认，切换会话后会被重置。 */
+  const [turnModelProviderId, setTurnModelProviderId] = useState("");
   /** 首屏初始化是否仍在进行，用于区分加载中和加载失败。 */
   const [isBooting, setIsBooting] = useState(true);
   /** 首屏初始化失败原因，失败后展示重试入口而不是停留在 loading。 */
@@ -374,6 +380,20 @@ export function WorkspaceShell() {
     };
   }, [snapshot?.activeDocumentId, snapshot?.documents]);
 
+  useEffect(() => {
+    if (!turnModelProviderId || !userSettings) {
+      return;
+    }
+
+    const stillSelectable = userSettings.modelConfig.providers.some(
+      (provider) => provider.id === turnModelProviderId && provider.enabled,
+    );
+
+    if (!stillSelectable) {
+      setTurnModelProviderId("");
+    }
+  }, [turnModelProviderId, userSettings]);
+
   /** 加载首屏必需数据；诊断日志失败不阻断进入工作台。 */
   async function loadInitialData(shouldCommit: () => boolean = () => true) {
     setIsBooting(true);
@@ -382,15 +402,20 @@ export function WorkspaceShell() {
 
     try {
       // 工作台快照和用户设置是首屏必需数据，必须同时成功后才能进入主界面。
-      const [nextSnapshot, nextUserSettings, nextAgentSkills, nextModelApiKeyStatus] = await Promise.all([
+      const [nextSnapshot, nextUserSettings, nextAgentSkills, nextModelApiKeyStatuses, nextProviderTemplates] = await Promise.all([
         loadWorkspaceState(),
         loadUserSettings(),
         loadAgentSkills(),
-        loadModelApiKeyStatus().catch((error) => ({
-          keyReference: "cici-note-openai-compatible-api-key",
-          configured: false,
-          message: formatErrorMessage(error),
-        })),
+        loadModelApiKeyStatuses().catch((error) => {
+          logWarn("读取模型密钥状态失败。", { category: "settings", event: "model_api_key_status_load", status: "failed", error });
+
+          return [] as ModelApiKeyStatus[];
+        }),
+        loadLlmProviderTemplates().catch((error) => {
+          logWarn("读取 Provider 模板失败。", { category: "settings", event: "provider_templates_load", status: "failed", error });
+
+          return [] as ProviderTemplate[];
+        }),
       ]);
 
       if (!shouldCommit()) {
@@ -400,7 +425,8 @@ export function WorkspaceShell() {
       setSnapshot(nextSnapshot);
       setUserSettings(nextUserSettings);
       setAgentSkills(nextAgentSkills);
-      setModelApiKeyStatus(nextModelApiKeyStatus);
+      setModelApiKeyStatuses(nextModelApiKeyStatuses);
+      setProviderTemplates(nextProviderTemplates);
       setEditingBaseHashes(buildNoteHashMap(nextSnapshot.notes));
       setEditingBaseDocumentHashes(buildDocumentHashMap(nextSnapshot.documents));
       setIsBooting(false);
@@ -472,6 +498,8 @@ export function WorkspaceShell() {
 
   /** 已加载的工作台快照，供事件闭包使用，避免 nullable state 进入业务逻辑。 */
   const currentSnapshot = snapshot;
+  /** 已加载的用户设置，供后续事件闭包读取时避开 nullable state 分支。 */
+  const currentUserSettings = userSettings;
 
   if (!currentSnapshot.knowledgeBases.length) {
     return (
@@ -1362,6 +1390,7 @@ export function WorkspaceShell() {
       setIsSessionListOpen(false);
       setIsSessionContextOpen(false);
       setIsScopeSelectorOpen(false);
+      setTurnModelProviderId("");
     } catch (error) {
       setNotice(error instanceof Error ? error.message : String(error));
     } finally {
@@ -1388,6 +1417,7 @@ export function WorkspaceShell() {
       setIsSessionListOpen(false);
       setIsSessionContextOpen(false);
       setIsScopeSelectorOpen(false);
+      setTurnModelProviderId("");
     } catch (error) {
       setNotice(error instanceof Error ? error.message : String(error));
     } finally {
@@ -1455,6 +1485,29 @@ export function WorkspaceShell() {
       commitSnapshot(
         await updateSessionScope(currentSnapshot, activeSession.id, Array.from(selectedIds), activeKnowledgeBase.id),
       );
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : String(error));
+    } finally {
+      endBusy();
+    }
+  }
+
+  /** 设置当前会话的默认 Provider；传入空字符串表示跟随全局默认 Provider。 */
+  async function handleSetSessionModelProvider(providerId: string) {
+    if (!isPersistedSession(currentSnapshot, activeSession)) {
+      setNotice("请先新建或发送一条消息创建会话，再设置会话默认模型。");
+      return;
+    }
+
+    const nextSession: AgentSession = {
+      ...activeSession,
+      modelProviderId: providerId || undefined,
+    };
+
+    beginBusy("正在更新会话默认模型...");
+
+    try {
+      commitSnapshot(await saveSession(currentSnapshot, nextSession));
     } catch (error) {
       setNotice(error instanceof Error ? error.message : String(error));
     } finally {
@@ -1598,11 +1651,17 @@ export function WorkspaceShell() {
         activeNoteId: activeNote?.id ?? "",
         activeDocumentId: activeDocument?.id ?? "",
       };
+      const selectedTurnProviderId = currentUserSettings.modelConfig.providers.some(
+        (provider) => provider.id === turnModelProviderId && provider.enabled,
+      )
+        ? turnModelProviderId
+        : "";
       const result = await runAgentTurn(
         turnSnapshot,
         prompt,
         action,
         optimisticMessage.id,
+        selectedTurnProviderId || undefined,
       );
 
       commitSnapshot(result.snapshot);
@@ -1816,8 +1875,8 @@ export function WorkspaceShell() {
     }
   }
 
-  /** 保存 BYOK API key；桌面端写入系统 keyring，避免明文进入 SQLite。 */
-  async function handleSaveApiKey(apiKey: string) {
+  /** 保存指定 provider 的 BYOK API key；桌面端写入系统 keyring，避免明文进入 SQLite。 */
+  async function handleSaveApiKey(providerId: string, apiKey: string) {
     const trimmedApiKey = apiKey.trim();
 
     if (!trimmedApiKey) {
@@ -1828,10 +1887,14 @@ export function WorkspaceShell() {
     beginBusy("正在保存模型密钥...");
 
     try {
-      const nextModelApiKeyStatus = await saveModelApiKey(trimmedApiKey);
+      const nextStatus = await saveModelApiKey(providerId, trimmedApiKey);
 
-      setModelApiKeyStatus(nextModelApiKeyStatus);
-      setNotice(nextModelApiKeyStatus.message);
+      setModelApiKeyStatuses((current) => {
+        const withoutProvider = current.filter((status) => status.providerId !== providerId);
+
+        return [...withoutProvider, nextStatus];
+      });
+      setNotice(nextStatus.message);
     } catch (error) {
       const message = formatErrorMessage(error);
 
@@ -1992,6 +2055,8 @@ export function WorkspaceShell() {
           notes={currentSnapshot.notes}
           prompt={agentPrompt}
           skills={agentSkills}
+          modelConfig={userSettings.modelConfig}
+          turnModelProviderId={turnModelProviderId}
           isBusy={isBusy}
           isSessionListOpen={isSessionListOpen}
           isSessionContextOpen={isSessionContextOpen}
@@ -2005,6 +2070,8 @@ export function WorkspaceShell() {
           onToggleScopeKnowledgeBase={handleToggleScopeKnowledgeBase}
           onPromptChange={setAgentPrompt}
           onSubmitPrompt={() => handleSubmitPrompt("ask")}
+          onTurnModelProviderChange={setTurnModelProviderId}
+          onSetSessionModelProvider={handleSetSessionModelProvider}
         />
       </main>
       {isSettingsOpen && (
@@ -2013,7 +2080,8 @@ export function WorkspaceShell() {
           activeKnowledgeBaseId={activeKnowledgeBase.id}
           settings={userSettings}
           skills={agentSkills}
-          modelApiKeyStatus={modelApiKeyStatus}
+          modelApiKeyStatuses={modelApiKeyStatuses}
+          providerTemplates={providerTemplates}
           auditLogs={auditLogs}
           appEventLogs={appEventLogs}
           isBusy={isBusy}
