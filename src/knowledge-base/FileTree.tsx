@@ -1,5 +1,18 @@
-import { ChevronDown, ChevronRight, File, FilePenLine, FileText, FileType, FolderOpen, FolderPlus, Plus, Trash2 } from "lucide-react";
+import {
+  ChevronDown,
+  ChevronRight,
+  File,
+  FilePenLine,
+  FileText,
+  FileType,
+  FolderOpen,
+  FolderPlus,
+  MoreHorizontal,
+  Plus,
+  Trash2,
+} from "lucide-react";
 import { useState } from "react";
+import { logDebug } from "../shared/logger";
 import type { FileTreeNode } from "../shared/types";
 
 /** 本地文件树组件，递归展示文件夹、Markdown、txt、docx 和 pdf 文件。 */
@@ -37,6 +50,26 @@ export function FileTree({
   onCreateFolder: (parentPath: string) => void;
 }) {
   const [openCreateMenuPath, setOpenCreateMenuPath] = useState<string | null>(null);
+  /** 当前展开的文件操作菜单路径；只保存相对路径用于 UI 状态，不写入日志。 */
+  const [openFileActionPath, setOpenFileActionPath] = useState<string | null>(null);
+
+  /** 切换文件行的低频操作菜单，日志只记录文件类型和菜单状态。 */
+  function handleToggleFileActionMenu(node: FileTreeNode) {
+    const nextOpenState = openFileActionPath !== node.path;
+
+    logDebug("切换文件树低频操作菜单。", {
+      category: "frontend",
+      event: "file_tree_action_menu_toggle",
+      status: nextOpenState ? "opened" : "closed",
+      metadata: {
+        nodeType: node.type,
+        fileType: node.fileType,
+        depth,
+      },
+    });
+    setOpenFileActionPath(nextOpenState ? node.path : null);
+    setOpenCreateMenuPath(null);
+  }
 
   if (!nodes.length && depth === 0) {
     return <p className="file-tree-empty">没有匹配的支持文档</p>;
@@ -76,6 +109,7 @@ export function FileTree({
                     onClick={(event) => {
                       event.stopPropagation();
                       setOpenCreateMenuPath(openCreateMenuPath === node.path ? null : node.path);
+                      setOpenFileActionPath(null);
                     }}
                   >
                     <Plus size={14} />
@@ -170,42 +204,61 @@ export function FileTree({
               >
                 <FileTreeIcon node={node} />
                 <span className="file-tree-name">{node.name}</span>
+                <span className="file-tree-type">{formatFileTreeTypeLabel(node)}</span>
               </button>
               {(canRename || canDelete) && (
                 <div className="file-tree-actions">
-                  {canRename && (
-                    <button
-                      className="file-action-button"
-                      type="button"
-                      title="重命名文件"
-                      onClick={(event) => {
-                        event.stopPropagation();
-                        if (noteId) {
-                          onRenameNote(noteId);
-                        } else if (documentId) {
-                          onRenameDocument(documentId);
-                        }
-                      }}
-                    >
-                      <FilePenLine size={14} />
-                    </button>
-                  )}
-                  {canDelete && (
-                    <button
-                      className="file-action-button danger"
-                      type="button"
-                      title="删除文件"
-                      onClick={(event) => {
-                        event.stopPropagation();
-                        if (noteId) {
-                          onDeleteNote(noteId);
-                        } else if (documentId) {
-                          onDeleteDocument(documentId);
-                        }
-                      }}
-                    >
-                      <Trash2 size={14} />
-                    </button>
+                  <button
+                    className="file-action-button"
+                    type="button"
+                    title="更多文件操作"
+                    aria-haspopup="menu"
+                    aria-expanded={openFileActionPath === node.path}
+                    onClick={(event) => {
+                      event.stopPropagation();
+                      handleToggleFileActionMenu(node);
+                    }}
+                  >
+                    <MoreHorizontal size={14} />
+                  </button>
+                  {openFileActionPath === node.path && (
+                    <div className="file-action-menu" role="menu">
+                      {canRename && (
+                        <button
+                          type="button"
+                          role="menuitem"
+                          onClick={() => {
+                            setOpenFileActionPath(null);
+                            if (noteId) {
+                              onRenameNote(noteId);
+                            } else if (documentId) {
+                              onRenameDocument(documentId);
+                            }
+                          }}
+                        >
+                          <FilePenLine size={14} />
+                          重命名
+                        </button>
+                      )}
+                      {canDelete && (
+                        <button
+                          className="danger"
+                          type="button"
+                          role="menuitem"
+                          onClick={() => {
+                            setOpenFileActionPath(null);
+                            if (noteId) {
+                              onDeleteNote(noteId);
+                            } else if (documentId) {
+                              onDeleteDocument(documentId);
+                            }
+                          }}
+                        >
+                          <Trash2 size={14} />
+                          删除
+                        </button>
+                      )}
+                    </div>
                   )}
                 </div>
               )}
@@ -228,4 +281,21 @@ function FileTreeIcon({ node }: { node: FileTreeNode }) {
   }
 
   return <FileText size={14} />;
+}
+
+/** 将文件类型转为短标签，作为侧栏扫描时的弱信息。 */
+function formatFileTreeTypeLabel(node: FileTreeNode) {
+  if (node.fileType === "txt") {
+    return "TXT";
+  }
+
+  if (node.fileType === "docx") {
+    return "DOCX";
+  }
+
+  if (node.fileType === "pdf") {
+    return "PDF";
+  }
+
+  return "MD";
 }

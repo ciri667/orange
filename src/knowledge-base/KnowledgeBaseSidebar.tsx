@@ -2,6 +2,11 @@ import { AlertCircle, BookOpen, Database, Loader2, Plus, RefreshCw, Search } fro
 import { FileTree } from "./FileTree";
 import type { FileTreeNode, KnowledgeBase } from "../shared/types";
 
+/** 汇总当前资料库文档数量，用于侧栏标题中的低噪音概览。 */
+function getKnowledgeBaseAssetCount(knowledgeBases: KnowledgeBase[]) {
+  return knowledgeBases.reduce((total, knowledgeBase) => total + knowledgeBase.noteCount + knowledgeBase.documentCount, 0);
+}
+
 /** 左侧知识库导航，包含知识库切换、搜索和本地目录树。 */
 export function KnowledgeBaseSidebar({
   knowledgeBases,
@@ -54,6 +59,8 @@ export function KnowledgeBaseSidebar({
   onCreateFolder: (parentPath: string) => void;
   onRefreshKnowledgeBase: (knowledgeBaseId: string) => void;
 }) {
+  const assetCount = getKnowledgeBaseAssetCount(knowledgeBases);
+
   return (
     <aside className="sidebar" aria-label="知识库导航">
       <div className="workspace-title">
@@ -61,15 +68,17 @@ export function KnowledgeBaseSidebar({
           <BookOpen size={18} />
         </div>
         <div>
-          <strong>Cici 工作区</strong>
-          <span>{knowledgeBases.length} 个本地知识库</span>
+          <strong>资料库</strong>
+          <span>
+            {knowledgeBases.length} 个本地库 · {assetCount} 个文件
+          </span>
         </div>
       </div>
 
       <section className="kb-switcher" aria-label="知识库切换">
         <div className="section-header">
-          <p className="section-label">当前知识库</p>
-          <span>单库激活</span>
+          <p className="section-label">Library</p>
+          <span>本地优先</span>
         </div>
         {knowledgeBases.map((knowledgeBase) => (
           <button
@@ -89,7 +98,7 @@ export function KnowledgeBaseSidebar({
         ))}
         <button className="add-kb-button" type="button" onClick={onAddKnowledgeBase}>
           <Plus size={15} />
-          添加知识库
+          连接资料库
         </button>
       </section>
 
@@ -105,14 +114,14 @@ export function KnowledgeBaseSidebar({
         <input
           value={searchTerm}
           onChange={(event) => onSearchChange(event.target.value)}
-          placeholder="搜索当前目录树"
+          placeholder="过滤文件和文件夹"
           type="search"
         />
       </label>
 
       <div className="local-tree" aria-label="本地目录树">
         <div className="section-header">
-          <p className="section-label">本地目录树</p>
+          <p className="section-label">Files</p>
           <div className="section-actions">
             <span>{activeKnowledgeBase.status === "error" ? "目录失效" : "支持文档"}</span>
             <button
