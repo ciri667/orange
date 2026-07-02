@@ -68,6 +68,42 @@ pub async fn load_workspace_state(app: AppHandle) -> Result<WorkspaceSnapshot, S
     Ok(snapshot)
 }
 
+/** 读取文件系统真实修改时间；读取失败时记录脱敏日志并退回当前本地时间。 */
+fn read_file_updated_at_or_now(
+    app: &AppHandle,
+    event: &str,
+    knowledge_base_id: &str,
+    entity_kind: &str,
+    entity_id: &str,
+    relative_path: &str,
+    path: &Path,
+) -> String {
+    match storage::file_modified_local_datetime(path) {
+        Ok(updated_at) => updated_at,
+        Err(error) => {
+            logging::write_app_event_best_effort(
+                app,
+                AppEventBuilder::new(
+                    AppLogLevel::Warn,
+                    AppLogCategory::Editor,
+                    event,
+                    "metadata_fallback",
+                    "无法读取文件系统修改时间，已退回当前本地时间。",
+                )
+                .knowledge_base_id(knowledge_base_id.to_owned())
+                .entity(entity_kind, entity_id.to_owned())
+                .relative_path(relative_path.to_owned())
+                .metadata(json!({
+                    "reason": "modified_time_unavailable",
+                    "error": error,
+                })),
+            );
+
+            storage::format_local_datetime()
+        }
+    }
+}
+
 /** 读取持久化 Agent 会话，并按当前工作台快照清理已失效的知识库或笔记引用。 */
 #[tauri::command]
 pub async fn load_sessions(
@@ -967,6 +1003,16 @@ pub async fn create_note(
     .await?;
     let created_relative_path = relative_path.clone();
     let note_id = storage::create_stable_note_id(&knowledge_base.id, &relative_path);
+    let created_note_path = PathBuf::from(&knowledge_base.path).join(&relative_path);
+    let updated_at = read_file_updated_at_or_now(
+        &app,
+        "create_note",
+        &knowledge_base.id,
+        "note",
+        &note_id,
+        &relative_path,
+        &created_note_path,
+    );
     let new_note = crate::domain::Note {
         id: note_id.clone(),
         knowledge_base_id: knowledge_base.id.clone(),
@@ -974,7 +1020,7 @@ pub async fn create_note(
         path: relative_path,
         content: String::new(),
         tags: Vec::new(),
-        updated_at: "刚刚".to_owned(),
+        updated_at,
         backlinks: Vec::new(),
         content_hash: storage::hash_content(""),
     };
@@ -1041,13 +1087,23 @@ pub async fn create_document(
     .await?;
     let created_relative_path = relative_path.clone();
     let document_id = storage::create_stable_document_id(&knowledge_base.id, &relative_path);
+    let created_document_path = PathBuf::from(&knowledge_base.path).join(&relative_path);
+    let updated_at = read_file_updated_at_or_now(
+        &app,
+        "create_document",
+        &knowledge_base.id,
+        "document",
+        &document_id,
+        &relative_path,
+        &created_document_path,
+    );
     let new_document = crate::domain::WorkspaceDocument {
         id: document_id.clone(),
         knowledge_base_id: knowledge_base.id.clone(),
         title: document_title_from_path(&relative_path),
         path: relative_path,
         file_type: "txt".to_owned(),
-        updated_at: "刚刚".to_owned(),
+        updated_at,
         content_hash: storage::hash_content(""),
         content: Some(String::new()),
         preview_available: false,
@@ -1184,13 +1240,23 @@ pub async fn rename_note(
     let next_note_id = storage::create_stable_note_id(&knowledge_base.id, &next_relative_path);
     let next_title =
         storage::extract_markdown_title(Path::new(&next_relative_path), &current_content);
+    let next_note_path = PathBuf::from(&knowledge_base.path).join(&next_relative_path);
+    let updated_at = read_file_updated_at_or_now(
+        &app,
+        "rename_note",
+        &knowledge_base.id,
+        "note",
+        &next_note_id,
+        &next_relative_path,
+        &next_note_path,
+    );
 
     snapshot.notes[note_index].id = next_note_id.clone();
     snapshot.notes[note_index].title = next_title;
     snapshot.notes[note_index].path = next_relative_path.clone();
     snapshot.notes[note_index].content = current_content;
     snapshot.notes[note_index].content_hash = current_hash;
-    snapshot.notes[note_index].updated_at = "刚刚".to_owned();
+    snapshot.notes[note_index].updated_at = updated_at;
     snapshot.active_document_id.clear();
 
     replace_note_reference_after_rename(
@@ -1254,13 +1320,23 @@ pub async fn rename_document(
         .await?;
     let next_document_id =
         storage::create_stable_document_id(&knowledge_base.id, &next_relative_path);
+    let next_document_path = PathBuf::from(&knowledge_base.path).join(&next_relative_path);
+    let updated_at = read_file_updated_at_or_now(
+        &app,
+        "rename_document",
+        &knowledge_base.id,
+        "document",
+        &next_document_id,
+        &next_relative_path,
+        &next_document_path,
+    );
 
     snapshot.documents[document_index].id = next_document_id.clone();
     snapshot.documents[document_index].title = document_title_from_path(&next_relative_path);
     snapshot.documents[document_index].path = next_relative_path;
     snapshot.documents[document_index].content = Some(current_content);
     snapshot.documents[document_index].content_hash = current_hash;
-    snapshot.documents[document_index].updated_at = "刚刚".to_owned();
+    snapshot.documents[document_index].updated_at = updated_at;
 
     if snapshot.active_document_id == payload.document_id {
         snapshot.active_document_id = next_document_id;
@@ -1483,10 +1559,19 @@ pub async fn save_note_content(
     })
     .await?;
 
+    let updated_at = read_file_updated_at_or_now(
+        &app,
+        "save_note_content",
+        &knowledge_base_id,
+        "note",
+        &payload.note_id,
+        &note_relative_path,
+        &target_path,
+    );
     let next_hash = storage::hash_content(&payload.content);
     snapshot.notes[note_index].content = payload.content;
     snapshot.notes[note_index].content_hash = next_hash;
-    snapshot.notes[note_index].updated_at = "刚刚".to_owned();
+    snapshot.notes[note_index].updated_at = updated_at;
     snapshot.active_note_id = payload.note_id;
     snapshot.active_document_id.clear();
     normalize_active_entities(&mut snapshot, None);
@@ -1660,10 +1745,19 @@ pub async fn save_document_content(
     })
     .await?;
 
+    let updated_at = read_file_updated_at_or_now(
+        &app,
+        "save_document_content",
+        &knowledge_base_id,
+        "document",
+        &payload.document_id,
+        &document_relative_path,
+        &target_path,
+    );
     let next_hash = storage::hash_content(&payload.content);
     snapshot.documents[document_index].content = Some(payload.content);
     snapshot.documents[document_index].content_hash = next_hash;
-    snapshot.documents[document_index].updated_at = "刚刚".to_owned();
+    snapshot.documents[document_index].updated_at = updated_at;
     snapshot.active_note_id.clear();
     snapshot.active_document_id = payload.document_id;
     normalize_active_entities(&mut snapshot, None);

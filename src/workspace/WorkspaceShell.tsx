@@ -954,7 +954,7 @@ export function WorkspaceShell() {
       ...currentSnapshot,
       documents: currentSnapshot.documents.map((document) =>
         document.id === activeDocument.id
-          ? { ...document, content, updatedAt: "刚刚", contentHash: createContentHash(content) }
+          ? { ...document, content, contentHash: createContentHash(content) }
           : document,
       ),
     });
