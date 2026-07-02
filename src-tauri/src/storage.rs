@@ -17,7 +17,7 @@ use std::fs;
 use std::io::{ErrorKind, Read, Write};
 use std::path::{Component, Path, PathBuf};
 use std::sync::{Mutex, MutexGuard, OnceLock};
-use std::time::Duration;
+use std::time::{Duration, SystemTime};
 use tauri::{AppHandle, Manager};
 use tempfile::NamedTempFile;
 use uuid::Uuid;
@@ -305,6 +305,23 @@ pub fn create_id(prefix: &str) -> String {
 /** 生成本地可读日期时间，用于长期展示的会话和审计记录时间。 */
 pub(crate) fn format_local_datetime() -> String {
     Local::now().format("%Y/%m/%d %H:%M").to_string()
+}
+
+/** 将操作系统文件时间格式化为本地可读日期时间，用于展示真实文件更新时间。 */
+fn format_local_datetime_from_system_time(system_time: SystemTime) -> String {
+    let datetime: chrono::DateTime<Local> = system_time.into();
+
+    datetime.format("%Y/%m/%d %H:%M").to_string()
+}
+
+/** 读取操作系统返回的文件修改时间，失败时返回错误交给调用层记录或汇总。 */
+pub(crate) fn file_modified_local_datetime(path: &Path) -> Result<String, String> {
+    let metadata = fs::metadata(path).map_err(|error| format!("无法读取文件元数据：{error}"))?;
+    let modified_at = metadata
+        .modified()
+        .map_err(|error| format!("无法读取文件修改时间：{error}"))?;
+
+    Ok(format_local_datetime_from_system_time(modified_at))
 }
 
 /** 将毫秒时间戳格式化为本地可读日期时间，用于迁移前端旧会话 ID 中的创建时间。 */
@@ -2223,6 +2240,14 @@ pub fn scan_supported_documents_directory(
             .to_string_lossy()
             .replace('\\', "/");
 
+        let updated_at = match file_modified_local_datetime(path) {
+            Ok(updated_at) => updated_at,
+            Err(error) => {
+                errors.push(format!("无法读取文件更新时间 {}：{error}", path.display()));
+                format_local_datetime()
+            }
+        };
+
         match document_kind {
             SupportedDocumentKind::Markdown => {
                 let content = match fs::read_to_string(path) {
@@ -2246,7 +2271,7 @@ pub fn scan_supported_documents_directory(
                     content_hash: hash_content(&content),
                     content,
                     tags,
-                    updated_at: "刚刚".to_owned(),
+                    updated_at,
                     backlinks: Vec::new(),
                 });
             }
@@ -2265,7 +2290,7 @@ pub fn scan_supported_documents_directory(
                     title: document_title_from_path(path),
                     path: relative_path,
                     file_type: "txt".to_owned(),
-                    updated_at: "刚刚".to_owned(),
+                    updated_at,
                     content_hash: hash_content(&content),
                     content: Some(content),
                     preview_available: false,
@@ -2293,7 +2318,7 @@ pub fn scan_supported_documents_directory(
                     title: document_title_from_path(path),
                     path: relative_path,
                     file_type: file_type.to_owned(),
-                    updated_at: "刚刚".to_owned(),
+                    updated_at,
                     content_hash: hash_bytes(&bytes),
                     content: None,
                     preview_available: true,
@@ -3274,17 +3299,18 @@ mod tests {
     use super::{
         atomic_write_markdown, atomic_write_text_document, create_blank_markdown_file,
         create_blank_text_document_file, create_folder, create_id, create_stable_note_id,
-        ensure_persistent_model_keyring, extract_docx_preview_blocks, format_local_datetime,
-        format_local_datetime_from_millis, hash_bytes, hash_content, insert_app_event_log,
-        is_missing_keyring_entry_error, load_document_preview, load_model_api_key_from_cache,
-        model_keyring_persists_until_delete, normalize_audit_log_created_at,
-        normalize_session_created_at, prune_app_event_logs, query_app_event_logs,
-        rename_markdown_file, rename_text_document_file, resolve_existing_file_inside_root,
-        resolve_inside_root, save_note_image_attachments, scan_markdown_directory,
-        scan_supported_documents_directory, sort_sessions_by_created_at_desc,
-        store_model_api_key_in_cache, trash_markdown_file, trash_text_document_file_with,
-        validate_folder_name, validate_markdown_file_name, validate_new_markdown_file_name,
-        validate_new_text_document_file_name, validate_text_document_file_name, BASE64_STANDARD,
+        ensure_persistent_model_keyring, extract_docx_preview_blocks, file_modified_local_datetime,
+        format_local_datetime, format_local_datetime_from_millis, hash_bytes, hash_content,
+        insert_app_event_log, is_missing_keyring_entry_error, load_document_preview,
+        load_model_api_key_from_cache, model_keyring_persists_until_delete,
+        normalize_audit_log_created_at, normalize_session_created_at, prune_app_event_logs,
+        query_app_event_logs, rename_markdown_file, rename_text_document_file,
+        resolve_existing_file_inside_root, resolve_inside_root, save_note_image_attachments,
+        scan_markdown_directory, scan_supported_documents_directory,
+        sort_sessions_by_created_at_desc, store_model_api_key_in_cache, trash_markdown_file,
+        trash_text_document_file_with, validate_folder_name, validate_markdown_file_name,
+        validate_new_markdown_file_name, validate_new_text_document_file_name,
+        validate_text_document_file_name, BASE64_STANDARD,
     };
     use crate::domain::{
         AgentSession, AppEventLog, KnowledgeBaseSelection, NoteImageAttachmentInput,
@@ -4077,15 +4103,20 @@ mod tests {
         assert_eq!(report.scanned_by_type.get("txt"), Some(&1));
         assert_eq!(report.scanned_by_type.get("docx"), Some(&1));
         assert_eq!(report.scanned_by_type.get("pdf"), Some(&1));
+        assert_eq!(
+            notes[0].updated_at,
+            file_modified_local_datetime(&note_path).unwrap()
+        );
         assert!(documents.iter().any(|document| document.file_type == "txt"
             && document.content.as_deref() == Some("纯文本正文")
+            && document.updated_at == file_modified_local_datetime(&txt_path).unwrap()
             && !document.preview_available));
-        assert!(documents
-            .iter()
-            .any(|document| document.file_type == "docx" && document.preview_available));
-        assert!(documents
-            .iter()
-            .any(|document| document.file_type == "pdf" && document.preview_available));
+        assert!(documents.iter().any(|document| document.file_type == "docx"
+            && document.updated_at == file_modified_local_datetime(&docx_path).unwrap()
+            && document.preview_available));
+        assert!(documents.iter().any(|document| document.file_type == "pdf"
+            && document.updated_at == file_modified_local_datetime(&pdf_path).unwrap()
+            && document.preview_available));
     }
 
     /** 扫描应返回没有 Markdown 文件的空目录，让前端目录树能显示真实空文件夹。 */
