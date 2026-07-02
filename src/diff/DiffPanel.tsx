@@ -32,6 +32,8 @@ export function DiffPanel({
   const comments = change.reviewComments ?? [];
   const draftCommentCount = comments.filter((comment) => comment.status === "draft").length;
   const submittedCommentCount = comments.filter((comment) => comment.status === "submitted").length;
+  /** 变更规模用于审阅区的风险提示，不记录正文内容。 */
+  const changedLineCount = diff.stats.addedLines + diff.stats.removedLines;
   const [collapsedHunkIds, setCollapsedHunkIds] = useState<Set<string>>(new Set());
   const [selectedLine, setSelectedLine] = useState<{ side: ReviewComment["lineSide"]; lineNumber: number; text: string } | null>(null);
   const [commentBody, setCommentBody] = useState("");
@@ -90,15 +92,22 @@ export function DiffPanel({
           <span>{change.targetPath}</span>
         </div>
         <div className="diff-actions">
-          <button className="ghost-button" type="button" onClick={onReject} disabled={isBusy}>
+          <button className="ghost-button danger-action" type="button" onClick={onReject} disabled={isBusy}>
             <X size={16} />
-            取消
+            拒绝写入
           </button>
           <button className="primary-button compact" type="button" onClick={onAccept} disabled={isBusy}>
             <Check size={16} />
             确认写入
           </button>
         </div>
+      </div>
+
+      <div className="review-trust-strip" aria-label="Agent 写入确认状态">
+        <strong>写入前检查</strong>
+        <span>{changedLineCount} 行变更</span>
+        <span>{draftCommentCount ? `${draftCommentCount} 条反馈待发送` : "可直接确认或评论"}</span>
+        <span>路径与 hash 会在确认时校验</span>
       </div>
 
       <div className="review-summary" aria-label="变更摘要">

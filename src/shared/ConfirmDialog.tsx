@@ -1,4 +1,4 @@
-import { AlertTriangle } from "lucide-react";
+import { AlertTriangle, ShieldCheck } from "lucide-react";
 
 /** 确认弹窗语义类型，danger 用于删除、移除授权等不可直接撤销的操作。 */
 export type ConfirmDialogTone = "default" | "danger";
@@ -30,6 +30,10 @@ export function ConfirmDialog({
   onCancel,
   onConfirm,
 }: ConfirmDialogProps) {
+  /** 默认确认使用信任图标，只有危险态才显示警告三角。 */
+  const ToneIcon = tone === "danger" ? AlertTriangle : ShieldCheck;
+  const toneLabel = tone === "danger" ? "需要确认" : "确认操作";
+
   return (
     <div
       className="modal-backdrop confirm-backdrop"
@@ -48,10 +52,10 @@ export function ConfirmDialog({
       >
         <div className="confirm-dialog-heading">
           <span className="confirm-dialog-icon" aria-hidden="true">
-            <AlertTriangle size={18} />
+            <ToneIcon size={18} />
           </span>
           <div>
-            <p className="section-label">Confirm</p>
+            <p className="section-label">{toneLabel}</p>
             <h2 id="confirm-dialog-title">{title}</h2>
           </div>
         </div>
