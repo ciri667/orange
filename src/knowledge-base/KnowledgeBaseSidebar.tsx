@@ -7,6 +7,13 @@ function getKnowledgeBaseAssetCount(knowledgeBases: KnowledgeBase[]) {
   return knowledgeBases.reduce((total, knowledgeBase) => total + knowledgeBase.noteCount + knowledgeBase.documentCount, 0);
 }
 
+/** 生成单个资料库文件数量摘要，总数优先，Markdown 数量作为类型补充。 */
+function getKnowledgeBaseFileSummary(knowledgeBase: KnowledgeBase) {
+  const fileCount = knowledgeBase.noteCount + knowledgeBase.documentCount;
+
+  return `${fileCount} 个文件 · ${knowledgeBase.noteCount} 个 Markdown`;
+}
+
 /** 左侧知识库导航，包含知识库切换、搜索和本地目录树。 */
 export function KnowledgeBaseSidebar({
   knowledgeBases,
@@ -91,7 +98,7 @@ export function KnowledgeBaseSidebar({
             <span className="kb-row-copy">
               <strong>{knowledgeBase.name}</strong>
               <span>
-                {knowledgeBase.noteCount} 篇 Markdown · {knowledgeBase.documentCount} 个文档 · {getKnowledgeBaseStatusLabel(knowledgeBase)}
+                {getKnowledgeBaseFileSummary(knowledgeBase)} · {getKnowledgeBaseStatusLabel(knowledgeBase)}
               </span>
             </span>
           </button>
