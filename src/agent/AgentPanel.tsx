@@ -6,6 +6,7 @@ import {
   History,
   Layers3,
   MessageSquareText,
+  PanelRightClose,
   PanelRightOpen,
   Plus,
   Trash2,
@@ -51,6 +52,7 @@ export function AgentPanel({
   onToggleSessionList,
   onToggleSessionContext,
   onToggleScopeSelector,
+  onCollapsePanel,
   onCreateSession,
   onSelectSession,
   onDeleteSession,
@@ -77,6 +79,7 @@ export function AgentPanel({
   onToggleSessionList: () => void;
   onToggleSessionContext: () => void;
   onToggleScopeSelector: () => void;
+  onCollapsePanel: () => void;
   onCreateSession: () => void;
   onSelectSession: (sessionId: string) => void;
   onDeleteSession: (sessionId: string) => void;
@@ -183,10 +186,13 @@ export function AgentPanel({
     <aside className="agent-panel" aria-label="AI 侧栏">
       <header className="agent-header">
         <div>
-          <p className="section-label">Agent Loop</p>
+          <p className="section-label">Agent</p>
           <h2>{activeSession.title}</h2>
         </div>
         <div className="agent-header-actions">
+          <button className="icon-button" type="button" title="收起 Agent 协作区" onClick={onCollapsePanel}>
+            <PanelRightClose size={17} />
+          </button>
           <button className="icon-button" type="button" title="查看上下文" onClick={onToggleSessionContext}>
             <PanelRightOpen size={17} />
           </button>
@@ -200,10 +206,9 @@ export function AgentPanel({
       </header>
 
       <div className="session-summary" aria-label="当前会话摘要">
-        <span>{getSessionTypeLabel(activeSession.type)}</span>
         <span>{selectedScopeLabel}</span>
         <span>{getSessionNoteLabel(activeSession, notes)}</span>
-        {modelConfig.enabled && <span>模型：{sessionProvider?.name ?? defaultProvider?.name ?? "未配置"}</span>}
+        {modelConfig.enabled && <span>{sessionProvider?.name ?? defaultProvider?.name ?? "模型未配置"}</span>}
         <span className={`session-write-status ${activeSession.pendingChange?.status === "pending" ? "pending" : ""}`}>
           {writeStatus}
         </span>
@@ -285,19 +290,21 @@ export function AgentPanel({
             {modelConfig.enabled && (
               <label className="context-model-select">
                 <span>会话默认模型</span>
-                <select
-                  value={activeSession.modelProviderId ?? FOLLOW_DEFAULT_VALUE}
-                  onChange={(event) => onSetSessionModelProvider(event.target.value)}
-                >
-                  <option value={FOLLOW_DEFAULT_VALUE}>
-                    跟随全局默认{defaultProvider ? `（${defaultProvider.name}）` : ""}
-                  </option>
-                  {enabledProviders.map((provider) => (
-                    <option key={provider.id} value={provider.id}>
-                      {provider.name}
+                <span className="select-control">
+                  <select
+                    value={activeSession.modelProviderId ?? FOLLOW_DEFAULT_VALUE}
+                    onChange={(event) => onSetSessionModelProvider(event.target.value)}
+                  >
+                    <option value={FOLLOW_DEFAULT_VALUE}>
+                      跟随全局默认{defaultProvider ? `（${defaultProvider.name}）` : ""}
                     </option>
-                  ))}
-                </select>
+                    {enabledProviders.map((provider) => (
+                      <option key={provider.id} value={provider.id}>
+                        {provider.name}
+                      </option>
+                    ))}
+                  </select>
+                </span>
               </label>
             )}
             <p className="context-note">
@@ -344,6 +351,7 @@ export function AgentPanel({
               return (
                 <label className={`scope-option ${isSelected ? "selected" : ""}`} key={knowledgeBase.id}>
                   <input
+                    className="control-checkbox-input"
                     checked={isSelected}
                     disabled={isActiveKnowledgeBase}
                     onChange={() => onToggleScopeKnowledgeBase(knowledgeBase.id)}
@@ -386,16 +394,18 @@ export function AgentPanel({
           {modelConfig.enabled && enabledProviders.length > 0 && (
             <label className="turn-model-select" aria-label="本轮使用的模型">
               <BrainCircuit size={14} />
-              <select value={turnModelProviderId} onChange={(event) => onTurnModelProviderChange(event.target.value)}>
-                <option value={FOLLOW_DEFAULT_VALUE}>
-                  本轮：跟随会话默认{sessionProvider ? `（${sessionProvider.name}）` : defaultProvider ? `（${defaultProvider.name}）` : ""}
-                </option>
-                {enabledProviders.map((provider) => (
-                  <option key={provider.id} value={provider.id}>
-                    本轮：{provider.name}
+              <span className="select-control inline-select-control">
+                <select value={turnModelProviderId} onChange={(event) => onTurnModelProviderChange(event.target.value)}>
+                  <option value={FOLLOW_DEFAULT_VALUE}>
+                    本轮：跟随会话默认{sessionProvider ? `（${sessionProvider.name}）` : defaultProvider ? `（${defaultProvider.name}）` : ""}
                   </option>
-                ))}
-              </select>
+                  {enabledProviders.map((provider) => (
+                    <option key={provider.id} value={provider.id}>
+                      本轮：{provider.name}
+                    </option>
+                  ))}
+                </select>
+              </span>
             </label>
           )}
         </div>
@@ -409,7 +419,7 @@ export function AgentPanel({
           aria-label="Agent 输入"
           disabled={isBusy}
         />
-        <button className="primary-button compact" type="button" onClick={onSubmitPrompt} disabled={isBusy}>
+        <button className="primary-button compact agent-send-button" type="button" onClick={onSubmitPrompt} disabled={isBusy}>
           <ArrowRight size={16} />
           发送
         </button>

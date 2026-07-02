@@ -23,6 +23,15 @@ export function ToolCallList({ toolCalls }: { toolCalls?: AgentToolCall[] }) {
     return null;
   }
 
+  /** 按状态汇总调用数量，收起态也能看到本轮 Agent 是否仍在执行或失败。 */
+  const statusCounts = toolCalls.reduce(
+    (counts, toolCall) => ({
+      completed: counts.completed + (toolCall.status === "completed" ? 1 : 0),
+      failed: counts.failed + (toolCall.status === "failed" ? 1 : 0),
+      running: counts.running + (toolCall.status === "running" ? 1 : 0),
+    }),
+    { completed: 0, failed: 0, running: 0 },
+  );
   /** 汇总当前轨迹状态，用于收起态提示用户是否有异常或正在运行的工具。 */
   const statusSummary = hasAttentionStatus
     ? toolCalls.some((toolCall) => toolCall.status === "failed")
@@ -44,6 +53,11 @@ export function ToolCallList({ toolCalls }: { toolCalls?: AgentToolCall[] }) {
         <span className="tool-call-toggle-title">运行信息</span>
         <span className="tool-call-toggle-meta">
           {toolCalls.length} 次调用 · {statusSummary}
+        </span>
+        <span className="tool-call-status-strip" aria-label="工具调用状态汇总">
+          {statusCounts.running > 0 && <em className="running">{statusCounts.running}</em>}
+          {statusCounts.failed > 0 && <em className="failed">{statusCounts.failed}</em>}
+          {statusCounts.completed > 0 && <em className="completed">{statusCounts.completed}</em>}
         </span>
       </button>
 
