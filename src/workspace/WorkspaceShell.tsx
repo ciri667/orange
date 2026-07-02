@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from "react";
+import { PanelRightOpen } from "lucide-react";
 import { AgentPanel } from "../agent/AgentPanel";
 import { DocumentPane } from "../editor/DocumentPane";
 import { EditorPane } from "../editor/EditorPane";
@@ -350,6 +351,8 @@ export function WorkspaceShell() {
   const [isSessionListOpen, setIsSessionListOpen] = useState(false);
   const [isSessionContextOpen, setIsSessionContextOpen] = useState(false);
   const [isScopeSelectorOpen, setIsScopeSelectorOpen] = useState(false);
+  /** 桌面端手动折叠 Agent 协作区，窄窗口断点仍由 CSS 自动接管。 */
+  const [isAgentPanelCollapsed, setIsAgentPanelCollapsed] = useState(false);
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
   const [isBusy, setIsBusy] = useState(false);
   const [busyLabel, setBusyLabel] = useState("");
@@ -1634,6 +1637,22 @@ export function WorkspaceShell() {
     setIsSessionContextOpen(false);
   }
 
+  /** 切换右侧 Agent 协作区显隐，保留编辑区优先的桌面工作流。 */
+  function handleToggleAgentPanelCollapsed() {
+    const nextCollapsedState = !isAgentPanelCollapsed;
+
+    logInfo("切换 Agent 协作区显隐。", {
+      category: "frontend",
+      event: "agent_panel_visibility_toggle",
+      status: nextCollapsedState ? "collapsed" : "expanded",
+      metadata: {
+        messageCount: activeSession.messages.length,
+        hasActivePendingChange: activeSession.pendingChange?.status === "pending",
+      },
+    });
+    setIsAgentPanelCollapsed(nextCollapsedState);
+  }
+
   /** 提交 Agent 输入，运行时会自行决定是否调用检索工具。 */
   async function handleSubmitPrompt(action: AgentActionType = "ask", presetPrompt?: string, sourceSnapshot = currentSnapshot) {
     const prompt = (presetPrompt ?? agentPrompt).trim();
@@ -2241,7 +2260,7 @@ export function WorkspaceShell() {
         onOpenSettings={handleOpenSettings}
       />
       <main
-        className={`workspace-grid ${resizingPane ? "is-resizing" : ""}`}
+        className={`workspace-grid ${resizingPane ? "is-resizing" : ""} ${isAgentPanelCollapsed ? "is-agent-collapsed" : ""}`}
         ref={workspaceRef}
         style={{ gridTemplateColumns }}
       >
@@ -2311,36 +2330,51 @@ export function WorkspaceShell() {
             onSubmitReviewComments={handleSubmitReviewComments}
           />
         )}
-        <div
-          className={`workspace-resizer ${resizingPane === "agent" ? "active" : ""}`}
-          {...getSeparatorProps("agent")}
-        />
-        <AgentPanel
-          sessions={currentSnapshot.sessions}
-          activeSession={activeSession}
-          activeKnowledgeBase={activeKnowledgeBase}
-          knowledgeBases={currentSnapshot.knowledgeBases}
-          notes={currentSnapshot.notes}
-          prompt={agentPrompt}
-          skills={agentSkills}
-          modelConfig={userSettings.modelConfig}
-          turnModelProviderId={turnModelProviderId}
-          isBusy={isBusy}
-          isSessionListOpen={isSessionListOpen}
-          isSessionContextOpen={isSessionContextOpen}
-          isScopeSelectorOpen={isScopeSelectorOpen}
-          onToggleSessionList={handleToggleSessionList}
-          onToggleSessionContext={handleToggleSessionContext}
-          onToggleScopeSelector={handleToggleScopeSelector}
-          onCreateSession={handleCreateSession}
-          onSelectSession={handleSelectSession}
-          onDeleteSession={handleDeleteSession}
-          onToggleScopeKnowledgeBase={handleToggleScopeKnowledgeBase}
-          onPromptChange={setAgentPrompt}
-          onSubmitPrompt={() => handleSubmitPrompt("ask")}
-          onTurnModelProviderChange={setTurnModelProviderId}
-          onSetSessionModelProvider={handleSetSessionModelProvider}
-        />
+        {!isAgentPanelCollapsed && (
+          <div
+            className={`workspace-resizer ${resizingPane === "agent" ? "active" : ""}`}
+            {...getSeparatorProps("agent")}
+          />
+        )}
+        {isAgentPanelCollapsed ? (
+          <button
+            className="agent-panel-reopen"
+            type="button"
+            title="展开 Agent 协作区"
+            onClick={handleToggleAgentPanelCollapsed}
+          >
+            <PanelRightOpen size={17} />
+            <span>Agent</span>
+          </button>
+        ) : (
+          <AgentPanel
+            sessions={currentSnapshot.sessions}
+            activeSession={activeSession}
+            activeKnowledgeBase={activeKnowledgeBase}
+            knowledgeBases={currentSnapshot.knowledgeBases}
+            notes={currentSnapshot.notes}
+            prompt={agentPrompt}
+            skills={agentSkills}
+            modelConfig={userSettings.modelConfig}
+            turnModelProviderId={turnModelProviderId}
+            isBusy={isBusy}
+            isSessionListOpen={isSessionListOpen}
+            isSessionContextOpen={isSessionContextOpen}
+            isScopeSelectorOpen={isScopeSelectorOpen}
+            onToggleSessionList={handleToggleSessionList}
+            onToggleSessionContext={handleToggleSessionContext}
+            onToggleScopeSelector={handleToggleScopeSelector}
+            onCollapsePanel={handleToggleAgentPanelCollapsed}
+            onCreateSession={handleCreateSession}
+            onSelectSession={handleSelectSession}
+            onDeleteSession={handleDeleteSession}
+            onToggleScopeKnowledgeBase={handleToggleScopeKnowledgeBase}
+            onPromptChange={setAgentPrompt}
+            onSubmitPrompt={() => handleSubmitPrompt("ask")}
+            onTurnModelProviderChange={setTurnModelProviderId}
+            onSetSessionModelProvider={handleSetSessionModelProvider}
+          />
+        )}
       </main>
       {isSettingsOpen && (
         <SettingsDrawer
