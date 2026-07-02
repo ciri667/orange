@@ -1,5 +1,5 @@
 import { convertFileSrc } from "@tauri-apps/api/core";
-import { ChevronDown, Clock3, Columns2, Eye, FileDown, FilePenLine, PencilLine, Save, Tags, Trash2 } from "lucide-react";
+import { ChevronDown, Clock3, Columns2, Eye, FileDown, FilePenLine, MoreHorizontal, PencilLine, Save, Tags, Trash2 } from "lucide-react";
 import { useState } from "react";
 import type { ClipboardEventHandler, RefObject, UIEventHandler } from "react";
 import ReactMarkdown, { defaultUrlTransform } from "react-markdown";
@@ -10,6 +10,7 @@ import remarkGfm from "remark-gfm";
 import { DiffPanel } from "../diff/DiffPanel";
 import type { ReviewCommentDraft } from "../diff/DiffPanel";
 import { MarkdownLink } from "../shared/MarkdownLink";
+import { logDebug } from "../shared/logger";
 import type { ExportFormat, KnowledgeBase, MarkdownViewMode, Note, ProposedChange } from "../shared/types";
 import { LineNumberedTextarea } from "./LineNumberedTextarea";
 import { useSyncedMarkdownScroll } from "./useSyncedMarkdownScroll";
@@ -98,6 +99,8 @@ export function EditorPane({
   const { editorRef, previewRef, handleEditorScroll, handlePreviewScroll } = useSyncedMarkdownScroll(viewMode === "split");
   /** 导出菜单只在当前编辑器头部短暂展开，不写入全局工作台状态。 */
   const [isExportMenuOpen, setIsExportMenuOpen] = useState(false);
+  /** 低频文件操作收纳到更多菜单，降低编辑器标题区的视觉密度。 */
+  const [isMoreMenuOpen, setIsMoreMenuOpen] = useState(false);
 
   if (!note) {
     return (
@@ -140,6 +143,23 @@ export function EditorPane({
     event.preventDefault();
     onPasteImages(imageFiles, event.currentTarget.selectionStart, event.currentTarget.selectionEnd);
   };
+  /** 切换低频操作菜单，并记录脱敏 UI 事件，便于排查菜单状态异常。 */
+  const handleMoreMenuToggle = () => {
+    const nextOpenState = !isMoreMenuOpen;
+
+    logDebug("切换 Markdown 更多操作菜单。", {
+      category: "frontend",
+      event: "markdown_more_menu_toggle",
+      status: nextOpenState ? "opened" : "closed",
+      metadata: {
+        isBusy,
+        isDirty,
+        viewMode,
+      },
+    });
+    setIsMoreMenuOpen(nextOpenState);
+    setIsExportMenuOpen(false);
+  };
 
   return (
     <section className="editor-pane" aria-label="Markdown 编辑器">
@@ -169,47 +189,74 @@ export function EditorPane({
             <Save size={16} />
             {isDirty ? "保存草稿" : "已保存"}
           </button>
-          <div className="export-menu-wrapper">
+          <div className="more-menu-wrapper">
             <button
-              className="text-button"
+              className="icon-button"
               type="button"
-              title="导出当前 Markdown"
+              title="更多文件操作"
               aria-haspopup="menu"
-              aria-expanded={isExportMenuOpen}
-              onClick={() => setIsExportMenuOpen((isOpen) => !isOpen)}
+              aria-expanded={isMoreMenuOpen}
+              onClick={handleMoreMenuToggle}
               disabled={isBusy}
             >
-              <FileDown size={16} />
-              导出
-              <ChevronDown size={14} />
+              <MoreHorizontal size={18} />
             </button>
-            {isExportMenuOpen && (
-              <div className="export-action-menu" role="menu">
-                {MARKDOWN_EXPORT_OPTIONS.map((option) => (
-                  <button
-                    key={option.format}
-                    type="button"
-                    role="menuitem"
-                    onClick={() => {
-                      setIsExportMenuOpen(false);
-                      void onExportFile(option.format);
-                    }}
-                  >
-                    <FileDown size={14} />
-                    {option.label}
-                  </button>
-                ))}
+            {isMoreMenuOpen && (
+              <div className="more-action-menu" role="menu">
+                <button
+                  type="button"
+                  role="menuitem"
+                  aria-haspopup="menu"
+                  aria-expanded={isExportMenuOpen}
+                  onClick={() => setIsExportMenuOpen((isOpen) => !isOpen)}
+                >
+                  <FileDown size={14} />
+                  导出当前文件
+                  <ChevronDown size={13} />
+                </button>
+                {isExportMenuOpen &&
+                  MARKDOWN_EXPORT_OPTIONS.map((option) => (
+                    <button
+                      className="nested-menu-item"
+                      key={option.format}
+                      type="button"
+                      role="menuitem"
+                      onClick={() => {
+                        setIsExportMenuOpen(false);
+                        setIsMoreMenuOpen(false);
+                        void onExportFile(option.format);
+                      }}
+                    >
+                      <FileDown size={14} />
+                      {option.label}
+                    </button>
+                  ))}
+                <button
+                  type="button"
+                  role="menuitem"
+                  onClick={() => {
+                    setIsMoreMenuOpen(false);
+                    onRenameNote();
+                  }}
+                >
+                  <FilePenLine size={14} />
+                  重命名
+                </button>
+                <button
+                  className="danger"
+                  type="button"
+                  role="menuitem"
+                  onClick={() => {
+                    setIsMoreMenuOpen(false);
+                    onDeleteNote();
+                  }}
+                >
+                  <Trash2 size={14} />
+                  删除
+                </button>
               </div>
             )}
           </div>
-          <button className="text-button" type="button" title="重命名当前笔记" onClick={onRenameNote} disabled={isBusy}>
-            <FilePenLine size={18} />
-            重命名
-          </button>
-          <button className="text-button danger" type="button" title="删除当前笔记" onClick={onDeleteNote} disabled={isBusy}>
-            <Trash2 size={18} />
-            删除
-          </button>
         </div>
       </header>
 

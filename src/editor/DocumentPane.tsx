@@ -1,6 +1,7 @@
 import { convertFileSrc } from "@tauri-apps/api/core";
-import { ChevronDown, Clock3, Eye, FileDown, FilePenLine, FileText, Save, Trash2 } from "lucide-react";
+import { ChevronDown, Clock3, Eye, FileDown, FilePenLine, FileText, MoreHorizontal, Save, Trash2 } from "lucide-react";
 import { useState } from "react";
+import { logDebug } from "../shared/logger";
 import type { DocumentFileType, DocumentPreview, ExportFormat, KnowledgeBase, WorkspaceDocument } from "../shared/types";
 import { LineNumberedTextarea } from "./LineNumberedTextarea";
 import { countLogicalLines } from "./lineNumberUtils";
@@ -72,6 +73,8 @@ export function DocumentPane({
 }) {
   /** 导出菜单是文档面板局部交互状态，切换文件时随组件自然重置。 */
   const [isExportMenuOpen, setIsExportMenuOpen] = useState(false);
+  /** 低频文件操作统一放入更多菜单，保持文档和 Markdown 头部一致。 */
+  const [isMoreMenuOpen, setIsMoreMenuOpen] = useState(false);
 
   if (!document) {
     return (
@@ -95,6 +98,23 @@ export function DocumentPane({
   const stats = getTextStats(content);
   const isTextDocument = document.fileType === "txt";
   const exportOptions = DOCUMENT_EXPORT_OPTIONS[document.fileType];
+  /** 切换低频操作菜单，并记录脱敏 UI 事件，避免把文件路径或标题写入日志。 */
+  const handleMoreMenuToggle = () => {
+    const nextOpenState = !isMoreMenuOpen;
+
+    logDebug("切换文档更多操作菜单。", {
+      category: "frontend",
+      event: "document_more_menu_toggle",
+      status: nextOpenState ? "opened" : "closed",
+      metadata: {
+        fileType: document.fileType,
+        isBusy,
+        isDirty,
+      },
+    });
+    setIsMoreMenuOpen(nextOpenState);
+    setIsExportMenuOpen(false);
+  };
 
   return (
     <section className="editor-pane" aria-label="普通文档">
@@ -106,55 +126,84 @@ export function DocumentPane({
           <h2>{document.title}</h2>
         </div>
         <div className="editor-actions">
-          <div className="export-menu-wrapper">
+          {isTextDocument && (
+            <button className="text-button" type="button" onClick={onSaveDocument} disabled={isBusy || !isDirty}>
+              <Save size={16} />
+              {isDirty ? "保存草稿" : "已保存"}
+            </button>
+          )}
+          <div className="more-menu-wrapper">
             <button
-              className="text-button"
+              className="icon-button"
               type="button"
-              title="导出当前文档"
+              title="更多文件操作"
               aria-haspopup="menu"
-              aria-expanded={isExportMenuOpen}
-              onClick={() => setIsExportMenuOpen((isOpen) => !isOpen)}
+              aria-expanded={isMoreMenuOpen}
+              onClick={handleMoreMenuToggle}
               disabled={isBusy}
             >
-              <FileDown size={16} />
-              导出
-              <ChevronDown size={14} />
+              <MoreHorizontal size={18} />
             </button>
-            {isExportMenuOpen && (
-              <div className="export-action-menu" role="menu">
-                {exportOptions.map((option) => (
+            {isMoreMenuOpen && (
+              <div className="more-action-menu" role="menu">
+                <button
+                  type="button"
+                  role="menuitem"
+                  aria-haspopup="menu"
+                  aria-expanded={isExportMenuOpen}
+                  onClick={() => setIsExportMenuOpen((isOpen) => !isOpen)}
+                >
+                  <FileDown size={14} />
+                  导出当前文件
+                  <ChevronDown size={13} />
+                </button>
+                {isExportMenuOpen &&
+                  exportOptions.map((option) => (
+                    <button
+                      className="nested-menu-item"
+                      key={option.format}
+                      type="button"
+                      role="menuitem"
+                      onClick={() => {
+                        setIsExportMenuOpen(false);
+                        setIsMoreMenuOpen(false);
+                        void onExportFile(option.format);
+                      }}
+                    >
+                      <FileDown size={14} />
+                      {option.label}
+                    </button>
+                  ))}
+                {isTextDocument && (
                   <button
-                    key={option.format}
                     type="button"
                     role="menuitem"
                     onClick={() => {
-                      setIsExportMenuOpen(false);
-                      void onExportFile(option.format);
+                      setIsMoreMenuOpen(false);
+                      onRenameDocument();
                     }}
                   >
-                    <FileDown size={14} />
-                    {option.label}
+                    <FilePenLine size={14} />
+                    重命名
                   </button>
-                ))}
+                )}
+                {isTextDocument && (
+                  <button
+                    className="danger"
+                    type="button"
+                    role="menuitem"
+                    onClick={() => {
+                      setIsMoreMenuOpen(false);
+                      onDeleteDocument();
+                    }}
+                  >
+                    <Trash2 size={14} />
+                    删除
+                  </button>
+                )}
               </div>
             )}
           </div>
-          {isTextDocument && (
-            <>
-              <button className="text-button" type="button" onClick={onSaveDocument} disabled={isBusy || !isDirty}>
-                <Save size={16} />
-                {isDirty ? "保存草稿" : "已保存"}
-              </button>
-              <button className="text-button" type="button" title="重命名当前 TXT" onClick={onRenameDocument} disabled={isBusy}>
-                <FilePenLine size={18} />
-                重命名
-              </button>
-              <button className="text-button danger" type="button" title="删除当前 TXT" onClick={onDeleteDocument} disabled={isBusy}>
-                <Trash2 size={18} />
-                删除
-              </button>
-            </>
-          )}
         </div>
       </header>
 

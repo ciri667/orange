@@ -118,7 +118,9 @@ export const LineNumberedTextarea = forwardRef<HTMLTextAreaElement, LineNumbered
   const digitCount = String(logicalLines.length).length;
   const wrapperClassName = ["line-numbered-textarea", className].filter(Boolean).join(" ");
   const textareaClassName = ["markdown-editor", "line-numbered-textarea-control", className].filter(Boolean).join(" ");
-  const wrapperStyle = { "--line-number-gutter-width": `max(48px, calc(${digitCount}ch + 28px))` } as CSSProperties;
+  /** 行号 gutter 的宽度 token，随行数位数变化但不触发布局跳变。 */
+  const gutterWidthToken = `max(48px, calc(${digitCount}ch + 28px))`;
+  const wrapperStyle = { "--line-number-gutter-width": gutterWidthToken } as CSSProperties;
 
   /** 更新文本内容区域尺寸；ResizeObserver 和内容位数变化都会走这里。 */
   const updateTextMetrics = useCallback(() => {
@@ -232,7 +234,7 @@ export const LineNumberedTextarea = forwardRef<HTMLTextAreaElement, LineNumbered
   }, [contentWidth, fileType, lineHeight, logicalLines]);
 
   return (
-    <div className={wrapperClassName} style={wrapperStyle}>
+    <div className={wrapperClassName} style={wrapperStyle} data-file-type={fileType} data-gutter-width={gutterWidthToken}>
       <div className="line-number-gutter" aria-hidden="true">
         <div className="line-number-gutter-scroll" ref={gutterScrollRef}>
           {logicalLines.map((_line, index) => (
