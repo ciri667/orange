@@ -100,6 +100,15 @@ export function SkillsModal({
     }),
     [skills],
   );
+  /** 能力管理摘要只展示数量和安全默认值，避免把 skill 路径写入顶部状态。 */
+  const skillSummary = useMemo(
+    () => ({
+      enabled: skills.filter((skill) => skill.enabled).length,
+      custom: skills.filter((skill) => skill.source === "custom").length,
+      builtIn: skills.filter((skill) => skill.source === "built-in").length,
+    }),
+    [skills],
+  );
   /** 根据搜索词、来源和标签得到展示列表，后端已保证内置、自定义的合并顺序。 */
   const filteredSkills = useMemo(
     () =>
@@ -303,6 +312,7 @@ export function SkillsModal({
           <div>
             <p className="section-label">Skills</p>
             <h2>管理 Agent Skills</h2>
+            <span className="modal-subtitle">启用的 Skill 会作为能力说明进入 Agent 上下文。</span>
           </div>
           <div className="skills-modal-actions">
             <button className="ghost-button" type="button" onClick={onOpenUserSkillsFolder} disabled={isBusy}>
@@ -317,6 +327,20 @@ export function SkillsModal({
 
         <div className="skills-modal-body">
           <aside className="skills-list-pane">
+            <div className="skills-overview" aria-label="Skills 摘要">
+              <span>
+                <strong>{skillSummary.enabled}</strong>
+                启用
+              </span>
+              <span>
+                <strong>{skillSummary.builtIn}</strong>
+                内置
+              </span>
+              <span>
+                <strong>{skillSummary.custom}</strong>
+                自定义
+              </span>
+            </div>
             <div className="skills-search">
               <Search size={15} />
               <input value={searchTerm} onChange={(event) => setSearchTerm(event.target.value)} placeholder="搜索 skill" />
@@ -465,11 +489,13 @@ function SkillDetail({
       <div className="skill-switches">
         <label className="toggle-row">
           <input
+            className="control-checkbox-input"
             checked={skill.enabled}
             onChange={(event) => onToggleSkill(skill.id, event.target.checked)}
             type="checkbox"
             disabled={isBusy}
           />
+          <span className="control-checkbox" aria-hidden="true" />
           <span>启用 Skill</span>
         </label>
       </div>
@@ -587,20 +613,24 @@ function SkillInstallForm({
       <div className="skill-switches">
         <label className="toggle-row">
           <input
+            className="control-checkbox-input"
             checked={draft.enableAfterInstall}
             onChange={(event) => updateDraft("enableAfterInstall", event.target.checked)}
             type="checkbox"
             disabled={isBusy}
           />
+          <span className="control-checkbox" aria-hidden="true" />
           <span>安装后启用</span>
         </label>
         <label className="toggle-row">
           <input
+            className="control-checkbox-input"
             checked={draft.replaceExisting}
             onChange={(event) => updateDraft("replaceExisting", event.target.checked)}
             type="checkbox"
             disabled={isBusy}
           />
+          <span className="control-checkbox" aria-hidden="true" />
           <span>替换同名 Skill</span>
         </label>
       </div>
@@ -681,7 +711,13 @@ function SkillForm({
       </label>
       <div className="skill-switches">
         <label className="toggle-row">
-          <input checked={draft.enabled} onChange={(event) => updateDraft("enabled", event.target.checked)} type="checkbox" />
+          <input
+            className="control-checkbox-input"
+            checked={draft.enabled}
+            onChange={(event) => updateDraft("enabled", event.target.checked)}
+            type="checkbox"
+          />
+          <span className="control-checkbox" aria-hidden="true" />
           <span>启用</span>
         </label>
       </div>

@@ -129,6 +129,13 @@ export function SettingsDrawer({
   const enabledSkillCount = skills.filter((skill) => skill.enabled).length;
   /** 自定义 skill 数量用于确认用户目录扫描是否已生效。 */
   const customSkillCount = skills.filter((skill) => skill.source === "custom").length;
+  /** 设置工作台顶部摘要只展示计数和状态，避免路径、密钥和请求内容外露。 */
+  const settingsSummary = {
+    knowledgeBaseCount: knowledgeBases.length,
+    providerCount: settingsDraft.modelConfig.providers.length,
+    enabledSkillCount,
+    errorLogCount: appEventLogs.filter((log) => log.level === "error").length,
+  };
   /** 左侧导航项只汇总脱敏状态和轻量计数，避免路径、密钥或请求内容进入 UI 状态元数据。 */
   const settingsNavItems = useMemo<SettingsSectionNavItem[]>(
     () => [
@@ -561,37 +568,43 @@ export function SettingsDrawer({
           <div className="settings-grid">
             <label className="toggle-row">
               <input
+                className="control-checkbox-input"
                 checked={settingsDraft.modelConfig.enabled}
                 onChange={(event) => updateModelConfig("enabled", event.target.checked)}
                 type="checkbox"
               />
+              <span className="control-checkbox" aria-hidden="true" />
               <span>启用云端模型（关闭后 Agent 只使用本地规则回复）</span>
             </label>
             <label>
               <span>隐私策略</span>
-              <select
-                value={settingsDraft.privacyPolicy}
-                onChange={(event) =>
-                  setSettingsDraft((currentSettings) => ({
-                    ...currentSettings,
-                    privacyPolicy: event.target.value as UserSettings["privacyPolicy"],
-                  }))
-                }
-              >
-                <option value="allow-selected-scope">允许已选 scope</option>
-                <option value="local-only">仅本地规则 Agent</option>
-              </select>
+              <span className="select-control">
+                <select
+                  value={settingsDraft.privacyPolicy}
+                  onChange={(event) =>
+                    setSettingsDraft((currentSettings) => ({
+                      ...currentSettings,
+                      privacyPolicy: event.target.value as UserSettings["privacyPolicy"],
+                    }))
+                  }
+                >
+                  <option value="allow-selected-scope">允许已选 scope</option>
+                  <option value="local-only">仅本地规则 Agent</option>
+                </select>
+              </span>
             </label>
           </div>
 
           <div className="provider-add-row">
-            <select value={selectedTemplateId} onChange={(event) => setSelectedTemplateId(event.target.value)}>
-              {providerTemplates.map((template) => (
-                <option key={template.templateId} value={template.templateId}>
-                  {template.name}
-                </option>
-              ))}
-            </select>
+            <span className="select-control">
+              <select value={selectedTemplateId} onChange={(event) => setSelectedTemplateId(event.target.value)}>
+                {providerTemplates.map((template) => (
+                  <option key={template.templateId} value={template.templateId}>
+                    {template.name}
+                  </option>
+                ))}
+              </select>
+            </span>
             <button
               className="ghost-button"
               type="button"
@@ -632,11 +645,13 @@ export function SettingsDrawer({
                         )}
                         <label className="toggle-row compact">
                           <input
+                            className="control-checkbox-input"
                             checked={provider.enabled}
                             onChange={(event) => updateProviderField(provider.id, "enabled", event.target.checked)}
                             disabled={isDefault}
                             type="checkbox"
                           />
+                          <span className="control-checkbox" aria-hidden="true" />
                           <span>启用</span>
                         </label>
                         <button
@@ -669,18 +684,22 @@ export function SettingsDrawer({
                       </label>
                       <label className="toggle-row compact">
                         <input
+                          className="control-checkbox-input"
                           checked={provider.supportsTools}
                           onChange={(event) => updateProviderField(provider.id, "supportsTools", event.target.checked)}
                           type="checkbox"
                         />
+                        <span className="control-checkbox" aria-hidden="true" />
                         <span>支持工具调用（Function Calling）</span>
                       </label>
                       <label className="toggle-row compact">
                         <input
+                          className="control-checkbox-input"
                           checked={provider.requiresApiKey}
                           onChange={(event) => updateProviderField(provider.id, "requiresApiKey", event.target.checked)}
                           type="checkbox"
                         />
+                        <span className="control-checkbox" aria-hidden="true" />
                         <span>需要 API key（本地免鉴权服务可关闭）</span>
                       </label>
                       {provider.requiresApiKey && (
@@ -799,32 +818,36 @@ export function SettingsDrawer({
           <div className="event-log-filters">
             <label>
               <span>级别</span>
-              <select value={eventLogLevel} onChange={(event) => handleEventLogLevelChange(event.target.value as AppEventLogLevel | "")}>
-                <option value="">全部</option>
-                <option value="error">错误</option>
-                <option value="warn">警告</option>
-                <option value="info">信息</option>
-                <option value="debug">调试</option>
-              </select>
+              <span className="select-control">
+                <select value={eventLogLevel} onChange={(event) => handleEventLogLevelChange(event.target.value as AppEventLogLevel | "")}>
+                  <option value="">全部</option>
+                  <option value="error">错误</option>
+                  <option value="warn">警告</option>
+                  <option value="info">信息</option>
+                  <option value="debug">调试</option>
+                </select>
+              </span>
             </label>
             <label>
               <span>分类</span>
-              <select
-                value={eventLogCategory}
-                onChange={(event) => handleEventLogCategoryChange(event.target.value as AppEventLogCategory | "")}
-              >
-                <option value="">全部</option>
-                <option value="app">应用</option>
-                <option value="storage">存储</option>
-                <option value="knowledge_base">知识库</option>
-                <option value="editor">编辑器</option>
-                <option value="agent">Agent</option>
-                <option value="model">模型</option>
-                <option value="skill">Skill</option>
-                <option value="settings">设置</option>
-                <option value="security">安全</option>
-                <option value="frontend">前端</option>
-              </select>
+              <span className="select-control">
+                <select
+                  value={eventLogCategory}
+                  onChange={(event) => handleEventLogCategoryChange(event.target.value as AppEventLogCategory | "")}
+                >
+                  <option value="">全部</option>
+                  <option value="app">应用</option>
+                  <option value="storage">存储</option>
+                  <option value="knowledge_base">知识库</option>
+                  <option value="editor">编辑器</option>
+                  <option value="agent">Agent</option>
+                  <option value="model">模型</option>
+                  <option value="skill">Skill</option>
+                  <option value="settings">设置</option>
+                  <option value="security">安全</option>
+                  <option value="frontend">前端</option>
+                </select>
+              </span>
             </label>
           </div>
           <div className="audit-list">
@@ -864,7 +887,7 @@ export function SettingsDrawer({
         <header className="settings-header">
           <div>
             <p className="section-label">Settings</p>
-            <h2>知识库与 Agent 设置</h2>
+            <h2>设置工作台</h2>
           </div>
           <button className="icon-button" type="button" title="关闭设置" onClick={onClose}>
             <X size={18} />
@@ -873,6 +896,13 @@ export function SettingsDrawer({
 
         <div className="settings-workbench">
           <nav className="settings-sidebar" aria-label="设置项">
+            <div className="settings-overview" aria-label="设置摘要">
+              <strong>本地 Agent 环境</strong>
+              <span>{settingsSummary.knowledgeBaseCount} 个资料库</span>
+              <span>{settingsSummary.providerCount} 个模型 Provider</span>
+              <span>{settingsSummary.enabledSkillCount} 个 Skill 启用</span>
+              {settingsSummary.errorLogCount > 0 && <em>{settingsSummary.errorLogCount} 条错误日志</em>}
+            </div>
             {SETTINGS_SECTION_GROUPS.map((group) => renderNavigationGroup(group))}
           </nav>
           <main className="settings-content" aria-label="设置主要内容">
