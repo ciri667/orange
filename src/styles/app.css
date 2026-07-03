@@ -1034,6 +1034,25 @@ textarea:disabled {
   background: #ffffff;
 }
 
+.document-image-preview {
+  display: grid;
+  min-width: 0;
+  min-height: 0;
+  place-items: center;
+  overflow: auto;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 18px;
+  background: #ffffff;
+}
+
+.document-image-preview img {
+  display: block;
+  max-width: 100%;
+  max-height: 100%;
+  object-fit: contain;
+}
+
 .document-docx-preview {
   min-width: 0;
   min-height: 0;
@@ -3674,6 +3693,7 @@ select:focus-visible,
 .line-numbered-textarea,
 .markdown-preview,
 .document-pdf-preview,
+.document-image-preview,
 .document-docx-preview,
 .document-preview-state,
 .editor-empty-state {
@@ -3721,6 +3741,7 @@ select:focus-visible,
 }
 
 .markdown-preview,
+.document-image-preview,
 .document-docx-preview {
   padding: 22px;
   font-size: 14px;
@@ -5165,6 +5186,7 @@ body,
 .line-numbered-textarea,
 .markdown-preview,
 .document-pdf-preview,
+.document-image-preview,
 .document-docx-preview,
 .document-preview-state,
 .editor-empty-state,

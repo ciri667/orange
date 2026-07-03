@@ -1,12 +1,12 @@
 import { convertFileSrc } from "@tauri-apps/api/core";
-import { ChevronDown, Clock3, Eye, FileDown, FilePenLine, FileText, MoreHorizontal, Save, Trash2 } from "lucide-react";
+import { ChevronDown, Clock3, Eye, FileDown, FileImage, FilePenLine, FileText, MoreHorizontal, Save, Trash2 } from "lucide-react";
 import { useState } from "react";
-import { logDebug } from "../shared/logger";
+import { logDebug, logInfo, logWarn } from "../shared/logger";
 import type { DocumentFileType, DocumentPreview, ExportFormat, KnowledgeBase, WorkspaceDocument } from "../shared/types";
 import { LineNumberedTextarea } from "./LineNumberedTextarea";
 import { countLogicalLines } from "./lineNumberUtils";
 
-/** 单个文档类型对应的导出菜单项，确保 PDF 不展示转 Markdown。 */
+/** 单个文档类型对应的导出菜单项，确保 PDF 和图片不展示不支持的转换。 */
 const DOCUMENT_EXPORT_OPTIONS: Record<DocumentFileType, Array<{ format: ExportFormat; label: string }>> = {
   txt: [
     { format: "original", label: "原文件 .txt" },
@@ -22,6 +22,7 @@ const DOCUMENT_EXPORT_OPTIONS: Record<DocumentFileType, Array<{ format: ExportFo
     { format: "original", label: "原文件 .pdf" },
     { format: "pdf", label: "转为 .pdf" },
   ],
+  image: [{ format: "original", label: "原图片文件" }],
 };
 
 /** 格式化纯文本文档的阅读统计，用于保持 txt 编辑体验与 Markdown 面板一致。 */
@@ -43,7 +44,20 @@ function isTauriAssetRuntime() {
   return typeof tauriInternals === "object" && tauriInternals !== null && "convertFileSrc" in tauriInternals;
 }
 
-/** 普通文档面板，txt 可编辑，docx/pdf 只读预览。 */
+/** 把预览返回的 assetPath 转成可渲染 URL；浏览器模拟态允许 data/blob/http 直通。 */
+function createDocumentAssetUrl(assetPath?: string) {
+  if (!assetPath) {
+    return "";
+  }
+
+  if (/^(data:|blob:|https?:)/i.test(assetPath)) {
+    return assetPath;
+  }
+
+  return isTauriAssetRuntime() ? convertFileSrc(assetPath) : "";
+}
+
+/** 普通文档面板，txt 可编辑，docx/pdf/图片只读预览。 */
 export function DocumentPane({
   document,
   knowledgeBase,
@@ -263,7 +277,7 @@ export function DocumentPane({
   );
 }
 
-/** 只读文档预览区域，按 docx/pdf 分支展示。 */
+/** 只读文档预览区域，按 docx/pdf/图片分支展示。 */
 function DocumentPreviewView({
   document,
   preview,
@@ -284,12 +298,52 @@ function DocumentPreviewView({
   }
 
   if (document.fileType === "pdf") {
-    const assetUrl = preview?.assetPath && isTauriAssetRuntime() ? convertFileSrc(preview.assetPath) : "";
+    const assetUrl = createDocumentAssetUrl(preview?.assetPath);
 
     return assetUrl ? (
       <iframe className="document-pdf-preview" title={document.title} src={assetUrl} />
     ) : (
       <div className="document-preview-state">当前环境无法内嵌 PDF 预览。</div>
+    );
+  }
+
+  if (document.fileType === "image") {
+    const assetUrl = createDocumentAssetUrl(preview?.assetPath);
+
+    return assetUrl ? (
+      <div className="document-image-preview" aria-label="图片预览">
+        <img
+          src={assetUrl}
+          alt={document.title}
+          onLoad={(event) => {
+            // 图片加载日志只记录渲染尺寸和文档类型，避免把本地路径写入日志。
+            logInfo("图片文档预览加载完成。", {
+              category: "frontend",
+              event: "document_image_preview",
+              status: "loaded",
+              metadata: {
+                fileType: document.fileType,
+                naturalWidth: event.currentTarget.naturalWidth,
+                naturalHeight: event.currentTarget.naturalHeight,
+              },
+            });
+          }}
+          onError={(event) => {
+            logWarn("图片文档预览加载失败。", {
+              category: "frontend",
+              event: "document_image_preview",
+              status: "failed",
+              metadata: {
+                fileType: document.fileType,
+                renderedWidth: event.currentTarget.clientWidth,
+                renderedHeight: event.currentTarget.clientHeight,
+              },
+            });
+          }}
+        />
+      </div>
+    ) : (
+      <div className="document-preview-state">当前环境无法内嵌图片预览。</div>
     );
   }
 
@@ -320,6 +374,10 @@ function getDocumentTypeLabel(document: WorkspaceDocument) {
 
   if (document.fileType === "docx") {
     return "DOCX 文档";
+  }
+
+  if (document.fileType === "image") {
+    return "图片";
   }
 
   return "PDF 文档";
