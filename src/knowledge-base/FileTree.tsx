@@ -2,6 +2,7 @@ import {
   ChevronDown,
   ChevronRight,
   File,
+  FileImage,
   FilePenLine,
   FileText,
   FileType,
@@ -15,7 +16,7 @@ import { useState } from "react";
 import { logDebug } from "../shared/logger";
 import type { FileTreeNode } from "../shared/types";
 
-/** 本地文件树组件，递归展示文件夹、Markdown、txt、docx 和 pdf 文件。 */
+/** 本地文件树组件，递归展示文件夹、Markdown、txt、docx、pdf 和图片文件。 */
 export function FileTree({
   nodes,
   activeNoteId,
@@ -280,6 +281,10 @@ function FileTreeIcon({ node }: { node: FileTreeNode }) {
     return <File size={14} />;
   }
 
+  if (node.fileType === "image") {
+    return <FileImage size={14} />;
+  }
+
   return <FileText size={14} />;
 }
 
@@ -295,6 +300,10 @@ function formatFileTreeTypeLabel(node: FileTreeNode) {
 
   if (node.fileType === "pdf") {
     return "PDF";
+  }
+
+  if (node.fileType === "image") {
+    return "IMG";
   }
 
   return "MD";
