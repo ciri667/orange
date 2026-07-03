@@ -1781,7 +1781,7 @@ pub async fn save_document_content(
     Ok(snapshot)
 }
 
-/** 加载 docx/pdf 文档预览，命令层负责定位知识库并把路径授权给 asset protocol。 */
+/** 加载 docx/pdf/图片文档预览，命令层负责定位知识库并把路径授权给 asset protocol。 */
 #[tauri::command]
 pub async fn load_document_preview(
     app: AppHandle,
@@ -2644,7 +2644,7 @@ fn note_title_from_path(relative_path: &str) -> String {
         .to_owned()
 }
 
-/** 从普通文档相对路径提取标题，txt/docx/pdf 首版都使用文件名 stem。 */
+/** 从普通文档相对路径提取标题，txt/docx/pdf/图片首版都使用文件名 stem。 */
 fn document_title_from_path(relative_path: &str) -> String {
     Path::new(relative_path)
         .file_stem()

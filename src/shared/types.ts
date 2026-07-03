@@ -35,12 +35,12 @@ export type ModelProvider = "openai-compatible";
 export type PrivacyPolicy = "local-only" | "allow-selected-scope";
 
 /** 非 Markdown 文档类型，决定目录树操作权限和中间面板展示方式。 */
-export type DocumentFileType = "txt" | "docx" | "pdf";
+export type DocumentFileType = "txt" | "docx" | "pdf" | "image";
 
 /** 当前文件导出格式，original 保留原文件，markdown/pdf 走轻量转换。 */
 export type ExportFormat = "original" | "markdown" | "pdf";
 
-/** 当前文件导出目标类型，note 对应 Markdown，document 对应 TXT/DOCX/PDF。 */
+/** 当前文件导出目标类型，note 对应 Markdown，document 对应 TXT/DOCX/PDF/图片。 */
 export type ExportTargetKind = "note" | "document";
 
 /** 可预览文档的正文块类型，首版 docx 只抽取段落级文本。 */
@@ -135,7 +135,7 @@ export interface Note {
   contentHash: string;
 }
 
-/** 非 Markdown 文档的数据模型；txt 带正文，docx/pdf 只保存预览所需元数据。 */
+/** 非 Markdown 文档的数据模型；txt 带正文，docx/pdf/图片只保存预览所需元数据。 */
 export interface WorkspaceDocument {
   id: string;
   knowledgeBaseId: string;
@@ -154,7 +154,7 @@ export interface DocumentPreviewBlock {
   text: string;
 }
 
-/** 非 Markdown 文档预览命令返回值，pdf 返回 asset 路径，docx 返回结构化文本。 */
+/** 非 Markdown 文档预览命令返回值，pdf/图片返回 asset 路径，docx 返回结构化文本。 */
 export interface DocumentPreview {
   documentId: string;
   fileType: DocumentFileType;

@@ -110,13 +110,14 @@ pub struct KnowledgeBase {
     pub scan_report: Option<ScanReport>,
 }
 
-/** 支持文档类型的扫描计数，默认补齐四类避免旧快照缺字段时报错。 */
+/** 支持文档类型的扫描计数，默认补齐五类避免旧快照缺字段时报错。 */
 pub fn default_scanned_by_type() -> HashMap<String, usize> {
     HashMap::from([
         ("markdown".to_owned(), 0),
         ("txt".to_owned(), 0),
         ("docx".to_owned(), 0),
         ("pdf".to_owned(), 0),
+        ("image".to_owned(), 0),
     ])
 }
 
@@ -147,7 +148,7 @@ pub struct Note {
     pub content_hash: String,
 }
 
-/** 非 Markdown 文档，txt 带正文，docx/pdf 只存只读预览所需元数据。 */
+/** 非 Markdown 文档，txt 带正文，docx/pdf/图片只存只读预览所需元数据。 */
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct WorkspaceDocument {
@@ -171,7 +172,7 @@ pub struct DocumentPreviewBlock {
     pub text: String,
 }
 
-/** 非 Markdown 文档预览返回值，pdf 使用 assetPath，docx 使用 blocks。 */
+/** 非 Markdown 文档预览返回值，pdf/图片使用 assetPath，docx 使用 blocks。 */
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DocumentPreview {
@@ -637,7 +638,7 @@ pub struct DeleteDocumentPayload {
     pub expected_hash: String,
 }
 
-/** 加载 docx/pdf 只读预览的命令入参。 */
+/** 加载 docx/pdf/图片只读预览的命令入参。 */
 #[derive(Clone, Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct LoadDocumentPreviewPayload {
@@ -645,7 +646,7 @@ pub struct LoadDocumentPreviewPayload {
     pub document_id: String,
 }
 
-/** 当前文件导出的目标类型，note 对应 Markdown，document 对应 TXT/DOCX/PDF。 */
+/** 当前文件导出的目标类型，note 对应 Markdown，document 对应 TXT/DOCX/PDF/图片。 */
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub enum ExportTargetKind {
