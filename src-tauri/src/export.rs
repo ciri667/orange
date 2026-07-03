@@ -44,6 +44,7 @@ enum ExportSourceType {
     Txt,
     Docx,
     Pdf,
+    Image,
 }
 
 impl ExportSourceType {
@@ -54,16 +55,7 @@ impl ExportSourceType {
             ExportSourceType::Txt => "txt",
             ExportSourceType::Docx => "docx",
             ExportSourceType::Pdf => "pdf",
-        }
-    }
-
-    /** 返回原文件导出时应使用的扩展名。 */
-    fn original_extension(self) -> &'static str {
-        match self {
-            ExportSourceType::Markdown => "md",
-            ExportSourceType::Txt => "txt",
-            ExportSourceType::Docx => "docx",
-            ExportSourceType::Pdf => "pdf",
+            ExportSourceType::Image => "image",
         }
     }
 }
@@ -86,9 +78,8 @@ pub async fn export_current_file(
     let operation_id = storage::create_id("export");
     let requested_format = payload.format;
     let source = resolve_export_source(payload)?;
-    let target_extension =
-        resolve_export_extension(source.source_type, &source.content, requested_format)?;
-    let suggested_file_name = build_export_file_name(&source, target_extension);
+    let target_extension = resolve_export_extension(&source, requested_format)?;
+    let suggested_file_name = build_export_file_name(&source, &target_extension);
 
     logging::write_app_event_best_effort(
         &app,
@@ -113,7 +104,7 @@ pub async fn export_current_file(
         &app,
         &source,
         requested_format,
-        target_extension,
+        &target_extension,
         &suggested_file_name,
     )
     .await;
@@ -309,12 +300,13 @@ fn source_from_document(
         "txt" => ExportSourceType::Txt,
         "docx" => ExportSourceType::Docx,
         "pdf" => ExportSourceType::Pdf,
+        "image" => ExportSourceType::Image,
         _ => return Err("该文档类型暂不支持导出。".to_owned()),
     };
     let content = match source_type {
         ExportSourceType::Txt => ExportContent::Text(document.content.unwrap_or_default()),
         ExportSourceType::Docx => ExportContent::DocxBlocks(Vec::new()),
-        ExportSourceType::Pdf => ExportContent::BinaryFile,
+        ExportSourceType::Pdf | ExportSourceType::Image => ExportContent::BinaryFile,
         ExportSourceType::Markdown => ExportContent::Text(String::new()),
     };
 
@@ -330,19 +322,28 @@ fn source_from_document(
 }
 
 /** 根据源类型和用户选择校验格式矩阵，并返回目标扩展名。 */
-fn resolve_export_extension(
-    source_type: ExportSourceType,
-    content: &ExportContent,
-    format: ExportFormat,
-) -> Result<&'static str, String> {
+fn resolve_export_extension(source: &ExportSource, format: ExportFormat) -> Result<String, String> {
     match format {
-        ExportFormat::Original => Ok(source_type.original_extension()),
-        ExportFormat::Markdown if matches!(content, ExportContent::BinaryFile) => {
-            Err("PDF 暂不支持转为 Markdown。".to_owned())
+        ExportFormat::Original => original_extension_from_source(source),
+        ExportFormat::Markdown if matches!(&source.content, ExportContent::BinaryFile) => {
+            Err("二进制文件暂不支持转为 Markdown。".to_owned())
         }
-        ExportFormat::Markdown => Ok("md"),
-        ExportFormat::Pdf => Ok("pdf"),
+        ExportFormat::Markdown => Ok("md".to_owned()),
+        ExportFormat::Pdf if source.source_type == ExportSourceType::Image => {
+            Err("图片暂不支持转为 PDF。".to_owned())
+        }
+        ExportFormat::Pdf => Ok("pdf".to_owned()),
     }
+}
+
+/** 原文件导出尽量沿用知识库内真实扩展名，图片等多扩展类型不会被统一改名。 */
+fn original_extension_from_source(source: &ExportSource) -> Result<String, String> {
+    Path::new(&source.relative_path)
+        .extension()
+        .and_then(|value| value.to_str())
+        .map(|extension| extension.trim_start_matches('.').to_ascii_lowercase())
+        .filter(|extension| !extension.is_empty())
+        .ok_or_else(|| "无法识别原文件扩展名。".to_owned())
 }
 
 /** 判断当前导出是否可以直接复制源文件。 */
@@ -777,22 +778,31 @@ mod tests {
 
     #[test]
     fn export_extension_rejects_pdf_to_markdown() {
-        let result = resolve_export_extension(
-            ExportSourceType::Pdf,
-            &ExportContent::BinaryFile,
-            ExportFormat::Markdown,
+        let pdf_source = test_source(ExportSourceType::Pdf, ExportContent::BinaryFile);
+        let txt_source = test_source(
+            ExportSourceType::Txt,
+            ExportContent::Text("正文".to_owned()),
         );
+        let result = resolve_export_extension(&pdf_source, ExportFormat::Markdown);
 
         assert!(result.is_err());
         assert_eq!(
-            resolve_export_extension(
-                ExportSourceType::Txt,
-                &ExportContent::Text("正文".to_owned()),
-                ExportFormat::Markdown
-            )
-            .unwrap(),
+            resolve_export_extension(&txt_source, ExportFormat::Markdown).unwrap(),
             "md"
         );
+    }
+
+    #[test]
+    fn original_export_keeps_image_extension() {
+        let mut source = test_source(ExportSourceType::Image, ExportContent::BinaryFile);
+
+        source.relative_path = "assets/diagram.webp".to_owned();
+
+        assert_eq!(
+            resolve_export_extension(&source, ExportFormat::Original).unwrap(),
+            "webp"
+        );
+        assert!(resolve_export_extension(&source, ExportFormat::Pdf).is_err());
     }
 
     #[test]
