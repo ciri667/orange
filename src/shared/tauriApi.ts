@@ -703,6 +703,7 @@ export async function attachKnowledgeBase(
           txt: 1,
           docx: 0,
           pdf: 0,
+          image: 0,
         },
         failedFileCount: 0,
         skippedDirectories: ["node_modules"],
@@ -824,7 +825,7 @@ export async function createNote(
                   scannedFileCount: item.scanReport.scannedFileCount + 1,
                   scannedByType: {
                     ...item.scanReport.scannedByType,
-                    markdown: item.scanReport.scannedByType.markdown + 1,
+                    markdown: (item.scanReport.scannedByType.markdown ?? 0) + 1,
                   },
                 }
               : item.scanReport,
@@ -897,7 +898,7 @@ export async function createDocument(
                   scannedFileCount: item.scanReport.scannedFileCount + 1,
                   scannedByType: {
                     ...item.scanReport.scannedByType,
-                    txt: item.scanReport.scannedByType.txt + 1,
+                    txt: (item.scanReport.scannedByType.txt ?? 0) + 1,
                   },
                 }
               : item.scanReport,
@@ -1170,7 +1171,7 @@ export async function deleteNote(
                   scannedFileCount: Math.max(0, knowledgeBase.scanReport.scannedFileCount - 1),
                   scannedByType: {
                     ...knowledgeBase.scanReport.scannedByType,
-                    markdown: Math.max(0, knowledgeBase.scanReport.scannedByType.markdown - 1),
+                    markdown: Math.max(0, (knowledgeBase.scanReport.scannedByType.markdown ?? 0) - 1),
                   },
                 }
               : knowledgeBase.scanReport,
@@ -1228,7 +1229,7 @@ export async function deleteDocument(
                   scannedFileCount: Math.max(0, knowledgeBase.scanReport.scannedFileCount - 1),
                   scannedByType: {
                     ...knowledgeBase.scanReport.scannedByType,
-                    txt: Math.max(0, knowledgeBase.scanReport.scannedByType.txt - 1),
+                    txt: Math.max(0, (knowledgeBase.scanReport.scannedByType.txt ?? 0) - 1),
                   },
                 }
               : knowledgeBase.scanReport,
@@ -1249,7 +1250,7 @@ export async function deleteDocument(
   return invokeLogged<WorkspaceSnapshot>("delete_document", { payload: { snapshot, documentId, expectedHash } });
 }
 
-/** 加载 DOCX/PDF 只读预览；TXT 直接使用快照中的 content。 */
+/** 加载 DOCX/PDF/图片只读预览；TXT 直接使用快照中的 content。 */
 export async function loadDocumentPreview(snapshot: WorkspaceSnapshot, documentId: string): Promise<DocumentPreview> {
   const document = snapshot.documents.find((item) => item.id === documentId);
 
@@ -1265,7 +1266,12 @@ export async function loadDocumentPreview(snapshot: WorkspaceSnapshot, documentI
       path: document.path,
       updatedAt: document.updatedAt,
       contentHash: document.contentHash,
-      assetPath: document.fileType === "pdf" ? document.path : undefined,
+      assetPath:
+        document.fileType === "pdf"
+          ? document.path
+          : document.fileType === "image"
+            ? createMockImagePreviewDataUrl(document.title)
+            : undefined,
       blocks:
         document.fileType === "docx"
           ? [
@@ -1277,6 +1283,14 @@ export async function loadDocumentPreview(snapshot: WorkspaceSnapshot, documentI
   }
 
   return invokeLogged<DocumentPreview>("load_document_preview", { payload: { snapshot, documentId } });
+}
+
+/** 浏览器开发态没有 Tauri asset 协议，用轻量 SVG data URL 模拟图片预览。 */
+function createMockImagePreviewDataUrl(title: string) {
+  const safeTitle = title.replace(/[<>&"]/g, "");
+  const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="960" height="540" viewBox="0 0 960 540"><rect width="960" height="540" fill="#f7f3ea"/><rect x="96" y="80" width="768" height="380" rx="18" fill="#ffffff" stroke="#d7cfc2"/><circle cx="260" cy="210" r="58" fill="#6aa6a1"/><path d="M160 410 360 270l130 92 92-70 218 118z" fill="#314452"/><text x="480" y="500" text-anchor="middle" font-family="system-ui, sans-serif" font-size="28" fill="#314452">${safeTitle || "图片预览"}</text></svg>`;
+
+  return `data:image/svg+xml,${encodeURIComponent(svg)}`;
 }
 
 /** 导出当前打开文件；真实文件写入只允许在 Tauri 桌面端通过系统保存对话框完成。 */

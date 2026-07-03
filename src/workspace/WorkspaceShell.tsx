@@ -575,7 +575,7 @@ export function WorkspaceShell() {
           <img className="brand-logo" src="/cici-note-logo.svg" alt="" />
         </div>
         <h1>连接一个支持文档目录，开始使用知识库 Agent 助手。</h1>
-        <p>目录树会展示 Markdown、TXT、DOCX 和 PDF；Agent 写入仍只作用于确认后的 Markdown diff。</p>
+        <p>目录树会展示 Markdown、TXT、DOCX、PDF 和图片；Agent 写入仍只作用于确认后的 Markdown diff。</p>
         {(busyLabel || notice) && (
           <p className={`operation-notice ${notice.includes("失败") || notice.includes("阻止") ? "error" : ""}`}>
             {busyLabel || notice}
