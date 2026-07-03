@@ -11,6 +11,7 @@ import { DiffPanel } from "../diff/DiffPanel";
 import type { ReviewCommentDraft } from "../diff/DiffPanel";
 import { MarkdownLink } from "../shared/MarkdownLink";
 import { logDebug } from "../shared/logger";
+import { useDismissable } from "../shared/useDismissable";
 import type { ExportFormat, KnowledgeBase, MarkdownViewMode, Note, ProposedChange } from "../shared/types";
 import { LineNumberedTextarea } from "./LineNumberedTextarea";
 import { useSyncedMarkdownScroll } from "./useSyncedMarkdownScroll";
@@ -102,6 +103,10 @@ export function EditorPane({
   /** 低频文件操作收纳到更多菜单，降低编辑器标题区的视觉密度。 */
   const [isMoreMenuOpen, setIsMoreMenuOpen] = useState(false);
 
+  // more-menu 已把触发按钮与浮层都包在 more-menu-wrapper 内，ref 挂到该 wrapper 即可；
+  // 点击编辑器其它区域或其它板块、按 Esc 时关闭更多菜单。
+  const moreMenuRef = useDismissable<HTMLDivElement>(isMoreMenuOpen, () => setIsMoreMenuOpen(false));
+
   if (!note) {
     return (
       <section className="editor-pane" aria-label="Markdown 编辑器">
@@ -189,7 +194,7 @@ export function EditorPane({
             <Save size={16} />
             {isDirty ? "保存草稿" : "已保存"}
           </button>
-          <div className="more-menu-wrapper">
+          <div className="more-menu-wrapper" ref={moreMenuRef}>
             <button
               className="icon-button"
               type="button"

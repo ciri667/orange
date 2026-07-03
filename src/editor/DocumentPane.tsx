@@ -2,6 +2,7 @@ import { convertFileSrc } from "@tauri-apps/api/core";
 import { ChevronDown, Clock3, Eye, FileDown, FileImage, FilePenLine, FileText, MoreHorizontal, Save, Trash2 } from "lucide-react";
 import { useState } from "react";
 import { logDebug, logInfo, logWarn } from "../shared/logger";
+import { useDismissable } from "../shared/useDismissable";
 import type { DocumentFileType, DocumentPreview, ExportFormat, KnowledgeBase, WorkspaceDocument } from "../shared/types";
 import { LineNumberedTextarea } from "./LineNumberedTextarea";
 import { countLogicalLines } from "./lineNumberUtils";
@@ -90,6 +91,10 @@ export function DocumentPane({
   /** 低频文件操作统一放入更多菜单，保持文档和 Markdown 头部一致。 */
   const [isMoreMenuOpen, setIsMoreMenuOpen] = useState(false);
 
+  // more-menu 的触发按钮与浮层都在 more-menu-wrapper 内，ref 挂到它即可；
+  // 点击其它板块或按 Esc 时关闭更多菜单。
+  const moreMenuRef = useDismissable<HTMLDivElement>(isMoreMenuOpen, () => setIsMoreMenuOpen(false));
+
   if (!document) {
     return (
       <section className="editor-pane" aria-label="文档预览">
@@ -146,7 +151,7 @@ export function DocumentPane({
               {isDirty ? "保存草稿" : "已保存"}
             </button>
           )}
-          <div className="more-menu-wrapper">
+          <div className="more-menu-wrapper" ref={moreMenuRef}>
             <button
               className="icon-button"
               type="button"
