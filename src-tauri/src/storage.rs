@@ -1,5 +1,6 @@
 use crate::domain::{
-    AgentSession, AppEventLog, DocumentPreview, DocumentPreviewBlock, FolderEntry, KnowledgeBase,
+    AgentSession, AppEventLog, DocumentPreview, DocumentPreviewBlock, FeishuCredentialStatus,
+    FeishuIntegrationSettings, FolderEntry, ImIntegrationSettings, KnowledgeBase,
     KnowledgeBaseSelection, LlmProviderConfig, ModelApiKeyStatus, ModelConfig, Note,
     NoteImageAttachmentInput, RequestAuditLog, SavedNoteImageAttachment, ScanReport, UserSettings,
     WorkspaceDocument, WorkspaceSnapshot,
@@ -44,6 +45,9 @@ const IGNORED_DIRECTORY_NAMES: &[&str] = &[
 /** 用户设置表中的默认记录 key，首版只有一个本机用户配置。 */
 const USER_SETTINGS_KEY: &str = "default";
 
+/** 即时通讯设置表 key；沿用 user_settings 表避免为单条本机配置新增表。 */
+const IM_SETTINGS_KEY: &str = "im_integrations";
+
 /** SQLite 被其他连接占用时的等待时长，覆盖大知识库索引重建的正常耗时窗口。 */
 const DATABASE_BUSY_TIMEOUT: Duration = Duration::from_secs(30);
 
@@ -55,6 +59,9 @@ const APP_EVENT_LOG_RETENTION_DAYS: i64 = 30;
 
 /** 系统安全存储中的模型密钥引用，SQLite 只保存这个引用而不保存明文 key。 */
 pub const MODEL_KEY_REFERENCE: &str = "cici-note-openai-compatible-api-key";
+
+/** 系统安全存储中的飞书 appSecret 引用，SQLite 永远不保存明文 secret。 */
+pub const FEISHU_SECRET_KEY_REFERENCE: &str = "cici-note-feishu-app-secret";
 
 /** 单张粘贴图片最大字节数，避免超大剪贴板内容阻塞 UI 或撑爆本地目录。 */
 const MAX_SINGLE_PASTE_IMAGE_BYTES: usize = 20 * 1024 * 1024;
@@ -432,6 +439,25 @@ pub fn default_user_settings() -> UserSettings {
     }
 }
 
+/** 返回即时通讯默认配置；默认不启用，必须由用户显式填写凭证和白名单。 */
+pub fn default_im_settings() -> ImIntegrationSettings {
+    ImIntegrationSettings {
+        feishu: FeishuIntegrationSettings {
+            enabled: false,
+            domain: "feishu".to_owned(),
+            app_id: String::new(),
+            secret_key_reference: FEISHU_SECRET_KEY_REFERENCE.to_owned(),
+            default_knowledge_base_ids: Vec::new(),
+            allowed_user_open_ids: Vec::new(),
+            allowed_chat_ids: Vec::new(),
+            discovered_user_open_ids: Vec::new(),
+            discovered_chat_ids: Vec::new(),
+            require_mention: true,
+            updated_at: format_local_datetime(),
+        },
+    }
+}
+
 /** 根据知识库和相对路径生成稳定笔记 ID，避免重新扫描后会话引用全部失效。 */
 pub fn create_stable_note_id(knowledge_base_id: &str, relative_path: &str) -> String {
     let mut hasher = Sha256::new();
@@ -626,6 +652,12 @@ fn ensure_database_schema(connection: &Connection, database_path: &Path) -> Resu
               duration_ms INTEGER,
               metadata_json TEXT,
               created_at TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS im_session_mappings (
+              channel_key TEXT PRIMARY KEY,
+              session_id TEXT NOT NULL,
+              updated_at TEXT NOT NULL
             );
             "#,
         )
@@ -1099,6 +1131,57 @@ pub fn restore_session_context(
     Ok(snapshot)
 }
 
+/** 查询 IM 对话已绑定的 AgentSession；会话删除或失效时由调用方重新创建。 */
+pub fn load_im_session_mapping(
+    app: &AppHandle,
+    channel_key: &str,
+) -> Result<Option<String>, String> {
+    let connection = open_database(app)?;
+    let session_id = connection
+        .query_row(
+            "SELECT session_id FROM im_session_mappings WHERE channel_key = ?1",
+            params![channel_key],
+            |row| row.get::<_, String>(0),
+        )
+        .ok();
+
+    Ok(session_id)
+}
+
+/** 保存 IM 对话到 AgentSession 的稳定映射，避免重启后丢失上下文。 */
+pub fn save_im_session_mapping(
+    app: &AppHandle,
+    channel_key: &str,
+    session_id: &str,
+) -> Result<(), String> {
+    let connection = open_database(app)?;
+    let _write_guard = lock_database_writer()?;
+
+    connection
+        .execute(
+            "INSERT OR REPLACE INTO im_session_mappings (channel_key, session_id, updated_at) VALUES (?1, ?2, ?3)",
+            params![channel_key, session_id, format_local_datetime()],
+        )
+        .map_err(|error| format!("无法保存 IM 会话映射：{error}"))?;
+
+    Ok(())
+}
+
+/** 删除 IM 对话映射，供 /reset 强制创建新会话。 */
+pub fn delete_im_session_mapping(app: &AppHandle, channel_key: &str) -> Result<(), String> {
+    let connection = open_database(app)?;
+    let _write_guard = lock_database_writer()?;
+
+    connection
+        .execute(
+            "DELETE FROM im_session_mappings WHERE channel_key = ?1",
+            params![channel_key],
+        )
+        .map_err(|error| format!("无法删除 IM 会话映射：{error}"))?;
+
+    Ok(())
+}
+
 /** 根据会话里的 note 引用恢复同知识库 Markdown；无有效引用时不再默认绑定第一篇文档。 */
 fn resolve_session_note_id(
     snapshot: &WorkspaceSnapshot,
@@ -1272,6 +1355,147 @@ pub fn save_user_settings(
     Ok(normalized_settings)
 }
 
+/** 从 SQLite 读取即时通讯设置，缺失时返回禁用状态的安全默认值。 */
+pub fn load_im_settings(app: &AppHandle) -> Result<ImIntegrationSettings, String> {
+    let connection = open_database(app)?;
+    let payload_json = connection
+        .query_row(
+            "SELECT payload_json FROM user_settings WHERE key = ?1",
+            params![IM_SETTINGS_KEY],
+            |row| row.get::<_, String>(0),
+        )
+        .ok();
+
+    match payload_json {
+        Some(payload_json) => {
+            let mut settings: ImIntegrationSettings = serde_json::from_str(&payload_json)
+                .map_err(|error| format!("无法解析即时通讯设置：{error}"))?;
+
+            normalize_im_settings(&mut settings);
+            Ok(settings)
+        }
+        None => Ok(default_im_settings()),
+    }
+}
+
+/** 保存即时通讯设置；appSecret 不在这个 payload 中，保存前统一归一化白名单和 key 引用。 */
+pub fn save_im_settings(
+    app: &AppHandle,
+    settings: &ImIntegrationSettings,
+) -> Result<ImIntegrationSettings, String> {
+    let connection = open_database(app)?;
+    let _write_guard = lock_database_writer()?;
+    let mut normalized_settings = settings.clone();
+
+    normalize_im_settings(&mut normalized_settings);
+
+    let payload_json = serde_json::to_string(&normalized_settings)
+        .map_err(|error| format!("无法序列化即时通讯设置：{error}"))?;
+
+    connection
+        .execute(
+            "INSERT OR REPLACE INTO user_settings (key, payload_json, updated_at) VALUES (?1, ?2, ?3)",
+            params![IM_SETTINGS_KEY, payload_json, format_local_datetime()],
+        )
+        .map_err(|error| format!("无法保存即时通讯设置：{error}"))?;
+
+    Ok(normalized_settings)
+}
+
+/** 记录飞书消息中发现的用户和群，供设置页一键加入白名单；不写日志、不暴露原始 ID。 */
+pub fn remember_feishu_discovered_peer(
+    app: &AppHandle,
+    sender_open_id: &str,
+    chat_id: &str,
+    is_group_chat: bool,
+) -> Result<bool, String> {
+    let mut settings = load_im_settings(app)?;
+    let sender_open_id = sender_open_id.trim();
+    let chat_id = chat_id.trim();
+    let mut changed = false;
+
+    if !sender_open_id.is_empty()
+        && !settings.feishu.allowed_user_open_ids.iter().any(|id| id == sender_open_id)
+        && !settings
+            .feishu
+            .discovered_user_open_ids
+            .iter()
+            .any(|id| id == sender_open_id)
+    {
+        settings
+            .feishu
+            .discovered_user_open_ids
+            .push(sender_open_id.to_owned());
+        changed = true;
+    }
+
+    if is_group_chat
+        && !chat_id.is_empty()
+        && !settings.feishu.allowed_chat_ids.iter().any(|id| id == chat_id)
+        && !settings
+            .feishu
+            .discovered_chat_ids
+            .iter()
+            .any(|id| id == chat_id)
+    {
+        settings.feishu.discovered_chat_ids.push(chat_id.to_owned());
+        changed = true;
+    }
+
+    if changed {
+        save_im_settings(app, &settings).map(|_| true)
+    } else {
+        Ok(false)
+    }
+}
+
+/** 归一化飞书设置，避免空白 ID、重复白名单或错误 key 引用进入持久化配置。 */
+fn normalize_im_settings(settings: &mut ImIntegrationSettings) {
+    settings.feishu.domain = match settings.feishu.domain.trim().to_ascii_lowercase().as_str() {
+        "lark" => "lark".to_owned(),
+        _ => "feishu".to_owned(),
+    };
+    settings.feishu.app_id = settings.feishu.app_id.trim().to_owned();
+    settings.feishu.secret_key_reference = FEISHU_SECRET_KEY_REFERENCE.to_owned();
+    settings.feishu.default_knowledge_base_ids =
+        normalize_identifier_list(&settings.feishu.default_knowledge_base_ids);
+    settings.feishu.allowed_user_open_ids =
+        normalize_identifier_list(&settings.feishu.allowed_user_open_ids);
+    settings.feishu.allowed_chat_ids = normalize_identifier_list(&settings.feishu.allowed_chat_ids);
+    settings.feishu.discovered_user_open_ids =
+        normalize_identifier_list(&settings.feishu.discovered_user_open_ids)
+            .into_iter()
+            .filter(|id| !settings.feishu.allowed_user_open_ids.contains(id))
+            .collect();
+    settings.feishu.discovered_chat_ids =
+        normalize_identifier_list(&settings.feishu.discovered_chat_ids)
+            .into_iter()
+            .filter(|id| !settings.feishu.allowed_chat_ids.contains(id))
+            .collect();
+
+    if settings.feishu.updated_at.trim().is_empty() || settings.feishu.updated_at == "刚刚" {
+        settings.feishu.updated_at = format_local_datetime();
+    }
+}
+
+/** 对配置中的 ID 列表做 trim、去空和去重；不记录原始值，避免日志间接暴露用户/群 ID。 */
+fn normalize_identifier_list(values: &[String]) -> Vec<String> {
+    let mut seen = HashSet::new();
+    let mut normalized = Vec::new();
+
+    for value in values {
+        let trimmed = value.trim();
+
+        if trimmed.is_empty() || !seen.insert(trimmed.to_owned()) {
+            continue;
+        }
+
+        normalized.push(trimmed.to_owned());
+    }
+
+    normalized
+}
+
 /** 把 BYOK 模型密钥保存到系统安全存储，按 providerId 隔离 key 引用，避免明文进入 SQLite。 */
 pub fn save_model_api_key(provider_id: &str, api_key: &str) -> Result<ModelApiKeyStatus, String> {
     ensure_persistent_model_keyring()?;
@@ -1331,6 +1555,59 @@ pub fn load_model_api_key(key_reference: &str) -> Result<Option<String>, String>
             }
         }
     }
+}
+
+/** 把飞书 appSecret 保存到系统安全存储；错误信息不回显 secret 内容。 */
+pub fn save_feishu_app_secret(app_secret: &str) -> Result<FeishuCredentialStatus, String> {
+    ensure_persistent_model_keyring()?;
+
+    if app_secret.trim().is_empty() {
+        return Err("飞书 appSecret 不能为空。".to_owned());
+    }
+
+    let entry = keyring::Entry::new("Cici Note", FEISHU_SECRET_KEY_REFERENCE)
+        .map_err(|error| format!("无法打开系统安全存储：{error}"))?;
+
+    entry
+        .set_password(app_secret)
+        .map_err(|error| format!("无法保存飞书 appSecret：{error}"))?;
+
+    let saved_secret = entry
+        .get_password()
+        .map_err(|error| format!("飞书 appSecret 已提交但读回校验失败：{error}"))?;
+
+    if saved_secret.trim().is_empty() {
+        return Err("飞书 appSecret 已提交但系统安全存储返回空值。".to_owned());
+    }
+
+    store_model_api_key_in_cache(FEISHU_SECRET_KEY_REFERENCE, &saved_secret)?;
+
+    Ok(FeishuCredentialStatus {
+        key_reference: FEISHU_SECRET_KEY_REFERENCE.to_owned(),
+        configured: true,
+        message: "飞书 appSecret 已保存到系统安全存储。".to_owned(),
+    })
+}
+
+/** 读取飞书 appSecret，供长连接和发送消息 API 使用；缺失时返回 None。 */
+pub fn load_feishu_app_secret() -> Result<Option<String>, String> {
+    load_model_api_key(FEISHU_SECRET_KEY_REFERENCE)
+}
+
+/** 查询飞书 appSecret 是否可读取；设置页只展示状态，不拿到明文。 */
+pub fn load_feishu_credential_status() -> Result<FeishuCredentialStatus, String> {
+    let configured = load_feishu_app_secret()?.is_some();
+    let message = if configured {
+        "系统安全存储中已找到飞书 appSecret。"
+    } else {
+        "系统安全存储中尚未找到飞书 appSecret。"
+    };
+
+    Ok(FeishuCredentialStatus {
+        key_reference: FEISHU_SECRET_KEY_REFERENCE.to_owned(),
+        configured,
+        message: message.to_owned(),
+    })
 }
 
 /** 查询单个 provider 的模型密钥是否已经可读取；不会返回明文密钥。 */

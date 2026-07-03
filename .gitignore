@@ -1,6 +1,9 @@
 node_modules/
 dist/
 src-tauri/target/
+# 飞书 sidecar 由 `npm run sidecar:feishu:build` 本地构建产物，不入库
+src-tauri/sidecars/bin/feishu-gateway
+src-tauri/sidecars/bin/feishu-gateway.exe
 docs/
 .idea/
 .DS_Store

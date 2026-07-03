@@ -387,6 +387,35 @@ pub struct UserSettings {
     pub write_confirmation_required: bool,
 }
 
+/** 即时通讯集成总设置，首版只包含飞书/Lark 自建应用。 */
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ImIntegrationSettings {
+    pub feishu: FeishuIntegrationSettings,
+}
+
+/** 飞书/Lark 自建应用配置；appSecret 单独存 keyring，这里只保存引用和脱敏权限边界。 */
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FeishuIntegrationSettings {
+    pub enabled: bool,
+    pub domain: String,
+    pub app_id: String,
+    pub secret_key_reference: String,
+    #[serde(default)]
+    pub default_knowledge_base_ids: Vec<String>,
+    #[serde(default)]
+    pub allowed_user_open_ids: Vec<String>,
+    #[serde(default)]
+    pub allowed_chat_ids: Vec<String>,
+    #[serde(default)]
+    pub discovered_user_open_ids: Vec<String>,
+    #[serde(default)]
+    pub discovered_chat_ids: Vec<String>,
+    pub require_mention: bool,
+    pub updated_at: String,
+}
+
 /** 模型密钥保存状态，只暴露是否可读取，不返回明文密钥。 */
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -395,6 +424,29 @@ pub struct ModelApiKeyStatus {
     pub key_reference: String,
     pub configured: bool,
     pub message: String,
+}
+
+/** 飞书 appSecret 保存状态；只暴露是否存在，不返回明文。 */
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FeishuCredentialStatus {
+    pub key_reference: String,
+    pub configured: bool,
+    pub message: String,
+}
+
+/** 飞书长连接网关运行态，设置页用它展示手动启停结果。 */
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FeishuGatewayStatus {
+    pub running: bool,
+    pub connected: bool,
+    pub domain: String,
+    pub app_id_configured: bool,
+    pub secret_configured: bool,
+    pub last_started_at: Option<String>,
+    pub last_stopped_at: Option<String>,
+    pub last_error: Option<String>,
 }
 
 /** 模型请求和本地工具调用审计摘要，用于解释每轮 Agent 使用了哪些范围。 */
@@ -754,12 +806,26 @@ pub struct SaveUserSettingsPayload {
     pub settings: UserSettings,
 }
 
+/** 保存即时通讯设置的命令入参；敏感凭证必须走单独命令进入 keyring。 */
+#[derive(Clone, Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SaveImSettingsPayload {
+    pub settings: ImIntegrationSettings,
+}
+
 /** 保存 BYOK 模型密钥的命令入参；密钥只进入系统安全存储，按 providerId 隔离。 */
 #[derive(Clone, Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SaveModelApiKeyPayload {
     pub provider_id: String,
     pub api_key: String,
+}
+
+/** 保存飞书 appSecret 的命令入参；明文只进入系统安全存储。 */
+#[derive(Clone, Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SaveFeishuSecretPayload {
+    pub app_secret: String,
 }
 
 /** 保存用户自建 skill 的命令入参；内置 skill 不能通过该入口修改。 */
