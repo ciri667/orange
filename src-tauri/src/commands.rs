@@ -1,15 +1,17 @@
 use crate::domain::{
     AgentSession, AgentSkill, AgentTurnPayload, AgentTurnResult, AppEventLog, ChangePayload,
     CreateDocumentPayload, CreateFolderPayload, CreateNotePayload, DeleteAgentSkillPayload,
-    DeleteDocumentPayload, DeleteNotePayload, DeleteSessionPayload, DocumentPreview, FolderEntry,
+    DeleteDocumentPayload, DeleteNotePayload, DeleteSessionPayload, DocumentPreview,
+    FeishuCredentialStatus, FeishuGatewayStatus, FolderEntry, ImIntegrationSettings,
     InstallAgentSkillPayload, InstallAgentSkillResult, KnowledgeBaseSelection,
     LoadAppEventLogsPayload, LoadDocumentPreviewPayload, LoadSessionsPayload, ModelApiKeyStatus,
     ProposedChange, RemoveKnowledgeBasePayload, RenameDocumentPayload, RenameNotePayload,
     RequestAuditLog, RescanKnowledgeBasePayload, RestoreSessionContextPayload,
-    SaveAgentSkillPayload, SaveDocumentContentPayload, SaveModelApiKeyPayload,
-    SaveNoteContentPayload, SaveNoteImageAttachmentsPayload, SaveSessionPayload,
-    SaveUserSettingsPayload, ScanKnowledgeBasePayload, ScanReport, ToggleAgentSkillPayload,
-    UpdateSessionScopePayload, UserSettings, WorkspaceSnapshot,
+    SaveAgentSkillPayload, SaveDocumentContentPayload, SaveFeishuSecretPayload,
+    SaveImSettingsPayload, SaveModelApiKeyPayload, SaveNoteContentPayload,
+    SaveNoteImageAttachmentsPayload, SaveSessionPayload, SaveUserSettingsPayload,
+    ScanKnowledgeBasePayload, ScanReport, ToggleAgentSkillPayload, UpdateSessionScopePayload,
+    UserSettings, WorkspaceSnapshot,
 };
 use crate::logging::{self, AppEventBuilder, AppLogCategory, AppLogLevel};
 use crate::model_provider::{self, ProviderTemplate};
@@ -230,6 +232,134 @@ pub async fn save_user_settings(
     }
 
     result
+}
+
+/** 读取即时通讯集成设置；敏感凭证只返回 keyring 状态不返回明文。 */
+#[tauri::command]
+pub async fn load_im_settings(app: AppHandle) -> Result<ImIntegrationSettings, String> {
+    run_blocking("读取即时通讯设置", move || {
+        storage::load_im_settings(&app)
+    })
+    .await
+}
+
+/** 保存即时通讯集成设置；飞书 appSecret 必须走独立 keyring 命令。 */
+#[tauri::command]
+pub async fn save_im_settings(
+    app: AppHandle,
+    payload: SaveImSettingsPayload,
+) -> Result<ImIntegrationSettings, String> {
+    let settings_app = app.clone();
+    let started_at = Instant::now();
+    let result = run_blocking("保存即时通讯设置", move || {
+        storage::save_im_settings(&settings_app, &payload.settings)
+    })
+    .await;
+
+    match &result {
+        Ok(settings) => logging::write_app_event_best_effort(
+            &app,
+            AppEventBuilder::new(
+                AppLogLevel::Info,
+                AppLogCategory::Im,
+                "save_im_settings",
+                "completed",
+                "已保存即时通讯设置。",
+            )
+            .duration(started_at.elapsed())
+            .metadata(json!({
+                "feishuEnabled": settings.feishu.enabled,
+                "domain": settings.feishu.domain,
+                "knowledgeBaseCount": settings.feishu.default_knowledge_base_ids.len(),
+                "allowedUserCount": settings.feishu.allowed_user_open_ids.len(),
+                "allowedChatCount": settings.feishu.allowed_chat_ids.len(),
+                "requireMention": settings.feishu.require_mention,
+            })),
+        ),
+        Err(error) => logging::write_app_event_best_effort(
+            &app,
+            AppEventBuilder::new(
+                AppLogLevel::Error,
+                AppLogCategory::Im,
+                "save_im_settings",
+                "failed",
+                error,
+            )
+            .duration(started_at.elapsed()),
+        ),
+    }
+
+    result
+}
+
+/** 保存飞书 appSecret 到系统安全存储；命令日志不包含 secret 明文。 */
+#[tauri::command]
+pub async fn save_feishu_app_secret(
+    app: AppHandle,
+    payload: SaveFeishuSecretPayload,
+) -> Result<FeishuCredentialStatus, String> {
+    let started_at = Instant::now();
+    let result = run_blocking("保存飞书 appSecret", move || {
+        storage::save_feishu_app_secret(&payload.app_secret)
+    })
+    .await;
+
+    match &result {
+        Ok(_) => logging::write_app_event_best_effort(
+            &app,
+            AppEventBuilder::new(
+                AppLogLevel::Info,
+                AppLogCategory::Im,
+                "save_feishu_app_secret",
+                "completed",
+                "飞书 appSecret 已保存。",
+            )
+            .duration(started_at.elapsed()),
+        ),
+        Err(error) => logging::write_app_event_best_effort(
+            &app,
+            AppEventBuilder::new(
+                AppLogLevel::Error,
+                AppLogCategory::Im,
+                "save_feishu_app_secret",
+                "failed",
+                error,
+            )
+            .duration(started_at.elapsed()),
+        ),
+    }
+
+    result
+}
+
+/** 读取飞书 appSecret 是否已配置；不返回明文 secret。 */
+#[tauri::command]
+pub async fn load_feishu_credential_status() -> Result<FeishuCredentialStatus, String> {
+    run_blocking("读取飞书凭证状态", storage::load_feishu_credential_status).await
+}
+
+/** 启动飞书长连接网关，消息处理进入后台任务。 */
+#[tauri::command]
+pub async fn start_feishu_gateway(app: AppHandle) -> Result<FeishuGatewayStatus, String> {
+    crate::im::feishu::start_gateway(app).await
+}
+
+/** 停止飞书长连接网关，不清空任何配置或凭证。 */
+#[tauri::command]
+pub async fn stop_feishu_gateway(app: AppHandle) -> Result<FeishuGatewayStatus, String> {
+    run_blocking("停止飞书长连接网关", move || {
+        crate::im::feishu::stop_gateway(&app)
+    })
+    .await
+}
+
+/** 读取飞书长连接网关运行态。 */
+#[tauri::command]
+pub async fn load_feishu_gateway_status(app: AppHandle) -> Result<FeishuGatewayStatus, String> {
+    run_blocking("读取飞书网关状态", move || {
+        crate::im::feishu::load_gateway_status(&app)
+    })
+    .await
 }
 
 /** 读取内置和用户自建 skills，内置定义会合并用户保存的启停偏好。 */
@@ -1996,6 +2126,162 @@ pub async fn run_agent_turn(
     );
 
     Ok(runtime_result.turn_result)
+}
+
+/** IM 后台入口复用 Agent runtime：创建或复用映射会话，持久化消息、审计和索引。 */
+pub(crate) async fn run_agent_turn_from_im(
+    app: AppHandle,
+    prompt: String,
+    channel_key: String,
+    knowledge_base_ids: Vec<String>,
+    session_title: String,
+) -> Result<WorkspaceSnapshot, String> {
+    let started_at = Instant::now();
+    let operation_id = storage::create_id("op");
+    let snapshot_app = app.clone();
+    let mut snapshot = run_blocking("加载 IM 工作台状态", move || {
+        storage::load_workspace_snapshot(&snapshot_app)
+    })
+    .await?;
+    let valid_scope_ids = snapshot
+        .knowledge_bases
+        .iter()
+        .filter(|knowledge_base| knowledge_base_ids.iter().any(|id| id == &knowledge_base.id))
+        .map(|knowledge_base| knowledge_base.id.clone())
+        .collect::<Vec<_>>();
+
+    if valid_scope_ids.is_empty() {
+        return Err("飞书默认知识库范围为空或已失效。".to_owned());
+    }
+
+    let session_id = resolve_or_create_im_session(
+        &app,
+        &mut snapshot,
+        &channel_key,
+        &session_title,
+        valid_scope_ids.clone(),
+    )?;
+    let active_knowledge_base_id = valid_scope_ids.first().cloned().unwrap_or_default();
+    let user_message = crate::im::feishu::build_im_user_message(&prompt);
+    let user_message_id = user_message.id.clone();
+
+    if let Some(session) = snapshot
+        .sessions
+        .iter_mut()
+        .find(|session| session.id == session_id)
+    {
+        session.messages.push(user_message);
+        session.updated_at = storage::format_local_datetime();
+    }
+
+    snapshot.active_session_id = session_id.clone();
+    snapshot.active_knowledge_base_id = active_knowledge_base_id.clone();
+    snapshot.active_note_id.clear();
+    snapshot.active_document_id.clear();
+
+    storage::save_sessions(&app, &snapshot)?;
+
+    logging::write_app_event_best_effort(
+        &app,
+        AppEventBuilder::new(
+            AppLogLevel::Info,
+            AppLogCategory::Im,
+            "feishu_agent_turn",
+            "started",
+            "飞书消息开始进入 Agent runtime。",
+        )
+        .operation_id(operation_id.clone())
+        .session_id(session_id.clone())
+        .knowledge_base_id(active_knowledge_base_id.clone())
+        .metadata(json!({
+            "scopeCount": valid_scope_ids.len(),
+            "promptChars": prompt.chars().count(),
+            "channelHash": storage::hash_content(&channel_key).chars().take(16).collect::<String>(),
+        })),
+    );
+
+    let settings_app = app.clone();
+    let settings = run_blocking("读取模型设置", move || {
+        storage::load_user_settings(&settings_app)
+    })
+    .await?;
+    let skills_app = app.clone();
+    let available_skills = run_blocking("读取 Agent Skills", move || {
+        let connection = storage::open_database(&skills_app)?;
+
+        skills::load_agent_skills(&skills_app, &connection)
+    })
+    .await?;
+    let request = crate::im::feishu::build_im_turn_request(
+        prompt,
+        session_id.clone(),
+        active_knowledge_base_id.clone(),
+        user_message_id,
+    );
+    let runtime_result =
+        runtime::run_agent_turn(&app, snapshot, request, settings, available_skills).await;
+    let audit_app = app.clone();
+    let audit_log = runtime_result.audit_log.clone();
+
+    run_blocking("写入 IM 请求审计日志", move || {
+        storage::append_request_audit_log(&audit_app, &audit_log)
+    })
+    .await?;
+    index_snapshot_in_background(app.clone(), &runtime_result.turn_result.snapshot).await?;
+
+    logging::write_app_event_best_effort(
+        &app,
+        AppEventBuilder::new(
+            AppLogLevel::Info,
+            AppLogCategory::Im,
+            "feishu_agent_turn",
+            "completed",
+            "飞书消息已完成 Agent runtime 处理。",
+        )
+        .operation_id(operation_id)
+        .session_id(session_id)
+        .knowledge_base_id(active_knowledge_base_id)
+        .duration(started_at.elapsed())
+        .metadata(json!({
+            "auditKind": runtime_result.audit_log.kind,
+            "toolSummary": runtime_result.audit_log.tool_summary,
+        })),
+    );
+
+    Ok(runtime_result.turn_result.snapshot)
+}
+
+/** 为 IM channel 找到已有会话；不存在或失效时创建一个新的 AgentSession 并保存映射。 */
+fn resolve_or_create_im_session(
+    app: &AppHandle,
+    snapshot: &mut WorkspaceSnapshot,
+    channel_key: &str,
+    session_title: &str,
+    knowledge_base_ids: Vec<String>,
+) -> Result<String, String> {
+    let mapped_session_id = storage::load_im_session_mapping(app, channel_key)?;
+
+    if let Some(session_id) = mapped_session_id {
+        if let Some(session) = snapshot
+            .sessions
+            .iter_mut()
+            .find(|session| session.id == session_id)
+        {
+            session.knowledge_base_ids = knowledge_base_ids;
+            session.updated_at = storage::format_local_datetime();
+
+            return Ok(session.id.clone());
+        }
+    }
+
+    let session =
+        crate::im::feishu::build_im_agent_session(session_title.to_owned(), knowledge_base_ids);
+    let session_id = session.id.clone();
+
+    snapshot.sessions.insert(0, session);
+    storage::save_im_session_mapping(app, channel_key, &session_id)?;
+
+    Ok(session_id)
 }
 
 /** 确认待写入 diff，校验知识库边界和内容 hash 后原子写回 Markdown。 */

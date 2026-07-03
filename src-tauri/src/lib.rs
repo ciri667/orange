@@ -3,6 +3,7 @@ mod agent_tools;
 mod commands;
 mod domain;
 mod export;
+mod im;
 mod logging;
 mod model_provider;
 mod runtime;
@@ -63,6 +64,37 @@ pub fn run() {
                 ),
             }
 
+            let im_handle = handle.clone();
+            tauri::async_runtime::spawn(async move {
+                match storage::load_im_settings(&im_handle) {
+                    Ok(settings) if settings.feishu.enabled => {
+                        if let Err(error) = im::feishu::start_gateway(im_handle.clone()).await {
+                            logging::write_app_event_best_effort(
+                                &im_handle,
+                                logging::AppEventBuilder::new(
+                                    logging::AppLogLevel::Warn,
+                                    logging::AppLogCategory::Im,
+                                    "feishu_gateway_autostart",
+                                    "failed",
+                                    error,
+                                ),
+                            );
+                        }
+                    }
+                    Ok(_) => {}
+                    Err(error) => logging::write_app_event_best_effort(
+                        &im_handle,
+                        logging::AppEventBuilder::new(
+                            logging::AppLogLevel::Warn,
+                            logging::AppLogCategory::Im,
+                            "feishu_gateway_autostart",
+                            "failed",
+                            error,
+                        ),
+                    ),
+                }
+            });
+
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -75,6 +107,13 @@ pub fn run() {
             commands::restore_session_context,
             commands::load_user_settings,
             commands::save_user_settings,
+            commands::load_im_settings,
+            commands::save_im_settings,
+            commands::save_feishu_app_secret,
+            commands::load_feishu_credential_status,
+            commands::start_feishu_gateway,
+            commands::stop_feishu_gateway,
+            commands::load_feishu_gateway_status,
             commands::load_agent_skills,
             commands::open_user_skills_folder,
             commands::save_agent_skill,
