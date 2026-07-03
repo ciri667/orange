@@ -593,6 +593,12 @@ textarea:disabled {
   bottom: 30px;
 }
 
+/* 根目录行紧贴 .local-tree 顶部，向上展开会溢出滚动容器被裁切，因此改为向下展开。 */
+.file-tree-row.root-folder .create-action-menu {
+  top: calc(100% + 6px);
+  bottom: auto;
+}
+
 .export-action-menu {
   top: calc(100% + 6px);
   min-width: 148px;
