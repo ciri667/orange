@@ -27,6 +27,7 @@ import {
 } from "../shared/selectors";
 import { MarkdownLink } from "../shared/MarkdownLink";
 import { logDebug } from "../shared/logger";
+import { useDismissable } from "../shared/useDismissable";
 import type { AgentSession, AgentSkill, KnowledgeBase, ModelConfig, Note } from "../shared/types";
 
 /** 会话/本轮模型选择器统一使用的“跟随默认”占位值，不写入具体 providerId。 */
@@ -182,8 +183,15 @@ export function AgentPanel({
     onSubmitPrompt();
   };
 
+  // AgentPanel 三个 popover 共用同一个外层 aside 作为 ref 容器：
+  // 点击 Agent 面板以外的区域才关闭浮层；面板内切入别的功能按钮时由各按钮的 toggle 自行处理。
+  const panelRef = useRef<HTMLElement | null>(null);
+  useDismissable(isSessionListOpen, onToggleSessionList, { externalRef: panelRef });
+  useDismissable(isSessionContextOpen, onToggleSessionContext, { externalRef: panelRef });
+  useDismissable(isScopeSelectorOpen, onToggleScopeSelector, { externalRef: panelRef });
+
   return (
-    <aside className="agent-panel" aria-label="AI 侧栏">
+    <aside ref={panelRef} className="agent-panel" aria-label="AI 侧栏">
       <header className="agent-header">
         <div>
           <p className="section-label">Agent</p>
