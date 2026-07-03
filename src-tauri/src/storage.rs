@@ -2084,6 +2084,7 @@ enum SupportedDocumentKind {
     Txt,
     Docx,
     Pdf,
+    Image,
 }
 
 impl SupportedDocumentKind {
@@ -2094,6 +2095,7 @@ impl SupportedDocumentKind {
             SupportedDocumentKind::Txt => "txt",
             SupportedDocumentKind::Docx => "docx",
             SupportedDocumentKind::Pdf => "pdf",
+            SupportedDocumentKind::Image => "image",
         }
     }
 
@@ -2104,6 +2106,7 @@ impl SupportedDocumentKind {
             SupportedDocumentKind::Txt => Some("txt"),
             SupportedDocumentKind::Docx => Some("docx"),
             SupportedDocumentKind::Pdf => Some("pdf"),
+            SupportedDocumentKind::Image => Some("image"),
         }
     }
 
@@ -2114,6 +2117,7 @@ impl SupportedDocumentKind {
             SupportedDocumentKind::Txt => "TXT",
             SupportedDocumentKind::Docx => "DOCX",
             SupportedDocumentKind::Pdf => "PDF",
+            SupportedDocumentKind::Image => "图片",
         }
     }
 }
@@ -2130,11 +2134,14 @@ fn supported_document_kind(path: &Path) -> Option<SupportedDocumentKind> {
         Some("txt") => Some(SupportedDocumentKind::Txt),
         Some("docx") => Some(SupportedDocumentKind::Docx),
         Some("pdf") => Some(SupportedDocumentKind::Pdf),
+        Some("png") | Some("jpg") | Some("jpeg") | Some("webp") | Some("gif") | Some("svg") => {
+            Some(SupportedDocumentKind::Image)
+        }
         _ => None,
     }
 }
 
-/** 从文件名提取普通文档标题，避免 docx/pdf 预览前还要读取二进制正文。 */
+/** 从文件名提取普通文档标题，避免 docx/pdf/图片预览前还要读取二进制正文。 */
 fn document_title_from_path(path: &Path) -> String {
     path.file_stem()
         .and_then(|value| value.to_str())
@@ -2296,7 +2303,9 @@ pub fn scan_supported_documents_directory(
                     preview_available: false,
                 });
             }
-            SupportedDocumentKind::Docx | SupportedDocumentKind::Pdf => {
+            SupportedDocumentKind::Docx
+            | SupportedDocumentKind::Pdf
+            | SupportedDocumentKind::Image => {
                 let bytes = match fs::read(path) {
                     Ok(bytes) => bytes,
                     Err(error) => {
@@ -2397,6 +2406,11 @@ fn is_pdf_document_file(path: &Path) -> bool {
 /** 判断路径是否为只读预览 docx 文档。 */
 fn is_docx_document_file(path: &Path) -> bool {
     supported_document_kind(path) == Some(SupportedDocumentKind::Docx)
+}
+
+/** 判断路径是否为只读预览图片文档。 */
+fn is_image_document_file(path: &Path) -> bool {
+    supported_document_kind(path) == Some(SupportedDocumentKind::Image)
 }
 
 /** 校验用户输入的新文件名，只允许当前目录下的 Markdown 文件名。 */
@@ -3094,7 +3108,7 @@ pub fn atomic_write_text_document(path: &Path, content: &str) -> Result<(), Stri
     Ok(())
 }
 
-/** 加载 docx/pdf 的只读预览数据，txt 不走该接口。 */
+/** 加载 docx/pdf/图片的只读预览数据，txt 不走该接口。 */
 pub fn load_document_preview(
     root: &Path,
     document: &WorkspaceDocument,
@@ -3140,6 +3154,25 @@ pub fn load_document_preview(
                 content_hash: hash_bytes(&bytes),
                 asset_path: None,
                 blocks: Some(blocks),
+            })
+        }
+        "image" => {
+            if !is_image_document_file(&target_path) {
+                return Err("只能预览图片文件。".to_owned());
+            }
+
+            let bytes = fs::read(&target_path)
+                .map_err(|error| format!("无法读取图片文件 {}：{error}", target_path.display()))?;
+
+            Ok(DocumentPreview {
+                document_id: document.id.clone(),
+                file_type: "image".to_owned(),
+                title: document.title.clone(),
+                path: document.path.clone(),
+                updated_at: "刚刚".to_owned(),
+                content_hash: hash_bytes(&bytes),
+                asset_path: Some(target_path.to_string_lossy().to_string()),
+                blocks: None,
             })
         }
         _ => Err("该文档类型不支持只读预览。".to_owned()),
@@ -4064,7 +4097,7 @@ mod tests {
         assert!(report.errors[0].contains("broken.md"));
     }
 
-    /** 支持文档扫描应区分 Markdown、TXT、DOCX、PDF，并忽略不支持的文件类型。 */
+    /** 支持文档扫描应区分 Markdown、TXT、DOCX、PDF、图片，并忽略不支持的文件类型。 */
     #[test]
     fn scan_supported_documents_reports_documents_by_type() {
         let dir = tempdir().unwrap();
@@ -4072,9 +4105,11 @@ mod tests {
         let txt_path = dir.path().join("notes").join("draft.txt");
         let docx_path = dir.path().join("docs").join("brief.docx");
         let pdf_path = dir.path().join("docs").join("spec.pdf");
+        let image_path = dir.path().join("assets").join("diagram.png");
 
         fs::create_dir_all(note_path.parent().unwrap()).unwrap();
         fs::create_dir_all(docx_path.parent().unwrap()).unwrap();
+        fs::create_dir_all(image_path.parent().unwrap()).unwrap();
         fs::write(&note_path, "# 可读笔记\n\n正文").unwrap();
         fs::write(&txt_path, "纯文本正文").unwrap();
         write_minimal_docx(
@@ -4082,7 +4117,8 @@ mod tests {
             r#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:p><w:r><w:t>DOCX 正文</w:t></w:r></w:p></w:body></w:document>"#,
         );
         fs::write(&pdf_path, b"%PDF-1.4\n").unwrap();
-        fs::write(dir.path().join("ignored.png"), b"png").unwrap();
+        fs::write(&image_path, test_png_bytes(b"scan")).unwrap();
+        fs::write(dir.path().join("ignored.bin"), b"binary").unwrap();
 
         let selection = KnowledgeBaseSelection {
             id: "kb-docs".to_owned(),
@@ -4095,14 +4131,15 @@ mod tests {
         let report = knowledge_base.scan_report.unwrap();
 
         assert_eq!(notes.len(), 1);
-        assert_eq!(documents.len(), 3);
+        assert_eq!(documents.len(), 4);
         assert_eq!(knowledge_base.note_count, 1);
-        assert_eq!(knowledge_base.document_count, 3);
-        assert_eq!(report.scanned_file_count, 4);
+        assert_eq!(knowledge_base.document_count, 4);
+        assert_eq!(report.scanned_file_count, 5);
         assert_eq!(report.scanned_by_type.get("markdown"), Some(&1));
         assert_eq!(report.scanned_by_type.get("txt"), Some(&1));
         assert_eq!(report.scanned_by_type.get("docx"), Some(&1));
         assert_eq!(report.scanned_by_type.get("pdf"), Some(&1));
+        assert_eq!(report.scanned_by_type.get("image"), Some(&1));
         assert_eq!(
             notes[0].updated_at,
             file_modified_local_datetime(&note_path).unwrap()
@@ -4117,6 +4154,11 @@ mod tests {
         assert!(documents.iter().any(|document| document.file_type == "pdf"
             && document.updated_at == file_modified_local_datetime(&pdf_path).unwrap()
             && document.preview_available));
+        assert!(documents
+            .iter()
+            .any(|document| document.file_type == "image"
+                && document.updated_at == file_modified_local_datetime(&image_path).unwrap()
+                && document.preview_available));
     }
 
     /** 扫描应返回没有 Markdown 文件的空目录，让前端目录树能显示真实空文件夹。 */
@@ -4185,5 +4227,29 @@ mod tests {
             &test_workspace_document("pdf", "../outside.pdf")
         )
         .is_err());
+    }
+
+    /** 图片预览返回知识库内文件的 asset 路径，并按二进制内容计算 hash。 */
+    #[test]
+    fn image_preview_returns_asset_path() {
+        let dir = tempdir().unwrap();
+        let image_path = dir.path().join("diagram.webp");
+        let image_bytes = [b"RIFF".as_slice(), &[0, 0, 0, 0], b"WEBP"].concat();
+
+        fs::write(&image_path, &image_bytes).unwrap();
+
+        let preview = load_document_preview(
+            dir.path(),
+            &test_workspace_document("image", "diagram.webp"),
+        )
+        .unwrap();
+        let canonical_image_path = fs::canonicalize(&image_path).unwrap();
+
+        assert_eq!(preview.file_type, "image");
+        assert_eq!(
+            preview.asset_path,
+            Some(canonical_image_path.to_string_lossy().to_string())
+        );
+        assert_eq!(preview.content_hash, hash_bytes(&image_bytes));
     }
 }
