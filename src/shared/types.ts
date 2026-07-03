@@ -323,6 +323,45 @@ export interface UserSettings {
   writeConfirmationRequired: boolean;
 }
 
+/** 即时通讯集成总设置，首版只包含飞书/Lark 自建应用。 */
+export interface ImIntegrationSettings {
+  feishu: FeishuIntegrationSettings;
+}
+
+/** 飞书/Lark 自建应用配置；appSecret 单独保存在系统安全存储。 */
+export interface FeishuIntegrationSettings {
+  enabled: boolean;
+  domain: "feishu" | "lark";
+  appId: string;
+  secretKeyReference: string;
+  defaultKnowledgeBaseIds: string[];
+  allowedUserOpenIds: string[];
+  allowedChatIds: string[];
+  discoveredUserOpenIds: string[];
+  discoveredChatIds: string[];
+  requireMention: boolean;
+  updatedAt: string;
+}
+
+/** 飞书 appSecret 保存状态；不包含明文 secret。 */
+export interface FeishuCredentialStatus {
+  keyReference: string;
+  configured: boolean;
+  message: string;
+}
+
+/** 飞书长连接网关运行态，设置页用它展示手动启停结果。 */
+export interface FeishuGatewayStatus {
+  running: boolean;
+  connected: boolean;
+  domain: "feishu" | "lark";
+  appIdConfigured: boolean;
+  secretConfigured: boolean;
+  lastStartedAt?: string;
+  lastStoppedAt?: string;
+  lastError?: string;
+}
+
 /** 模型密钥状态只说明是否可读取，不包含明文密钥；按 providerId 隔离。 */
 export interface ModelApiKeyStatus {
   providerId: string;
@@ -353,6 +392,7 @@ export type AppEventLogCategory =
   | "editor"
   | "agent"
   | "model"
+  | "im"
   | "skill"
   | "settings"
   | "security"

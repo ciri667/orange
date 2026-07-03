@@ -22,7 +22,10 @@ import type {
   ExportFileResult,
   ExportFormat,
   ExportTargetKind,
+  FeishuCredentialStatus,
+  FeishuGatewayStatus,
   FolderEntry,
+  ImIntegrationSettings,
   InstallAgentSkillPayload,
   InstallAgentSkillResult,
   KnowledgeBase,
@@ -67,6 +70,23 @@ const defaultBrowserUserSettings: UserSettings = {
   },
   privacyPolicy: "allow-selected-scope",
   writeConfirmationRequired: true,
+};
+
+/** 浏览器开发态默认 IM 设置；桌面端真实设置由 SQLite 和系统 keyring 保存。 */
+const defaultBrowserImSettings: ImIntegrationSettings = {
+  feishu: {
+    enabled: false,
+    domain: "feishu",
+    appId: "",
+    secretKeyReference: "cici-note-feishu-app-secret",
+    defaultKnowledgeBaseIds: [],
+    allowedUserOpenIds: [],
+    allowedChatIds: [],
+    discoveredUserOpenIds: [],
+    discoveredChatIds: [],
+    requireMention: true,
+    updatedAt: "刚刚",
+  },
 };
 
 /** 浏览器开发态镜像后端内置模板，只用于模拟设置页“新增 Provider”入口。 */
@@ -115,6 +135,19 @@ const browserProviderTemplates: ProviderTemplate[] = [
 
 /** 浏览器 fallback 的临时用户设置，仅用于 Vite 开发态模拟设置页交互。 */
 let browserUserSettings: UserSettings = defaultBrowserUserSettings;
+
+/** 浏览器 fallback 的临时 IM 设置，仅用于 Vite 开发态模拟设置页交互。 */
+let browserImSettings: ImIntegrationSettings = defaultBrowserImSettings;
+
+/** 浏览器 fallback 的飞书网关状态；浏览器态无法连接真实长连接。 */
+let browserFeishuGatewayStatus: FeishuGatewayStatus = {
+  running: false,
+  connected: false,
+  domain: "feishu",
+  appIdConfigured: false,
+  secretConfigured: false,
+  lastError: "浏览器开发态未连接桌面长连接网关。",
+};
 
 /** 浏览器 fallback 的临时审计日志，模拟桌面端模型和工具边界展示。 */
 let browserAuditLogs: RequestAuditLog[] = [];
@@ -426,6 +459,94 @@ export async function saveUserSettings(settings: UserSettings): Promise<UserSett
   }
 
   return invokeLogged<UserSettings>("save_user_settings", { payload: { settings } });
+}
+
+/** 读取即时通讯设置；浏览器开发态返回内存 mock。 */
+export async function loadImSettings(): Promise<ImIntegrationSettings> {
+  if (!isTauriRuntime()) {
+    return cloneImSettings(browserImSettings);
+  }
+
+  return invokeLogged<ImIntegrationSettings>("load_im_settings");
+}
+
+/** 保存即时通讯设置；敏感凭证由独立 keyring 命令处理。 */
+export async function saveImSettings(settings: ImIntegrationSettings): Promise<ImIntegrationSettings> {
+  if (!isTauriRuntime()) {
+    browserImSettings = cloneImSettings(settings);
+    browserFeishuGatewayStatus = {
+      ...browserFeishuGatewayStatus,
+      domain: settings.feishu.domain,
+      appIdConfigured: Boolean(settings.feishu.appId.trim()),
+    };
+
+    return loadImSettings();
+  }
+
+  return invokeLogged<ImIntegrationSettings>("save_im_settings", { payload: { settings } });
+}
+
+/** 保存飞书 appSecret；桌面端写入系统安全存储，浏览器态只返回不可用说明。 */
+export async function saveFeishuAppSecret(appSecret: string): Promise<FeishuCredentialStatus> {
+  if (!isTauriRuntime()) {
+    throw new Error("浏览器开发态不能保存飞书 appSecret，请在 Tauri 桌面端配置。");
+  }
+
+  return invokeLogged<FeishuCredentialStatus>("save_feishu_app_secret", { payload: { appSecret } });
+}
+
+/** 读取飞书 appSecret 是否已配置；不会返回明文 secret。 */
+export async function loadFeishuCredentialStatus(): Promise<FeishuCredentialStatus> {
+  if (!isTauriRuntime()) {
+    return {
+      keyReference: browserImSettings.feishu.secretKeyReference,
+      configured: false,
+      message: "浏览器开发态未连接系统安全存储。",
+    };
+  }
+
+  return invokeLogged<FeishuCredentialStatus>("load_feishu_credential_status");
+}
+
+/** 启动飞书长连接网关；浏览器态只返回不可用状态。 */
+export async function startFeishuGateway(): Promise<FeishuGatewayStatus> {
+  if (!isTauriRuntime()) {
+    browserFeishuGatewayStatus = {
+      ...browserFeishuGatewayStatus,
+      running: false,
+      connected: false,
+      lastError: "浏览器开发态不能启动飞书长连接网关。",
+    };
+
+    return browserFeishuGatewayStatus;
+  }
+
+  return invokeLogged<FeishuGatewayStatus>("start_feishu_gateway");
+}
+
+/** 停止飞书长连接网关；不会清空设置和凭证。 */
+export async function stopFeishuGateway(): Promise<FeishuGatewayStatus> {
+  if (!isTauriRuntime()) {
+    browserFeishuGatewayStatus = {
+      ...browserFeishuGatewayStatus,
+      running: false,
+      connected: false,
+      lastStoppedAt: formatLocalDateTime(),
+    };
+
+    return browserFeishuGatewayStatus;
+  }
+
+  return invokeLogged<FeishuGatewayStatus>("stop_feishu_gateway");
+}
+
+/** 读取飞书长连接网关运行态。 */
+export async function loadFeishuGatewayStatus(): Promise<FeishuGatewayStatus> {
+  if (!isTauriRuntime()) {
+    return { ...browserFeishuGatewayStatus };
+  }
+
+  return invokeLogged<FeishuGatewayStatus>("load_feishu_gateway_status");
 }
 
 /** 读取 Agent skills，桌面端来自 SQLite，浏览器开发态来自内存模拟状态。 */
@@ -1625,6 +1746,20 @@ function cloneUserSettings(settings: UserSettings): UserSettings {
     modelConfig: {
       ...settings.modelConfig,
       providers: settings.modelConfig.providers.map((provider) => ({ ...provider })),
+    },
+  };
+}
+
+/** 深拷贝即时通讯设置，保证浏览器开发态保存和读取行为接近桌面端持久化。 */
+function cloneImSettings(settings: ImIntegrationSettings): ImIntegrationSettings {
+  return {
+    feishu: {
+      ...settings.feishu,
+      defaultKnowledgeBaseIds: [...settings.feishu.defaultKnowledgeBaseIds],
+      allowedUserOpenIds: [...settings.feishu.allowedUserOpenIds],
+      allowedChatIds: [...settings.feishu.allowedChatIds],
+      discoveredUserOpenIds: [...settings.feishu.discoveredUserOpenIds],
+      discoveredChatIds: [...settings.feishu.discoveredChatIds],
     },
   };
 }
