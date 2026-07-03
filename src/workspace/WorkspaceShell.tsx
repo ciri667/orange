@@ -30,6 +30,9 @@ import {
   loadDocumentPreview,
   loadAppEventLogs,
   loadAgentSkills,
+  loadFeishuCredentialStatus,
+  loadFeishuGatewayStatus,
+  loadImSettings,
   installAgentSkill,
   loadLlmProviderTemplates,
   loadModelApiKeyStatuses,
@@ -47,12 +50,16 @@ import {
   runAgentTurn,
   saveAgentSkill,
   saveDocumentContent,
+  saveFeishuAppSecret,
+  saveImSettings,
   saveNoteContent,
   saveNoteImageAttachments,
   saveModelApiKey,
   saveSession,
   saveUserSettings,
   selectKnowledgeBaseDirectory,
+  startFeishuGateway,
+  stopFeishuGateway,
   toggleAgentSkill,
   updateSessionScope,
 } from "../shared/tauriApi";
@@ -66,6 +73,9 @@ import type {
   AppEventLogLevel,
   DocumentPreview,
   ExportFormat,
+  FeishuCredentialStatus,
+  FeishuGatewayStatus,
+  ImIntegrationSettings,
   InstallAgentSkillPayload,
   InstallAgentSkillResult,
   KnowledgeBase,
@@ -330,10 +340,16 @@ function buildReviewFeedbackPrompt(change: ProposedChange, comments: ReviewComme
 export function WorkspaceShell() {
   const [snapshot, setSnapshot] = useState<WorkspaceSnapshot | null>(null);
   const [userSettings, setUserSettings] = useState<UserSettings | null>(null);
+  /** 即时通讯设置由后端持久化；敏感凭证状态单独读取。 */
+  const [imSettings, setImSettings] = useState<ImIntegrationSettings | null>(null);
   /** Agent skills 列表由后端合并内置与用户自建定义，前端只保存展示状态。 */
   const [agentSkills, setAgentSkills] = useState<AgentSkill[]>([]);
   /** 模型密钥状态按 providerId 隔离，只保存是否可读，不包含明文 API key。 */
   const [modelApiKeyStatuses, setModelApiKeyStatuses] = useState<ModelApiKeyStatus[]>([]);
+  /** 飞书 appSecret 状态只说明是否可读取，不包含明文 secret。 */
+  const [feishuCredentialStatus, setFeishuCredentialStatus] = useState<FeishuCredentialStatus | null>(null);
+  /** 飞书长连接网关运行态，用于设置页手动启停和错误展示。 */
+  const [feishuGatewayStatus, setFeishuGatewayStatus] = useState<FeishuGatewayStatus | null>(null);
   /** 内置 LLM Provider 模板，驱动设置页“新增 Provider”入口。 */
   const [providerTemplates, setProviderTemplates] = useState<ProviderTemplate[]>([]);
   /** 本轮显式选择的 Provider；空字符串表示跟随会话/全局默认，切换会话后会被重置。 */
@@ -471,9 +487,19 @@ export function WorkspaceShell() {
 
     try {
       // 工作台快照和用户设置是首屏必需数据，必须同时成功后才能进入主界面。
-      const [nextSnapshot, nextUserSettings, nextAgentSkills, nextModelApiKeyStatuses, nextProviderTemplates] = await Promise.all([
+      const [
+        nextSnapshot,
+        nextUserSettings,
+        nextImSettings,
+        nextAgentSkills,
+        nextModelApiKeyStatuses,
+        nextProviderTemplates,
+        nextFeishuCredentialStatus,
+        nextFeishuGatewayStatus,
+      ] = await Promise.all([
         loadWorkspaceState(),
         loadUserSettings(),
+        loadImSettings(),
         loadAgentSkills(),
         loadModelApiKeyStatuses().catch((error) => {
           logWarn("读取模型密钥状态失败。", { category: "settings", event: "model_api_key_status_load", status: "failed", error });
@@ -485,6 +511,16 @@ export function WorkspaceShell() {
 
           return [] as ProviderTemplate[];
         }),
+        loadFeishuCredentialStatus().catch((error) => {
+          logWarn("读取飞书凭证状态失败。", { category: "im", event: "feishu_credential_status_load", status: "failed", error });
+
+          return null;
+        }),
+        loadFeishuGatewayStatus().catch((error) => {
+          logWarn("读取飞书网关状态失败。", { category: "im", event: "feishu_gateway_status_load", status: "failed", error });
+
+          return null;
+        }),
       ]);
 
       if (!shouldCommit()) {
@@ -493,9 +529,12 @@ export function WorkspaceShell() {
 
       setSnapshot(nextSnapshot);
       setUserSettings(nextUserSettings);
+      setImSettings(nextImSettings);
       setAgentSkills(nextAgentSkills);
       setModelApiKeyStatuses(nextModelApiKeyStatuses);
       setProviderTemplates(nextProviderTemplates);
+      setFeishuCredentialStatus(nextFeishuCredentialStatus);
+      setFeishuGatewayStatus(nextFeishuGatewayStatus);
       setEditingBaseHashes(buildNoteHashMap(nextSnapshot.notes));
       setEditingBaseDocumentHashes(buildDocumentHashMap(nextSnapshot.documents));
       setIsBooting(false);
@@ -505,7 +544,10 @@ export function WorkspaceShell() {
       if (shouldCommit()) {
         setSnapshot(null);
         setUserSettings(null);
+        setImSettings(null);
         setAgentSkills([]);
+        setFeishuCredentialStatus(null);
+        setFeishuGatewayStatus(null);
         setAuditLogs([]);
         setAppEventLogs([]);
         setBootError(formatErrorMessage(error));
@@ -548,7 +590,7 @@ export function WorkspaceShell() {
     );
   }
 
-  if (!snapshot || !userSettings) {
+  if (!snapshot || !userSettings || !imSettings) {
     const errorMessage = bootError || "工作台初始化未完成，请重试。";
 
     return (
@@ -2068,6 +2110,91 @@ export function WorkspaceShell() {
     }
   }
 
+  /** 保存即时通讯设置；敏感凭证由单独入口写入系统安全存储。 */
+  async function handleSaveImSettings(nextSettings: ImIntegrationSettings) {
+    beginBusy("正在保存即时通讯设置...");
+
+    try {
+      setImSettings(await saveImSettings(nextSettings));
+      setFeishuGatewayStatus(await loadFeishuGatewayStatus().catch(() => feishuGatewayStatus));
+      setNotice("已保存即时通讯设置。");
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : String(error));
+      throw error;
+    } finally {
+      endBusy();
+    }
+  }
+
+  /** 保存飞书 appSecret；明文只在本次调用中传给后端 keyring 命令。 */
+  async function handleSaveFeishuSecret(appSecret: string) {
+    beginBusy("正在保存飞书 appSecret...");
+
+    try {
+      const status = await saveFeishuAppSecret(appSecret);
+
+      setFeishuCredentialStatus(status);
+      setFeishuGatewayStatus(await loadFeishuGatewayStatus().catch(() => feishuGatewayStatus));
+      setNotice("已保存飞书 appSecret。");
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : String(error));
+      throw error;
+    } finally {
+      endBusy();
+    }
+  }
+
+  /** 手动启动飞书长连接网关；启动失败时保留现有配置供用户修正。 */
+  async function handleStartFeishuGateway() {
+    beginBusy("正在启动飞书长连接...");
+
+    try {
+      setFeishuGatewayStatus(await startFeishuGateway());
+      setNotice("已启动飞书长连接网关。");
+    } catch (error) {
+      setFeishuGatewayStatus(await loadFeishuGatewayStatus().catch(() => feishuGatewayStatus));
+      setNotice(error instanceof Error ? error.message : String(error));
+      throw error;
+    } finally {
+      endBusy();
+    }
+  }
+
+  /** 手动停止飞书长连接网关；不会清空凭证或白名单。 */
+  async function handleStopFeishuGateway() {
+    beginBusy("正在停止飞书长连接...");
+
+    try {
+      setFeishuGatewayStatus(await stopFeishuGateway());
+      setNotice("已停止飞书长连接网关。");
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : String(error));
+    } finally {
+      endBusy();
+    }
+  }
+
+  /** 刷新飞书网关、凭证和 IM 设置；未授权消息发现的候选对象也通过这里进入设置页。 */
+  async function handleRefreshFeishuStatus() {
+    beginBusy("正在刷新飞书状态...");
+
+    try {
+      const [credentialStatus, gatewayStatus, nextImSettings] = await Promise.all([
+        loadFeishuCredentialStatus().catch(() => feishuCredentialStatus),
+        loadFeishuGatewayStatus().catch(() => feishuGatewayStatus),
+        loadImSettings().catch(() => imSettings),
+      ]);
+
+      setFeishuCredentialStatus(credentialStatus);
+      setFeishuGatewayStatus(gatewayStatus);
+      setImSettings(nextImSettings);
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : String(error));
+    } finally {
+      endBusy();
+    }
+  }
+
   /** 保存用户自建 skill 后刷新列表，保证后端归一化后的 ID、name 和时间进入 UI。 */
   async function handleSaveSkill(skill: AgentSkill) {
     beginBusy("正在保存 Skill...");
@@ -2381,8 +2508,11 @@ export function WorkspaceShell() {
           knowledgeBases={currentSnapshot.knowledgeBases}
           activeKnowledgeBaseId={activeKnowledgeBase.id}
           settings={userSettings}
+          imSettings={imSettings}
           skills={agentSkills}
           modelApiKeyStatuses={modelApiKeyStatuses}
+          feishuCredentialStatus={feishuCredentialStatus}
+          feishuGatewayStatus={feishuGatewayStatus}
           providerTemplates={providerTemplates}
           auditLogs={auditLogs}
           appEventLogs={appEventLogs}
@@ -2392,12 +2522,17 @@ export function WorkspaceShell() {
           onRescanKnowledgeBase={handleRescanKnowledgeBase}
           onRemoveKnowledgeBase={handleRemoveKnowledgeBase}
           onSaveSettings={handleSaveSettings}
+          onSaveImSettings={handleSaveImSettings}
           onSaveSkill={handleSaveSkill}
           onInstallSkill={handleInstallSkill}
           onToggleSkill={handleToggleSkill}
           onDeleteSkill={handleDeleteSkill}
           onOpenUserSkillsFolder={handleOpenUserSkillsFolder}
           onSaveApiKey={handleSaveApiKey}
+          onSaveFeishuSecret={handleSaveFeishuSecret}
+          onStartFeishuGateway={handleStartFeishuGateway}
+          onStopFeishuGateway={handleStopFeishuGateway}
+          onRefreshFeishuStatus={handleRefreshFeishuStatus}
           onRefreshAuditLogs={handleRefreshAuditLogs}
           onRefreshAppEventLogs={handleRefreshAppEventLogs}
           onClearAppEventLogs={handleClearAppEventLogs}

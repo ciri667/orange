@@ -1800,7 +1800,7 @@ button.diff-line:not(:disabled):hover,
   background: #ffffff;
 }
 
-.scope-option input {
+.scope-option input:not([type="checkbox"]) {
   display: none;
 }
 
@@ -2490,6 +2490,61 @@ button.diff-line:not(:disabled):hover,
 
 .settings-grid .settings-full-row {
   grid-column: 1 / -1;
+}
+
+.settings-grid textarea {
+  min-height: 96px;
+  resize: vertical;
+}
+
+.inline-secret-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 8px;
+}
+
+.settings-section-subblock {
+  display: grid;
+  gap: 12px;
+}
+
+.settings-kb-list.compact {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.discovered-peer-list {
+  display: grid;
+  gap: 8px;
+}
+
+.discovered-peer-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 10px;
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  padding: 10px;
+  background: #ffffff;
+}
+
+.discovered-peer-row > span {
+  display: grid;
+  min-width: 0;
+  gap: 3px;
+}
+
+.discovered-peer-row strong {
+  color: var(--text-strong);
+  font-size: 13px;
+}
+
+.discovered-peer-row span span {
+  color: var(--text-muted);
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
+  font-size: 12px;
 }
 
 .settings-empty {

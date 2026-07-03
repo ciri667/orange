@@ -1,8 +1,10 @@
 import {
   BookOpen,
+  Check,
   FolderOpen,
   History,
   KeyRound,
+  MessageCircle,
   Plus,
   RotateCw,
   Save,
@@ -15,7 +17,7 @@ import {
   X,
 } from "lucide-react";
 import type { LucideIcon } from "lucide-react";
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { ConfirmDialog } from "../shared/ConfirmDialog";
 import { createLocalId, formatLocalDateTime } from "../shared/id";
 import { logDebug, logError, logInfo } from "../shared/logger";
@@ -26,6 +28,9 @@ import type {
   AppEventLogLevel,
   InstallAgentSkillPayload,
   InstallAgentSkillResult,
+  FeishuCredentialStatus,
+  FeishuGatewayStatus,
+  ImIntegrationSettings,
   KnowledgeBase,
   LlmProviderConfig,
   ModelApiKeyStatus,
@@ -36,7 +41,7 @@ import type {
 import { SkillsModal } from "./SkillsModal";
 
 /** 设置页左侧导航的可选分区，和右侧主内容一一对应。 */
-type SettingsSectionId = "knowledge" | "model" | "skills" | "eventLogs" | "auditLogs";
+type SettingsSectionId = "knowledge" | "model" | "im" | "skills" | "eventLogs" | "auditLogs";
 
 /** 设置页导航分组，帮助用户区分可配置项和只读诊断项。 */
 type SettingsSectionGroup = "配置" | "诊断";
@@ -60,8 +65,11 @@ export function SettingsDrawer({
   knowledgeBases,
   activeKnowledgeBaseId,
   settings,
+  imSettings,
   skills,
   modelApiKeyStatuses,
+  feishuCredentialStatus,
+  feishuGatewayStatus,
   providerTemplates,
   auditLogs,
   appEventLogs,
@@ -71,12 +79,17 @@ export function SettingsDrawer({
   onRescanKnowledgeBase,
   onRemoveKnowledgeBase,
   onSaveSettings,
+  onSaveImSettings,
   onSaveSkill,
   onInstallSkill,
   onToggleSkill,
   onDeleteSkill,
   onOpenUserSkillsFolder,
   onSaveApiKey,
+  onSaveFeishuSecret,
+  onStartFeishuGateway,
+  onStopFeishuGateway,
+  onRefreshFeishuStatus,
   onRefreshAuditLogs,
   onRefreshAppEventLogs,
   onClearAppEventLogs,
@@ -86,8 +99,11 @@ export function SettingsDrawer({
   knowledgeBases: KnowledgeBase[];
   activeKnowledgeBaseId: string;
   settings: UserSettings;
+  imSettings: ImIntegrationSettings;
   skills: AgentSkill[];
   modelApiKeyStatuses: ModelApiKeyStatus[];
+  feishuCredentialStatus: FeishuCredentialStatus | null;
+  feishuGatewayStatus: FeishuGatewayStatus | null;
   providerTemplates: ProviderTemplate[];
   auditLogs: RequestAuditLog[];
   appEventLogs: AppEventLog[];
@@ -97,12 +113,17 @@ export function SettingsDrawer({
   onRescanKnowledgeBase: (knowledgeBaseId: string) => void;
   onRemoveKnowledgeBase: (knowledgeBaseId: string) => void;
   onSaveSettings: (settings: UserSettings) => Promise<void> | void;
+  onSaveImSettings: (settings: ImIntegrationSettings) => Promise<void> | void;
   onSaveSkill: (skill: AgentSkill) => Promise<AgentSkill | void> | AgentSkill | void;
   onInstallSkill: (payload: InstallAgentSkillPayload) => Promise<InstallAgentSkillResult> | InstallAgentSkillResult;
   onToggleSkill: (skillId: string, enabled: boolean) => Promise<void> | void;
   onDeleteSkill: (skillId: string) => Promise<void> | void;
   onOpenUserSkillsFolder: () => Promise<void> | void;
   onSaveApiKey: (providerId: string, apiKey: string) => Promise<void> | void;
+  onSaveFeishuSecret: (appSecret: string) => Promise<void> | void;
+  onStartFeishuGateway: () => Promise<void> | void;
+  onStopFeishuGateway: () => Promise<void> | void;
+  onRefreshFeishuStatus: () => Promise<void> | void;
   onRefreshAuditLogs: () => Promise<void> | void;
   onRefreshAppEventLogs: (filters?: { level?: AppEventLogLevel | ""; category?: AppEventLogCategory | "" }) => Promise<void> | void;
   onClearAppEventLogs: (filters?: { level?: AppEventLogLevel | ""; category?: AppEventLogCategory | "" }) => Promise<void> | void;
@@ -111,6 +132,10 @@ export function SettingsDrawer({
 }) {
   /** 模型设置表单草稿，用户保存前不影响正在运行的 Agent Runtime。 */
   const [settingsDraft, setSettingsDraft] = useState<UserSettings>(settings);
+  /** 即时通讯设置草稿，保存前不影响正在运行的飞书网关。 */
+  const [imSettingsDraft, setImSettingsDraft] = useState<ImIntegrationSettings>(imSettings);
+  /** 飞书 appSecret 草稿只存在输入框中，保存后立即清空。 */
+  const [feishuSecretDraft, setFeishuSecretDraft] = useState("");
   /** 每个 provider 的 API key 草稿只保留在输入框中，保存后由外层写入系统安全存储。 */
   const [apiKeyDraftByProvider, setApiKeyDraftByProvider] = useState<Record<string, string>>({});
   /** “新增 Provider”入口当前选中的内置模板 ID。 */
@@ -125,6 +150,8 @@ export function SettingsDrawer({
   const [eventLogLevel, setEventLogLevel] = useState<AppEventLogLevel | "">("");
   /** 应用事件日志分类筛选，空字符串表示不过滤。 */
   const [eventLogCategory, setEventLogCategory] = useState<AppEventLogCategory | "">("");
+  /** 默认知识库自动预选只执行一次，避免用户手动取消后又被 effect 选回。 */
+  const hasSeededDefaultImKnowledgeBaseRef = useRef(false);
   /** 已启用 skill 数量，用于设置摘要快速说明能力状态。 */
   const enabledSkillCount = skills.filter((skill) => skill.enabled).length;
   /** 自定义 skill 数量用于确认用户目录扫描是否已生效。 */
@@ -133,6 +160,7 @@ export function SettingsDrawer({
   const settingsSummary = {
     knowledgeBaseCount: knowledgeBases.length,
     providerCount: settingsDraft.modelConfig.providers.length,
+    feishuStatus: feishuGatewayStatus?.running ? "运行中" : imSettingsDraft.feishu.enabled ? "已配置" : "未启用",
     enabledSkillCount,
     errorLogCount: appEventLogs.filter((log) => log.level === "error").length,
   };
@@ -156,6 +184,15 @@ export function SettingsDrawer({
         meta: settingsDraft.modelConfig.enabled ? "已启用" : "未启用",
         icon: Settings2,
         tone: settingsDraft.modelConfig.enabled ? "success" : "neutral",
+      },
+      {
+        id: "im",
+        group: "配置",
+        label: "即时通讯",
+        description: "飞书/Lark 长连接和白名单",
+        meta: settingsSummary.feishuStatus,
+        icon: MessageCircle,
+        tone: feishuGatewayStatus?.running ? "success" : imSettingsDraft.feishu.enabled ? "warning" : "neutral",
       },
       {
         id: "skills",
@@ -189,6 +226,9 @@ export function SettingsDrawer({
       appEventLogs,
       auditLogs.length,
       enabledSkillCount,
+      feishuGatewayStatus?.running,
+      imSettingsDraft.feishu.enabled,
+      settingsSummary.feishuStatus,
       knowledgeBases,
       settingsDraft.modelConfig.enabled,
       skills.length,
@@ -198,6 +238,33 @@ export function SettingsDrawer({
   useEffect(() => {
     setSettingsDraft(settings);
   }, [settings]);
+
+  useEffect(() => {
+    setImSettingsDraft(imSettings);
+  }, [imSettings]);
+
+  useEffect(() => {
+    const fallbackKnowledgeBaseId = activeKnowledgeBaseId || knowledgeBases[0]?.id;
+
+    if (
+      hasSeededDefaultImKnowledgeBaseRef.current ||
+      !fallbackKnowledgeBaseId ||
+      imSettingsDraft.feishu.defaultKnowledgeBaseIds.length > 0
+    ) {
+      return;
+    }
+
+    hasSeededDefaultImKnowledgeBaseRef.current = true;
+
+    // 默认范围只写入设置页草稿；仍由用户保存或启动时显式持久化，避免打开设置页就改配置。
+    setImSettingsDraft((currentSettings) => ({
+      ...currentSettings,
+      feishu: {
+        ...currentSettings.feishu,
+        defaultKnowledgeBaseIds: [fallbackKnowledgeBaseId],
+      },
+    }));
+  }, [activeKnowledgeBaseId, imSettingsDraft.feishu.defaultKnowledgeBaseIds.length, knowledgeBases]);
 
   useEffect(() => {
     if (providerTemplates.length && !providerTemplates.some((template) => template.templateId === selectedTemplateId)) {
@@ -244,6 +311,156 @@ export function SettingsDrawer({
       });
       throw error;
     }
+  }
+
+  /** 生成可持久化的即时通讯设置，统一裁剪空白和去重，避免保存/启动路径出现不一致。 */
+  function buildNormalizedImSettings(): ImIntegrationSettings {
+    const allowedUserOpenIds = uniqueTrimmedList(imSettingsDraft.feishu.allowedUserOpenIds);
+    const allowedChatIds = uniqueTrimmedList(imSettingsDraft.feishu.allowedChatIds);
+
+    return {
+      ...imSettingsDraft,
+      feishu: {
+        ...imSettingsDraft.feishu,
+        appId: imSettingsDraft.feishu.appId.trim(),
+        defaultKnowledgeBaseIds: uniqueTrimmedList(imSettingsDraft.feishu.defaultKnowledgeBaseIds),
+        allowedUserOpenIds,
+        allowedChatIds,
+        discoveredUserOpenIds: uniqueTrimmedList(imSettingsDraft.feishu.discoveredUserOpenIds).filter(
+          (openId) => !allowedUserOpenIds.includes(openId),
+        ),
+        discoveredChatIds: uniqueTrimmedList(imSettingsDraft.feishu.discoveredChatIds).filter(
+          (chatId) => !allowedChatIds.includes(chatId),
+        ),
+        updatedAt: formatLocalDateTime(),
+      },
+    };
+  }
+
+  /** 保存即时通讯设置；日志只记录计数和状态，不记录 open_id/chat_id 原文。 */
+  async function handleSaveImSettings() {
+    const startedAt = performance.now();
+    const nextSettings = buildNormalizedImSettings();
+
+    logInfo("设置页保存即时通讯设置。", {
+      category: "im",
+      event: "im_settings_save",
+      status: "started",
+      metadata: {
+        feishuEnabled: nextSettings.feishu.enabled,
+        domain: nextSettings.feishu.domain,
+        knowledgeBaseCount: nextSettings.feishu.defaultKnowledgeBaseIds.length,
+        allowedUserCount: nextSettings.feishu.allowedUserOpenIds.length,
+        allowedChatCount: nextSettings.feishu.allowedChatIds.length,
+      },
+    });
+
+    try {
+      await onSaveImSettings(nextSettings);
+      setImSettingsDraft(nextSettings);
+      logInfo("设置页即时通讯设置保存完成。", {
+        category: "im",
+        event: "im_settings_save",
+        status: "completed",
+        durationMs: performance.now() - startedAt,
+      });
+    } catch (error) {
+      logError("设置页即时通讯设置保存失败。", {
+        category: "im",
+        event: "im_settings_save",
+        status: "failed",
+        durationMs: performance.now() - startedAt,
+        error,
+      });
+      throw error;
+    }
+  }
+
+  /** 启动飞书网关前先保存当前草稿，确保后端读取到最新知识库范围和白名单。 */
+  async function handleStartFeishuGateway() {
+    const startedAt = performance.now();
+
+    try {
+      await handleSaveImSettings();
+      await onStartFeishuGateway();
+      logInfo("设置页启动飞书网关完成。", {
+        category: "im",
+        event: "feishu_gateway_start_from_settings",
+        status: "completed",
+        durationMs: performance.now() - startedAt,
+      });
+    } catch (error) {
+      logError("设置页启动飞书网关失败。", {
+        category: "im",
+        event: "feishu_gateway_start_from_settings",
+        status: "failed",
+        durationMs: performance.now() - startedAt,
+        error,
+      });
+    }
+  }
+
+  /** 保存飞书 appSecret 后立即清空输入框，避免敏感信息留在 React state。 */
+  async function handleSaveFeishuSecret() {
+    const appSecret = feishuSecretDraft.trim();
+
+    if (!appSecret) {
+      return;
+    }
+
+    try {
+      await onSaveFeishuSecret(appSecret);
+      setFeishuSecretDraft("");
+    } catch {
+      // 外层 notice 和前端日志已经说明失败；保留输入方便用户修正重试。
+    }
+  }
+
+  /** 更新飞书设置草稿中的单个字段。 */
+  function updateFeishuDraft<K extends keyof ImIntegrationSettings["feishu"]>(
+    field: K,
+    value: ImIntegrationSettings["feishu"][K],
+  ) {
+    setImSettingsDraft((currentSettings) => ({
+      ...currentSettings,
+      feishu: {
+        ...currentSettings.feishu,
+        [field]: value,
+      },
+    }));
+  }
+
+  /** 将 textarea 的多行 ID 转成去重数组；不记录原始 ID 内容。 */
+  function parseMultilineIds(value: string) {
+    return uniqueTrimmedList(value.split(/\r?\n|,/));
+  }
+
+  /** 将后端自动发现的飞书用户加入 allowlist，同时从候选列表移除。 */
+  function allowDiscoveredFeishuUser(openId: string) {
+    const allowedUserOpenIds = uniqueTrimmedList([...imSettingsDraft.feishu.allowedUserOpenIds, openId]);
+
+    setImSettingsDraft((currentSettings) => ({
+      ...currentSettings,
+      feishu: {
+        ...currentSettings.feishu,
+        allowedUserOpenIds,
+        discoveredUserOpenIds: currentSettings.feishu.discoveredUserOpenIds.filter((candidate) => candidate !== openId),
+      },
+    }));
+  }
+
+  /** 将后端自动发现的飞书群加入 allowlist，同时从候选列表移除。 */
+  function allowDiscoveredFeishuChat(chatId: string) {
+    const allowedChatIds = uniqueTrimmedList([...imSettingsDraft.feishu.allowedChatIds, chatId]);
+
+    setImSettingsDraft((currentSettings) => ({
+      ...currentSettings,
+      feishu: {
+        ...currentSettings.feishu,
+        allowedChatIds,
+        discoveredChatIds: currentSettings.feishu.discoveredChatIds.filter((candidate) => candidate !== chatId),
+      },
+    }));
   }
 
   /** 保存指定 provider 的 BYOK key 后清空对应输入框，日志只记录是否提交了输入，不记录密钥内容。 */
@@ -786,6 +1003,203 @@ export function SettingsDrawer({
       );
     }
 
+    if (activeSection === "im") {
+      const feishu = imSettingsDraft.feishu;
+      const selectedKnowledgeBaseIds = new Set(feishu.defaultKnowledgeBaseIds);
+
+      return (
+        <section className="settings-section" aria-labelledby="im-settings-title">
+          <div className="settings-section-title settings-content-title">
+            <div>
+              <p className="section-label">Configuration</p>
+              <h3 id="im-settings-title">即时通讯</h3>
+              <p>连接飞书/Lark 自建应用，允许白名单用户通过文本消息调用 Agent。</p>
+            </div>
+            <div className="settings-title-actions">
+              <button className="ghost-button" type="button" onClick={onRefreshFeishuStatus} disabled={isBusy}>
+                <RotateCw size={14} />
+                刷新
+              </button>
+              {feishuGatewayStatus?.running ? (
+                <button className="ghost-button danger-action" type="button" onClick={onStopFeishuGateway} disabled={isBusy}>
+                  停止
+                </button>
+              ) : (
+                <button className="primary-button compact" type="button" onClick={handleStartFeishuGateway} disabled={isBusy}>
+                  启动
+                </button>
+              )}
+              <button className="primary-button compact" type="button" onClick={handleSaveImSettings} disabled={isBusy}>
+                <Save size={14} />
+                保存设置
+              </button>
+            </div>
+          </div>
+
+          <div className="settings-grid">
+            <label className="toggle-row settings-full-row">
+              <input
+                className="control-checkbox-input"
+                checked={feishu.enabled}
+                onChange={(event) => updateFeishuDraft("enabled", event.target.checked)}
+                type="checkbox"
+              />
+              <span className="control-checkbox" aria-hidden="true" />
+              <span>启用飞书/Lark 集成</span>
+            </label>
+            <label>
+              <span>平台</span>
+              <span className="select-control">
+                <select value={feishu.domain} onChange={(event) => updateFeishuDraft("domain", event.target.value as "feishu" | "lark")}>
+                  <option value="feishu">飞书</option>
+                  <option value="lark">Lark</option>
+                </select>
+              </span>
+            </label>
+            <label>
+              <span>App ID</span>
+              <input value={feishu.appId} onChange={(event) => updateFeishuDraft("appId", event.target.value)} placeholder="cli_xxx" />
+            </label>
+            <label className="settings-full-row">
+              <span>App Secret</span>
+              <div className="inline-secret-row">
+                <input
+                  type="password"
+                  value={feishuSecretDraft}
+                  onChange={(event) => setFeishuSecretDraft(event.target.value)}
+                  placeholder={feishuCredentialStatus?.configured ? "已保存，输入新值可替换" : "输入飞书 appSecret"}
+                />
+                <button className="ghost-button" type="button" onClick={handleSaveFeishuSecret} disabled={isBusy || !feishuSecretDraft.trim()}>
+                  <KeyRound size={14} />
+                  保存密钥
+                </button>
+              </div>
+              <em>{feishuCredentialStatus?.message ?? "尚未读取凭证状态。"}</em>
+            </label>
+            <label className="toggle-row settings-full-row">
+              <input
+                className="control-checkbox-input"
+                checked={feishu.requireMention}
+                onChange={(event) => updateFeishuDraft("requireMention", event.target.checked)}
+                type="checkbox"
+              />
+              <span className="control-checkbox" aria-hidden="true" />
+              <span>群聊必须直接 @ 机器人</span>
+            </label>
+          </div>
+
+          <div className="settings-section-subblock">
+            <div className="settings-section-title">
+              <div>
+                <h4>默认知识库范围</h4>
+                <p>飞书消息只能检索这些知识库；写入类请求仍只生成待确认 diff。</p>
+              </div>
+            </div>
+            <div className="settings-kb-list compact">
+              {knowledgeBases.map((knowledgeBase) => {
+                const isSelected = selectedKnowledgeBaseIds.has(knowledgeBase.id);
+
+                return (
+                  <label className={isSelected ? "scope-option selected" : "scope-option"} key={knowledgeBase.id}>
+                    <input
+                      type="checkbox"
+                      checked={isSelected}
+                      onChange={() => {
+                        const nextIds = new Set(feishu.defaultKnowledgeBaseIds);
+
+                        // 多选范围允许用户手动增减；这里只更新草稿，保存/启动时再持久化。
+                        if (nextIds.has(knowledgeBase.id)) {
+                          nextIds.delete(knowledgeBase.id);
+                        } else {
+                          nextIds.add(knowledgeBase.id);
+                        }
+
+                        updateFeishuDraft("defaultKnowledgeBaseIds", Array.from(nextIds));
+                      }}
+                    />
+                    <span className="scope-check" aria-hidden="true">
+                      {isSelected && <Check size={12} />}
+                    </span>
+                    <span className="scope-option-copy">
+                      <strong>{knowledgeBase.name}</strong>
+                      <span>{knowledgeBase.status === "error" ? "目录失效" : `${knowledgeBase.noteCount} 篇笔记`}</span>
+                    </span>
+                  </label>
+                );
+              })}
+            </div>
+          </div>
+
+          <div className="settings-section-subblock">
+            <div className="settings-section-title">
+              <div>
+                <h4>待授权飞书对象</h4>
+                <p>收到未授权消息后会自动出现在这里；点击允许后保存设置即可生效。</p>
+              </div>
+            </div>
+            {feishu.discoveredUserOpenIds.length || feishu.discoveredChatIds.length ? (
+              <div className="discovered-peer-list">
+                {feishu.discoveredUserOpenIds.map((openId, index) => (
+                  <div className="discovered-peer-row" key={openId}>
+                    <span>
+                      <strong>用户候选 {index + 1}</strong>
+                      <span>{formatIdentifierPreview(openId)}</span>
+                    </span>
+                    <button className="ghost-button compact" type="button" onClick={() => allowDiscoveredFeishuUser(openId)}>
+                      允许用户
+                    </button>
+                  </div>
+                ))}
+                {feishu.discoveredChatIds.map((chatId, index) => (
+                  <div className="discovered-peer-row" key={chatId}>
+                    <span>
+                      <strong>群候选 {index + 1}</strong>
+                      <span>{formatIdentifierPreview(chatId)}</span>
+                    </span>
+                    <button className="ghost-button compact" type="button" onClick={() => allowDiscoveredFeishuChat(chatId)}>
+                      允许群聊
+                    </button>
+                  </div>
+                ))}
+              </div>
+            ) : (
+              <p className="settings-empty">暂无待授权对象。让用户或群先给机器人发送一条消息后刷新状态。</p>
+            )}
+          </div>
+
+          <div className="settings-grid">
+            <label className="settings-full-row">
+              <span>允许用户 open_id</span>
+              <textarea
+                value={feishu.allowedUserOpenIds.join("\n")}
+                onChange={(event) => updateFeishuDraft("allowedUserOpenIds", parseMultilineIds(event.target.value))}
+                rows={4}
+                placeholder="ou_xxx，每行一个"
+              />
+            </label>
+            <label className="settings-full-row">
+              <span>允许群 chat_id</span>
+              <textarea
+                value={feishu.allowedChatIds.join("\n")}
+                onChange={(event) => updateFeishuDraft("allowedChatIds", parseMultilineIds(event.target.value))}
+                rows={4}
+                placeholder="oc_xxx，每行一个；私聊可留空"
+              />
+            </label>
+          </div>
+
+          <div className="policy-row">
+            <MessageCircle size={16} />
+            <span>
+              网关：{feishuGatewayStatus?.running ? "运行中" : "未运行"} / 连接：
+              {feishuGatewayStatus?.connected ? "已收到事件" : "未确认"} / 平台：{feishuGatewayStatus?.domain ?? feishu.domain}
+            </span>
+          </div>
+          {feishuGatewayStatus?.lastError ? <p className="settings-empty">{feishuGatewayStatus.lastError}</p> : null}
+        </section>
+      );
+    }
+
     if (activeSection === "eventLogs") {
       return (
         <section className="settings-section" aria-labelledby="event-log-settings-title">
@@ -841,6 +1255,7 @@ export function SettingsDrawer({
                   <option value="knowledge_base">知识库</option>
                   <option value="editor">编辑器</option>
                   <option value="agent">Agent</option>
+                  <option value="im">即时通讯</option>
                   <option value="model">模型</option>
                   <option value="skill">Skill</option>
                   <option value="settings">设置</option>
@@ -1023,6 +1438,7 @@ function formatEventLogCategory(category: AppEventLogCategory) {
     knowledge_base: "知识库",
     editor: "编辑器",
     agent: "Agent",
+    im: "即时通讯",
     model: "模型",
     skill: "Skill",
     settings: "设置",
@@ -1043,6 +1459,22 @@ function formatEventStatus(status: string) {
   };
 
   return labels[status] ?? status;
+}
+
+/** 去重并清理用户在多行输入中的 ID；日志和状态只使用数量。 */
+function uniqueTrimmedList(values: string[]) {
+  return Array.from(new Set(values.map((value) => value.trim()).filter(Boolean)));
+}
+
+/** 设置页只展示飞书 ID 的短预览；完整 ID 保留在本地输入框和持久化配置中。 */
+function formatIdentifierPreview(value: string) {
+  const trimmed = value.trim();
+
+  if (trimmed.length <= 12) {
+    return trimmed || "未命名对象";
+  }
+
+  return `${trimmed.slice(0, 6)}...${trimmed.slice(-4)}`;
 }
 
 /** 汇总事件日志的轻量上下文，避免卡片中散落过多字段。 */
