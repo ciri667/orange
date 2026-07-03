@@ -14,6 +14,7 @@ import {
 } from "lucide-react";
 import { useState } from "react";
 import { logDebug } from "../shared/logger";
+import { useDismissable } from "../shared/useDismissable";
 import type { FileTreeNode } from "../shared/types";
 
 /** 本地文件树组件，递归展示文件夹、Markdown、txt、docx、pdf 和图片文件。 */
@@ -50,8 +51,8 @@ export function FileTree({
   onCreateText: (parentPath: string) => void;
   onCreateFolder: (parentPath: string) => void;
 }) {
+  // 同一时刻只允许一个文件夹行的新建菜单或文件行的操作菜单展开，路径为空表示全部收起。
   const [openCreateMenuPath, setOpenCreateMenuPath] = useState<string | null>(null);
-  /** 当前展开的文件操作菜单路径；只保存相对路径用于 UI 状态，不写入日志。 */
   const [openFileActionPath, setOpenFileActionPath] = useState<string | null>(null);
 
   /** 切换文件行的低频操作菜单，日志只记录文件类型和菜单状态。 */
@@ -101,57 +102,19 @@ export function FileTree({
                 </button>
                 <span className="file-tree-count">{node.children.length}</span>
                 <div className="file-tree-actions">
-                  <button
-                    className="file-action-button"
-                    type="button"
-                    title={`在「${node.name}」中新建`}
-                    aria-haspopup="menu"
-                    aria-expanded={openCreateMenuPath === node.path}
-                    onClick={(event) => {
-                      event.stopPropagation();
+                  <CreateMenu
+                    isOpen={openCreateMenuPath === node.path}
+                    onToggle={() => {
                       setOpenCreateMenuPath(openCreateMenuPath === node.path ? null : node.path);
                       setOpenFileActionPath(null);
                     }}
-                  >
-                    <Plus size={14} />
-                  </button>
-                  {openCreateMenuPath === node.path && (
-                    <div className="create-action-menu" role="menu">
-                      <button
-                        type="button"
-                        role="menuitem"
-                        onClick={() => {
-                          setOpenCreateMenuPath(null);
-                          onCreateMarkdown(node.path);
-                        }}
-                      >
-                        <FileText size={14} />
-                        新建 Markdown
-                      </button>
-                      <button
-                        type="button"
-                        role="menuitem"
-                        onClick={() => {
-                          setOpenCreateMenuPath(null);
-                          onCreateText(node.path);
-                        }}
-                      >
-                        <FileType size={14} />
-                        新建 TXT
-                      </button>
-                      <button
-                        type="button"
-                        role="menuitem"
-                        onClick={() => {
-                          setOpenCreateMenuPath(null);
-                          onCreateFolder(node.path);
-                        }}
-                      >
-                        <FolderPlus size={14} />
-                        新建目录
-                      </button>
-                    </div>
-                  )}
+                    onClose={() => setOpenCreateMenuPath(null)}
+                    folderName={node.name}
+                    folderPath={node.path}
+                    onCreateMarkdown={onCreateMarkdown}
+                    onCreateText={onCreateText}
+                    onCreateFolder={onCreateFolder}
+                  />
                 </div>
               </div>
               {!isCollapsed && (
@@ -209,58 +172,19 @@ export function FileTree({
               </button>
               {(canRename || canDelete) && (
                 <div className="file-tree-actions">
-                  <button
-                    className="file-action-button"
-                    type="button"
-                    title="更多文件操作"
-                    aria-haspopup="menu"
-                    aria-expanded={openFileActionPath === node.path}
-                    onClick={(event) => {
-                      event.stopPropagation();
-                      handleToggleFileActionMenu(node);
-                    }}
-                  >
-                    <MoreHorizontal size={14} />
-                  </button>
-                  {openFileActionPath === node.path && (
-                    <div className="file-action-menu" role="menu">
-                      {canRename && (
-                        <button
-                          type="button"
-                          role="menuitem"
-                          onClick={() => {
-                            setOpenFileActionPath(null);
-                            if (noteId) {
-                              onRenameNote(noteId);
-                            } else if (documentId) {
-                              onRenameDocument(documentId);
-                            }
-                          }}
-                        >
-                          <FilePenLine size={14} />
-                          重命名
-                        </button>
-                      )}
-                      {canDelete && (
-                        <button
-                          className="danger"
-                          type="button"
-                          role="menuitem"
-                          onClick={() => {
-                            setOpenFileActionPath(null);
-                            if (noteId) {
-                              onDeleteNote(noteId);
-                            } else if (documentId) {
-                              onDeleteDocument(documentId);
-                            }
-                          }}
-                        >
-                          <Trash2 size={14} />
-                          删除
-                        </button>
-                      )}
-                    </div>
-                  )}
+                  <FileActionMenu
+                    isOpen={openFileActionPath === node.path}
+                    onToggle={() => handleToggleFileActionMenu(node)}
+                    onClose={() => setOpenFileActionPath(null)}
+                    canRename={canRename}
+                    canDelete={canDelete}
+                    noteId={noteId}
+                    documentId={documentId}
+                    onRenameNote={onRenameNote}
+                    onDeleteNote={onDeleteNote}
+                    onRenameDocument={onRenameDocument}
+                    onDeleteDocument={onDeleteDocument}
+                  />
                 </div>
               )}
             </div>
@@ -268,6 +192,172 @@ export function FileTree({
         );
       })}
     </ul>
+  );
+}
+
+/** 文件夹行的「+」按钮与新建菜单。ref 与 hook 只覆盖按钮 + 菜单这个小范围，
+ * 点击树内别处（其它文件夹 / 文件行）也视为外部点击而关闭，避免旧菜单残留。 */
+function CreateMenu({
+  isOpen,
+  onToggle,
+  onClose,
+  folderName,
+  folderPath,
+  onCreateMarkdown,
+  onCreateText,
+  onCreateFolder,
+}: {
+  isOpen: boolean;
+  onToggle: () => void;
+  onClose: () => void;
+  folderName: string;
+  folderPath: string;
+  onCreateMarkdown: (parentPath: string) => void;
+  onCreateText: (parentPath: string) => void;
+  onCreateFolder: (parentPath: string) => void;
+}) {
+  // ref 仅包住触发按钮与浮层，判定点外部（含树内其它行）即关闭。
+  const containerRef = useDismissable<HTMLDivElement>(isOpen, onClose);
+
+  return (
+    <div ref={containerRef}>
+      <button
+        className="file-action-button"
+        type="button"
+        title={`在「${folderName}」中新建`}
+        aria-haspopup="menu"
+        aria-expanded={isOpen}
+        onClick={(event) => {
+          event.stopPropagation();
+          onToggle();
+        }}
+      >
+        <Plus size={14} />
+      </button>
+      {isOpen && (
+        <div className="create-action-menu" role="menu">
+          <button
+            type="button"
+            role="menuitem"
+            onClick={() => {
+              onClose();
+              onCreateMarkdown(folderPath);
+            }}
+          >
+            <FileText size={14} />
+            新建 Markdown
+          </button>
+          <button
+            type="button"
+            role="menuitem"
+            onClick={() => {
+              onClose();
+              onCreateText(folderPath);
+            }}
+          >
+            <FileType size={14} />
+            新建 TXT
+          </button>
+          <button
+            type="button"
+            role="menuitem"
+            onClick={() => {
+              onClose();
+              onCreateFolder(folderPath);
+            }}
+          >
+            <FolderPlus size={14} />
+            新建目录
+          </button>
+        </div>
+      )}
+    </div>
+  );
+}
+
+/** 文件行的「更多操作」按钮与菜单。ref 覆盖按钮 + 菜单，点树内其它行也会关闭。 */
+function FileActionMenu({
+  isOpen,
+  onToggle,
+  onClose,
+  canRename,
+  canDelete,
+  noteId,
+  documentId,
+  onRenameNote,
+  onDeleteNote,
+  onRenameDocument,
+  onDeleteDocument,
+}: {
+  isOpen: boolean;
+  onToggle: () => void;
+  onClose: () => void;
+  canRename: boolean;
+  canDelete: boolean;
+  noteId: string | undefined;
+  documentId: string | undefined;
+  onRenameNote: (noteId: string) => void;
+  onDeleteNote: (noteId: string) => void;
+  onRenameDocument: (documentId: string) => void;
+  onDeleteDocument: (documentId: string) => void;
+}) {
+  const containerRef = useDismissable<HTMLDivElement>(isOpen, onClose);
+
+  return (
+    <div ref={containerRef}>
+      <button
+        className="file-action-button"
+        type="button"
+        title="更多文件操作"
+        aria-haspopup="menu"
+        aria-expanded={isOpen}
+        onClick={(event) => {
+          event.stopPropagation();
+          onToggle();
+        }}
+      >
+        <MoreHorizontal size={14} />
+      </button>
+      {isOpen && (
+        <div className="file-action-menu" role="menu">
+          {canRename && (
+            <button
+              type="button"
+              role="menuitem"
+              onClick={() => {
+                onClose();
+                if (noteId) {
+                  onRenameNote(noteId);
+                } else if (documentId) {
+                  onRenameDocument(documentId);
+                }
+              }}
+            >
+              <FilePenLine size={14} />
+              重命名
+            </button>
+          )}
+          {canDelete && (
+            <button
+              className="danger"
+              type="button"
+              role="menuitem"
+              onClick={() => {
+                onClose();
+                if (noteId) {
+                  onDeleteNote(noteId);
+                } else if (documentId) {
+                  onDeleteDocument(documentId);
+                }
+              }}
+            >
+              <Trash2 size={14} />
+              删除
+            </button>
+          )}
+        </div>
+      )}
+    </div>
   );
 }
 
