@@ -37,6 +37,9 @@
   "bundle": {
     "active": true,
     "targets": ["dmg", "app"],
+    "resources": {
+      "sidecars/bin/": ""
+    },
     "icon": []
   }
 }
