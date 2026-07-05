@@ -373,7 +373,7 @@ pub async fn load_agent_skills(app: AppHandle) -> Result<Vec<AgentSkill>, String
     .await
 }
 
-/** 打开 Cici Note 用户 Skills 文件夹，浏览器开发态由前端 mock 只展示路径。 */
+/** 打开橘记 用户 Skills 文件夹，浏览器开发态由前端 mock 只展示路径。 */
 #[tauri::command]
 pub async fn open_user_skills_folder(app: AppHandle) -> Result<String, String> {
     let skills_app = app.clone();

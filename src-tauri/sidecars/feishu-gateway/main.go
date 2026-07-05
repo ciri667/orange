@@ -104,7 +104,7 @@ func readConfig() (sidecarConfig, error) {
 	return config, nil
 }
 
-// resolveDomain maps Cici Note's compact domain setting to SDK base URLs.
+// resolveDomain maps Orange (橘记)'s compact domain setting to SDK base URLs.
 func resolveDomain(domain string) string {
 	if strings.EqualFold(domain, "lark") {
 		return lark.LarkBaseUrl
@@ -186,7 +186,7 @@ func p2pEnteredEventID(event *larkim.P2ChatAccessEventBotP2pChatEnteredV1) strin
 
 // buildMentions marks direct bot mention as openId=bot because SDK bot identity is not needed by Rust.
 //
-// 真实场景下被 @ 机器人的 mention.id.open_id 是机器人自己的 ou_xxx（非空），name 是应用名（如 "Cici Note"），
+// 真实场景下被 @ 机器人的 mention.id.open_id 是机器人自己的 ou_xxx（非空），name 是应用名（如 "橘记"），
 // 旧版靠 open_id 为空 + name 含 "bot" 的兜底永远命中不了。改用飞书官方 mentioned_type==bot 作为权威判定，
 // 旧启发式仅作无该字段时的兜底。
 func buildMentions(raw []*larkim.MentionEvent) []outboundMention {

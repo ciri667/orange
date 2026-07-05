@@ -383,7 +383,7 @@ export function AgentPanel({
           <article className={`message ${message.role}`} key={message.id}>
             <div className="message-role">
               {message.role === "assistant" ? <Sparkles size={14} /> : <MessageSquareText size={14} />}
-              <span>{message.role === "assistant" ? "Cici Agent" : "你"}</span>
+              <span>{message.role === "assistant" ? "橘记 Agent" : "你"}</span>
             </div>
             <MessageMarkdown content={message.content} />
             <ToolCallList toolCalls={message.toolCalls} />

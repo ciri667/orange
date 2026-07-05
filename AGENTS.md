@@ -2,7 +2,7 @@
 
 ## Project Structure & Module Organization
 
-Cici Note is a Vite + React + TypeScript frontend with a Tauri v2 Rust desktop backend.
+橘记 (Orange) is a Vite + React + TypeScript frontend with a Tauri v2 Rust desktop backend.
 
 - `src/` contains the application UI, split by feature: `workspace/`, `knowledge-base/`, `editor/`, `agent/`, `diff/`, `settings/`, and shared types/utilities in `shared/`.
 - `src-tauri/src/` contains Rust commands, local storage, agent runtime, domain types, and secure file operations.

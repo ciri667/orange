@@ -53,7 +53,7 @@ const defaultBrowserProvider: LlmProviderConfig = {
   provider: "openai-compatible",
   apiBase: "https://api.openai.com/v1",
   model: "gpt-4o-mini",
-  keyReference: "cici-note-openai-compatible-api-key",
+  keyReference: "orange-openai-compatible-api-key",
   enabled: false,
   supportsTools: true,
   requiresApiKey: true,
@@ -78,7 +78,7 @@ const defaultBrowserImSettings: ImIntegrationSettings = {
     enabled: false,
     domain: "feishu",
     appId: "",
-    secretKeyReference: "cici-note-feishu-app-secret",
+    secretKeyReference: "orange-feishu-app-secret",
     defaultKnowledgeBaseIds: [],
     allowedUserOpenIds: [],
     allowedChatIds: [],
@@ -278,7 +278,7 @@ const browserCustomSkills: AgentSkill[] = [
     id: "skill-custom-browser-demo",
     name: "meeting-note-polish",
     displayName: "会议纪要润色",
-    description: "来自 ~/.cici-note/skills 的示例 SKILL.md，用于模拟自定义 skill 扫描结果。",
+    description: "来自 ~/.orange/skills 的示例 SKILL.md，用于模拟自定义 skill 扫描结果。",
     instructions:
       "读取当前会议纪要上下文，保持事实和行动项不变，输出更清晰的 Markdown 结构。涉及写入时必须生成待确认 diff。",
     tags: ["自定义", "会议", "写作"],
@@ -286,7 +286,7 @@ const browserCustomSkills: AgentSkill[] = [
     source: "custom",
     createdAt: "自定义",
     updatedAt: "自定义",
-    path: "~/.cici-note/skills/meeting-note-polish/SKILL.md",
+    path: "~/.orange/skills/meeting-note-polish/SKILL.md",
     relativePath: "meeting-note-polish/SKILL.md",
     metadata: {
       frontmatterName: "meeting-note-polish",
@@ -558,16 +558,16 @@ export async function loadAgentSkills(): Promise<AgentSkill[]> {
   return invokeLogged<AgentSkill[]>("load_agent_skills");
 }
 
-/** 打开 Cici Note 用户 Skills 文件夹；浏览器开发态只返回提示路径。 */
+/** 打开橘记 用户 Skills 文件夹；浏览器开发态只返回提示路径。 */
 export async function openUserSkillsFolder(): Promise<string> {
   if (!isTauriRuntime()) {
-    return "~/.cici-note/skills";
+    return "~/.orange/skills";
   }
 
   return invokeLogged<string>("open_user_skills_folder");
 }
 
-/** 新增或编辑用户自建 skill；桌面端会写入 ~/.cici-note/skills/<name>/SKILL.md。 */
+/** 新增或编辑用户自建 skill；桌面端会写入 ~/.orange/skills/<name>/SKILL.md。 */
 export async function saveAgentSkill(skill: AgentSkill): Promise<AgentSkill> {
   if (!isTauriRuntime()) {
     const isBuiltInSkill = browserBuiltInSkills.some((builtInSkill) => builtInSkill.id === skill.id) || skill.source === "built-in";
@@ -784,7 +784,7 @@ export async function clearAppEventLogs(): Promise<void> {
 /** 打开 Tauri app log 目录，方便用户附带文件日志排查。 */
 export async function openAppLogFolder(): Promise<string> {
   if (!isTauriRuntime()) {
-    return "~/Library/Logs/app.cici-note.desktop";
+    return "~/Library/Logs/app.orange.desktop";
   }
 
   return invokeLogged<string>("open_app_log_folder");
@@ -1782,7 +1782,7 @@ function normalizeBrowserCustomSkill(skill: AgentSkill): AgentSkill {
     source: "custom",
     createdAt: skill.createdAt.trim() || now,
     updatedAt: now,
-    path: `~/.cici-note/skills/${relativePath}`,
+    path: `~/.orange/skills/${relativePath}`,
     relativePath,
     metadata: {
       frontmatterName: normalizedName,

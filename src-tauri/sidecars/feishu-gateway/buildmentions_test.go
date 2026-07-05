@@ -19,7 +19,7 @@ func TestBuildMentionsBotByType(t *testing.T) {
 	raw := []*larkim.MentionEvent{
 		{
 			Id:            idPtr("ou_real_bot_identity"),
-			Name:          strPtr("Cici Note"),
+			Name:          strPtr("橘记"),
 			MentionedType: strPtr("bot"),
 		},
 	}
@@ -67,12 +67,12 @@ func TestBuildMentionsFallbackNameContainsBot(t *testing.T) {
 	}
 }
 
-// TestBuildMentionsAppNameWithoutBotNotMarked 缺少 mentioned_type 且 name 是普通应用名（如 "Cici Note"，不含 bot）时不应被误判为 bot——这是旧 bug 的根因之一。
+// TestBuildMentionsAppNameWithoutBotNotMarked 缺少 mentioned_type 且 name 是普通应用名（如 "橘记"，不含 bot）时不应被误判为 bot——这是旧 bug 的根因之一。
 func TestBuildMentionsAppNameWithoutBotNotMarked(t *testing.T) {
 	raw := []*larkim.MentionEvent{
 		{
 			Id:   idPtr("ou_real_bot_identity"), // 真实场景下机器人 mention 带 ou_xxx
-			Name: strPtr("Cici Note"),          // 应用名不含 "bot"
+			Name: strPtr("橘记"),          // 应用名不含 "bot"
 		},
 	}
 	got := buildMentions(raw)
@@ -110,7 +110,7 @@ func TestBuildMentionsNilEntriesSkipped(t *testing.T) {
 		nil,
 		{
 			Id:            idPtr("ou_real_bot_identity"),
-			Name:          strPtr("Cici Note"),
+			Name:          strPtr("橘记"),
 			MentionedType: strPtr("bot"),
 		},
 		nil,

@@ -58,10 +58,10 @@ const MAX_APP_EVENT_LOGS: usize = 2_000;
 const APP_EVENT_LOG_RETENTION_DAYS: i64 = 30;
 
 /** 系统安全存储中的模型密钥引用，SQLite 只保存这个引用而不保存明文 key。 */
-pub const MODEL_KEY_REFERENCE: &str = "cici-note-openai-compatible-api-key";
+pub const MODEL_KEY_REFERENCE: &str = "orange-openai-compatible-api-key";
 
 /** 系统安全存储中的飞书 appSecret 引用，SQLite 永远不保存明文 secret。 */
-pub const FEISHU_SECRET_KEY_REFERENCE: &str = "cici-note-feishu-app-secret";
+pub const FEISHU_SECRET_KEY_REFERENCE: &str = "orange-feishu-app-secret";
 
 /** 单张粘贴图片最大字节数，避免超大剪贴板内容阻塞 UI 或撑爆本地目录。 */
 const MAX_SINGLE_PASTE_IMAGE_BYTES: usize = 20 * 1024 * 1024;
@@ -522,7 +522,7 @@ fn database_path(app: &AppHandle) -> Result<PathBuf, String> {
         .map_err(|error| format!("无法获取应用数据目录：{error}"))?;
 
     fs::create_dir_all(&app_data_dir).map_err(|error| format!("无法创建应用数据目录：{error}"))?;
-    Ok(app_data_dir.join("cici-note.sqlite3"))
+    Ok(app_data_dir.join("orange.sqlite3"))
 }
 
 /** 打开 SQLite 连接并确保 FTS5、向量缓存和会话表存在。 */
@@ -1501,7 +1501,7 @@ pub fn save_model_api_key(provider_id: &str, api_key: &str) -> Result<ModelApiKe
     ensure_persistent_model_keyring()?;
 
     let key_reference = model_provider::key_reference_for_provider(provider_id);
-    let entry = keyring::Entry::new("Cici Note", &key_reference)
+    let entry = keyring::Entry::new("Orange", &key_reference)
         .map_err(|error| format!("无法打开系统安全存储：{error}"))?;
 
     entry
@@ -1535,19 +1535,53 @@ pub fn load_model_api_key(key_reference: &str) -> Result<Option<String>, String>
         return Ok(Some(api_key));
     }
 
-    let entry = keyring::Entry::new("Cici Note", key_reference)
-        .map_err(|error| format!("无法打开系统安全存储：{error}"))?;
+    // 品牌升级（cici-note → orange）后，老用户的密钥仍存在旧 keyring service "Cici Note"
+    // 下、且 account 可能是旧前缀 "cici-note-*"。这里在新 service 下查不到时回退读旧
+    // service 并落到规范位置（新 service "Orange" + 规范化后的 key_reference），保证透明迁移。
+    let normalized_key_reference = normalize_key_reference(key_reference);
+    if let Some(api_key) = read_keyring_password("Orange", &normalized_key_reference)? {
+        store_model_api_key_in_cache(&normalized_key_reference, &api_key)?;
+        return Ok(Some(api_key));
+    }
 
-    match entry.get_password() {
-        Ok(api_key) if !api_key.trim().is_empty() => {
-            store_model_api_key_in_cache(key_reference, &api_key)?;
-            Ok(Some(api_key))
+    // 兼容回退：依次尝试旧 service 名与旧前缀的 account 四种组合。
+    let legacy_key_reference = key_reference
+        .strip_prefix("orange-")
+        .map(|rest| format!("cici-note-{rest}"))
+        .unwrap_or_else(|| key_reference.to_owned());
+    for (service, account) in [
+        ("Cici Note", key_reference),
+        ("Cici Note", &legacy_key_reference),
+        ("Orange", &legacy_key_reference),
+    ] {
+        if let Some(api_key) = read_keyring_password(service, account)? {
+            // 命中旧条目：迁移写入规范位置，并缓存。
+            persist_migrated_keyring_password(&normalized_key_reference, &api_key)?;
+            store_model_api_key_in_cache(&normalized_key_reference, &api_key)?;
+            return Ok(Some(api_key));
         }
+    }
+
+    Ok(None)
+}
+
+/** 把传入的 key_reference 规范化为新前缀 orange-，兼容 sqlite 里仍存的 cici-note-* 历史 account。 */
+fn normalize_key_reference(key_reference: &str) -> String {
+    key_reference
+        .strip_prefix("cici-note-")
+        .map(|rest| format!("orange-{rest}"))
+        .unwrap_or_else(|| key_reference.to_owned())
+}
+
+/** 读取指定 service/account 的 keyring 密码；缺失视为 None，其他错误向上抛。 */
+fn read_keyring_password(service: &str, account: &str) -> Result<Option<String>, String> {
+    let entry = keyring::Entry::new(service, account)
+        .map_err(|error| format!("无法打开系统安全存储：{error}"))?;
+    match entry.get_password() {
+        Ok(api_key) if !api_key.trim().is_empty() => Ok(Some(api_key)),
         Ok(_) => Ok(None),
         Err(error) => {
             let message = error.to_string();
-
-            // 不同平台的 keyring 缺失错误文案不同，首版只把缺失视为未配置，其他错误继续暴露。
             if is_missing_keyring_entry_error(&message) {
                 Ok(None)
             } else {
@@ -1555,6 +1589,15 @@ pub fn load_model_api_key(key_reference: &str) -> Result<Option<String>, String>
             }
         }
     }
+}
+
+/** 把迁移过来的明文密钥写入规范的 keyring service 与 account，错误信息不回显明文内容。 */
+fn persist_migrated_keyring_password(normalized_key_reference: &str, api_key: &str) -> Result<(), String> {
+    let entry = keyring::Entry::new("Orange", normalized_key_reference)
+        .map_err(|error| format!("无法打开系统安全存储：{error}"))?;
+    entry
+        .set_password(api_key)
+        .map_err(|error| format!("品牌升级迁移写入密钥失败：{error}"))
 }
 
 /** 把飞书 appSecret 保存到系统安全存储；错误信息不回显 secret 内容。 */
@@ -1565,7 +1608,7 @@ pub fn save_feishu_app_secret(app_secret: &str) -> Result<FeishuCredentialStatus
         return Err("飞书 appSecret 不能为空。".to_owned());
     }
 
-    let entry = keyring::Entry::new("Cici Note", FEISHU_SECRET_KEY_REFERENCE)
+    let entry = keyring::Entry::new("Orange", FEISHU_SECRET_KEY_REFERENCE)
         .map_err(|error| format!("无法打开系统安全存储：{error}"))?;
 
     entry
@@ -3936,7 +3979,7 @@ mod tests {
     #[test]
     fn reject_path_outside_root_without_creating_parent() {
         let dir = tempdir().unwrap();
-        let outside_name = format!("cici-note-outside-parent-{}", create_id("test"));
+        let outside_name = format!("orange-outside-parent-{}", create_id("test"));
         let outside_parent = dir.path().parent().unwrap().join(&outside_name);
         let result = resolve_inside_root(dir.path(), &format!("../{outside_name}/outside.md"));
 

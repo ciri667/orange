@@ -18,7 +18,9 @@ interface ResizeDragState {
 }
 
 /** 本机 UI 偏好存储键，版本后缀用于未来布局模型变化时安全回退。 */
-const WORKSPACE_LAYOUT_STORAGE_KEY = "cici-note.workspace-layout.v1";
+const WORKSPACE_LAYOUT_STORAGE_KEY = "orange.workspace-layout.v1";
+/** 旧版本品牌命名遗留的存储键，用于一次性迁移到新键，迁移后旧的保留作回滚保险。 */
+const LEGACY_WORKSPACE_LAYOUT_STORAGE_KEY = "cici-note.workspace-layout.v1";
 
 /** 默认布局沿用原始三栏宽度，避免首次进入时视觉比例突变。 */
 const DEFAULT_WORKSPACE_LAYOUT: WorkspaceLayoutSizes = {
@@ -72,9 +74,26 @@ function readStoredWorkspaceLayout(): WorkspaceLayoutSizes {
     const rawLayout = window.localStorage.getItem(WORKSPACE_LAYOUT_STORAGE_KEY);
 
     if (!rawLayout) {
+      // 旧品牌（cici-note）遗留的布局偏好做一次性迁移：旧键存在则复制到新键，
+      // 旧键保留作回滚保险。仅在新键缺失时执行，保证迁移幂等。
+      const legacyLayout = window.localStorage.getItem(LEGACY_WORKSPACE_LAYOUT_STORAGE_KEY);
+      if (legacyLayout) {
+        window.localStorage.setItem(WORKSPACE_LAYOUT_STORAGE_KEY, legacyLayout);
+        return parseStoredWorkspaceLayout(legacyLayout);
+      }
       return DEFAULT_WORKSPACE_LAYOUT;
     }
 
+    return parseStoredWorkspaceLayout(rawLayout);
+  } catch {
+    // 损坏数据不阻断启动，回归默认布局。
+    return DEFAULT_WORKSPACE_LAYOUT;
+  }
+}
+
+/** 解析已读取的布局 JSON 字符串，损坏或越界时回退默认布局。 */
+function parseStoredWorkspaceLayout(rawLayout: string): WorkspaceLayoutSizes {
+  try {
     const parsedLayout = JSON.parse(rawLayout) as Partial<WorkspaceLayoutSizes>;
 
     // 只接受完整且有限的数字宽度，避免旧版本或手动编辑的缓存破坏布局。

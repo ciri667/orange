@@ -29,7 +29,7 @@ class RootErrorBoundary extends Component<{ children: ReactNode }, { hasError: b
       return (
         <main className="loading-shell boot-error-shell">
           <p>界面渲染失败</p>
-          <p className="boot-error-message">请重启 Cici Note 后重试。</p>
+          <p className="boot-error-message">请重启橘记后重试。</p>
         </main>
       );
     }

@@ -572,7 +572,7 @@ export function SettingsDrawer({
       model: template.model,
       // 后端保存设置时会强制按 providerId 重新计算 key_reference（见 model_provider::normalize_model_config_key_references），
       // 这里保持同样的派生格式只是为了让草稿状态在保存前也保持一致，不作为最终依据。
-      keyReference: `cici-note-llm-provider-${providerId}-api-key`,
+      keyReference: `orange-llm-provider-${providerId}-api-key`,
       enabled: true,
       supportsTools: true,
       requiresApiKey: template.requiresApiKey,

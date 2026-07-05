@@ -35,9 +35,12 @@ pub fn run() {
                     logging::AppLogCategory::App,
                     "app_started",
                     "completed",
-                    "Cici Note 桌面端已启动。",
+                    "橘记 桌面端已启动。",
                 ),
             );
+
+            // 品牌升级（cici-note → orange）的一次性本地数据迁移：幂等、best-effort。
+            skills::migrate_legacy_cici_data(&handle);
 
             match logging::cleanup_old_file_logs(&handle) {
                 Ok(removed_count) if removed_count > 0 => logging::write_app_event_best_effort(
@@ -147,5 +150,5 @@ pub fn run() {
             commands::reject_proposed_change
         ])
         .run(tauri::generate_context!())
-        .expect("failed to run Cici Note desktop app");
+        .expect("failed to run Orange desktop app");
 }

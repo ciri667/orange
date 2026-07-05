@@ -625,36 +625,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "cici-note"
-version = "0.1.0"
-dependencies = [
- "base64 0.22.1",
- "chrono",
- "genpdf",
- "keyring",
- "log",
- "quick-xml 0.36.2",
- "reqwest 0.12.28",
- "rusqlite",
- "serde",
- "serde_json",
- "serde_yaml",
- "sha2",
- "tauri",
- "tauri-build",
- "tauri-plugin-dialog",
- "tauri-plugin-fs",
- "tauri-plugin-log",
- "tauri-plugin-opener",
- "tempfile",
- "thiserror 1.0.69",
- "trash",
- "uuid",
- "walkdir",
- "zip",
-]
-
-[[package]]
 name = "combine"
 version = "4.6.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2782,6 +2752,36 @@ name = "option-ext"
 version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "04744f49eae99ab78e0d5c0b603ab218f515ea8cfe5a456d7629ad883a3b6e7d"
+
+[[package]]
+name = "orange"
+version = "0.1.0"
+dependencies = [
+ "base64 0.22.1",
+ "chrono",
+ "genpdf",
+ "keyring",
+ "log",
+ "quick-xml 0.36.2",
+ "reqwest 0.12.28",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "serde_yaml",
+ "sha2",
+ "tauri",
+ "tauri-build",
+ "tauri-plugin-dialog",
+ "tauri-plugin-fs",
+ "tauri-plugin-log",
+ "tauri-plugin-opener",
+ "tempfile",
+ "thiserror 1.0.69",
+ "trash",
+ "uuid",
+ "walkdir",
+ "zip",
+]
 
 [[package]]
 name = "ordered-float"

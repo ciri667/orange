@@ -14,11 +14,11 @@ use zip::ZipArchive;
 /** 内置 skill 来源标记，决定设置页只能禁用不能删除。 */
 pub const BUILT_IN_SKILL_SOURCE: &str = "built-in";
 
-/** 自定义 skill 来源标记，来自 Cici Note 用户目录中的 SKILL.md。 */
+/** 自定义 skill 来源标记，来自橘记用户目录中的 SKILL.md。 */
 pub const CUSTOM_SKILL_SOURCE: &str = "custom";
 
-/** Cici Note 自有用户目录名，避免污染或误读用户真实 Codex 配置。 */
-const CICI_HOME_DIRECTORY_NAME: &str = ".cici-note";
+/** 橘记自有用户目录名，避免污染或误读用户真实 Codex 配置。 */
+const ORANGE_HOME_DIRECTORY_NAME: &str = ".orange";
 
 /** 自定义 skill 的主说明文件名，沿用 Codex 的目录化体验。 */
 const SKILL_MARKDOWN_FILE_NAME: &str = "SKILL.md";
@@ -44,8 +44,8 @@ pub const MAX_REMOTE_SKILL_MARKDOWN_BYTES: usize = 1024 * 1024;
 /** 远程下载的压缩包最大字节数；解压后还会再次做总量限制。 */
 pub const MAX_REMOTE_SKILL_ARCHIVE_BYTES: usize = 25 * 1024 * 1024;
 
-/** 第三方 skill 安装时保存在 agents 目录中的 Cici Note 元数据文件。 */
-const CICI_INSTALL_METADATA_FILE_NAME: &str = "cici-note.yaml";
+/** 第三方 skill 安装时保存在 agents 目录中的橘记元数据文件。 */
+const ORANGE_INSTALL_METADATA_FILE_NAME: &str = "orange.yaml";
 
 /** 第三方 skill 安装冲突时直接失败，不覆盖用户现有目录。 */
 const INSTALL_CONFLICT_FAIL: &str = "fail";
@@ -93,9 +93,9 @@ pub fn built_in_skills() -> Vec<AgentSkill> {
 
 /** 获取用户自定义 skills 根目录，并创建预留 memory 目录。 */
 pub fn user_skills_root(app: &AppHandle) -> Result<PathBuf, String> {
-    let cici_home = user_cici_home(app)?;
-    let skills_root = cici_home.join("skills");
-    let memory_root = cici_home.join(MEMORY_DIRECTORY_NAME);
+    let orange_home = user_orange_home(app)?;
+    let skills_root = orange_home.join("skills");
+    let memory_root = orange_home.join(MEMORY_DIRECTORY_NAME);
 
     fs::create_dir_all(&skills_root).map_err(|error| {
         format!(
@@ -123,7 +123,7 @@ pub fn load_agent_skills(
     load_agent_skills_from_roots(connection, &[skills_root])
 }
 
-/** 从指定目录读取 skill，测试可传入临时根目录模拟 ~/.cici-note/skills。 */
+/** 从指定目录读取 skill，测试可传入临时根目录模拟 ~/.orange/skills。 */
 pub fn load_agent_skills_from_roots(
     connection: &Connection,
     custom_skill_roots: &[PathBuf],
@@ -150,7 +150,7 @@ pub fn load_agent_skills_from_roots(
     Ok(skills)
 }
 
-/** 保存用户自建 skill 到 Cici Note skills 目录，SQLite 只记录启停覆盖。 */
+/** 保存用户自建 skill 到橘记 skills 目录，SQLite 只记录启停覆盖。 */
 pub fn save_user_skill(
     app: &AppHandle,
     connection: &Connection,
@@ -161,7 +161,7 @@ pub fn save_user_skill(
     save_user_skill_to_root(connection, &skills_root, skill)
 }
 
-/** 保存用户自建 skill 到指定 skills 根目录，测试可用临时目录替代 ~/.cici-note/skills。 */
+/** 保存用户自建 skill 到指定 skills 根目录，测试可用临时目录替代 ~/.orange/skills。 */
 pub fn save_user_skill_to_root(
     connection: &Connection,
     skills_root: &Path,
@@ -840,7 +840,7 @@ fn normalize_custom_skill_input(mut skill: AgentSkill) -> Result<AgentSkill, Str
     Ok(skill)
 }
 
-/** 将用户创建或编辑的 skill 写入 ~/.cici-note/skills/<name>/SKILL.md。 */
+/** 将用户创建或编辑的 skill 写入 ~/.orange/skills/<name>/SKILL.md。 */
 fn write_skill_files(
     skills_root: &Path,
     skill: &AgentSkill,
@@ -948,7 +948,7 @@ fn move_previous_skill_directory_if_needed(
     }
 
     if !absolute_previous_dir.starts_with(&absolute_root) {
-        return Err("只能迁移 Cici Note 用户 Skills 目录内的 skill。".to_owned());
+        return Err("只能迁移橘记用户 Skills 目录内的 skill。".to_owned());
     }
 
     if next_skill_dir.exists() {
@@ -994,7 +994,7 @@ fn safe_relative_skill_folder(relative_path: &Path) -> Result<String, String> {
     Ok(parts.join("/"))
 }
 
-/** 构造写入磁盘的 SKILL.md，保留 tags 作为 Cici Note frontmatter 扩展字段。 */
+/** 构造写入磁盘的 SKILL.md，保留 tags 作为橘记 frontmatter 扩展字段。 */
 fn build_skill_markdown(skill: &AgentSkill) -> String {
     let mut frontmatter = vec![
         ("name", yaml_quote(&skill.name)),
@@ -1141,7 +1141,7 @@ fn install_discovered_skill(
     let file_count =
         copy_skill_directory_checked(&discovered_skill.source_dir, &staging_dir, &mut warnings)?;
 
-    write_cici_install_metadata(
+    write_orange_install_metadata(
         &staging_dir,
         discovered_skill,
         options,
@@ -1236,7 +1236,7 @@ fn copy_skill_directory_checked(
                 .any(|component| component.as_os_str() == "scripts")
             {
                 warnings.push(
-                    "安装包包含 scripts 目录；Cici Note 已保留文件但不会执行脚本。".to_owned(),
+                    "安装包包含 scripts 目录；橘记已保留文件但不会执行脚本。".to_owned(),
                 );
             }
 
@@ -1299,8 +1299,8 @@ fn should_skip_install_relative_path(relative_path: &Path) -> bool {
     })
 }
 
-/** 写入 Cici Note 安装元数据，保留可审计摘要但不保存完整来源 URL 或绝对路径。 */
-fn write_cici_install_metadata(
+/** 写入橘记安装元数据，保留可审计摘要但不保存完整来源 URL 或绝对路径。 */
+fn write_orange_install_metadata(
     skill_dir: &Path,
     discovered_skill: &DiscoveredInstallableSkill,
     options: &SkillInstallOptions,
@@ -1308,7 +1308,7 @@ fn write_cici_install_metadata(
     file_count: usize,
 ) -> Result<(), String> {
     let agents_dir = skill_dir.join("agents");
-    let metadata_path = agents_dir.join(CICI_INSTALL_METADATA_FILE_NAME);
+    let metadata_path = agents_dir.join(ORANGE_INSTALL_METADATA_FILE_NAME);
     let content = format!(
         "install:\n  source_type: {}\n  source_summary: {}\n  installed_at: {}\n  content_hash: {}\n  file_count: {}\n  default_enabled: {}\n",
         yaml_quote(&options.source_type),
@@ -1339,7 +1339,7 @@ fn delete_custom_skill_directory(skills_root: &Path, skill: &AgentSkill) -> Resu
             .file_name()
             .is_none_or(|name| name != SKILL_MARKDOWN_FILE_NAME)
     {
-        return Err("只能删除 Cici Note 用户 Skills 目录内的 SKILL.md。".to_owned());
+        return Err("只能删除橘记用户 Skills 目录内的 SKILL.md。".to_owned());
     }
 
     let skill_dir = skill_markdown_path
@@ -1564,15 +1564,155 @@ fn stable_absolute_path(path: &Path) -> PathBuf {
     })
 }
 
-/** 获取 Cici Note 用户目录，优先 ~/.cici-note，无法读取 home 时回退 app data。 */
-fn user_cici_home(app: &AppHandle) -> Result<PathBuf, String> {
+/** 获取橘记用户目录，优先 ~/.orange，无法读取 home 时回退 app data。 */
+fn user_orange_home(app: &AppHandle) -> Result<PathBuf, String> {
     if let Some(home_dir) = home_dir() {
-        return Ok(home_dir.join(CICI_HOME_DIRECTORY_NAME));
+        return Ok(home_dir.join(ORANGE_HOME_DIRECTORY_NAME));
     }
 
     app.path()
         .app_data_dir()
         .map_err(|error| format!("无法获取应用数据目录：{error}"))
+}
+
+/**
+ * 品牌升级（cici-note → orange / 橘记）的一次性数据迁移。
+ *
+ * 目标是把老用户在旧品牌命名下落地的本地数据平滑迁移到新名下，避免升级后用户感觉
+ * 数据"凭空消失"。覆盖范围：
+ *   1. 用户 skills 目录：~/.cici-note → ~/.orange；
+ *   2. 第三方 skill 安装元数据文件：每个 skills/<name>/agents/cici-note.yaml → orange.yaml；
+ *   3. SQLite 数据库：旧 identifier（app.cici-note.desktop）的 app_data_dir 下的 cici-note.sqlite3
+ *      复制到新 identifier 的 app_data_dir 下的 orange.sqlite3。
+ *
+ * keyring 密钥迁移不在这里做：load_model_api_key / load_feishu_app_secret 已经内置
+ * legacy service 回退读取，老用户首次访问密钥时会自动迁移到规范位置。
+ *
+ * 迁移幂等性：每一步都先判目标是否已存在再迁，并保留源数据作回滚保险；任何环节失败
+ * 仅记录到应用事件日志，绝不阻断启动。
+ */
+pub fn migrate_legacy_cici_data(app: &AppHandle) {
+    migrate_legacy_user_home_directory();
+    migrate_legacy_metadata_filenames();
+    if let Err(error) = migrate_legacy_sqlite_database(app) {
+        crate::logging::write_app_event_best_effort(
+            app,
+            crate::logging::AppEventBuilder::new(
+                crate::logging::AppLogLevel::Warn,
+                crate::logging::AppLogCategory::App,
+                "rebrand_v1_sqlite_migration",
+                "failed",
+                error,
+            ),
+        );
+    } else {
+        crate::logging::write_app_event_best_effort(
+            app,
+            crate::logging::AppEventBuilder::new(
+                crate::logging::AppLogLevel::Info,
+                crate::logging::AppLogCategory::App,
+                "rebrand_v1_sqlite_migration",
+                "completed",
+                "SQLite 数据库品牌升级迁移已检查并按需迁移。",
+            ),
+        );
+    }
+}
+
+/** 把 ~/.cici-note 整目录就地改名到 ~/.orange；两者都在则记日志跳过。 */
+fn migrate_legacy_user_home_directory() {
+    if let Some(home_dir) = home_dir() {
+        let legacy = home_dir.join(".cici-note");
+        let target = home_dir.join(ORANGE_HOME_DIRECTORY_NAME);
+        if !legacy.exists() {
+            return;
+        }
+        if target.exists() {
+            log::warn!(
+                "品牌升级迁移跳过：~/.orange 已存在，保留旧目录 ~/.cici-note 不动，由用户手动决定。"
+            );
+            return;
+        }
+        if let Err(error) = std::fs::rename(&legacy, &target) {
+            log::warn!("品牌升级迁移 ~/.cici-note → ~/.orange 失败：{error}；旧目录保留。");
+        }
+    }
+}
+
+/** 在 ~/.orange/skills 的每个 skill 的 agents 子目录下把 cici-note.yaml 改名为 orange.yaml；冲突则保留旧文件。 */
+fn migrate_legacy_metadata_filenames() {
+    if let Some(home_dir) = home_dir() {
+        let skills_root = home_dir.join(ORANGE_HOME_DIRECTORY_NAME).join("skills");
+        let Ok(entries) = std::fs::read_dir(&skills_root) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            let agents_dir = entry.path().join("agents");
+            // 旧品牌下第三方 skill 的元数据文件名为 cici-note.yaml，已在品牌升级中改为 orange.yaml。
+            let legacy_meta = agents_dir.join("cici-note.yaml");
+            let target_meta = agents_dir.join(ORANGE_INSTALL_METADATA_FILE_NAME);
+            if !legacy_meta.exists() || target_meta.exists() {
+                continue;
+            }
+            if let Err(error) = std::fs::rename(&legacy_meta, &target_meta) {
+                log::warn!(
+                    "品牌升级迁移 cici-note.yaml → orange.yaml 失败：{}；旧文件保留。",
+                    error
+                );
+            }
+        }
+    }
+}
+
+/**
+ * 在 macOS 上 app_data_dir 由 identifier 决定，identifier 改名后新 app_data_dir 与旧的不同，
+ * 新库会读不到旧库。这里按 macOS 路径派生规则手算旧路径下的 cici-note.sqlite3，复制到新 app_data_dir
+ * 下的 orange.sqlite3。
+ *
+ * 仅 macOS 处理：其他平台 identifier 改名的影响范围不同，暂不在首版迁移中覆盖。
+ */
+fn migrate_legacy_sqlite_database(app: &AppHandle) -> Result<(), String> {
+    let new_data_dir = app
+        .path()
+        .app_data_dir()
+        .map_err(|error| format!("无法获取应用数据目录：{error}"))?;
+    let new_db_path = new_data_dir.join("orange.sqlite3");
+    if new_db_path.exists() {
+        // 已经有新库，跳过迁移，避免覆盖用户在新版下产生的数据。
+        return Ok(());
+    }
+
+    // macOS：~/Library/Application Support/app.cici-note.desktop/cici-note.sqlite3
+    #[cfg(target_os = "macos")]
+    {
+        if let Some(home_dir) = home_dir() {
+            let legacy_db_path = home_dir
+                .join("Library")
+                .join("Application Support")
+                .join("app.cici-note.desktop")
+                .join("cici-note.sqlite3");
+            if !legacy_db_path.exists() {
+                return Ok(());
+            }
+            std::fs::create_dir_all(&new_data_dir)
+                .map_err(|error| format!("无法创建新应用数据目录：{error}"))?;
+            // 使用复制而非移动，保留旧库作回滚保险。
+            std::fs::copy(&legacy_db_path, &new_db_path).map_err(|error| {
+                format!("SQLite 品牌升级迁移复制失败：{error}；旧库保留在 {legacy_db_path:?}")
+            })?;
+            log::info!(
+                "SQLite 品牌升级迁移完成：{} → {}",
+                legacy_db_path.display(),
+                new_db_path.display()
+            );
+        }
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = &new_data_dir;
+        let _ = &new_db_path;
+    }
+    Ok(())
 }
 
 /** 跨平台读取用户 home 目录，避免为单个目录引入额外依赖。 */

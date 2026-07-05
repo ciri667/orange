@@ -583,7 +583,7 @@ export function WorkspaceShell() {
     return (
       <main className="loading-shell">
         <div className="brand-mark">
-          <img className="brand-logo" src="/cici-note-logo.svg" alt="" />
+          <img className="brand-logo" src="/orange-logo.svg" alt="" />
         </div>
         <p>正在加载本地知识库工作台...</p>
       </main>
@@ -596,7 +596,7 @@ export function WorkspaceShell() {
     return (
       <main className="loading-shell boot-error-shell">
         <div className="brand-mark">
-          <img className="brand-logo" src="/cici-note-logo.svg" alt="" />
+          <img className="brand-logo" src="/orange-logo.svg" alt="" />
         </div>
         <p>本地知识库工作台加载失败</p>
         <p className="boot-error-message">{errorMessage}</p>
@@ -614,7 +614,7 @@ export function WorkspaceShell() {
     return (
       <main className="empty-shell">
         <div className="brand-mark">
-          <img className="brand-logo" src="/cici-note-logo.svg" alt="" />
+          <img className="brand-logo" src="/orange-logo.svg" alt="" />
         </div>
         <h1>连接一个支持文档目录，开始使用知识库 Agent 助手。</h1>
         <p>目录树会展示 Markdown、TXT、DOCX、PDF 和图片；Agent 写入仍只作用于确认后的 Markdown diff。</p>
@@ -2271,7 +2271,7 @@ export function WorkspaceShell() {
     }
   }
 
-  /** 打开 Cici Note 用户 Skills 文件夹；浏览器开发态只展示 mock 路径。 */
+  /** 打开橘记 用户 Skills 文件夹；浏览器开发态只展示 mock 路径。 */
   async function handleOpenUserSkillsFolder() {
     beginBusy("正在打开用户 Skills 文件夹...");
 

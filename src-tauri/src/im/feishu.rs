@@ -713,7 +713,7 @@ fn build_status_reply(app: &AppHandle, settings: &FeishuIntegrationSettings) -> 
     let status = load_gateway_status(app).ok();
 
     format!(
-        "Cici Note 飞书集成状态：{}\n模型：{}\n默认知识库范围：{} 个\n群聊 @：{}",
+        "橘记 飞书集成状态：{}\n模型：{}\n默认知识库范围：{} 个\n群聊 @：{}",
         if status.as_ref().is_some_and(|status| status.running) {
             "运行中"
         } else {
@@ -774,7 +774,7 @@ fn reset_im_session(
     "已重置当前飞书会话。".to_owned()
 }
 
-/** 为飞书消息运行 Cici Agent，并返回可发送回飞书的短文本。 */
+/** 为飞书消息运行橘记 Agent，并返回可发送回飞书的短文本。 */
 async fn run_agent_for_event(
     app: &AppHandle,
     event: &FeishuInboundEvent,
@@ -820,7 +820,7 @@ fn build_agent_reply_text(snapshot: &WorkspaceSnapshot) -> String {
         .as_ref()
         .is_some_and(|change| change.status == "pending")
     {
-        reply.push_str("\n\n已生成待确认改动，请回到 Cici Note 审阅后再写入本地文件。");
+        reply.push_str("\n\n已生成待确认改动，请回到橘记审阅后再写入本地文件。");
     }
 
     reply

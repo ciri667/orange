@@ -136,7 +136,7 @@ pub fn key_reference_for_provider(provider_id: &str) -> String {
     if provider_id == MIGRATED_DEFAULT_PROVIDER_ID {
         crate::storage::MODEL_KEY_REFERENCE.to_owned()
     } else {
-        format!("cici-note-llm-provider-{provider_id}-api-key")
+        format!("orange-llm-provider-{provider_id}-api-key")
     }
 }
 
@@ -330,7 +330,7 @@ mod tests {
                 "provider": "openai-compatible",
                 "apiBase": "https://api.openai.com/v1",
                 "model": "gpt-4o-mini",
-                "keyReference": "cici-note-openai-compatible-api-key",
+                "keyReference": "orange-openai-compatible-api-key",
                 "enabled": true
             },
             "privacyPolicy": "allow-selected-scope",
@@ -541,7 +541,7 @@ mod tests {
                         "provider": "openai-compatible",
                         "apiBase": "https://llm.example/v1",
                         "model": "test-model",
-                        "keyReference": "cici-note-llm-provider-provider-a-api-key",
+                        "keyReference": "orange-llm-provider-provider-a-api-key",
                         "enabled": true,
                         "supportsTools": true,
                         "requiresApiKey": true,

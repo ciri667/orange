@@ -1,4 +1,4 @@
-module cici-note-feishu-gateway
+module orange-feishu-gateway
 
 go 1.22
 

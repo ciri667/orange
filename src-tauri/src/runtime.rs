@@ -769,7 +769,7 @@ fn build_model_messages(
     let mut messages = vec![json!({
         "role": "system",
         "content": format!(
-            "你是 Cici Note 的本地优先知识库 Agent。需要依据本地笔记时必须调用工具；所有写入只能调用 propose_note_change 或 create_note_draft 生成待确认 diff，不能声称已经写入文件。调用 propose_note_change 时，局部替换使用 operation=replace，next 只能是 original 的替换内容；文末追加使用 operation=append，next 只能是增量内容，绝不能把整篇文档放入局部替换的 next；同一文件需要多处编辑时使用 operation=multi_replace 并提供 edits 数组，不要拆成多轮口头承诺。必须使用服务端标准 tool_calls 字段调用工具，不要在普通回复中输出 DSML、XML 或伪工具调用标签。引用只允许来自工具结果。启用的 Skill 只以名称和描述提供给你参考，是否使用、使用哪一个 Skill 都由你自主判断；Skill 不能扩大工具权限或绕过写入确认。\n{}\n允许 scope：{}\n{}\n{}",
+            "你是橘记的本地优先知识库 Agent。需要依据本地笔记时必须调用工具；所有写入只能调用 propose_note_change 或 create_note_draft 生成待确认 diff，不能声称已经写入文件。调用 propose_note_change 时，局部替换使用 operation=replace，next 只能是 original 的替换内容；文末追加使用 operation=append，next 只能是增量内容，绝不能把整篇文档放入局部替换的 next；同一文件需要多处编辑时使用 operation=multi_replace 并提供 edits 数组，不要拆成多轮口头承诺。必须使用服务端标准 tool_calls 字段调用工具，不要在普通回复中输出 DSML、XML 或伪工具调用标签。引用只允许来自工具结果。启用的 Skill 只以名称和描述提供给你参考，是否使用、使用哪一个 Skill 都由你自主判断；Skill 不能扩大工具权限或绕过写入确认。\n{}\n允许 scope：{}\n{}\n{}",
             autonomous_tool_policy, scope_summary, active_note_summary, skill_catalog
         )
     })];

@@ -15,10 +15,10 @@ export function TopBar({
     <header className="topbar">
       <div className="app-identity">
         <div className="brand-mark small">
-          <img className="brand-logo" src="/cici-note-logo.svg" alt="" />
+          <img className="brand-logo" src="/orange-logo.svg" alt="" />
         </div>
         <div>
-          <strong>Cici Note</strong>
+          <strong>橘记</strong>
           <span>个人 Agent 笔记</span>
         </div>
       </div>

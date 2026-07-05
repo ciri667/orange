@@ -1,16 +1,16 @@
 [package]
-name = "cici-note"
+name = "orange"
 version = "0.1.0"
 description = "Local-first knowledge base agent assistant"
-authors = ["Cici Note"]
+authors = ["橘记"]
 edition = "2021"
 
 [lib]
-name = "cici_note_lib"
+name = "orange_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
 
 [[bin]]
-name = "cici-note"
+name = "orange"
 path = "src/main.rs"
 
 [build-dependencies]
