@@ -1,9 +1,10 @@
 use crate::domain::{
     AgentSession, AppEventLog, DocumentPreview, DocumentPreviewBlock, FeishuCredentialStatus,
-    FeishuIntegrationSettings, FolderEntry, ImIntegrationSettings, KnowledgeBase,
-    KnowledgeBaseSelection, LlmProviderConfig, ModelApiKeyStatus, ModelConfig, Note,
-    NoteImageAttachmentInput, RequestAuditLog, SavedNoteImageAttachment, ScanReport, UserSettings,
-    WorkspaceDocument, WorkspaceSnapshot,
+    FeishuIntegrationSettings, FolderEntry, ImIntegrationSettings, ImProviderConfig,
+    ImProviderCredentialStatus, ImProviderSettings, KnowledgeBase, KnowledgeBaseSelection,
+    LlmProviderConfig, ModelApiKeyStatus, ModelConfig, Note, NoteImageAttachmentInput,
+    RequestAuditLog, SavedNoteImageAttachment, ScanReport, UserSettings, WorkspaceDocument,
+    WorkspaceSnapshot, IM_PROVIDER_FEISHU,
 };
 use crate::model_provider;
 use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
@@ -12,6 +13,8 @@ use chrono::{Duration as ChronoDuration, Local, NaiveDateTime, TimeZone};
 use quick_xml::events::Event;
 use quick_xml::Reader;
 use rusqlite::{params, Connection, TransactionBehavior};
+use serde::Deserialize;
+use serde_json::Value;
 use sha2::{Digest, Sha256};
 use std::collections::{HashMap, HashSet};
 use std::fs;
@@ -442,20 +445,25 @@ pub fn default_user_settings() -> UserSettings {
 /** 返回即时通讯默认配置；默认不启用，必须由用户显式填写凭证和白名单。 */
 pub fn default_im_settings() -> ImIntegrationSettings {
     ImIntegrationSettings {
-        feishu: FeishuIntegrationSettings {
-            enabled: false,
-            domain: "feishu".to_owned(),
-            app_id: String::new(),
-            secret_key_reference: FEISHU_SECRET_KEY_REFERENCE.to_owned(),
-            default_knowledge_base_ids: Vec::new(),
-            allowed_user_open_ids: Vec::new(),
-            allowed_chat_ids: Vec::new(),
-            discovered_user_open_ids: Vec::new(),
-            discovered_chat_ids: Vec::new(),
-            require_mention: true,
-            updated_at: format_local_datetime(),
-        },
+        providers: vec![default_feishu_provider_settings()],
     }
+}
+
+/** 构造飞书 provider 默认配置；后续新增 provider 时保留同样的隔离构造函数。 */
+fn default_feishu_provider_settings() -> ImProviderSettings {
+    ImProviderSettings::from_feishu(FeishuIntegrationSettings {
+        enabled: false,
+        domain: "feishu".to_owned(),
+        app_id: String::new(),
+        secret_key_reference: FEISHU_SECRET_KEY_REFERENCE.to_owned(),
+        default_knowledge_base_ids: Vec::new(),
+        allowed_user_open_ids: Vec::new(),
+        allowed_chat_ids: Vec::new(),
+        discovered_user_open_ids: Vec::new(),
+        discovered_chat_ids: Vec::new(),
+        require_mention: true,
+        updated_at: format_local_datetime(),
+    })
 }
 
 /** 根据知识库和相对路径生成稳定笔记 ID，避免重新扫描后会话引用全部失效。 */
@@ -1355,6 +1363,13 @@ pub fn save_user_settings(
     Ok(normalized_settings)
 }
 
+/** 旧版 IM 设置结构；只用于读取历史 `{ feishu: ... }` JSON 并迁移到 providers。 */
+#[derive(Clone, Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct LegacyImIntegrationSettings {
+    feishu: FeishuIntegrationSettings,
+}
+
 /** 从 SQLite 读取即时通讯设置，缺失时返回禁用状态的安全默认值。 */
 pub fn load_im_settings(app: &AppHandle) -> Result<ImIntegrationSettings, String> {
     let connection = open_database(app)?;
@@ -1368,14 +1383,35 @@ pub fn load_im_settings(app: &AppHandle) -> Result<ImIntegrationSettings, String
 
     match payload_json {
         Some(payload_json) => {
-            let mut settings: ImIntegrationSettings = serde_json::from_str(&payload_json)
-                .map_err(|error| format!("无法解析即时通讯设置：{error}"))?;
+            let mut settings = parse_im_settings_payload(&payload_json)?;
 
             normalize_im_settings(&mut settings);
             Ok(settings)
         }
         None => Ok(default_im_settings()),
     }
+}
+
+/** 解析 IM 设置 JSON；优先读取新 provider 结构，旧飞书结构走兼容迁移。 */
+fn parse_im_settings_payload(payload_json: &str) -> Result<ImIntegrationSettings, String> {
+    let value: Value = serde_json::from_str(payload_json)
+        .map_err(|error| format!("无法解析即时通讯设置：{error}"))?;
+
+    if value.get("providers").is_some() {
+        return serde_json::from_value(value)
+            .map_err(|error| format!("无法解析即时通讯 provider 设置：{error}"));
+    }
+
+    if value.get("feishu").is_some() {
+        let legacy_settings: LegacyImIntegrationSettings = serde_json::from_value(value)
+            .map_err(|error| format!("无法迁移旧版飞书设置：{error}"))?;
+
+        return Ok(ImIntegrationSettings {
+            providers: vec![ImProviderSettings::from_feishu(legacy_settings.feishu)],
+        });
+    }
+
+    Ok(default_im_settings())
 }
 
 /** 保存即时通讯设置；appSecret 不在这个 payload 中，保存前统一归一化白名单和 key 引用。 */
@@ -1402,6 +1438,19 @@ pub fn save_im_settings(
     Ok(normalized_settings)
 }
 
+/** 读取飞书 provider 的扁平运行时设置；不存在时返回可操作错误。 */
+pub fn load_feishu_integration_settings(
+    app: &AppHandle,
+) -> Result<FeishuIntegrationSettings, String> {
+    let settings = load_im_settings(app)?;
+
+    settings
+        .providers
+        .iter()
+        .find_map(ImProviderSettings::to_feishu_settings)
+        .ok_or_else(|| "未找到飞书 IM provider 配置。".to_owned())
+}
+
 /** 记录飞书消息中发现的用户和群，供设置页一键加入白名单；不写日志、不暴露原始 ID。 */
 pub fn remember_feishu_discovered_peer(
     app: &AppHandle,
@@ -1413,17 +1462,19 @@ pub fn remember_feishu_discovered_peer(
     let sender_open_id = sender_open_id.trim();
     let chat_id = chat_id.trim();
     let mut changed = false;
+    let provider = feishu_provider_mut(&mut settings)?;
 
     if !sender_open_id.is_empty()
-        && !settings.feishu.allowed_user_open_ids.iter().any(|id| id == sender_open_id)
-        && !settings
-            .feishu
+        && !provider
+            .allowed_user_open_ids
+            .iter()
+            .any(|id| id == sender_open_id)
+        && !provider
             .discovered_user_open_ids
             .iter()
             .any(|id| id == sender_open_id)
     {
-        settings
-            .feishu
+        provider
             .discovered_user_open_ids
             .push(sender_open_id.to_owned());
         changed = true;
@@ -1431,14 +1482,10 @@ pub fn remember_feishu_discovered_peer(
 
     if is_group_chat
         && !chat_id.is_empty()
-        && !settings.feishu.allowed_chat_ids.iter().any(|id| id == chat_id)
-        && !settings
-            .feishu
-            .discovered_chat_ids
-            .iter()
-            .any(|id| id == chat_id)
+        && !provider.allowed_chat_ids.iter().any(|id| id == chat_id)
+        && !provider.discovered_chat_ids.iter().any(|id| id == chat_id)
     {
-        settings.feishu.discovered_chat_ids.push(chat_id.to_owned());
+        provider.discovered_chat_ids.push(chat_id.to_owned());
         changed = true;
     }
 
@@ -1449,33 +1496,133 @@ pub fn remember_feishu_discovered_peer(
     }
 }
 
-/** 归一化飞书设置，避免空白 ID、重复白名单或错误 key 引用进入持久化配置。 */
+/** 获取可变飞书 provider；调用方只在飞书平台事件中使用。 */
+fn feishu_provider_mut(
+    settings: &mut ImIntegrationSettings,
+) -> Result<&mut ImProviderSettings, String> {
+    settings
+        .providers
+        .iter_mut()
+        .find(|provider| provider.provider_id == IM_PROVIDER_FEISHU)
+        .ok_or_else(|| "未找到飞书 IM provider 配置。".to_owned())
+}
+
+/** 归一化 IM provider 设置，避免空白 ID、重复 provider、重复白名单或错误 key 引用进入持久化配置。 */
 fn normalize_im_settings(settings: &mut ImIntegrationSettings) {
-    settings.feishu.domain = match settings.feishu.domain.trim().to_ascii_lowercase().as_str() {
-        "lark" => "lark".to_owned(),
-        _ => "feishu".to_owned(),
-    };
-    settings.feishu.app_id = settings.feishu.app_id.trim().to_owned();
-    settings.feishu.secret_key_reference = FEISHU_SECRET_KEY_REFERENCE.to_owned();
-    settings.feishu.default_knowledge_base_ids =
-        normalize_identifier_list(&settings.feishu.default_knowledge_base_ids);
-    settings.feishu.allowed_user_open_ids =
-        normalize_identifier_list(&settings.feishu.allowed_user_open_ids);
-    settings.feishu.allowed_chat_ids = normalize_identifier_list(&settings.feishu.allowed_chat_ids);
-    settings.feishu.discovered_user_open_ids =
-        normalize_identifier_list(&settings.feishu.discovered_user_open_ids)
+    if !settings
+        .providers
+        .iter()
+        .any(|provider| provider.provider_id == IM_PROVIDER_FEISHU)
+    {
+        settings.providers.push(default_feishu_provider_settings());
+    }
+
+    for provider in &mut settings.providers {
+        provider.provider_id = provider.provider_id.trim().to_ascii_lowercase();
+        provider.default_knowledge_base_ids =
+            normalize_identifier_list(&provider.default_knowledge_base_ids);
+        provider.allowed_user_open_ids = normalize_identifier_list(&provider.allowed_user_open_ids);
+        provider.allowed_chat_ids = normalize_identifier_list(&provider.allowed_chat_ids);
+        provider.discovered_user_open_ids =
+            normalize_identifier_list(&provider.discovered_user_open_ids)
+                .into_iter()
+                .filter(|id| !provider.allowed_user_open_ids.contains(id))
+                .collect();
+        provider.discovered_chat_ids = normalize_identifier_list(&provider.discovered_chat_ids)
             .into_iter()
-            .filter(|id| !settings.feishu.allowed_user_open_ids.contains(id))
-            .collect();
-    settings.feishu.discovered_chat_ids =
-        normalize_identifier_list(&settings.feishu.discovered_chat_ids)
-            .into_iter()
-            .filter(|id| !settings.feishu.allowed_chat_ids.contains(id))
+            .filter(|id| !provider.allowed_chat_ids.contains(id))
             .collect();
 
-    if settings.feishu.updated_at.trim().is_empty() || settings.feishu.updated_at == "刚刚" {
-        settings.feishu.updated_at = format_local_datetime();
+        if provider.updated_at.trim().is_empty() || provider.updated_at == "刚刚" {
+            provider.updated_at = format_local_datetime();
+        }
+
+        match &mut provider.config {
+            ImProviderConfig::Feishu(config) => {
+                provider.provider_id = IM_PROVIDER_FEISHU.to_owned();
+                config.domain = match config.domain.trim().to_ascii_lowercase().as_str() {
+                    "lark" => "lark".to_owned(),
+                    _ => "feishu".to_owned(),
+                };
+                config.app_id = config.app_id.trim().to_owned();
+                config.secret_key_reference = FEISHU_SECRET_KEY_REFERENCE.to_owned();
+            }
+        }
     }
+
+    merge_duplicate_im_providers(&mut settings.providers);
+}
+
+/** 合并重复 IM provider；保留已启用、已填写字段和白名单，避免运行态误读到默认禁用副本。 */
+fn merge_duplicate_im_providers(providers: &mut Vec<ImProviderSettings>) {
+    let mut merged: Vec<ImProviderSettings> = Vec::new();
+
+    for provider in providers.drain(..) {
+        if let Some(existing) = merged
+            .iter_mut()
+            .find(|candidate| candidate.provider_id == provider.provider_id)
+        {
+            merge_im_provider_settings(existing, provider);
+        } else {
+            merged.push(provider);
+        }
+    }
+
+    *providers = merged;
+}
+
+/** 把同一 providerId 的两个配置合并为一个，布尔开关和列表采用“更完整”的值。 */
+fn merge_im_provider_settings(target: &mut ImProviderSettings, source: ImProviderSettings) {
+    target.enabled = target.enabled || source.enabled;
+    target.require_mention = target.require_mention && source.require_mention;
+    target.default_knowledge_base_ids = merge_identifier_lists(
+        &target.default_knowledge_base_ids,
+        source.default_knowledge_base_ids,
+    );
+    target.allowed_user_open_ids =
+        merge_identifier_lists(&target.allowed_user_open_ids, source.allowed_user_open_ids);
+    target.allowed_chat_ids =
+        merge_identifier_lists(&target.allowed_chat_ids, source.allowed_chat_ids);
+    target.discovered_user_open_ids = merge_identifier_lists(
+        &target.discovered_user_open_ids,
+        source.discovered_user_open_ids,
+    )
+    .into_iter()
+    .filter(|id| !target.allowed_user_open_ids.contains(id))
+    .collect();
+    target.discovered_chat_ids =
+        merge_identifier_lists(&target.discovered_chat_ids, source.discovered_chat_ids)
+            .into_iter()
+            .filter(|id| !target.allowed_chat_ids.contains(id))
+            .collect();
+
+    if !source.updated_at.trim().is_empty() && source.updated_at != "刚刚" {
+        target.updated_at = source.updated_at;
+    }
+
+    match (&mut target.config, source.config) {
+        (ImProviderConfig::Feishu(target_config), ImProviderConfig::Feishu(source_config)) => {
+            let source_has_runtime_config = !source_config.app_id.trim().is_empty();
+            let target_missing_runtime_config = target_config.app_id.trim().is_empty();
+
+            // 飞书/Lark 只保留非空 appId 和规范 key 引用；默认禁用副本不能覆盖用户已填写的平台。
+            if source_has_runtime_config || target_missing_runtime_config {
+                target_config.domain = source_config.domain;
+            }
+            if source_has_runtime_config {
+                target_config.app_id = source_config.app_id;
+            }
+            target_config.secret_key_reference = FEISHU_SECRET_KEY_REFERENCE.to_owned();
+        }
+    }
+}
+
+/** 合并两个 ID 列表并统一 trim、去空、去重，不把原始 ID 写入日志。 */
+fn merge_identifier_lists(current: &[String], next: Vec<String>) -> Vec<String> {
+    let mut values = current.to_vec();
+
+    values.extend(next);
+    normalize_identifier_list(&values)
 }
 
 /** 对配置中的 ID 列表做 trim、去空和去重；不记录原始值，避免日志间接暴露用户/群 ID。 */
@@ -1592,12 +1739,46 @@ fn read_keyring_password(service: &str, account: &str) -> Result<Option<String>,
 }
 
 /** 把迁移过来的明文密钥写入规范的 keyring service 与 account，错误信息不回显明文内容。 */
-fn persist_migrated_keyring_password(normalized_key_reference: &str, api_key: &str) -> Result<(), String> {
+fn persist_migrated_keyring_password(
+    normalized_key_reference: &str,
+    api_key: &str,
+) -> Result<(), String> {
     let entry = keyring::Entry::new("Orange", normalized_key_reference)
         .map_err(|error| format!("无法打开系统安全存储：{error}"))?;
     entry
         .set_password(api_key)
         .map_err(|error| format!("品牌升级迁移写入密钥失败：{error}"))
+}
+
+/** 把 IM provider 密钥保存到系统安全存储；错误信息不回显 secret 内容。 */
+pub fn save_im_provider_secret(
+    provider_id: &str,
+    secret: &str,
+) -> Result<ImProviderCredentialStatus, String> {
+    match provider_id {
+        IM_PROVIDER_FEISHU => save_feishu_app_secret(secret),
+        _ => Err(format!("暂不支持保存 IM provider {provider_id} 的密钥。")),
+    }
+}
+
+/** 查询 IM provider 密钥状态；设置页只展示状态，不拿到明文。 */
+pub fn load_im_provider_credential_status(
+    provider_id: &str,
+) -> Result<ImProviderCredentialStatus, String> {
+    match provider_id {
+        IM_PROVIDER_FEISHU => load_feishu_credential_status(),
+        _ => Err(format!(
+            "暂不支持读取 IM provider {provider_id} 的凭证状态。"
+        )),
+    }
+}
+
+/** 读取 IM provider 明文密钥；仅供网关和发送 API 在后台流程中使用。 */
+pub fn load_im_provider_secret(provider_id: &str) -> Result<Option<String>, String> {
+    match provider_id {
+        IM_PROVIDER_FEISHU => load_feishu_app_secret(),
+        _ => Err(format!("暂不支持读取 IM provider {provider_id} 的密钥。")),
+    }
 }
 
 /** 把飞书 appSecret 保存到系统安全存储；错误信息不回显 secret 内容。 */
@@ -1626,6 +1807,7 @@ pub fn save_feishu_app_secret(app_secret: &str) -> Result<FeishuCredentialStatus
     store_model_api_key_in_cache(FEISHU_SECRET_KEY_REFERENCE, &saved_secret)?;
 
     Ok(FeishuCredentialStatus {
+        provider_id: IM_PROVIDER_FEISHU.to_owned(),
         key_reference: FEISHU_SECRET_KEY_REFERENCE.to_owned(),
         configured: true,
         message: "飞书 appSecret 已保存到系统安全存储。".to_owned(),
@@ -1647,6 +1829,7 @@ pub fn load_feishu_credential_status() -> Result<FeishuCredentialStatus, String>
     };
 
     Ok(FeishuCredentialStatus {
+        provider_id: IM_PROVIDER_FEISHU.to_owned(),
         key_reference: FEISHU_SECRET_KEY_REFERENCE.to_owned(),
         configured,
         message: message.to_owned(),
@@ -3656,18 +3839,19 @@ mod tests {
         format_local_datetime, format_local_datetime_from_millis, hash_bytes, hash_content,
         insert_app_event_log, is_missing_keyring_entry_error, load_document_preview,
         load_model_api_key_from_cache, model_keyring_persists_until_delete,
-        normalize_audit_log_created_at, normalize_session_created_at, prune_app_event_logs,
-        query_app_event_logs, rename_markdown_file, rename_text_document_file,
-        resolve_existing_file_inside_root, resolve_inside_root, save_note_image_attachments,
-        scan_markdown_directory, scan_supported_documents_directory,
-        sort_sessions_by_created_at_desc, store_model_api_key_in_cache, trash_markdown_file,
-        trash_text_document_file_with, validate_folder_name, validate_markdown_file_name,
-        validate_new_markdown_file_name, validate_new_text_document_file_name,
-        validate_text_document_file_name, BASE64_STANDARD,
+        normalize_audit_log_created_at, normalize_im_settings, normalize_session_created_at,
+        parse_im_settings_payload, prune_app_event_logs, query_app_event_logs,
+        rename_markdown_file, rename_text_document_file, resolve_existing_file_inside_root,
+        resolve_inside_root, save_note_image_attachments, scan_markdown_directory,
+        scan_supported_documents_directory, sort_sessions_by_created_at_desc,
+        store_model_api_key_in_cache, trash_markdown_file, trash_text_document_file_with,
+        validate_folder_name, validate_markdown_file_name, validate_new_markdown_file_name,
+        validate_new_text_document_file_name, validate_text_document_file_name, BASE64_STANDARD,
     };
     use crate::domain::{
-        AgentSession, AppEventLog, KnowledgeBaseSelection, NoteImageAttachmentInput,
-        RequestAuditLog, WorkspaceDocument,
+        AgentSession, AppEventLog, FeishuIntegrationSettings, ImIntegrationSettings,
+        ImProviderSettings, KnowledgeBaseSelection, NoteImageAttachmentInput, RequestAuditLog,
+        WorkspaceDocument, IM_PROVIDER_FEISHU,
     };
     use base64::Engine as _;
     use rusqlite::Connection;
@@ -3694,6 +3878,125 @@ mod tests {
             deleted_at: None,
             model_provider_id: None,
         }
+    }
+
+    /** 旧版 `{ feishu: ... }` IM 设置必须迁移为 providers，避免升级后丢失飞书配置。 */
+    #[test]
+    fn legacy_im_settings_payload_migrates_to_provider_shape() {
+        let payload = r#"{
+            "feishu": {
+                "enabled": true,
+                "domain": "lark",
+                "appId": " cli_x ",
+                "secretKeyReference": "legacy-secret",
+                "defaultKnowledgeBaseIds": ["kb-a"],
+                "allowedUserOpenIds": ["ou_user"],
+                "allowedChatIds": ["oc_group"],
+                "discoveredUserOpenIds": [],
+                "discoveredChatIds": [],
+                "requireMention": true,
+                "updatedAt": "2026-07-06 10:00"
+            }
+        }"#;
+        let mut settings = parse_im_settings_payload(payload).unwrap();
+
+        normalize_im_settings(&mut settings);
+
+        assert_eq!(settings.providers.len(), 1);
+        let feishu = settings.providers[0].to_feishu_settings().unwrap();
+
+        assert_eq!(settings.providers[0].provider_id, IM_PROVIDER_FEISHU);
+        assert!(feishu.enabled);
+        assert_eq!(feishu.domain, "lark");
+        assert_eq!(feishu.app_id, "cli_x");
+        assert_eq!(
+            feishu.secret_key_reference,
+            super::FEISHU_SECRET_KEY_REFERENCE
+        );
+    }
+
+    /** provider 归一化必须去重白名单并从 discovered 中移除已授权对象。 */
+    #[test]
+    fn im_provider_normalization_deduplicates_and_filters_discovered_peers() {
+        let mut settings = super::default_im_settings();
+        let provider = settings
+            .providers
+            .iter_mut()
+            .find(|provider| provider.provider_id == IM_PROVIDER_FEISHU)
+            .unwrap();
+
+        provider.default_knowledge_base_ids = vec![" kb-a ".to_owned(), "kb-a".to_owned()];
+        provider.allowed_user_open_ids = vec![" ou_user ".to_owned(), "ou_user".to_owned()];
+        provider.allowed_chat_ids = vec![" oc_group ".to_owned(), "oc_group".to_owned()];
+        provider.discovered_user_open_ids = vec!["ou_user".to_owned(), "ou_other".to_owned()];
+        provider.discovered_chat_ids = vec!["oc_group".to_owned(), "oc_other".to_owned()];
+
+        normalize_im_settings(&mut settings);
+        let provider = settings
+            .providers
+            .iter()
+            .find(|provider| provider.provider_id == IM_PROVIDER_FEISHU)
+            .unwrap();
+
+        assert_eq!(provider.default_knowledge_base_ids, vec!["kb-a".to_owned()]);
+        assert_eq!(provider.allowed_user_open_ids, vec!["ou_user".to_owned()]);
+        assert_eq!(provider.allowed_chat_ids, vec!["oc_group".to_owned()]);
+        assert_eq!(
+            provider.discovered_user_open_ids,
+            vec!["ou_other".to_owned()]
+        );
+        assert_eq!(provider.discovered_chat_ids, vec!["oc_other".to_owned()]);
+    }
+
+    /** 重复 provider 必须合并成一个已启用配置，避免运行态读取到默认禁用副本。 */
+    #[test]
+    fn im_provider_normalization_merges_duplicate_feishu_providers() {
+        let mut settings = ImIntegrationSettings {
+            providers: vec![
+                ImProviderSettings::from_feishu(FeishuIntegrationSettings {
+                    enabled: false,
+                    domain: "feishu".to_owned(),
+                    app_id: String::new(),
+                    secret_key_reference: "legacy-secret".to_owned(),
+                    default_knowledge_base_ids: Vec::new(),
+                    allowed_user_open_ids: Vec::new(),
+                    allowed_chat_ids: Vec::new(),
+                    discovered_user_open_ids: Vec::new(),
+                    discovered_chat_ids: Vec::new(),
+                    require_mention: true,
+                    updated_at: "刚刚".to_owned(),
+                }),
+                ImProviderSettings::from_feishu(FeishuIntegrationSettings {
+                    enabled: true,
+                    domain: "lark".to_owned(),
+                    app_id: "cli_x".to_owned(),
+                    secret_key_reference: "legacy-secret".to_owned(),
+                    default_knowledge_base_ids: vec!["kb-a".to_owned()],
+                    allowed_user_open_ids: vec!["ou_user".to_owned()],
+                    allowed_chat_ids: vec!["oc_group".to_owned()],
+                    discovered_user_open_ids: vec!["ou_candidate".to_owned()],
+                    discovered_chat_ids: vec!["oc_candidate".to_owned()],
+                    require_mention: true,
+                    updated_at: "2026-07-06 11:00".to_owned(),
+                }),
+            ],
+        };
+
+        normalize_im_settings(&mut settings);
+
+        assert_eq!(settings.providers.len(), 1);
+        let feishu = settings.providers[0].to_feishu_settings().unwrap();
+        assert!(feishu.enabled);
+        assert_eq!(feishu.domain, "lark");
+        assert_eq!(feishu.app_id, "cli_x");
+        assert_eq!(feishu.default_knowledge_base_ids, vec!["kb-a".to_owned()]);
+        assert_eq!(feishu.allowed_user_open_ids, vec!["ou_user".to_owned()]);
+        assert_eq!(feishu.allowed_chat_ids, vec!["oc_group".to_owned()]);
+        assert_eq!(
+            feishu.discovered_user_open_ids,
+            vec!["ou_candidate".to_owned()]
+        );
+        assert_eq!(feishu.discovered_chat_ids, vec!["oc_candidate".to_owned()]);
     }
 
     /** 写入最小 DOCX zip fixture，只包含预览命令首版会解析的 word/document.xml。 */
