@@ -10,7 +10,8 @@
     "tauri": "tauri",
     "desktop:dev": "tauri dev",
     "desktop:build": "tauri build",
-    "sidecar:feishu:build": "node scripts/build-feishu-sidecar.mjs",
+    "sidecar:im:build": "node scripts/build-im-sidecars.mjs",
+    "sidecar:feishu:build": "npm run sidecar:im:build -- --provider feishu",
     "rust:test": "cargo test --manifest-path src-tauri/Cargo.toml"
   },
   "dependencies": {
