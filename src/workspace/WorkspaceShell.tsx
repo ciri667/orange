@@ -30,9 +30,9 @@ import {
   loadDocumentPreview,
   loadAppEventLogs,
   loadAgentSkills,
-  loadFeishuCredentialStatus,
-  loadFeishuGatewayStatus,
+  loadImGatewayStatus,
   loadImSettings,
+  loadImProviderCredentialStatus,
   installAgentSkill,
   loadLlmProviderTemplates,
   loadModelApiKeyStatuses,
@@ -50,7 +50,7 @@ import {
   runAgentTurn,
   saveAgentSkill,
   saveDocumentContent,
-  saveFeishuAppSecret,
+  saveImProviderSecret,
   saveImSettings,
   saveNoteContent,
   saveNoteImageAttachments,
@@ -58,8 +58,8 @@ import {
   saveSession,
   saveUserSettings,
   selectKnowledgeBaseDirectory,
-  startFeishuGateway,
-  stopFeishuGateway,
+  startImGateway,
+  stopImGateway,
   toggleAgentSkill,
   updateSessionScope,
 } from "../shared/tauriApi";
@@ -511,13 +511,25 @@ export function WorkspaceShell() {
 
           return [] as ProviderTemplate[];
         }),
-        loadFeishuCredentialStatus().catch((error) => {
-          logWarn("读取飞书凭证状态失败。", { category: "im", event: "feishu_credential_status_load", status: "failed", error });
+        loadImProviderCredentialStatus("feishu").catch((error) => {
+          logWarn("读取 IM provider 凭证状态失败。", {
+            category: "im",
+            event: "im_provider_credential_status_load",
+            status: "failed",
+            metadata: { providerId: "feishu" },
+            error,
+          });
 
           return null;
         }),
-        loadFeishuGatewayStatus().catch((error) => {
-          logWarn("读取飞书网关状态失败。", { category: "im", event: "feishu_gateway_status_load", status: "failed", error });
+        loadImGatewayStatus("feishu").catch((error) => {
+          logWarn("读取 IM 网关状态失败。", {
+            category: "im",
+            event: "im_gateway_status_load",
+            status: "failed",
+            metadata: { providerId: "feishu" },
+            error,
+          });
 
           return null;
         }),
@@ -2116,7 +2128,7 @@ export function WorkspaceShell() {
 
     try {
       setImSettings(await saveImSettings(nextSettings));
-      setFeishuGatewayStatus(await loadFeishuGatewayStatus().catch(() => feishuGatewayStatus));
+      setFeishuGatewayStatus(await loadImGatewayStatus("feishu").catch(() => feishuGatewayStatus));
       setNotice("已保存即时通讯设置。");
     } catch (error) {
       setNotice(error instanceof Error ? error.message : String(error));
@@ -2131,10 +2143,10 @@ export function WorkspaceShell() {
     beginBusy("正在保存飞书 appSecret...");
 
     try {
-      const status = await saveFeishuAppSecret(appSecret);
+      const status = await saveImProviderSecret("feishu", appSecret);
 
       setFeishuCredentialStatus(status);
-      setFeishuGatewayStatus(await loadFeishuGatewayStatus().catch(() => feishuGatewayStatus));
+      setFeishuGatewayStatus(await loadImGatewayStatus("feishu").catch(() => feishuGatewayStatus));
       setNotice("已保存飞书 appSecret。");
     } catch (error) {
       setNotice(error instanceof Error ? error.message : String(error));
@@ -2149,10 +2161,10 @@ export function WorkspaceShell() {
     beginBusy("正在启动飞书长连接...");
 
     try {
-      setFeishuGatewayStatus(await startFeishuGateway());
+      setFeishuGatewayStatus(await startImGateway("feishu"));
       setNotice("已启动飞书长连接网关。");
     } catch (error) {
-      setFeishuGatewayStatus(await loadFeishuGatewayStatus().catch(() => feishuGatewayStatus));
+      setFeishuGatewayStatus(await loadImGatewayStatus("feishu").catch(() => feishuGatewayStatus));
       setNotice(error instanceof Error ? error.message : String(error));
       throw error;
     } finally {
@@ -2165,7 +2177,7 @@ export function WorkspaceShell() {
     beginBusy("正在停止飞书长连接...");
 
     try {
-      setFeishuGatewayStatus(await stopFeishuGateway());
+      setFeishuGatewayStatus(await stopImGateway("feishu"));
       setNotice("已停止飞书长连接网关。");
     } catch (error) {
       setNotice(error instanceof Error ? error.message : String(error));
@@ -2180,8 +2192,8 @@ export function WorkspaceShell() {
 
     try {
       const [credentialStatus, gatewayStatus, nextImSettings] = await Promise.all([
-        loadFeishuCredentialStatus().catch(() => feishuCredentialStatus),
-        loadFeishuGatewayStatus().catch(() => feishuGatewayStatus),
+        loadImProviderCredentialStatus("feishu").catch(() => feishuCredentialStatus),
+        loadImGatewayStatus("feishu").catch(() => feishuGatewayStatus),
         loadImSettings().catch(() => imSettings),
       ]);
 

@@ -28,6 +28,7 @@ import type {
   AppEventLogLevel,
   InstallAgentSkillPayload,
   InstallAgentSkillResult,
+  FeishuIntegrationSettings,
   FeishuCredentialStatus,
   FeishuGatewayStatus,
   ImIntegrationSettings,
@@ -59,6 +60,51 @@ interface SettingsSectionNavItem {
 
 /** 左侧导航分组顺序，保证配置项始终排在诊断项之前。 */
 const SETTINGS_SECTION_GROUPS: SettingsSectionGroup[] = ["配置", "诊断"];
+
+/** 构造飞书 provider 默认草稿；用于兼容旧 mock 或缺失 provider 的异常状态。 */
+function createDefaultFeishuProvider(): FeishuIntegrationSettings {
+  return {
+    providerId: "feishu",
+    enabled: false,
+    defaultKnowledgeBaseIds: [],
+    allowedUserOpenIds: [],
+    allowedChatIds: [],
+    discoveredUserOpenIds: [],
+    discoveredChatIds: [],
+    requireMention: true,
+    updatedAt: "刚刚",
+    config: {
+      type: "feishu",
+      domain: "feishu",
+      appId: "",
+      secretKeyReference: "orange-feishu-app-secret",
+    },
+  };
+}
+
+/** 从 IM 设置中读取飞书 provider；首版 UI 只渲染该 provider。 */
+function getFeishuProvider(settings: ImIntegrationSettings): FeishuIntegrationSettings {
+  const provider = settings.providers.find((candidate) => candidate.providerId === "feishu");
+
+  return provider ? (provider as FeishuIntegrationSettings) : createDefaultFeishuProvider();
+}
+
+/** 更新飞书 provider，并保证 providers 数组中只替换对应项，不影响未来其它 IM provider。 */
+function updateFeishuProvider(
+  settings: ImIntegrationSettings,
+  updater: (provider: FeishuIntegrationSettings) => FeishuIntegrationSettings,
+): ImIntegrationSettings {
+  const currentProvider = getFeishuProvider(settings);
+  const nextProvider = updater(currentProvider);
+  const hasFeishuProvider = settings.providers.some((provider) => provider.providerId === "feishu");
+
+  return {
+    ...settings,
+    providers: hasFeishuProvider
+      ? settings.providers.map((provider) => (provider.providerId === "feishu" ? nextProvider : provider))
+      : [...settings.providers, nextProvider],
+  };
+}
 
 /** 设置抽屉，展示多知识库、模型策略、Skills 和诊断信息。 */
 export function SettingsDrawer({
@@ -156,11 +202,13 @@ export function SettingsDrawer({
   const enabledSkillCount = skills.filter((skill) => skill.enabled).length;
   /** 自定义 skill 数量用于确认用户目录扫描是否已生效。 */
   const customSkillCount = skills.filter((skill) => skill.source === "custom").length;
+  /** 当前可配置的飞书 provider 草稿；后续多 IM provider 可在此扩展为 tabs/list。 */
+  const feishuProviderDraft = getFeishuProvider(imSettingsDraft);
   /** 设置工作台顶部摘要只展示计数和状态，避免路径、密钥和请求内容外露。 */
   const settingsSummary = {
     knowledgeBaseCount: knowledgeBases.length,
     providerCount: settingsDraft.modelConfig.providers.length,
-    feishuStatus: feishuGatewayStatus?.running ? "运行中" : imSettingsDraft.feishu.enabled ? "已配置" : "未启用",
+    feishuStatus: feishuGatewayStatus?.running ? "运行中" : feishuProviderDraft.enabled ? "已配置" : "未启用",
     enabledSkillCount,
     errorLogCount: appEventLogs.filter((log) => log.level === "error").length,
   };
@@ -192,7 +240,7 @@ export function SettingsDrawer({
         description: "飞书/Lark 长连接和白名单",
         meta: settingsSummary.feishuStatus,
         icon: MessageCircle,
-        tone: feishuGatewayStatus?.running ? "success" : imSettingsDraft.feishu.enabled ? "warning" : "neutral",
+        tone: feishuGatewayStatus?.running ? "success" : feishuProviderDraft.enabled ? "warning" : "neutral",
       },
       {
         id: "skills",
@@ -227,7 +275,7 @@ export function SettingsDrawer({
       auditLogs.length,
       enabledSkillCount,
       feishuGatewayStatus?.running,
-      imSettingsDraft.feishu.enabled,
+      feishuProviderDraft.enabled,
       settingsSummary.feishuStatus,
       knowledgeBases,
       settingsDraft.modelConfig.enabled,
@@ -249,7 +297,7 @@ export function SettingsDrawer({
     if (
       hasSeededDefaultImKnowledgeBaseRef.current ||
       !fallbackKnowledgeBaseId ||
-      imSettingsDraft.feishu.defaultKnowledgeBaseIds.length > 0
+      feishuProviderDraft.defaultKnowledgeBaseIds.length > 0
     ) {
       return;
     }
@@ -258,13 +306,12 @@ export function SettingsDrawer({
 
     // 默认范围只写入设置页草稿；仍由用户保存或启动时显式持久化，避免打开设置页就改配置。
     setImSettingsDraft((currentSettings) => ({
-      ...currentSettings,
-      feishu: {
-        ...currentSettings.feishu,
+      ...updateFeishuProvider(currentSettings, (provider) => ({
+        ...provider,
         defaultKnowledgeBaseIds: [fallbackKnowledgeBaseId],
-      },
+      })),
     }));
-  }, [activeKnowledgeBaseId, imSettingsDraft.feishu.defaultKnowledgeBaseIds.length, knowledgeBases]);
+  }, [activeKnowledgeBaseId, feishuProviderDraft.defaultKnowledgeBaseIds.length, knowledgeBases]);
 
   useEffect(() => {
     if (providerTemplates.length && !providerTemplates.some((template) => template.templateId === selectedTemplateId)) {
@@ -314,44 +361,51 @@ export function SettingsDrawer({
   }
 
   /** 生成可持久化的即时通讯设置，统一裁剪空白和去重，避免保存/启动路径出现不一致。 */
-  function buildNormalizedImSettings(): ImIntegrationSettings {
-    const allowedUserOpenIds = uniqueTrimmedList(imSettingsDraft.feishu.allowedUserOpenIds);
-    const allowedChatIds = uniqueTrimmedList(imSettingsDraft.feishu.allowedChatIds);
+  function buildNormalizedImSettings(settingsDraftForSave: ImIntegrationSettings = imSettingsDraft): ImIntegrationSettings {
+    const feishu = getFeishuProvider(settingsDraftForSave);
+    const allowedUserOpenIds = uniqueTrimmedList(feishu.allowedUserOpenIds);
+    const allowedChatIds = uniqueTrimmedList(feishu.allowedChatIds);
 
-    return {
-      ...imSettingsDraft,
-      feishu: {
-        ...imSettingsDraft.feishu,
-        appId: imSettingsDraft.feishu.appId.trim(),
-        defaultKnowledgeBaseIds: uniqueTrimmedList(imSettingsDraft.feishu.defaultKnowledgeBaseIds),
-        allowedUserOpenIds,
-        allowedChatIds,
-        discoveredUserOpenIds: uniqueTrimmedList(imSettingsDraft.feishu.discoveredUserOpenIds).filter(
-          (openId) => !allowedUserOpenIds.includes(openId),
-        ),
-        discoveredChatIds: uniqueTrimmedList(imSettingsDraft.feishu.discoveredChatIds).filter(
-          (chatId) => !allowedChatIds.includes(chatId),
-        ),
-        updatedAt: formatLocalDateTime(),
+    return updateFeishuProvider(settingsDraftForSave, (provider) => ({
+      ...provider,
+      config: {
+        ...provider.config,
+        appId: provider.config.appId.trim(),
       },
-    };
+      defaultKnowledgeBaseIds: uniqueTrimmedList(provider.defaultKnowledgeBaseIds),
+      allowedUserOpenIds,
+      allowedChatIds,
+      discoveredUserOpenIds: uniqueTrimmedList(provider.discoveredUserOpenIds).filter((openId) => !allowedUserOpenIds.includes(openId)),
+      discoveredChatIds: uniqueTrimmedList(provider.discoveredChatIds).filter((chatId) => !allowedChatIds.includes(chatId)),
+      updatedAt: formatLocalDateTime(),
+    }));
   }
 
   /** 保存即时通讯设置；日志只记录计数和状态，不记录 open_id/chat_id 原文。 */
-  async function handleSaveImSettings() {
+  async function handleSaveImSettings(options: { enableFeishuBeforeSave?: boolean } = {}) {
     const startedAt = performance.now();
-    const nextSettings = buildNormalizedImSettings();
+    const draftForSave = options.enableFeishuBeforeSave
+      ? updateFeishuProvider(imSettingsDraft, (provider) => ({
+          ...provider,
+          // 启动网关代表用户要让该 provider 接收消息；先落库 enabled，避免 sidecar 收到消息后被运行态拦截。
+          enabled: true,
+          updatedAt: formatLocalDateTime(),
+        }))
+      : imSettingsDraft;
+    const nextSettings = buildNormalizedImSettings(draftForSave);
+    const feishu = getFeishuProvider(nextSettings);
 
     logInfo("设置页保存即时通讯设置。", {
       category: "im",
       event: "im_settings_save",
       status: "started",
       metadata: {
-        feishuEnabled: nextSettings.feishu.enabled,
-        domain: nextSettings.feishu.domain,
-        knowledgeBaseCount: nextSettings.feishu.defaultKnowledgeBaseIds.length,
-        allowedUserCount: nextSettings.feishu.allowedUserOpenIds.length,
-        allowedChatCount: nextSettings.feishu.allowedChatIds.length,
+        providerId: "feishu",
+        feishuEnabled: feishu.enabled,
+        domain: feishu.config.domain,
+        knowledgeBaseCount: feishu.defaultKnowledgeBaseIds.length,
+        allowedUserCount: feishu.allowedUserOpenIds.length,
+        allowedChatCount: feishu.allowedChatIds.length,
       },
     });
 
@@ -381,20 +435,22 @@ export function SettingsDrawer({
     const startedAt = performance.now();
 
     try {
-      await handleSaveImSettings();
+      await handleSaveImSettings({ enableFeishuBeforeSave: true });
       await onStartFeishuGateway();
       logInfo("设置页启动飞书网关完成。", {
         category: "im",
-        event: "feishu_gateway_start_from_settings",
+        event: "im_gateway_start_from_settings",
         status: "completed",
         durationMs: performance.now() - startedAt,
+        metadata: { providerId: "feishu" },
       });
     } catch (error) {
       logError("设置页启动飞书网关失败。", {
         category: "im",
-        event: "feishu_gateway_start_from_settings",
+        event: "im_gateway_start_from_settings",
         status: "failed",
         durationMs: performance.now() - startedAt,
+        metadata: { providerId: "feishu" },
         error,
       });
     }
@@ -417,16 +473,31 @@ export function SettingsDrawer({
   }
 
   /** 更新飞书设置草稿中的单个字段。 */
-  function updateFeishuDraft<K extends keyof ImIntegrationSettings["feishu"]>(
+  function updateFeishuDraft<K extends keyof FeishuIntegrationSettings>(
     field: K,
-    value: ImIntegrationSettings["feishu"][K],
+    value: FeishuIntegrationSettings[K],
   ) {
     setImSettingsDraft((currentSettings) => ({
-      ...currentSettings,
-      feishu: {
-        ...currentSettings.feishu,
+      ...updateFeishuProvider(currentSettings, (provider) => ({
+        ...provider,
         [field]: value,
-      },
+      })),
+    }));
+  }
+
+  /** 更新飞书 provider config 草稿中的单个字段，避免平台字段混入通用 provider 顶层。 */
+  function updateFeishuConfigDraft<K extends keyof FeishuIntegrationSettings["config"]>(
+    field: K,
+    value: FeishuIntegrationSettings["config"][K],
+  ) {
+    setImSettingsDraft((currentSettings) => ({
+      ...updateFeishuProvider(currentSettings, (provider) => ({
+        ...provider,
+        config: {
+          ...provider.config,
+          [field]: value,
+        },
+      })),
     }));
   }
 
@@ -437,29 +508,27 @@ export function SettingsDrawer({
 
   /** 将后端自动发现的飞书用户加入 allowlist，同时从候选列表移除。 */
   function allowDiscoveredFeishuUser(openId: string) {
-    const allowedUserOpenIds = uniqueTrimmedList([...imSettingsDraft.feishu.allowedUserOpenIds, openId]);
+    const allowedUserOpenIds = uniqueTrimmedList([...feishuProviderDraft.allowedUserOpenIds, openId]);
 
     setImSettingsDraft((currentSettings) => ({
-      ...currentSettings,
-      feishu: {
-        ...currentSettings.feishu,
+      ...updateFeishuProvider(currentSettings, (provider) => ({
+        ...provider,
         allowedUserOpenIds,
-        discoveredUserOpenIds: currentSettings.feishu.discoveredUserOpenIds.filter((candidate) => candidate !== openId),
-      },
+        discoveredUserOpenIds: provider.discoveredUserOpenIds.filter((candidate) => candidate !== openId),
+      })),
     }));
   }
 
   /** 将后端自动发现的飞书群加入 allowlist，同时从候选列表移除。 */
   function allowDiscoveredFeishuChat(chatId: string) {
-    const allowedChatIds = uniqueTrimmedList([...imSettingsDraft.feishu.allowedChatIds, chatId]);
+    const allowedChatIds = uniqueTrimmedList([...feishuProviderDraft.allowedChatIds, chatId]);
 
     setImSettingsDraft((currentSettings) => ({
-      ...currentSettings,
-      feishu: {
-        ...currentSettings.feishu,
+      ...updateFeishuProvider(currentSettings, (provider) => ({
+        ...provider,
         allowedChatIds,
-        discoveredChatIds: currentSettings.feishu.discoveredChatIds.filter((candidate) => candidate !== chatId),
-      },
+        discoveredChatIds: provider.discoveredChatIds.filter((candidate) => candidate !== chatId),
+      })),
     }));
   }
 
@@ -1004,7 +1073,7 @@ export function SettingsDrawer({
     }
 
     if (activeSection === "im") {
-      const feishu = imSettingsDraft.feishu;
+      const feishu = feishuProviderDraft;
       const selectedKnowledgeBaseIds = new Set(feishu.defaultKnowledgeBaseIds);
 
       return (
@@ -1013,7 +1082,7 @@ export function SettingsDrawer({
             <div>
               <p className="section-label">Configuration</p>
               <h3 id="im-settings-title">即时通讯</h3>
-              <p>连接飞书/Lark 自建应用，允许白名单用户通过文本消息调用 Agent。</p>
+              <p>连接已注册的即时通讯 provider，允许白名单用户通过文本消息调用 Agent。</p>
             </div>
             <div className="settings-title-actions">
               <button className="ghost-button" type="button" onClick={onRefreshFeishuStatus} disabled={isBusy}>
@@ -1029,7 +1098,7 @@ export function SettingsDrawer({
                   启动
                 </button>
               )}
-              <button className="primary-button compact" type="button" onClick={handleSaveImSettings} disabled={isBusy}>
+              <button className="primary-button compact" type="button" onClick={() => handleSaveImSettings()} disabled={isBusy}>
                 <Save size={14} />
                 保存设置
               </button>
@@ -1050,7 +1119,7 @@ export function SettingsDrawer({
             <label>
               <span>平台</span>
               <span className="select-control">
-                <select value={feishu.domain} onChange={(event) => updateFeishuDraft("domain", event.target.value as "feishu" | "lark")}>
+                <select value={feishu.config.domain} onChange={(event) => updateFeishuConfigDraft("domain", event.target.value as "feishu" | "lark")}>
                   <option value="feishu">飞书</option>
                   <option value="lark">Lark</option>
                 </select>
@@ -1058,7 +1127,7 @@ export function SettingsDrawer({
             </label>
             <label>
               <span>App ID</span>
-              <input value={feishu.appId} onChange={(event) => updateFeishuDraft("appId", event.target.value)} placeholder="cli_xxx" />
+              <input value={feishu.config.appId} onChange={(event) => updateFeishuConfigDraft("appId", event.target.value)} placeholder="cli_xxx" />
             </label>
             <label className="settings-full-row">
               <span>App Secret</span>
@@ -1192,7 +1261,7 @@ export function SettingsDrawer({
             <MessageCircle size={16} />
             <span>
               网关：{feishuGatewayStatus?.running ? "运行中" : "未运行"} / 连接：
-              {feishuGatewayStatus?.connected ? "已收到事件" : "未确认"} / 平台：{feishuGatewayStatus?.domain ?? feishu.domain}
+              {feishuGatewayStatus?.connected ? "已收到事件" : "未确认"} / 平台：{feishuGatewayStatus?.domain ?? feishu.config.domain}
             </span>
           </div>
           {feishuGatewayStatus?.lastError ? <p className="settings-empty">{feishuGatewayStatus.lastError}</p> : null}
