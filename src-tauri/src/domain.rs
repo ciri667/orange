@@ -640,6 +640,9 @@ pub struct AgentTurnRequest {
     /** 本轮显式选择的 Provider；优先级高于会话默认和全局默认。 */
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model_provider_id: Option<String>,
+    /** 本轮通过 slash picker 显式激活的 Skill ID；默认空数组兼容历史请求。 */
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub explicit_skill_ids: Vec<String>,
 }
 
 /** Agent 单轮返回结果。 */

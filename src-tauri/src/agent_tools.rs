@@ -1238,6 +1238,7 @@ mod tests {
             active_note_id: "note-a".to_owned(),
             client_message_id: None,
             model_provider_id: None,
+            explicit_skill_ids: Vec::new(),
         }
     }
 

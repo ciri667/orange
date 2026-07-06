@@ -25,6 +25,9 @@ const MAX_TOOL_RESULT_CHARS: usize = 9000;
 /** 请求审计最多记录的发送片段摘要数量。 */
 const MAX_AUDIT_FRAGMENTS: usize = 8;
 
+/** 后端再次限制每轮显式 Skill 数量，避免绕过 UI 传入过多 instructions。 */
+const MAX_EXPLICIT_SKILLS_PER_TURN: usize = 3;
+
 /** 云端模型请求超时时间，避免网络卡住后阻塞 Agent turn。 */
 const MODEL_HTTP_TIMEOUT_SECONDS: u64 = 60;
 
@@ -39,6 +42,14 @@ const DSML_TOOL_CALL_CLOSE_MARKERS: [&str; 2] =
 struct DsmlToolCallExtraction {
     visible_content: String,
     tool_calls: Vec<Value>,
+}
+
+/** 本轮显式 Skill 解析结果；skills 已按用户选择顺序去重并校验 enabled。 */
+#[derive(Debug)]
+struct ExplicitSkillSelection {
+    skills: Vec<AgentSkill>,
+    requested_count: usize,
+    truncated: bool,
 }
 
 /** 真实 Agent Runtime 的调度结果，包含可持久化快照和本轮请求审计摘要。 */
@@ -93,6 +104,80 @@ impl RuntimeAuditTrail {
     }
 }
 
+/** 解析本轮显式 Skill ID，按选择顺序去重、限制数量，并校验仍存在且已启用。 */
+fn resolve_explicit_skills(
+    requested_skill_ids: &[String],
+    available_skills: &[AgentSkill],
+) -> Result<ExplicitSkillSelection, String> {
+    let mut seen_skill_ids = HashSet::new();
+    let mut normalized_ids = Vec::new();
+
+    for skill_id in requested_skill_ids {
+        let skill_id = skill_id.trim();
+
+        if skill_id.is_empty() || !seen_skill_ids.insert(skill_id.to_owned()) {
+            continue;
+        }
+
+        normalized_ids.push(skill_id.to_owned());
+    }
+
+    let truncated = normalized_ids.len() > MAX_EXPLICIT_SKILLS_PER_TURN;
+    let normalized_ids = normalized_ids
+        .into_iter()
+        .take(MAX_EXPLICIT_SKILLS_PER_TURN)
+        .collect::<Vec<_>>();
+    let mut resolved_skills = Vec::new();
+
+    for skill_id in &normalized_ids {
+        let Some(skill) = available_skills.iter().find(|skill| skill.id == *skill_id) else {
+            return Err(format!("显式选择的 Skill 不存在或已被移除：{skill_id}"));
+        };
+
+        if !skill.enabled {
+            return Err(format!(
+                "显式选择的 Skill「{}」已禁用，请重新选择已启用 Skill。",
+                skill.display_name
+            ));
+        }
+
+        resolved_skills.push(skill.clone());
+    }
+
+    Ok(ExplicitSkillSelection {
+        skills: resolved_skills,
+        requested_count: requested_skill_ids.len(),
+        truncated,
+    })
+}
+
+/** 统计显式 Skill 来源分布，供运行日志观测，不包含路径或 instructions 正文。 */
+fn explicit_skill_source_summary(skills: &[AgentSkill]) -> String {
+    let built_in_count = skills
+        .iter()
+        .filter(|skill| skill.source == skills::BUILT_IN_SKILL_SOURCE)
+        .count();
+    let custom_count = skills.len().saturating_sub(built_in_count);
+
+    format!("built_in={built_in_count},custom={custom_count}")
+}
+
+/** 拼接审计可见 Skill 摘要，显式摘要不包含 instructions 正文。 */
+fn format_skill_audit_summary(
+    available_skills: &[AgentSkill],
+    explicit_skills: &[AgentSkill],
+) -> String {
+    if explicit_skills.is_empty() {
+        return skills::skill_summary(available_skills);
+    }
+
+    format!(
+        "{}；{}",
+        skills::skill_summary(available_skills),
+        skills::explicit_skill_summary(explicit_skills)
+    )
+}
+
 /** 运行真实 Agent Runtime；只有用户显式关闭模型或选择本地策略时才回退规则 Agent。 */
 pub async fn run_agent_turn(
     app: &AppHandle,
@@ -101,7 +186,53 @@ pub async fn run_agent_turn(
     settings: UserSettings,
     available_skills: Vec<AgentSkill>,
 ) -> RuntimeTurnResult {
+    let explicit_skill_selection =
+        match resolve_explicit_skills(&request.explicit_skill_ids, &available_skills) {
+            Ok(selection) => selection,
+            Err(error) => {
+                log::warn!(
+                    target: "agent_runtime",
+                    "显式 Skill 解析失败：requested_count={} reason={}",
+                    request.explicit_skill_ids.len(),
+                    model_provider::redact_model_error_text(&error)
+                );
+                return skill_activation_error_turn(
+                    snapshot,
+                    request,
+                    &available_skills,
+                    &[],
+                    &error,
+                );
+            }
+        };
+    let explicit_skills = explicit_skill_selection.skills.clone();
+
+    if !explicit_skills.is_empty() {
+        log::info!(
+            target: "agent_runtime",
+            "显式 Skill 解析完成：requested_count={} resolved_count={} truncated={} instruction_chars={} source_summary={}",
+            explicit_skill_selection.requested_count,
+            explicit_skills.len(),
+            explicit_skill_selection.truncated,
+            explicit_skills
+                .iter()
+                .map(|skill| skill.instructions.chars().count())
+                .sum::<usize>(),
+            explicit_skill_source_summary(&explicit_skills)
+        );
+    }
+
     if !settings.model_config.enabled {
+        if !explicit_skills.is_empty() {
+            return skill_activation_error_turn(
+                snapshot,
+                request,
+                &available_skills,
+                &explicit_skills,
+                "已显式选择 Skill，但当前模型未启用，无法执行 strict skill turn。请启用真实模型后重试。",
+            );
+        }
+
         return fallback_agent_turn(
             app,
             snapshot,
@@ -112,6 +243,16 @@ pub async fn run_agent_turn(
     }
 
     if settings.privacy_policy != "allow-selected-scope" {
+        if !explicit_skills.is_empty() {
+            return skill_activation_error_turn(
+                snapshot,
+                request,
+                &available_skills,
+                &explicit_skills,
+                "已显式选择 Skill，但隐私策略为仅本地，无法把 Skill instructions 发送给真实模型执行。",
+            );
+        }
+
         return fallback_agent_turn(
             app,
             snapshot,
@@ -137,6 +278,7 @@ pub async fn run_agent_turn(
                 request,
                 None,
                 &available_skills,
+                &explicit_skills,
                 &error.to_string(),
             )
         }
@@ -148,6 +290,7 @@ pub async fn run_agent_turn(
             request,
             Some(&provider),
             &available_skills,
+            &explicit_skills,
             &format!(
                 "Provider「{}」未标记支持工具调用（tool calling），无法用于 Agent Loop。",
                 provider.name
@@ -164,6 +307,7 @@ pub async fn run_agent_turn(
                     request,
                     Some(&provider),
                     &available_skills,
+                    &explicit_skills,
                     &format!(
                         "Provider「{}」未找到模型密钥。请在设置中保存 API key 后重试。",
                         provider.name
@@ -176,6 +320,7 @@ pub async fn run_agent_turn(
                     request,
                     Some(&provider),
                     &available_skills,
+                    &explicit_skills,
                     &error,
                 )
             }
@@ -189,6 +334,7 @@ pub async fn run_agent_turn(
         snapshot.clone(),
         request.clone(),
         available_skills.clone(),
+        explicit_skills.clone(),
         provider.clone(),
         api_key,
     )
@@ -200,6 +346,7 @@ pub async fn run_agent_turn(
             request,
             Some(&provider),
             &available_skills,
+            &explicit_skills,
             &format!("模型请求失败：{error}"),
         ),
     }
@@ -234,6 +381,7 @@ async fn run_model_loop(
     mut snapshot: WorkspaceSnapshot,
     request: AgentTurnRequest,
     available_skills: Vec<AgentSkill>,
+    explicit_skills: Vec<AgentSkill>,
     provider: LlmProviderConfig,
     api_key: String,
 ) -> Result<RuntimeTurnResult, String> {
@@ -255,24 +403,35 @@ async fn run_model_loop(
         session_index,
         &request,
         &available_skills,
+        &explicit_skills,
         &current_user_message_id,
     );
     let endpoint = model_provider::chat_completions_endpoint(&provider.api_base);
     let tool_registry = ToolRegistry::default();
     let mut tool_calls = vec![skill_context_tool_call(&available_skills)];
+    tool_calls.extend(activate_skill_tool_calls(
+        &explicit_skills,
+        "completed",
+        None,
+    ));
     let mut last_failed_tool_summary: Option<String> = None;
 
     tool_calls.push(model_request_tool_call(&provider, &endpoint, "completed"));
 
     log::info!(
         target: "agent_runtime",
-        "模型 Agent 自主工具选择开始：session={} action={} provider_id={} provider_name={} model={} enabled_skill_count={} scope_count={} prompt_chars={}",
+        "模型 Agent 自主工具选择开始：session={} action={} provider_id={} provider_name={} model={} enabled_skill_count={} explicit_skill_count={} explicit_instruction_chars={} scope_count={} prompt_chars={}",
         snapshot.sessions[session_index].id,
         request.action,
         provider.id,
         provider.name,
         provider.model,
         available_skills.iter().filter(|skill| skill.enabled).count(),
+        explicit_skills.len(),
+        explicit_skills
+            .iter()
+            .map(|skill| skill.instructions.chars().count())
+            .sum::<usize>(),
         snapshot.sessions[session_index].knowledge_base_ids.len(),
         request.prompt.chars().count()
     );
@@ -327,7 +486,7 @@ async fn run_model_loop(
                 &request.prompt,
                 &format!(
                     "OpenAI-compatible 模型请求；{}",
-                    skills::skill_summary(&available_skills)
+                    format_skill_audit_summary(&available_skills, &explicit_skills)
                 ),
                 &audit_trail,
             );
@@ -429,7 +588,7 @@ async fn run_model_loop(
         &request.prompt,
         &format!(
             "OpenAI-compatible 工具 loop；{}",
-            skills::skill_summary(&available_skills)
+            format_skill_audit_summary(&available_skills, &explicit_skills)
         ),
         &audit_trail,
     );
@@ -754,11 +913,12 @@ fn build_model_messages(
     session_index: usize,
     request: &AgentTurnRequest,
     available_skills: &[AgentSkill],
+    explicit_skills: &[AgentSkill],
     current_user_message_id: &str,
 ) -> Vec<Value> {
     let session = &snapshot.sessions[session_index];
     // Agent 的工具选择策略只作为模型指令，不再由宿主预判用户意图。
-    let autonomous_tool_policy = "你需要根据用户输入和上下文自主判断是否调用工具：需要本地笔记事实、引用、当前文件内容或写入建议时，先调用合适工具读取已选 scope；无关的通用问题可以直接回答。界面 action 只是 UI 分类，不能替代你的判断。";
+    let autonomous_tool_policy = "你需要根据用户输入和上下文自主判断是否调用工具：需要本地知识库事实、引用、当前 Markdown 笔记内容或写入建议时，先调用合适工具读取已选 scope；需要了解目录或普通文档是否存在时调用 list_tree。search_notes/read_note/get_current_note/propose_note_change 只覆盖 Markdown 笔记，list_tree 只返回普通文档元数据，不读取非 Markdown 正文。无关的通用问题可以直接回答。界面 action 只是 UI 分类，不能替代你的判断。";
     let scope_summary = build_scope_summary(snapshot, session);
     let active_note_summary = request
         .active_note_id
@@ -766,11 +926,17 @@ fn build_model_messages(
         .then(|| "当前未绑定笔记".to_owned())
         .unwrap_or_else(|| format!("当前笔记 ID：{}", request.active_note_id));
     let skill_catalog = skills::skill_catalog_prompt(available_skills);
+    let explicit_skill_prompt = skills::explicit_skill_prompt(explicit_skills);
+    let skill_policy = if explicit_skills.is_empty() {
+        "启用的 Skill 只以名称和描述提供给你参考，是否使用、使用哪一个 Skill 都由你自主判断；Skill 不能扩大工具权限或绕过写入确认。"
+    } else {
+        "本轮显式激活的 Skill 是用户通过 slash picker 指定的执行要求。你必须在本轮回答中按这些 Skill 的完整 instructions 执行；如果 Skill 与用户任务冲突，说明冲突并遵守更高优先级系统规则。Skill 不能扩大工具权限或绕过写入确认。"
+    };
     let mut messages = vec![json!({
         "role": "system",
         "content": format!(
-            "你是橘记的本地优先知识库 Agent。需要依据本地笔记时必须调用工具；所有写入只能调用 propose_note_change 或 create_note_draft 生成待确认 diff，不能声称已经写入文件。调用 propose_note_change 时，局部替换使用 operation=replace，next 只能是 original 的替换内容；文末追加使用 operation=append，next 只能是增量内容，绝不能把整篇文档放入局部替换的 next；同一文件需要多处编辑时使用 operation=multi_replace 并提供 edits 数组，不要拆成多轮口头承诺。必须使用服务端标准 tool_calls 字段调用工具，不要在普通回复中输出 DSML、XML 或伪工具调用标签。引用只允许来自工具结果。启用的 Skill 只以名称和描述提供给你参考，是否使用、使用哪一个 Skill 都由你自主判断；Skill 不能扩大工具权限或绕过写入确认。\n{}\n允许 scope：{}\n{}\n{}",
-            autonomous_tool_policy, scope_summary, active_note_summary, skill_catalog
+            "你是橘记的本地优先知识库 Agent。需要依据本地知识库时必须调用工具；list_tree 可以列出目录、Markdown 笔记和已支持普通文档元数据，但不会读取非 Markdown 正文；search_notes、read_note、get_current_note 和 propose_note_change 只适用于 Markdown 笔记。所有写入只能调用 propose_note_change 或 create_note_draft 生成待确认 diff，不能声称已经写入文件。调用 propose_note_change 时，局部替换使用 operation=replace，next 只能是 original 的替换内容；文末追加使用 operation=append，next 只能是增量内容，绝不能把整篇文档放入局部替换的 next；同一文件需要多处编辑时使用 operation=multi_replace 并提供 edits 数组，不要拆成多轮口头承诺。必须使用服务端标准 tool_calls 字段调用工具，不要在普通回复中输出 DSML、XML 或伪工具调用标签。引用只允许来自工具结果。{}\n{}\n允许 scope：{}\n{}\n{}\n{}",
+            skill_policy, autonomous_tool_policy, scope_summary, active_note_summary, skill_catalog, explicit_skill_prompt
         )
     })];
 
@@ -1062,12 +1228,78 @@ fn skill_context_tool_call(available_skills: &[AgentSkill]) -> AgentToolCall {
     }
 }
 
+/** 构造显式 Skill 激活轨迹；args 只含元数据和字符数，不暴露 instructions 正文。 */
+fn activate_skill_tool_calls(
+    explicit_skills: &[AgentSkill],
+    status: &str,
+    failed_reason: Option<&str>,
+) -> Vec<AgentToolCall> {
+    explicit_skills
+        .iter()
+        .map(|skill| {
+            let instruction_chars = skill.instructions.chars().count();
+            let summary = match (status, failed_reason) {
+                ("failed", Some(reason)) => {
+                    format!("显式 Skill「{}」未完成执行：{}", skill.display_name, reason)
+                }
+                ("failed", None) => format!("显式 Skill「{}」未完成执行。", skill.display_name),
+                _ => format!(
+                    "已显式激活 Skill「{}」，instructions {} 字符已进入本轮模型上下文。",
+                    skill.display_name, instruction_chars
+                ),
+            };
+
+            AgentToolCall {
+                id: create_id("tool"),
+                name: "activate_skill".to_owned(),
+                status: status.to_owned(),
+                summary,
+                args: json!({
+                    "skillId": skill.id,
+                    "name": skill.name,
+                    "displayName": skill.display_name,
+                    "source": skill.source,
+                    "relativePath": skill.relative_path,
+                    "instructionChars": instruction_chars,
+                }),
+            }
+        })
+        .collect()
+}
+
+/** 构造无法解析到具体 Skill 时的失败激活轨迹，避免丢失显式选择失败原因。 */
+fn failed_activate_skill_request_tool_call(
+    requested_skill_ids: &[String],
+    reason: &str,
+) -> AgentToolCall {
+    let sanitized_ids = requested_skill_ids
+        .iter()
+        .map(|skill_id| skill_id.trim())
+        .filter(|skill_id| !skill_id.is_empty())
+        .take(MAX_EXPLICIT_SKILLS_PER_TURN)
+        .collect::<Vec<_>>();
+
+    AgentToolCall {
+        id: create_id("tool"),
+        name: "activate_skill".to_owned(),
+        status: "failed".to_owned(),
+        summary: format!("显式 Skill 激活失败：{reason}"),
+        args: json!({
+            "skillIds": sanitized_ids,
+            "requestedSkillCount": requested_skill_ids.len(),
+            "instructionChars": 0,
+            "reason": reason,
+        }),
+    }
+}
+
 /** 云端模型启用后发生配置或请求错误时，返回可见错误消息而不是静默降级；reason 会先脱敏再展示。 */
 fn model_error_turn(
     mut snapshot: WorkspaceSnapshot,
     request: AgentTurnRequest,
     provider: Option<&LlmProviderConfig>,
     available_skills: &[AgentSkill],
+    explicit_skills: &[AgentSkill],
     reason: &str,
 ) -> RuntimeTurnResult {
     let session_index = resolve_session_index(&snapshot, &request).unwrap_or(0);
@@ -1091,18 +1323,31 @@ fn model_error_turn(
 
     apply_first_prompt_title(&mut snapshot.sessions[session_index], &request.prompt);
     ensure_user_message_for_turn(&mut snapshot.sessions[session_index], &request);
+    let mut tool_calls = vec![skill_context_tool_call(available_skills)];
+
+    tool_calls.extend(activate_skill_tool_calls(
+        explicit_skills,
+        if explicit_skills.is_empty() {
+            "completed"
+        } else {
+            "failed"
+        },
+        Some("真实模型请求没有完成，strict skill execution 未发生。"),
+    ));
+    tool_calls.push(failed_request);
     snapshot.sessions[session_index]
         .messages
         .push(AgentMessage {
             id: create_id("assistant"),
             role: "assistant".to_owned(),
-            content: format!("真实模型请求没有完成：{redacted_reason}"),
+            content: if explicit_skills.is_empty() {
+                format!("真实模型请求没有完成：{redacted_reason}")
+            } else {
+                format!("显式 Skill 未完成执行：{redacted_reason}")
+            },
             action: Some(request.action.clone()),
             citations: Some(Vec::new()),
-            tool_calls: Some(vec![
-                skill_context_tool_call(available_skills),
-                failed_request,
-            ]),
+            tool_calls: Some(tool_calls),
         });
     snapshot.sessions[session_index].updated_at = "刚刚".to_owned();
 
@@ -1113,7 +1358,93 @@ fn model_error_turn(
         &request.prompt,
         &format!(
             "{redacted_reason}；{}",
-            skills::skill_summary(available_skills)
+            format_skill_audit_summary(available_skills, explicit_skills)
+        ),
+        &RuntimeAuditTrail::default(),
+    );
+
+    RuntimeTurnResult {
+        turn_result: AgentTurnResult { snapshot },
+        audit_log,
+    }
+}
+
+/** 显式 Skill 无法进入真实模型 turn 时返回可见错误，不能静默降级成本地规则 Agent。 */
+fn skill_activation_error_turn(
+    mut snapshot: WorkspaceSnapshot,
+    request: AgentTurnRequest,
+    available_skills: &[AgentSkill],
+    explicit_skills: &[AgentSkill],
+    reason: &str,
+) -> RuntimeTurnResult {
+    let session_index = resolve_session_index(&snapshot, &request).unwrap_or(0);
+    let redacted_reason = model_provider::redact_model_error_text(reason);
+    let mut tool_calls = vec![skill_context_tool_call(available_skills)];
+
+    if explicit_skills.is_empty() {
+        tool_calls.push(failed_activate_skill_request_tool_call(
+            &request.explicit_skill_ids,
+            &redacted_reason,
+        ));
+    } else {
+        tool_calls.extend(activate_skill_tool_calls(
+            explicit_skills,
+            "failed",
+            Some("当前配置无法执行真实模型 turn，strict skill execution 未发生。"),
+        ));
+        tool_calls.push(AgentToolCall {
+            id: create_id("tool"),
+            name: "model_request".to_owned(),
+            status: "failed".to_owned(),
+            summary: redacted_reason.clone(),
+            args: json!({ "reason": redacted_reason }),
+        });
+    }
+
+    apply_first_prompt_title(&mut snapshot.sessions[session_index], &request.prompt);
+    ensure_user_message_for_turn(&mut snapshot.sessions[session_index], &request);
+    snapshot.sessions[session_index]
+        .messages
+        .push(AgentMessage {
+            id: create_id("assistant"),
+            role: "assistant".to_owned(),
+            content: format!("显式 Skill 未完成执行：{redacted_reason}"),
+            action: Some(request.action.clone()),
+            citations: Some(Vec::new()),
+            tool_calls: Some(tool_calls),
+        });
+    snapshot.sessions[session_index].updated_at = "刚刚".to_owned();
+
+    log::warn!(
+        target: "agent_runtime",
+        "显式 Skill 执行中止：session={} requested_count={} resolved_count={} reason={}",
+        snapshot.sessions[session_index].id,
+        request.explicit_skill_ids.len(),
+        explicit_skills.len(),
+        redacted_reason
+    );
+
+    let explicit_summary = if explicit_skills.is_empty() {
+        format!(
+            "显式 Skill：{} 个（解析失败或未完成校验）",
+            request
+                .explicit_skill_ids
+                .iter()
+                .filter(|skill_id| !skill_id.trim().is_empty())
+                .count()
+        )
+    } else {
+        skills::explicit_skill_summary(explicit_skills)
+    };
+    let audit_log = build_audit_log(
+        "skill_activation_error_turn",
+        &snapshot,
+        session_index,
+        &request.prompt,
+        &format!(
+            "{redacted_reason}；{}；{}",
+            skills::skill_summary(available_skills),
+            explicit_summary
         ),
         &RuntimeAuditTrail::default(),
     );
@@ -1365,6 +1696,7 @@ mod tests {
             active_note_id: "note-a".to_owned(),
             client_message_id: None,
             model_provider_id: None,
+            explicit_skill_ids: Vec::new(),
         }
     }
 
@@ -1391,8 +1723,14 @@ mod tests {
         let snapshot = runtime_test_snapshot("正文内容足够用于测试。".to_owned());
         let request = runtime_test_request("ask", "总结当前知识库里的隐私边界");
         let available_skills = crate::skills::built_in_skills();
-        let messages =
-            build_model_messages(&snapshot, 0, &request, &available_skills, "user-current");
+        let messages = build_model_messages(
+            &snapshot,
+            0,
+            &request,
+            &available_skills,
+            &[],
+            "user-current",
+        );
         let system_content = messages[0]["content"].as_str().unwrap_or_default();
 
         assert!(system_content.contains("自主判断是否调用工具"));
@@ -1418,6 +1756,7 @@ mod tests {
             request,
             Some(&provider),
             &available_skills,
+            &[],
             "模型请求失败：测试错误",
         );
         let session = &result.turn_result.snapshot.sessions[0];
@@ -1446,6 +1785,7 @@ mod tests {
             request,
             None,
             &available_skills,
+            &[],
             "未找到 Provider 配置：missing-provider",
         );
         let session = &result.turn_result.snapshot.sessions[0];
@@ -1453,6 +1793,165 @@ mod tests {
 
         assert!(last_message.content.contains("真实模型请求没有完成"));
         assert!(last_message.content.contains("missing-provider"));
+    }
+
+    /** 显式 Skill 应把完整 instructions 注入 system prompt，并保留目录摘要。 */
+    #[test]
+    fn model_messages_include_explicit_skill_instructions() {
+        let snapshot = runtime_test_snapshot("正文内容足够用于测试。".to_owned());
+        let request = runtime_test_request("ask", "按研究流程总结");
+        let available_skills = crate::skills::built_in_skills();
+        let explicit_skill = available_skills
+            .iter()
+            .find(|skill| skill.id == "skill-note-research")
+            .unwrap()
+            .clone();
+        let messages = build_model_messages(
+            &snapshot,
+            0,
+            &request,
+            &available_skills,
+            std::slice::from_ref(&explicit_skill),
+            "user-current",
+        );
+        let system_content = messages[0]["content"].as_str().unwrap_or_default();
+
+        assert!(system_content.contains("本轮显式激活的 Skills"));
+        assert!(system_content.contains("执行要求"));
+        assert!(system_content.contains(&explicit_skill.instructions));
+        assert!(system_content.contains("可用 Skills"));
+        assert!(system_content.contains("不能扩大工具权限"));
+    }
+
+    /** resolve_explicit_skills 会按选择顺序去重、限制数量并拒绝已禁用 Skill。 */
+    #[test]
+    fn resolve_explicit_skills_dedupes_limits_and_rejects_disabled() {
+        let mut available_skills = crate::skills::built_in_skills();
+        let ids = vec![
+            "skill-note-research".to_owned(),
+            "skill-note-research".to_owned(),
+            "skill-note-rewrite".to_owned(),
+            "skill-draft-from-context".to_owned(),
+            "skill-organize-knowledge".to_owned(),
+        ];
+        let selection = resolve_explicit_skills(&ids, &available_skills).unwrap();
+
+        assert_eq!(selection.skills.len(), MAX_EXPLICIT_SKILLS_PER_TURN);
+        assert_eq!(selection.skills[0].id, "skill-note-research");
+        assert_eq!(selection.skills[1].id, "skill-note-rewrite");
+        assert!(selection.truncated);
+
+        available_skills[0].enabled = false;
+        let error = resolve_explicit_skills(&["skill-note-research".to_owned()], &available_skills)
+            .unwrap_err();
+
+        assert!(error.contains("已禁用"));
+    }
+
+    /** 显式 Skill 缺失时返回可见错误，并记录 failed activate_skill。 */
+    #[test]
+    fn skill_activation_error_turn_records_failed_activate_skill_for_missing_skill() {
+        let snapshot = runtime_test_snapshot("正文内容足够用于测试。".to_owned());
+        let mut request = runtime_test_request("ask", "按不存在的 skill 执行");
+        let available_skills = crate::skills::built_in_skills();
+
+        request.explicit_skill_ids = vec!["missing-skill".to_owned()];
+        let result = skill_activation_error_turn(
+            snapshot,
+            request,
+            &available_skills,
+            &[],
+            "显式选择的 Skill 不存在或已被移除：missing-skill",
+        );
+        let session = &result.turn_result.snapshot.sessions[0];
+        let last_message = session.messages.last().unwrap();
+        let tool_calls = last_message.tool_calls.as_ref().unwrap();
+        let activate_call = tool_calls
+            .iter()
+            .find(|tool_call| tool_call.name == "activate_skill")
+            .unwrap();
+
+        assert_eq!(result.audit_log.kind, "skill_activation_error_turn");
+        assert!(last_message.content.contains("显式 Skill 未完成执行"));
+        assert_eq!(activate_call.status, "failed");
+        assert_eq!(
+            activate_call.args["skillIds"][0].as_str(),
+            Some("missing-skill")
+        );
+        assert!(!activate_call.args.to_string().contains("当用户要求查找"));
+    }
+
+    /** 已选 Skill 但真实模型 turn 不可执行时，不应伪装成本地规则 Agent。 */
+    #[test]
+    fn explicit_skill_error_turn_does_not_use_local_rule_fallback() {
+        let snapshot = runtime_test_snapshot("正文内容足够用于测试。".to_owned());
+        let mut request = runtime_test_request("ask", "按研究流程总结");
+        let available_skills = crate::skills::built_in_skills();
+        let explicit_skill = available_skills
+            .iter()
+            .find(|skill| skill.id == "skill-note-research")
+            .unwrap()
+            .clone();
+
+        request.explicit_skill_ids = vec![explicit_skill.id.clone()];
+        let result = skill_activation_error_turn(
+            snapshot,
+            request,
+            &available_skills,
+            std::slice::from_ref(&explicit_skill),
+            "已显式选择 Skill，但当前模型未启用，无法执行 strict skill turn。",
+        );
+        let tool_calls = result.turn_result.snapshot.sessions[0]
+            .messages
+            .last()
+            .unwrap()
+            .tool_calls
+            .as_ref()
+            .unwrap();
+        let activate_call = tool_calls
+            .iter()
+            .find(|tool_call| tool_call.name == "activate_skill")
+            .unwrap();
+
+        assert!(tool_calls
+            .iter()
+            .all(|tool_call| tool_call.name != "local_rule_agent"));
+        assert_eq!(activate_call.status, "failed");
+        assert!(tool_calls
+            .iter()
+            .any(|tool_call| tool_call.name == "model_request" && tool_call.status == "failed"));
+        assert!(result
+            .audit_log
+            .content_summary
+            .contains("显式 Skill：1 个"));
+    }
+
+    /** activate_skill 轨迹只能包含元数据，不能把完整 instructions 暴露到 UI 或审计。 */
+    #[test]
+    fn activate_skill_tool_call_omits_instructions() {
+        let available_skills = crate::skills::built_in_skills();
+        let explicit_skill = available_skills
+            .iter()
+            .find(|skill| skill.id == "skill-note-research")
+            .unwrap()
+            .clone();
+        let calls =
+            activate_skill_tool_calls(std::slice::from_ref(&explicit_skill), "completed", None);
+        let call = calls.first().unwrap();
+        let serialized_args = call.args.to_string();
+
+        assert_eq!(call.name, "activate_skill");
+        assert_eq!(call.status, "completed");
+        assert_eq!(
+            call.args["skillId"].as_str(),
+            Some(explicit_skill.id.as_str())
+        );
+        assert_eq!(
+            call.args["instructionChars"].as_u64(),
+            Some(explicit_skill.instructions.chars().count() as u64)
+        );
+        assert!(!serialized_args.contains(&explicit_skill.instructions));
+        assert!(!call.summary.contains(&explicit_skill.instructions));
     }
 
     /** 本轮显式选择了 providerId 时，必须记为会话默认，下次打开该会话选择器才能展示“最后一次切换”的模型。 */

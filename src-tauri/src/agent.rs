@@ -264,6 +264,7 @@ mod tests {
             active_note_id: "note-a".to_owned(),
             client_message_id: None,
             model_provider_id: None,
+            explicit_skill_ids: Vec::new(),
         };
         let response = build_local_response(&request, &[], &[]);
 
@@ -281,6 +282,7 @@ mod tests {
             active_note_id: "note-a".to_owned(),
             client_message_id: None,
             model_provider_id: None,
+            explicit_skill_ids: Vec::new(),
         };
         let response = build_local_response(&request, &[], &[]);
 
@@ -320,6 +322,7 @@ mod tests {
             active_note_id: String::new(),
             client_message_id: Some("user-client".to_owned()),
             model_provider_id: None,
+            explicit_skill_ids: Vec::new(),
         };
 
         ensure_user_message_for_turn(&mut session, &request);
