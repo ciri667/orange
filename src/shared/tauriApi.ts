@@ -25,7 +25,10 @@ import type {
   FeishuCredentialStatus,
   FeishuGatewayStatus,
   FolderEntry,
+  ImGatewayStatus,
   ImIntegrationSettings,
+  ImProviderCredentialStatus,
+  ImProviderSettings,
   InstallAgentSkillPayload,
   InstallAgentSkillResult,
   KnowledgeBase,
@@ -72,21 +75,28 @@ const defaultBrowserUserSettings: UserSettings = {
   writeConfirmationRequired: true,
 };
 
-/** 浏览器开发态默认 IM 设置；桌面端真实设置由 SQLite 和系统 keyring 保存。 */
-const defaultBrowserImSettings: ImIntegrationSettings = {
-  feishu: {
-    enabled: false,
+/** 浏览器开发态默认飞书 provider；桌面端真实设置由 SQLite 和系统 keyring 保存。 */
+const defaultBrowserFeishuProvider: ImProviderSettings = {
+  providerId: "feishu",
+  enabled: false,
+  defaultKnowledgeBaseIds: [],
+  allowedUserOpenIds: [],
+  allowedChatIds: [],
+  discoveredUserOpenIds: [],
+  discoveredChatIds: [],
+  requireMention: true,
+  updatedAt: "刚刚",
+  config: {
+    type: "feishu",
     domain: "feishu",
     appId: "",
     secretKeyReference: "orange-feishu-app-secret",
-    defaultKnowledgeBaseIds: [],
-    allowedUserOpenIds: [],
-    allowedChatIds: [],
-    discoveredUserOpenIds: [],
-    discoveredChatIds: [],
-    requireMention: true,
-    updatedAt: "刚刚",
   },
+};
+
+/** 浏览器开发态默认 IM 设置；桌面端真实设置由 SQLite 和系统 keyring 保存。 */
+const defaultBrowserImSettings: ImIntegrationSettings = {
+  providers: [defaultBrowserFeishuProvider],
 };
 
 /** 浏览器开发态镜像后端内置模板，只用于模拟设置页“新增 Provider”入口。 */
@@ -140,7 +150,8 @@ let browserUserSettings: UserSettings = defaultBrowserUserSettings;
 let browserImSettings: ImIntegrationSettings = defaultBrowserImSettings;
 
 /** 浏览器 fallback 的飞书网关状态；浏览器态无法连接真实长连接。 */
-let browserFeishuGatewayStatus: FeishuGatewayStatus = {
+let browserFeishuGatewayStatus: ImGatewayStatus = {
+  providerId: "feishu",
   running: false,
   connected: false,
   domain: "feishu",
@@ -154,6 +165,11 @@ let browserAuditLogs: RequestAuditLog[] = [];
 
 /** 浏览器 fallback 的临时应用事件日志，模拟桌面端设置页诊断列表。 */
 let browserAppEventLogs: AppEventLog[] = [];
+
+/** 从 IM 设置中读取飞书 provider；浏览器态缺失时回退默认值，避免旧 mock 状态崩溃。 */
+function getFeishuProvider(settings: ImIntegrationSettings): ImProviderSettings {
+  return settings.providers.find((provider) => provider.providerId === "feishu") ?? defaultBrowserFeishuProvider;
+}
 
 /** 带脱敏日志的 Tauri invoke 包装，只记录命令名、状态和耗时，不记录 payload。 */
 async function invokeLogged<T>(command: string, args?: Record<string, unknown>): Promise<T> {
@@ -473,11 +489,13 @@ export async function loadImSettings(): Promise<ImIntegrationSettings> {
 /** 保存即时通讯设置；敏感凭证由独立 keyring 命令处理。 */
 export async function saveImSettings(settings: ImIntegrationSettings): Promise<ImIntegrationSettings> {
   if (!isTauriRuntime()) {
+    const feishu = getFeishuProvider(settings);
+
     browserImSettings = cloneImSettings(settings);
     browserFeishuGatewayStatus = {
       ...browserFeishuGatewayStatus,
-      domain: settings.feishu.domain,
-      appIdConfigured: Boolean(settings.feishu.appId.trim()),
+      domain: feishu.config.domain,
+      appIdConfigured: Boolean(feishu.config.appId.trim()),
     };
 
     return loadImSettings();
@@ -486,49 +504,54 @@ export async function saveImSettings(settings: ImIntegrationSettings): Promise<I
   return invokeLogged<ImIntegrationSettings>("save_im_settings", { payload: { settings } });
 }
 
-/** 保存飞书 appSecret；桌面端写入系统安全存储，浏览器态只返回不可用说明。 */
-export async function saveFeishuAppSecret(appSecret: string): Promise<FeishuCredentialStatus> {
+/** 保存 IM provider secret；桌面端写入系统安全存储，浏览器态只返回不可用说明。 */
+export async function saveImProviderSecret(providerId: "feishu", secret: string): Promise<ImProviderCredentialStatus> {
   if (!isTauriRuntime()) {
-    throw new Error("浏览器开发态不能保存飞书 appSecret，请在 Tauri 桌面端配置。");
+    throw new Error("浏览器开发态不能保存 IM provider secret，请在 Tauri 桌面端配置。");
   }
 
-  return invokeLogged<FeishuCredentialStatus>("save_feishu_app_secret", { payload: { appSecret } });
+  return invokeLogged<ImProviderCredentialStatus>("save_im_provider_secret", { payload: { providerId, secret } });
 }
 
-/** 读取飞书 appSecret 是否已配置；不会返回明文 secret。 */
-export async function loadFeishuCredentialStatus(): Promise<FeishuCredentialStatus> {
+/** 读取 IM provider secret 是否已配置；不会返回明文 secret。 */
+export async function loadImProviderCredentialStatus(providerId: "feishu"): Promise<ImProviderCredentialStatus> {
   if (!isTauriRuntime()) {
+    const feishu = getFeishuProvider(browserImSettings);
+
     return {
-      keyReference: browserImSettings.feishu.secretKeyReference,
+      providerId,
+      keyReference: feishu.config.secretKeyReference,
       configured: false,
       message: "浏览器开发态未连接系统安全存储。",
     };
   }
 
-  return invokeLogged<FeishuCredentialStatus>("load_feishu_credential_status");
+  return invokeLogged<ImProviderCredentialStatus>("load_im_provider_credential_status", { payload: { providerId } });
 }
 
-/** 启动飞书长连接网关；浏览器态只返回不可用状态。 */
-export async function startFeishuGateway(): Promise<FeishuGatewayStatus> {
+/** 启动 IM provider 长连接网关；浏览器态只返回不可用状态。 */
+export async function startImGateway(providerId: "feishu"): Promise<ImGatewayStatus> {
   if (!isTauriRuntime()) {
     browserFeishuGatewayStatus = {
       ...browserFeishuGatewayStatus,
+      providerId,
       running: false,
       connected: false,
-      lastError: "浏览器开发态不能启动飞书长连接网关。",
+      lastError: "浏览器开发态不能启动 IM 长连接网关。",
     };
 
     return browserFeishuGatewayStatus;
   }
 
-  return invokeLogged<FeishuGatewayStatus>("start_feishu_gateway");
+  return invokeLogged<ImGatewayStatus>("start_im_gateway", { payload: { providerId } });
 }
 
-/** 停止飞书长连接网关；不会清空设置和凭证。 */
-export async function stopFeishuGateway(): Promise<FeishuGatewayStatus> {
+/** 停止 IM provider 长连接网关；不会清空设置和凭证。 */
+export async function stopImGateway(providerId: "feishu"): Promise<ImGatewayStatus> {
   if (!isTauriRuntime()) {
     browserFeishuGatewayStatus = {
       ...browserFeishuGatewayStatus,
+      providerId,
       running: false,
       connected: false,
       lastStoppedAt: formatLocalDateTime(),
@@ -537,16 +560,41 @@ export async function stopFeishuGateway(): Promise<FeishuGatewayStatus> {
     return browserFeishuGatewayStatus;
   }
 
-  return invokeLogged<FeishuGatewayStatus>("stop_feishu_gateway");
+  return invokeLogged<ImGatewayStatus>("stop_im_gateway", { payload: { providerId } });
 }
 
-/** 读取飞书长连接网关运行态。 */
-export async function loadFeishuGatewayStatus(): Promise<FeishuGatewayStatus> {
+/** 读取 IM provider 长连接网关运行态。 */
+export async function loadImGatewayStatus(providerId: "feishu"): Promise<ImGatewayStatus> {
   if (!isTauriRuntime()) {
-    return { ...browserFeishuGatewayStatus };
+    return { ...browserFeishuGatewayStatus, providerId };
   }
 
-  return invokeLogged<FeishuGatewayStatus>("load_feishu_gateway_status");
+  return invokeLogged<ImGatewayStatus>("load_im_gateway_status", { payload: { providerId } });
+}
+
+/** 保存飞书 appSecret；兼容旧调用，内部走通用 IM provider secret 命令。 */
+export async function saveFeishuAppSecret(appSecret: string): Promise<FeishuCredentialStatus> {
+  return saveImProviderSecret("feishu", appSecret);
+}
+
+/** 读取飞书 appSecret 是否已配置；兼容旧调用。 */
+export async function loadFeishuCredentialStatus(): Promise<FeishuCredentialStatus> {
+  return loadImProviderCredentialStatus("feishu");
+}
+
+/** 启动飞书长连接网关；兼容旧调用。 */
+export async function startFeishuGateway(): Promise<FeishuGatewayStatus> {
+  return startImGateway("feishu");
+}
+
+/** 停止飞书长连接网关；兼容旧调用。 */
+export async function stopFeishuGateway(): Promise<FeishuGatewayStatus> {
+  return stopImGateway("feishu");
+}
+
+/** 读取飞书长连接网关运行态；兼容旧调用。 */
+export async function loadFeishuGatewayStatus(): Promise<FeishuGatewayStatus> {
+  return loadImGatewayStatus("feishu");
 }
 
 /** 读取 Agent skills，桌面端来自 SQLite，浏览器开发态来自内存模拟状态。 */
@@ -1753,14 +1801,15 @@ function cloneUserSettings(settings: UserSettings): UserSettings {
 /** 深拷贝即时通讯设置，保证浏览器开发态保存和读取行为接近桌面端持久化。 */
 function cloneImSettings(settings: ImIntegrationSettings): ImIntegrationSettings {
   return {
-    feishu: {
-      ...settings.feishu,
-      defaultKnowledgeBaseIds: [...settings.feishu.defaultKnowledgeBaseIds],
-      allowedUserOpenIds: [...settings.feishu.allowedUserOpenIds],
-      allowedChatIds: [...settings.feishu.allowedChatIds],
-      discoveredUserOpenIds: [...settings.feishu.discoveredUserOpenIds],
-      discoveredChatIds: [...settings.feishu.discoveredChatIds],
-    },
+    providers: settings.providers.map((provider) => ({
+      ...provider,
+      defaultKnowledgeBaseIds: [...provider.defaultKnowledgeBaseIds],
+      allowedUserOpenIds: [...provider.allowedUserOpenIds],
+      allowedChatIds: [...provider.allowedChatIds],
+      discoveredUserOpenIds: [...provider.discoveredUserOpenIds],
+      discoveredChatIds: [...provider.discoveredChatIds],
+      config: { ...provider.config },
+    })),
   };
 }
 

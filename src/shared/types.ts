@@ -323,17 +323,24 @@ export interface UserSettings {
   writeConfirmationRequired: boolean;
 }
 
-/** 即时通讯集成总设置，首版只包含飞书/Lark 自建应用。 */
-export interface ImIntegrationSettings {
-  feishu: FeishuIntegrationSettings;
-}
+/** 当前内置 IM provider；新增 provider 时继续使用稳定小写 ID。 */
+export type ImProviderId = "feishu";
 
-/** 飞书/Lark 自建应用配置；appSecret 单独保存在系统安全存储。 */
-export interface FeishuIntegrationSettings {
-  enabled: boolean;
+/** 飞书/Lark 自建应用专属配置；appSecret 单独保存在系统安全存储。 */
+export interface FeishuProviderConfig {
+  type: "feishu";
   domain: "feishu" | "lark";
   appId: string;
   secretKeyReference: string;
+}
+
+/** IM provider 平台专属配置；新增 IM 时在这里扩展联合类型。 */
+export type ImProviderConfig = FeishuProviderConfig;
+
+/** 单个 IM provider 的通用配置；平台专属字段放在 config 中。 */
+export interface ImProviderSettings {
+  providerId: ImProviderId;
+  enabled: boolean;
   defaultKnowledgeBaseIds: string[];
   allowedUserOpenIds: string[];
   allowedChatIds: string[];
@@ -341,17 +348,34 @@ export interface FeishuIntegrationSettings {
   discoveredChatIds: string[];
   requireMention: boolean;
   updatedAt: string;
+  config: ImProviderConfig;
 }
 
-/** 飞书 appSecret 保存状态；不包含明文 secret。 */
-export interface FeishuCredentialStatus {
+/** 即时通讯集成总设置，providers 是未来扩展多个 IM 的固定入口。 */
+export interface ImIntegrationSettings {
+  providers: ImProviderSettings[];
+}
+
+/** 兼容旧设置页局部类型命名；实际持久化已经使用 provider 结构。 */
+export type FeishuIntegrationSettings = ImProviderSettings & {
+  providerId: "feishu";
+  config: FeishuProviderConfig;
+};
+
+/** IM provider secret 保存状态；不包含明文 secret。 */
+export interface ImProviderCredentialStatus {
+  providerId: ImProviderId;
   keyReference: string;
   configured: boolean;
   message: string;
 }
 
-/** 飞书长连接网关运行态，设置页用它展示手动启停结果。 */
-export interface FeishuGatewayStatus {
+/** 兼容旧飞书状态命名；实际接口已经 provider 化。 */
+export type FeishuCredentialStatus = ImProviderCredentialStatus;
+
+/** IM provider 长连接网关运行态，设置页用它展示手动启停结果。 */
+export interface ImGatewayStatus {
+  providerId: ImProviderId;
   running: boolean;
   connected: boolean;
   domain: "feishu" | "lark";
@@ -361,6 +385,9 @@ export interface FeishuGatewayStatus {
   lastStoppedAt?: string;
   lastError?: string;
 }
+
+/** 兼容旧飞书网关状态命名；实际接口已经 provider 化。 */
+export type FeishuGatewayStatus = ImGatewayStatus;
 
 /** 模型密钥状态只说明是否可读取，不包含明文密钥；按 providerId 隔离。 */
 export interface ModelApiKeyStatus {
