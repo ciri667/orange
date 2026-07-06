@@ -554,6 +554,7 @@ export function runMockAgentTurn(
   prompt: string,
   action: AgentActionType,
   clientMessageId?: string,
+  explicitSkillIds: string[] = [],
 ): WorkspaceSnapshot {
   const nextSnapshot = cloneWorkspaceSnapshot(snapshot);
   const session = nextSnapshot.sessions.find((item) => item.id === nextSnapshot.activeSessionId) ?? nextSnapshot.sessions[0];
@@ -574,11 +575,22 @@ export function runMockAgentTurn(
     content: prompt,
     action,
   };
+  /** 去重后的显式 Skill ID；mock 环境只有 ID，不读取或保存 Skill 正文。 */
+  const explicitSkillIdList = Array.from(new Set(explicitSkillIds.map((skillId) => skillId.trim()).filter(Boolean))).slice(0, 3);
   const toolCalls: AgentToolCall[] = [
     createToolCall(
       "skill_context",
-      "浏览器 mock 未显式指定 Skill；真实模型场景会按已启用 Skills 的名称和描述自主判断。",
-      { skillId: null, explicit: false },
+      explicitSkillIdList.length
+        ? `浏览器 mock 已收到 ${explicitSkillIdList.length} 个显式 Skill；真实桌面端会向模型注入完整 instructions。`
+        : "浏览器 mock 未显式指定 Skill；真实模型场景会按已启用 Skills 的名称和描述自主判断。",
+      { explicit: explicitSkillIdList.length > 0, explicitSkillCount: explicitSkillIdList.length },
+    ),
+    ...explicitSkillIdList.map((skillId) =>
+      createToolCall("activate_skill", `浏览器开发态已模拟显式激活 Skill：${skillId}`, {
+        skillId,
+        explicit: true,
+        instructionChars: null,
+      }),
     ),
   ];
   let citations: Citation[] = [];
@@ -705,7 +717,9 @@ export function runMockAgentTurn(
       ? `我调用了检索工具，并只在 ${getScopeLabel(nextSnapshot, session)} 范围内组织回答：本地优先的关键是把 Markdown 文件作为用户拥有的主数据源，索引和模型请求都只是辅助层；写入必须先形成 diff，确认后才落盘。`
       : `我调用了检索工具，但在 ${getScopeLabel(nextSnapshot, session)} 中没有找到足够相关的笔记。`;
   } else {
-    content = "浏览器开发态没有真实模型，因此不会替 Agent 预先选择工具。桌面端启用模型后，Agent 会自行判断是否检索、读取或生成待确认 diff。";
+    content = explicitSkillIdList.length
+      ? `浏览器开发态未调用真实模型，但已模拟显式 Skill 激活（${explicitSkillIdList.length} 个）。桌面端会把所选 Skill instructions 注入本轮模型上下文。`
+      : "浏览器开发态没有真实模型，因此不会替 Agent 预先选择工具。桌面端启用模型后，Agent 会自行判断是否检索、读取或生成待确认 diff。";
   }
 
   session.messages.push({

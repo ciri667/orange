@@ -487,6 +487,8 @@ export interface AgentTurnRequest {
   clientMessageId?: string;
   /** 本轮显式选择的 Provider；优先级高于会话默认和全局默认。 */
   modelProviderId?: string;
+  /** 本轮通过 slash picker 显式激活的 Skill ID；只作用于当前 turn，不写入会话。 */
+  explicitSkillIds?: string[];
 }
 
 /** Agent 单轮返回结果，包含更新后的完整工作台状态。 */

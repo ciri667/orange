@@ -238,9 +238,9 @@ const browserBuiltInSkills: AgentSkill[] = [
     id: "skill-note-research",
     name: "note-research",
     displayName: "知识库研究",
-    description: "基于已选知识库检索、阅读笔记，并给出带引用的回答。",
+    description: "基于已选知识库发现支持文档、检索和阅读 Markdown 笔记，并给出带引用的回答。",
     instructions:
-      "当用户要求查找、总结、对比或引用本地笔记时，先调用 search_notes、read_note 或 list_tree 获取依据。回答中只引用工具返回的材料；如果工具没有结果，明确说明未找到依据，不要编造来源。",
+      "当用户要求查找、总结、对比或引用本地知识库时，先调用 list_tree、search_notes 或 read_note 获取依据。list_tree 可发现目录、Markdown 笔记和已支持普通文档元数据；search_notes/read_note 只覆盖 Markdown 笔记。回答中只引用工具返回的材料；如果工具没有结果，明确说明未找到依据，不要编造来源。",
     tags: ["研究", "检索", "引用"],
     enabled: true,
     source: "built-in",
@@ -277,9 +277,9 @@ const browserBuiltInSkills: AgentSkill[] = [
     id: "skill-organize-knowledge",
     name: "organize-knowledge",
     displayName: "知识整理",
-    description: "给出标签、标题、目录和关联笔记建议，不直接移动或改写文件。",
+    description: "给出标签、标题、目录、支持文档和关联笔记建议，不直接移动或改写文件。",
     instructions:
-      "当用户要求整理知识库、补标签、规划目录或建立关联时，优先调用 list_tree、search_notes 或 read_note 获取结构与内容，再调用 suggest_organization 输出建议。该 skill 不执行文件移动或直接写入。",
+      "当用户要求整理知识库、补标签、规划目录或建立关联时，优先调用 list_tree 获取目录、Markdown 笔记和已支持普通文档结构；需要正文依据时再调用 search_notes 或 read_note 读取 Markdown 笔记，然后调用 suggest_organization 输出建议。该 skill 不执行文件移动或直接写入。",
     tags: ["整理", "标签", "目录"],
     enabled: true,
     source: "built-in",
@@ -1534,6 +1534,7 @@ export async function runAgentTurn(
   action: AgentActionType,
   clientMessageId?: string,
   modelProviderId?: string,
+  explicitSkillIds: string[] = [],
 ): Promise<AgentTurnResult> {
   const request: AgentTurnRequest = {
     prompt,
@@ -1543,11 +1544,12 @@ export async function runAgentTurn(
     activeNoteId: snapshot.activeNoteId,
     clientMessageId,
     modelProviderId,
+    explicitSkillIds,
   };
 
   if (!isTauriRuntime()) {
     logBrowserSkillContext(browserAgentSkills, request);
-    const nextSnapshot = runMockAgentTurn(snapshot, prompt, action, clientMessageId);
+    const nextSnapshot = runMockAgentTurn(snapshot, prompt, action, clientMessageId, explicitSkillIds);
 
     browserAuditLogs = [createBrowserAuditLog(nextSnapshot, prompt), ...browserAuditLogs].slice(0, 20);
 
@@ -1969,15 +1971,16 @@ function normalizeBrowserTerms(terms: string[]) {
     .slice(0, 16);
 }
 
-/** 浏览器 mock 只记录已启用 skill 数量，具体是否使用由真实模型场景自行判断。 */
+/** 浏览器 mock 记录本轮显式 skill 数量，不记录用户输入或 skill instructions。 */
 function logBrowserSkillContext(skills: AgentSkill[], request: AgentTurnRequest): void {
-  logDebug("浏览器 mock 未预先选择 Skill。", {
+  logDebug("浏览器 mock 解析本轮 Skill 上下文。", {
     category: "frontend",
     event: "resolve_skill",
-    status: "skipped",
+    status: request.explicitSkillIds?.length ? "explicit" : "catalog_only",
     metadata: {
       action: request.action,
       enabledSkillCount: skills.filter((skill) => skill.enabled).length,
+      explicitSkillCount: request.explicitSkillIds?.length ?? 0,
     },
   });
 }

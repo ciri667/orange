@@ -354,6 +354,8 @@ export function WorkspaceShell() {
   const [providerTemplates, setProviderTemplates] = useState<ProviderTemplate[]>([]);
   /** 本轮显式选择的 Provider；空字符串表示跟随会话/全局默认，切换会话后会被重置。 */
   const [turnModelProviderId, setTurnModelProviderId] = useState("");
+  /** 本轮通过 slash picker 显式激活的 Skill ID；发送成功后清空，失败时保留便于重试。 */
+  const [explicitSkillIds, setExplicitSkillIds] = useState<string[]>([]);
   /** 首屏初始化是否仍在进行，用于区分加载中和加载失败。 */
   const [isBooting, setIsBooting] = useState(true);
   /** 首屏初始化失败原因，失败后展示重试入口而不是停留在 loading。 */
@@ -1512,6 +1514,7 @@ export function WorkspaceShell() {
       setIsSessionContextOpen(false);
       setIsScopeSelectorOpen(false);
       setTurnModelProviderId("");
+      setExplicitSkillIds([]);
     } catch (error) {
       setNotice(error instanceof Error ? error.message : String(error));
     } finally {
@@ -1539,6 +1542,7 @@ export function WorkspaceShell() {
       setIsSessionContextOpen(false);
       setIsScopeSelectorOpen(false);
       setTurnModelProviderId("");
+      setExplicitSkillIds([]);
     } catch (error) {
       setNotice(error instanceof Error ? error.message : String(error));
     } finally {
@@ -1710,6 +1714,7 @@ export function WorkspaceShell() {
   /** 提交 Agent 输入，运行时会自行决定是否调用检索工具。 */
   async function handleSubmitPrompt(action: AgentActionType = "ask", presetPrompt?: string, sourceSnapshot = currentSnapshot) {
     const prompt = (presetPrompt ?? agentPrompt).trim();
+    const turnExplicitSkillIds = presetPrompt ? [] : explicitSkillIds;
     const sourceActiveSession = sourceSnapshot.sessions.find((session) => session.id === sourceSnapshot.activeSessionId) ?? activeSession;
     const sourceActiveKnowledgeBase =
       sourceSnapshot.knowledgeBases.find((knowledgeBase) => knowledgeBase.id === sourceSnapshot.activeKnowledgeBaseId) ?? activeKnowledgeBase;
@@ -1749,6 +1754,7 @@ export function WorkspaceShell() {
           metadata: {
             knowledgeBaseId: sourceActiveKnowledgeBase.id,
             promptLength: prompt.length,
+            explicitSkillCount: turnExplicitSkillIds.length,
           },
         });
       } else if (shouldUseFirstPromptAsTitle(sourceActiveSession)) {
@@ -1763,6 +1769,7 @@ export function WorkspaceShell() {
           metadata: {
             knowledgeBaseId: sourceActiveKnowledgeBase.id,
             promptLength: prompt.length,
+            explicitSkillCount: turnExplicitSkillIds.length,
           },
         });
       }
@@ -1784,6 +1791,7 @@ export function WorkspaceShell() {
           knowledgeBaseId: activeKnowledgeBase.id,
           sessionId: sessionForTurn.id,
           promptLength: prompt.length,
+          explicitSkillCount: turnExplicitSkillIds.length,
         },
       });
 
@@ -1800,9 +1808,13 @@ export function WorkspaceShell() {
         action,
         optimisticMessage.id,
         turnModelProviderId || undefined,
+        turnExplicitSkillIds,
       );
 
       commitSnapshot(result.snapshot);
+      if (!presetPrompt) {
+        setExplicitSkillIds([]);
+      }
       const [nextAuditLogs, nextAppEventLogs] = await Promise.all([loadRequestAuditLogs(), loadAppEventLogs()]);
 
       setAuditLogs(nextAuditLogs);
@@ -2494,6 +2506,7 @@ export function WorkspaceShell() {
             notes={currentSnapshot.notes}
             prompt={agentPrompt}
             skills={agentSkills}
+            selectedSkillIds={explicitSkillIds}
             modelConfig={userSettings.modelConfig}
             turnModelProviderId={turnModelProviderId}
             isBusy={isBusy}
@@ -2509,6 +2522,7 @@ export function WorkspaceShell() {
             onDeleteSession={handleDeleteSession}
             onToggleScopeKnowledgeBase={handleToggleScopeKnowledgeBase}
             onPromptChange={setAgentPrompt}
+            onSelectedSkillIdsChange={setExplicitSkillIds}
             onSubmitPrompt={() => handleSubmitPrompt("ask")}
             onTurnModelProviderChange={setTurnModelProviderId}
             onSetSessionModelProvider={handleSetSessionModelProvider}
