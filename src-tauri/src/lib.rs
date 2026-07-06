@@ -70,27 +70,37 @@ pub fn run() {
             let im_handle = handle.clone();
             tauri::async_runtime::spawn(async move {
                 match storage::load_im_settings(&im_handle) {
-                    Ok(settings) if settings.feishu.enabled => {
-                        if let Err(error) = im::feishu::start_gateway(im_handle.clone()).await {
-                            logging::write_app_event_best_effort(
-                                &im_handle,
-                                logging::AppEventBuilder::new(
-                                    logging::AppLogLevel::Warn,
-                                    logging::AppLogCategory::Im,
-                                    "feishu_gateway_autostart",
-                                    "failed",
-                                    error,
-                                ),
-                            );
+                    Ok(settings) => {
+                        for provider in settings
+                            .providers
+                            .iter()
+                            .filter(|provider| provider.enabled)
+                        {
+                            let provider_id = provider.provider_id.clone();
+                            // 自动启动只按 provider 路由；具体凭证校验和 sidecar 启动由各 provider 负责。
+                            if let Err(error) =
+                                im::start_gateway(im_handle.clone(), &provider_id).await
+                            {
+                                logging::write_app_event_best_effort(
+                                    &im_handle,
+                                    logging::AppEventBuilder::new(
+                                        logging::AppLogLevel::Warn,
+                                        logging::AppLogCategory::Im,
+                                        "im_gateway_autostart",
+                                        "failed",
+                                        error,
+                                    )
+                                    .metadata(serde_json::json!({ "providerId": provider_id })),
+                                );
+                            }
                         }
                     }
-                    Ok(_) => {}
                     Err(error) => logging::write_app_event_best_effort(
                         &im_handle,
                         logging::AppEventBuilder::new(
                             logging::AppLogLevel::Warn,
                             logging::AppLogCategory::Im,
-                            "feishu_gateway_autostart",
+                            "im_gateway_autostart",
                             "failed",
                             error,
                         ),
@@ -112,6 +122,11 @@ pub fn run() {
             commands::save_user_settings,
             commands::load_im_settings,
             commands::save_im_settings,
+            commands::save_im_provider_secret,
+            commands::load_im_provider_credential_status,
+            commands::start_im_gateway,
+            commands::stop_im_gateway,
+            commands::load_im_gateway_status,
             commands::save_feishu_app_secret,
             commands::load_feishu_credential_status,
             commands::start_feishu_gateway,
@@ -132,19 +147,19 @@ pub fn run() {
             commands::open_app_log_folder,
             commands::scan_knowledge_base,
             commands::rescan_knowledge_base,
+            commands::remove_knowledge_base,
+            commands::rename_note,
+            commands::delete_note,
+            commands::save_note_content,
             commands::create_note,
+            commands::save_note_image_attachments,
+            commands::rename_document,
+            commands::delete_document,
+            commands::save_document_content,
             commands::create_document,
             commands::create_folder,
-            commands::rename_note,
-            commands::rename_document,
-            commands::delete_note,
-            commands::delete_document,
-            commands::save_note_content,
-            commands::save_note_image_attachments,
-            commands::save_document_content,
             commands::load_document_preview,
             export::export_current_file,
-            commands::remove_knowledge_base,
             commands::run_agent_turn,
             commands::apply_proposed_change,
             commands::reject_proposed_change
