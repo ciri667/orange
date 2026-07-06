@@ -1,5 +1,6 @@
 use crate::domain::{
-    AgentSession, AgentToolCall, AgentTurnRequest, Citation, ProposedChange, WorkspaceSnapshot,
+    AgentSession, AgentToolCall, AgentTurnRequest, Citation, ProposedChange, WorkspaceDocument,
+    WorkspaceSnapshot,
 };
 use crate::storage::{create_id, hash_content};
 use crate::text_edit::{
@@ -13,8 +14,18 @@ use tauri::AppHandle;
 /** 单次 read_note 工具最多发送给模型的正文字符数。 */
 pub(crate) const MAX_READ_NOTE_CHARS: usize = 6000;
 
-/** list_tree 工具最多发送的目录和笔记摘要数量。 */
+/** list_tree 工具最多发送的目录、Markdown 和普通文档摘要数量。 */
 const MAX_TREE_ITEMS: usize = 120;
+
+/** list_tree 按支持文档类型输出的计数，避免模型把未知扩展名误认为已索引内容。 */
+#[derive(Clone, Debug)]
+struct ListTreeFileTypeCounts {
+    markdown: usize,
+    txt: usize,
+    docx: usize,
+    pdf: usize,
+    image: usize,
+}
 
 /** Agent 一次多处编辑中的单个片段，original 必须唯一命中，next 允许为空表示删除。 */
 #[derive(Clone, Debug)]
@@ -205,7 +216,7 @@ impl AgentTool for ReadNoteTool {
     }
 }
 
-/** list_tree 工具，列出当前 scope 内目录和笔记摘要，供模型自主判断下一步。 */
+/** list_tree 工具，列出当前 scope 内目录、Markdown 笔记和支持文档摘要，供模型判断下一步。 */
 struct ListTreeTool;
 
 impl AgentTool for ListTreeTool {
@@ -214,7 +225,7 @@ impl AgentTool for ListTreeTool {
     }
 
     fn description(&self) -> &'static str {
-        "List folders and notes inside the selected scope."
+        "List folders, Markdown notes, and supported document metadata inside the selected scope. It does not read non-Markdown document contents."
     }
 
     fn parameters(&self) -> Value {
@@ -537,7 +548,7 @@ fn execute_read_note(
     }
 }
 
-/** 执行 list_tree，只返回当前 scope 内的目录和笔记摘要。 */
+/** 执行 list_tree，只返回当前 scope 内的目录、Markdown 笔记和普通文档元数据。 */
 fn execute_list_tree(snapshot: &WorkspaceSnapshot, session_index: usize) -> ToolExecutionResult {
     let scope_ids = scope_id_set(&snapshot.sessions[session_index]);
     let scoped_folders: Vec<_> = snapshot
@@ -550,6 +561,13 @@ fn execute_list_tree(snapshot: &WorkspaceSnapshot, session_index: usize) -> Tool
         .iter()
         .filter(|note| scope_ids.contains(note.knowledge_base_id.as_str()))
         .collect();
+    let scoped_documents: Vec<_> = snapshot
+        .documents
+        .iter()
+        .filter(|document| scope_ids.contains(document.knowledge_base_id.as_str()))
+        .collect();
+    let file_type_counts = build_list_tree_file_type_counts(scoped_notes.len(), &scoped_documents);
+    let total_files = scoped_notes.len() + scoped_documents.len();
     let folders: Vec<_> = scoped_folders
         .iter()
         .take(MAX_TREE_ITEMS)
@@ -560,14 +578,48 @@ fn execute_list_tree(snapshot: &WorkspaceSnapshot, session_index: usize) -> Tool
         .take(MAX_TREE_ITEMS)
         .map(|note| json!({ "id": note.id, "title": note.title, "path": note.path, "knowledgeBaseId": note.knowledge_base_id }))
         .collect();
-    let truncated = scoped_folders.len() > MAX_TREE_ITEMS || scoped_notes.len() > MAX_TREE_ITEMS;
+    let documents: Vec<_> = scoped_documents
+        .iter()
+        .take(MAX_TREE_ITEMS)
+        .map(|document| {
+            json!({
+                "id": &document.id,
+                "title": &document.title,
+                "path": &document.path,
+                "knowledgeBaseId": &document.knowledge_base_id,
+                "fileType": &document.file_type,
+                "previewAvailable": document.preview_available,
+                "agentReadable": false
+            })
+        })
+        .collect();
+    let truncated = scoped_folders.len() > MAX_TREE_ITEMS
+        || scoped_notes.len() > MAX_TREE_ITEMS
+        || scoped_documents.len() > MAX_TREE_ITEMS;
+
+    log::debug!(
+        target: "agent_tools",
+        "list_tree 完成：session={} folder_count={} markdown_count={} document_count={} total_files={} truncated={} type_markdown={} type_txt={} type_docx={} type_pdf={} type_image={}",
+        snapshot.sessions[session_index].id,
+        scoped_folders.len(),
+        scoped_notes.len(),
+        scoped_documents.len(),
+        total_files,
+        truncated,
+        file_type_counts.markdown,
+        file_type_counts.txt,
+        file_type_counts.docx,
+        file_type_counts.pdf,
+        file_type_counts.image
+    );
 
     ToolExecutionResult {
         success: true,
         summary: format!(
-            "已列出 {} 个目录和 {} 篇笔记{}",
+            "已列出 {} 个目录、{} 篇 Markdown 和 {} 个普通文档{}",
             scoped_folders.len(),
             scoped_notes.len(),
+            scoped_documents.len(),
             if truncated {
                 "，结果已按预算截断"
             } else {
@@ -577,18 +629,63 @@ fn execute_list_tree(snapshot: &WorkspaceSnapshot, session_index: usize) -> Tool
         payload: json!({
             "folders": folders,
             "notes": notes,
+            "documents": documents,
             "totalFolders": scoped_folders.len(),
             "totalNotes": scoped_notes.len(),
+            "totalDocuments": scoped_documents.len(),
+            "totalFiles": total_files,
+            "fileTypeCounts": file_type_counts.to_json(),
             "truncated": truncated
         }),
         citations: Vec::new(),
         audit_fragment: Some(format!(
-            "list_tree 发送 {} 个目录摘要、{} 篇笔记摘要{}",
+            "list_tree 发送 {} 个目录摘要、{} 篇 Markdown 摘要、{} 个普通文档摘要{}",
             scoped_folders.len().min(MAX_TREE_ITEMS),
             scoped_notes.len().min(MAX_TREE_ITEMS),
+            scoped_documents.len().min(MAX_TREE_ITEMS),
             if truncated { "（已截断）" } else { "" }
         )),
     }
+}
+
+impl ListTreeFileTypeCounts {
+    /** 转成模型可读 JSON，固定输出五个支持类型 key，便于调用方稳定解析。 */
+    fn to_json(&self) -> Value {
+        json!({
+            "markdown": self.markdown,
+            "txt": self.txt,
+            "docx": self.docx,
+            "pdf": self.pdf,
+            "image": self.image
+        })
+    }
+}
+
+/** 汇总 list_tree 返回范围内的文件类型数量，不读取普通文档正文或 hash。 */
+fn build_list_tree_file_type_counts(
+    markdown_count: usize,
+    documents: &[&WorkspaceDocument],
+) -> ListTreeFileTypeCounts {
+    let mut counts = ListTreeFileTypeCounts {
+        markdown: markdown_count,
+        txt: 0,
+        docx: 0,
+        pdf: 0,
+        image: 0,
+    };
+
+    for document in documents {
+        // file_type 来自扫描白名单；未知历史值不进入固定计数，避免误导模型能力边界。
+        match document.file_type.as_str() {
+            "txt" => counts.txt += 1,
+            "docx" => counts.docx += 1,
+            "pdf" => counts.pdf += 1,
+            "image" => counts.image += 1,
+            _ => {}
+        }
+    }
+
+    counts
 }
 
 /** 执行 propose_note_change，只创建待确认 diff，不直接写文件。 */
@@ -1045,7 +1142,7 @@ fn budget_citation(mut citation: Citation) -> Citation {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::domain::{FolderEntry, KnowledgeBase, Note};
+    use crate::domain::{FolderEntry, KnowledgeBase, Note, WorkspaceDocument};
 
     /** 构造工具层测试使用的最小工作台快照。 */
     fn tool_test_snapshot(note_content: String) -> WorkspaceSnapshot {
@@ -1157,6 +1254,32 @@ mod tests {
         }
     }
 
+    /** 构造工具层普通文档条目，测试 list_tree 元数据时不需要真实文件系统。 */
+    fn tool_test_document(
+        id: &str,
+        knowledge_base_id: &str,
+        path: &str,
+        file_type: &str,
+        preview_available: bool,
+    ) -> WorkspaceDocument {
+        WorkspaceDocument {
+            id: id.to_owned(),
+            knowledge_base_id: knowledge_base_id.to_owned(),
+            title: path
+                .rsplit('/')
+                .next()
+                .unwrap_or("测试文档")
+                .trim_end_matches(&format!(".{file_type}"))
+                .to_owned(),
+            path: path.to_owned(),
+            file_type: file_type.to_owned(),
+            updated_at: "刚刚".to_owned(),
+            content_hash: hash_content(id),
+            content: (file_type == "txt").then(|| "纯文本正文不会通过 list_tree 返回。".to_owned()),
+            preview_available,
+        }
+    }
+
     /** 默认 registry 必须暴露现有内置工具的 schema。 */
     #[test]
     fn registry_schema_contains_builtin_tools() {
@@ -1196,6 +1319,111 @@ mod tests {
 
         assert_eq!(outcome.call.status, "failed");
         assert!(outcome.payload.get("error").is_some());
+    }
+
+    /** list_tree 应返回当前 scope 内普通文档元数据，但不暴露正文和 hash。 */
+    #[test]
+    fn list_tree_returns_document_metadata_for_scope() {
+        let registry = ToolRegistry::default();
+        let mut snapshot = tool_test_snapshot("正文内容足够用于测试。".to_owned());
+        snapshot.documents = vec![
+            tool_test_document("document-txt", "kb-a", "Docs/brief.txt", "txt", false),
+            tool_test_document("document-pdf", "kb-a", "Docs/spec.pdf", "pdf", true),
+        ];
+        let request = tool_test_request("ask", "列出文件");
+        let mut context = tool_test_context(&mut snapshot, &request);
+        let outcome = registry.execute_named(&mut context, "list_tree", json!({}));
+        let documents = outcome.payload["documents"].as_array().unwrap();
+        let txt_document = documents
+            .iter()
+            .find(|document| document["id"].as_str() == Some("document-txt"))
+            .unwrap();
+
+        assert_eq!(outcome.call.status, "completed");
+        assert_eq!(documents.len(), 2);
+        assert_eq!(txt_document["fileType"].as_str(), Some("txt"));
+        assert_eq!(txt_document["previewAvailable"].as_bool(), Some(false));
+        assert_eq!(txt_document["agentReadable"].as_bool(), Some(false));
+        assert!(txt_document.get("content").is_none());
+        assert!(txt_document.get("contentHash").is_none());
+    }
+
+    /** list_tree 必须按会话 scope 过滤普通文档，避免暴露未授权知识库结构。 */
+    #[test]
+    fn list_tree_rejects_documents_outside_scope() {
+        let registry = ToolRegistry::default();
+        let mut snapshot = tool_test_snapshot("正文内容足够用于测试。".to_owned());
+        snapshot.documents = vec![
+            tool_test_document("document-a", "kb-a", "Docs/allowed.txt", "txt", false),
+            tool_test_document("document-b", "kb-b", "Private/hidden.pdf", "pdf", true),
+        ];
+        let request = tool_test_request("ask", "列出文件");
+        let mut context = tool_test_context(&mut snapshot, &request);
+        let outcome = registry.execute_named(&mut context, "list_tree", json!({}));
+        let documents = outcome.payload["documents"].as_array().unwrap();
+
+        assert_eq!(outcome.call.status, "completed");
+        assert_eq!(documents.len(), 1);
+        assert_eq!(documents[0]["id"].as_str(), Some("document-a"));
+        assert_eq!(outcome.payload["totalDocuments"].as_u64(), Some(1));
+    }
+
+    /** list_tree 应汇总混合文件总数、类型计数和截断状态。 */
+    #[test]
+    fn list_tree_reports_totals_type_counts_and_truncation() {
+        let registry = ToolRegistry::default();
+        let mut snapshot = tool_test_snapshot("正文内容足够用于测试。".to_owned());
+
+        snapshot.documents = vec![
+            tool_test_document("document-txt-base", "kb-a", "Docs/base.txt", "txt", false),
+            tool_test_document("document-docx", "kb-a", "Docs/brief.docx", "docx", true),
+            tool_test_document("document-pdf", "kb-a", "Docs/spec.pdf", "pdf", true),
+            tool_test_document(
+                "document-image",
+                "kb-a",
+                "Assets/diagram.png",
+                "image",
+                true,
+            ),
+        ];
+
+        for index in 0..(MAX_TREE_ITEMS - 3) {
+            // 生成超过 list_tree 单类预算的 TXT 文档，用于验证 totals 保留真实数量而数组被截断。
+            snapshot.documents.push(tool_test_document(
+                &format!("document-extra-{index}"),
+                "kb-a",
+                &format!("Docs/extra-{index}.txt"),
+                "txt",
+                false,
+            ));
+        }
+
+        let request = tool_test_request("ask", "列出文件");
+        let mut context = tool_test_context(&mut snapshot, &request);
+        let outcome = registry.execute_named(&mut context, "list_tree", json!({}));
+        let documents = outcome.payload["documents"].as_array().unwrap();
+        let file_type_counts = &outcome.payload["fileTypeCounts"];
+
+        assert_eq!(outcome.call.status, "completed");
+        assert_eq!(documents.len(), MAX_TREE_ITEMS);
+        assert_eq!(outcome.payload["totalNotes"].as_u64(), Some(1));
+        assert_eq!(
+            outcome.payload["totalDocuments"].as_u64(),
+            Some((MAX_TREE_ITEMS + 1) as u64)
+        );
+        assert_eq!(
+            outcome.payload["totalFiles"].as_u64(),
+            Some((MAX_TREE_ITEMS + 2) as u64)
+        );
+        assert_eq!(outcome.payload["truncated"].as_bool(), Some(true));
+        assert_eq!(file_type_counts["markdown"].as_u64(), Some(1));
+        assert_eq!(
+            file_type_counts["txt"].as_u64(),
+            Some((MAX_TREE_ITEMS - 2) as u64)
+        );
+        assert_eq!(file_type_counts["docx"].as_u64(), Some(1));
+        assert_eq!(file_type_counts["pdf"].as_u64(), Some(1));
+        assert_eq!(file_type_counts["image"].as_u64(), Some(1));
     }
 
     /** read_note 会按上下文预算截断长正文并保留截断标记。 */
