@@ -387,14 +387,56 @@ pub struct UserSettings {
     pub write_confirmation_required: bool,
 }
 
-/** 即时通讯集成总设置，首版只包含飞书/Lark 自建应用。 */
+/** 首个内置 IM provider ID；后续 provider 继续使用稳定小写 ID。 */
+pub const IM_PROVIDER_FEISHU: &str = "feishu";
+
+/** 即时通讯集成总设置；providers 是持久化扩展点，避免新增 IM 时继续扩根字段。 */
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ImIntegrationSettings {
-    pub feishu: FeishuIntegrationSettings,
+    #[serde(default)]
+    pub providers: Vec<ImProviderSettings>,
 }
 
-/** 飞书/Lark 自建应用配置；appSecret 单独存 keyring，这里只保存引用和脱敏权限边界。 */
+/** 单个 IM provider 的通用配置；平台专属字段放在 config 中。 */
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ImProviderSettings {
+    pub provider_id: String,
+    pub enabled: bool,
+    #[serde(default)]
+    pub default_knowledge_base_ids: Vec<String>,
+    #[serde(default)]
+    pub allowed_user_open_ids: Vec<String>,
+    #[serde(default)]
+    pub allowed_chat_ids: Vec<String>,
+    #[serde(default)]
+    pub discovered_user_open_ids: Vec<String>,
+    #[serde(default)]
+    pub discovered_chat_ids: Vec<String>,
+    pub require_mention: bool,
+    pub updated_at: String,
+    pub config: ImProviderConfig,
+}
+
+/** IM provider 平台专属配置；新增 IM 时在这里增加新变体。 */
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(tag = "type", rename_all = "camelCase")]
+pub enum ImProviderConfig {
+    #[serde(rename = "feishu")]
+    Feishu(FeishuProviderConfig),
+}
+
+/** 飞书/Lark 自建应用专属配置；appSecret 单独存 keyring，这里只保存引用。 */
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FeishuProviderConfig {
+    pub domain: String,
+    pub app_id: String,
+    pub secret_key_reference: String,
+}
+
+/** 飞书/Lark 运行时扁平配置；用于复用首版已有处理逻辑，不作为新持久化结构。 */
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct FeishuIntegrationSettings {
@@ -416,6 +458,50 @@ pub struct FeishuIntegrationSettings {
     pub updated_at: String,
 }
 
+impl ImProviderSettings {
+    /** 从旧版飞书配置生成 provider 配置，用于 SQLite 旧 JSON 迁移和默认值构造。 */
+    pub fn from_feishu(settings: FeishuIntegrationSettings) -> Self {
+        Self {
+            provider_id: IM_PROVIDER_FEISHU.to_owned(),
+            enabled: settings.enabled,
+            default_knowledge_base_ids: settings.default_knowledge_base_ids,
+            allowed_user_open_ids: settings.allowed_user_open_ids,
+            allowed_chat_ids: settings.allowed_chat_ids,
+            discovered_user_open_ids: settings.discovered_user_open_ids,
+            discovered_chat_ids: settings.discovered_chat_ids,
+            require_mention: settings.require_mention,
+            updated_at: settings.updated_at,
+            config: ImProviderConfig::Feishu(FeishuProviderConfig {
+                domain: settings.domain,
+                app_id: settings.app_id,
+                secret_key_reference: settings.secret_key_reference,
+            }),
+        }
+    }
+
+    /** 将 provider 配置转成飞书运行时配置；非飞书 provider 返回 None。 */
+    pub fn to_feishu_settings(&self) -> Option<FeishuIntegrationSettings> {
+        match &self.config {
+            ImProviderConfig::Feishu(config) if self.provider_id == IM_PROVIDER_FEISHU => {
+                Some(FeishuIntegrationSettings {
+                    enabled: self.enabled,
+                    domain: config.domain.clone(),
+                    app_id: config.app_id.clone(),
+                    secret_key_reference: config.secret_key_reference.clone(),
+                    default_knowledge_base_ids: self.default_knowledge_base_ids.clone(),
+                    allowed_user_open_ids: self.allowed_user_open_ids.clone(),
+                    allowed_chat_ids: self.allowed_chat_ids.clone(),
+                    discovered_user_open_ids: self.discovered_user_open_ids.clone(),
+                    discovered_chat_ids: self.discovered_chat_ids.clone(),
+                    require_mention: self.require_mention,
+                    updated_at: self.updated_at.clone(),
+                })
+            }
+            _ => None,
+        }
+    }
+}
+
 /** 模型密钥保存状态，只暴露是否可读取，不返回明文密钥。 */
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -426,19 +512,24 @@ pub struct ModelApiKeyStatus {
     pub message: String,
 }
 
-/** 飞书 appSecret 保存状态；只暴露是否存在，不返回明文。 */
+/** IM provider 凭证保存状态；只暴露是否存在，不返回明文。 */
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub struct FeishuCredentialStatus {
+pub struct ImProviderCredentialStatus {
+    pub provider_id: String,
     pub key_reference: String,
     pub configured: bool,
     pub message: String,
 }
 
-/** 飞书长连接网关运行态，设置页用它展示手动启停结果。 */
+/** 兼容旧命令签名的飞书凭证状态别名。 */
+pub type FeishuCredentialStatus = ImProviderCredentialStatus;
+
+/** IM provider 长连接网关运行态，设置页用它展示手动启停结果。 */
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub struct FeishuGatewayStatus {
+pub struct ImGatewayStatus {
+    pub provider_id: String,
     pub running: bool,
     pub connected: bool,
     pub domain: String,
@@ -448,6 +539,9 @@ pub struct FeishuGatewayStatus {
     pub last_stopped_at: Option<String>,
     pub last_error: Option<String>,
 }
+
+/** 兼容旧命令签名的飞书网关状态别名。 */
+pub type FeishuGatewayStatus = ImGatewayStatus;
 
 /** 模型请求和本地工具调用审计摘要，用于解释每轮 Agent 使用了哪些范围。 */
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -821,7 +915,22 @@ pub struct SaveModelApiKeyPayload {
     pub api_key: String,
 }
 
-/** 保存飞书 appSecret 的命令入参；明文只进入系统安全存储。 */
+/** 保存 IM provider 密钥的命令入参；明文只进入系统安全存储。 */
+#[derive(Clone, Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SaveImProviderSecretPayload {
+    pub provider_id: String,
+    pub secret: String,
+}
+
+/** 指定 IM provider 的命令入参；启停和状态读取都通过 providerId 路由。 */
+#[derive(Clone, Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ImProviderPayload {
+    pub provider_id: String,
+}
+
+/** 保存飞书 appSecret 的兼容命令入参；明文只进入系统安全存储。 */
 #[derive(Clone, Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SaveFeishuSecretPayload {
