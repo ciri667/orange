@@ -1,23 +1,18 @@
 use crate::domain::{
-    AgentMessage, AgentSession, AgentTurnRequest, FeishuGatewayStatus, FeishuIntegrationSettings,
-    WorkspaceSnapshot,
+    FeishuGatewayStatus, FeishuIntegrationSettings, WorkspaceSnapshot, IM_PROVIDER_FEISHU,
 };
 use crate::logging::{self, AppEventBuilder, AppLogCategory, AppLogLevel};
-use crate::storage::{self, create_id, format_local_datetime};
+use crate::storage::{self, format_local_datetime};
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use std::collections::{HashSet, VecDeque};
 use std::io::{BufRead, BufReader, Write};
-use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
-use tauri::{AppHandle, Manager};
-
-#[cfg(unix)]
-use std::os::unix::fs::PermissionsExt;
+use tauri::AppHandle;
 
 /** 飞书单个收件人的发送限流间隔；飞书同用户或同群发送上限为 5 QPS。 */
 const FEISHU_SEND_INTERVAL: Duration = Duration::from_millis(220);
@@ -106,13 +101,13 @@ static FEISHU_GATEWAY_STATE: OnceLock<Mutex<FeishuGatewayState>> = OnceLock::new
 
 /** 启动飞书长连接网关；只负责拉起 sidecar，消息处理在后台任务中完成。 */
 pub async fn start_gateway(app: AppHandle) -> Result<FeishuGatewayStatus, String> {
-    let settings = storage::load_im_settings(&app)?.feishu;
-    let app_secret =
-        storage::load_feishu_app_secret()?.ok_or_else(|| "请先保存飞书 appSecret。".to_owned())?;
+    let settings = storage::load_feishu_integration_settings(&app)?;
+    let app_secret = storage::load_im_provider_secret(IM_PROVIDER_FEISHU)?
+        .ok_or_else(|| "请先保存飞书 appSecret。".to_owned())?;
 
     validate_gateway_settings(&settings)?;
 
-    let sidecar_path = sidecar_binary_path(&app)?;
+    let sidecar_path = super::sidecar_binary_path(&app, IM_PROVIDER_FEISHU, "feishu-gateway")?;
     let mut child = Command::new(&sidecar_path)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -166,11 +161,12 @@ pub async fn start_gateway(app: AppHandle) -> Result<FeishuGatewayStatus, String
         AppEventBuilder::new(
             AppLogLevel::Info,
             AppLogCategory::Im,
-            "feishu_gateway_start",
+            "im_gateway_start",
             "completed",
             "飞书长连接网关已启动。",
         )
         .metadata(json!({
+            "providerId": IM_PROVIDER_FEISHU,
             "domain": settings.domain,
             "knowledgeBaseCount": settings.default_knowledge_base_ids.len(),
             "allowedUserCount": settings.allowed_user_open_ids.len(),
@@ -206,10 +202,11 @@ pub fn stop_gateway(app: &AppHandle) -> Result<FeishuGatewayStatus, String> {
         AppEventBuilder::new(
             AppLogLevel::Info,
             AppLogCategory::Im,
-            "feishu_gateway_stop",
+            "im_gateway_stop",
             "completed",
             "飞书长连接网关已停止。",
-        ),
+        )
+        .metadata(json!({ "providerId": IM_PROVIDER_FEISHU })),
     );
 
     Ok(state.to_status())
@@ -217,8 +214,8 @@ pub fn stop_gateway(app: &AppHandle) -> Result<FeishuGatewayStatus, String> {
 
 /** 读取飞书网关状态，并补齐当前配置是否存在。 */
 pub fn load_gateway_status(app: &AppHandle) -> Result<FeishuGatewayStatus, String> {
-    let settings = storage::load_im_settings(app)?.feishu;
-    let secret_configured = storage::load_feishu_credential_status()
+    let settings = storage::load_feishu_integration_settings(app)?;
+    let secret_configured = storage::load_im_provider_credential_status(IM_PROVIDER_FEISHU)
         .map(|status| status.configured)
         .unwrap_or(false);
     let mut state = lock_gateway_state()?;
@@ -234,6 +231,7 @@ impl FeishuGatewayState {
     /** 转成前端可序列化状态，隐藏 child、限流表和去重队列。 */
     fn to_status(&self) -> FeishuGatewayStatus {
         FeishuGatewayStatus {
+            provider_id: IM_PROVIDER_FEISHU.to_owned(),
             running: self.running,
             connected: self.connected,
             domain: self.domain.clone(),
@@ -256,6 +254,9 @@ fn lock_gateway_state() -> Result<std::sync::MutexGuard<'static, FeishuGatewaySt
 
 /** 校验启动所需的非敏感配置，避免 sidecar 启动后才失败。 */
 fn validate_gateway_settings(settings: &FeishuIntegrationSettings) -> Result<(), String> {
+    if !settings.enabled {
+        return Err("请先启用飞书/Lark 集成。".to_owned());
+    }
     if settings.app_id.trim().is_empty() {
         return Err("请先填写飞书 App ID。".to_owned());
     }
@@ -267,60 +268,6 @@ fn validate_gateway_settings(settings: &FeishuIntegrationSettings) -> Result<(),
     }
 
     Ok(())
-}
-
-/** 定位 sidecar 二进制；开发态优先使用源码目录下的本机编译产物。 */
-fn sidecar_binary_path(app: &AppHandle) -> Result<PathBuf, String> {
-    let file_name = if cfg!(target_os = "windows") {
-        "feishu-gateway.exe"
-    } else {
-        "feishu-gateway"
-    };
-    let dev_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("sidecars")
-        .join("bin")
-        .join(file_name);
-
-    if is_executable_file(&dev_path) {
-        return Ok(dev_path);
-    }
-
-    app.path()
-        .resource_dir()
-        .map(|path| path.join(file_name))
-        .map_err(|error| format!("无法定位应用资源目录：{error}"))
-        .and_then(|path| {
-            if is_executable_file(&path) {
-                Ok(path)
-            } else {
-                Err(
-                    "飞书 sidecar 尚未构建或不可执行，请先运行 npm run sidecar:feishu:build。"
-                        .to_owned(),
-                )
-            }
-        })
-}
-
-/** 判断 sidecar 路径是否是可启动的二进制文件，避免把源码目录误当成命令执行。 */
-fn is_executable_file(path: &Path) -> bool {
-    let Ok(metadata) = path.metadata() else {
-        return false;
-    };
-
-    if !metadata.is_file() {
-        return false;
-    }
-
-    #[cfg(unix)]
-    {
-        // macOS/Linux 需要任一执行位，否则 spawn 会返回 Permission denied。
-        metadata.permissions().mode() & 0o111 != 0
-    }
-
-    #[cfg(not(unix))]
-    {
-        true
-    }
 }
 
 /** 后台读取 sidecar stdout 的 JSONL 消息事件，收到后快速投递到异步 Agent 任务。 */
@@ -355,7 +302,10 @@ fn spawn_stdout_reader(app: AppHandle, stdout: impl std::io::Read + Send + 'stat
                     });
                 }
                 Err(error) => {
-                    record_sidecar_stdout_noise(&app, &format!("飞书 sidecar JSONL 事件格式无效：{error}"));
+                    record_sidecar_stdout_noise(
+                        &app,
+                        &format!("飞书 sidecar JSONL 事件格式无效：{error}"),
+                    );
                 }
             }
         }
@@ -369,10 +319,11 @@ fn record_sidecar_stdout_noise(app: &AppHandle, line: &str) {
         AppEventBuilder::new(
             AppLogLevel::Warn,
             AppLogCategory::Im,
-            "feishu_gateway_stdout_ignored",
+            "im_gateway_stdout_ignored",
             "skipped",
             logging::sanitize_log_text(line),
-        ),
+        )
+        .metadata(json!({ "providerId": IM_PROVIDER_FEISHU })),
     );
 }
 
@@ -391,10 +342,11 @@ fn spawn_stderr_reader(app: AppHandle, stderr: impl std::io::Read + Send + 'stat
                 AppEventBuilder::new(
                     AppLogLevel::Warn,
                     AppLogCategory::Im,
-                    "feishu_gateway_stderr",
+                    "im_gateway_stderr",
                     "failed",
                     logging::sanitize_log_text(&line),
-                ),
+                )
+                .metadata(json!({ "providerId": IM_PROVIDER_FEISHU })),
             );
         }
     });
@@ -413,10 +365,11 @@ fn mark_gateway_connected(app: &AppHandle) {
             AppEventBuilder::new(
                 AppLogLevel::Info,
                 AppLogCategory::Im,
-                "feishu_gateway_connected",
+                "im_gateway_connected",
                 "completed",
                 "飞书长连接已收到事件。",
-            ),
+            )
+            .metadata(json!({ "providerId": IM_PROVIDER_FEISHU })),
         );
     }
 }
@@ -433,10 +386,11 @@ fn record_gateway_error(app: &AppHandle, message: &str) {
         AppEventBuilder::new(
             AppLogLevel::Warn,
             AppLogCategory::Im,
-            "feishu_gateway_disconnected",
+            "im_gateway_disconnected",
             "failed",
             message,
-        ),
+        )
+        .metadata(json!({ "providerId": IM_PROVIDER_FEISHU })),
     );
 }
 
@@ -449,7 +403,7 @@ async fn handle_inbound_event(app: AppHandle, event: FeishuInboundEvent) {
         return;
     }
 
-    let is_group_chat = event.chat_type == "group" || event.chat_type == "topic_group" || event.chat_id.starts_with("oc_");
+    let is_group_chat = is_group_chat_event(&event);
 
     if event.kind == "discovery" {
         remember_discovered_peer_from_event(&app, &event, is_group_chat, &event_hash);
@@ -461,11 +415,12 @@ async fn handle_inbound_event(app: AppHandle, event: FeishuInboundEvent) {
         AppEventBuilder::new(
             AppLogLevel::Info,
             AppLogCategory::Im,
-            "feishu_message_received",
+            "im_message_received",
             "completed",
             "收到飞书消息事件。",
         )
         .metadata(json!({
+            "providerId": IM_PROVIDER_FEISHU,
             "eventHash": event_hash,
             "messageHash": hash_identifier(&event.message_id),
             "chatHash": hash_identifier(&event.chat_id),
@@ -475,8 +430,8 @@ async fn handle_inbound_event(app: AppHandle, event: FeishuInboundEvent) {
         })),
     );
 
-    let mut settings = match storage::load_im_settings(&app) {
-        Ok(settings) => settings.feishu,
+    let mut settings = match storage::load_feishu_integration_settings(&app) {
+        Ok(settings) => settings,
         Err(error) => {
             record_gateway_error(&app, &error);
             return;
@@ -484,11 +439,11 @@ async fn handle_inbound_event(app: AppHandle, event: FeishuInboundEvent) {
     };
     // 先记录可授权候选，再做 allowlist 判断；未授权消息也能在设置页一键加入。
     if remember_discovered_peer_from_event(&app, &event, is_group_chat, &event_hash) {
-        if let Ok(next_settings) = storage::load_im_settings(&app) {
-            settings = next_settings.feishu;
+        if let Ok(next_settings) = storage::load_feishu_integration_settings(&app) {
+            settings = next_settings;
         }
-    } else if let Ok(next_settings) = storage::load_im_settings(&app) {
-        settings = next_settings.feishu;
+    } else if let Ok(next_settings) = storage::load_feishu_integration_settings(&app) {
+        settings = next_settings;
     }
     let decision = decide_event_handling(&settings, &event);
 
@@ -498,7 +453,7 @@ async fn handle_inbound_event(app: AppHandle, event: FeishuInboundEvent) {
             AppEventBuilder::new(
                 AppLogLevel::Info,
                 AppLogCategory::Im,
-                "feishu_message_blocked",
+                "im_message_blocked",
                 "blocked",
                 block.reason,
             )
@@ -524,24 +479,28 @@ async fn handle_inbound_event(app: AppHandle, event: FeishuInboundEvent) {
             AppEventBuilder::new(
                 AppLogLevel::Info,
                 AppLogCategory::Im,
-                "feishu_reply_sent",
+                "im_reply_sent",
                 "completed",
                 "飞书回复已发送。",
             )
             .duration(started_at.elapsed())
-            .metadata(json!({ "eventHash": event_hash, "replyChars": reply.chars().count() })),
+            .metadata(json!({
+                "providerId": IM_PROVIDER_FEISHU,
+                "eventHash": event_hash,
+                "replyChars": reply.chars().count()
+            })),
         ),
         Err(error) => logging::write_app_event_best_effort(
             &app,
             AppEventBuilder::new(
                 AppLogLevel::Error,
                 AppLogCategory::Im,
-                "feishu_reply_failed",
+                "im_reply_failed",
                 "failed",
                 error,
             )
             .duration(started_at.elapsed())
-            .metadata(json!({ "eventHash": event_hash })),
+            .metadata(json!({ "providerId": IM_PROVIDER_FEISHU, "eventHash": event_hash })),
         ),
     }
 }
@@ -566,11 +525,12 @@ fn remember_discovered_peer_from_event(
                     AppEventBuilder::new(
                         AppLogLevel::Info,
                         AppLogCategory::Im,
-                        "feishu_discovered_peer_saved",
+                        "im_discovered_peer_saved",
                         "completed",
                         "已记录飞书待授权对象。",
                     )
                     .metadata(json!({
+                        "providerId": IM_PROVIDER_FEISHU,
                         "eventHash": event_hash,
                         "senderHash": hash_identifier(&event.sender_open_id),
                         "chatHash": hash_identifier(&event.chat_id),
@@ -587,11 +547,11 @@ fn remember_discovered_peer_from_event(
                 AppEventBuilder::new(
                     AppLogLevel::Warn,
                     AppLogCategory::Im,
-                    "feishu_discovered_peer_save",
+                    "im_discovered_peer_save",
                     "failed",
                     error,
                 )
-                .metadata(json!({ "eventHash": event_hash })),
+                .metadata(json!({ "providerId": IM_PROVIDER_FEISHU, "eventHash": event_hash })),
             );
             false
         }
@@ -641,7 +601,7 @@ fn decide_event_handling(
         return Err(block_reason("飞书发送人不在允许名单中。"));
     }
 
-    let is_group_chat = event.chat_type == "group" || event.chat_id.starts_with("oc_");
+    let is_group_chat = is_group_chat_event(event);
 
     if is_group_chat {
         if !settings
@@ -672,7 +632,7 @@ fn block_metadata(
     settings: &FeishuIntegrationSettings,
     event_hash: &str,
 ) -> Value {
-    let is_group_chat = event.chat_type == "group" || event.chat_id.starts_with("oc_");
+    let is_group_chat = is_group_chat_event(event);
     let sender_allowed = settings
         .allowed_user_open_ids
         .iter()
@@ -683,11 +643,13 @@ fn block_metadata(
         .any(|chat_id| chat_id == &event.chat_id);
 
     json!({
+        "providerId": IM_PROVIDER_FEISHU,
         "eventHash": event_hash,
         "senderHash": hash_identifier(&event.sender_open_id),
         "chatHash": hash_identifier(&event.chat_id),
         "chatType": event.chat_type,
         "isGroupChat": is_group_chat,
+        "providerEnabled": settings.enabled,
         "senderAllowed": sender_allowed,
         "chatAllowed": !is_group_chat || chat_allowed,
         "directMention": is_direct_bot_mention(event),
@@ -703,6 +665,11 @@ fn is_direct_bot_mention(event: &FeishuInboundEvent) -> bool {
         .mentions
         .iter()
         .any(|mention| mention.open_id == "bot" || mention.name == "bot")
+}
+
+/** 判断飞书事件是否来自群聊；chat_id 形态不能作为依据，单聊也可能出现 oc_* 会话 ID。 */
+fn is_group_chat_event(event: &FeishuInboundEvent) -> bool {
+    matches!(event.chat_type.as_str(), "group" | "topic_group")
 }
 
 /** 构造 `/status` 回复，只展示脱敏配置和运行状态。 */
@@ -747,11 +714,14 @@ fn reset_im_session(
             AppEventBuilder::new(
                 AppLogLevel::Warn,
                 AppLogCategory::Im,
-                "feishu_session_reset",
+                "im_session_reset",
                 "failed",
                 error,
             )
-            .metadata(json!({ "channelHash": hash_identifier(&channel_key) })),
+            .metadata(json!({
+                "providerId": IM_PROVIDER_FEISHU,
+                "channelHash": hash_identifier(&channel_key)
+            })),
         );
         return "重置飞书会话失败，请稍后重试。".to_owned();
     }
@@ -761,11 +731,12 @@ fn reset_im_session(
         AppEventBuilder::new(
             AppLogLevel::Info,
             AppLogCategory::Im,
-            "feishu_session_reset",
+            "im_session_reset",
             "completed",
             "飞书会话映射已重置。",
         )
         .metadata(json!({
+            "providerId": IM_PROVIDER_FEISHU,
             "channelHash": hash_identifier(&channel_key),
             "scopeCount": settings.default_knowledge_base_ids.len(),
         })),
@@ -782,6 +753,7 @@ async fn run_agent_for_event(
 ) -> String {
     let result = crate::commands::run_agent_turn_from_im(
         app.clone(),
+        IM_PROVIDER_FEISHU.to_owned(),
         event.text.trim().to_owned(),
         build_channel_key(event),
         settings.default_knowledge_base_ids.clone(),
@@ -828,7 +800,7 @@ fn build_agent_reply_text(snapshot: &WorkspaceSnapshot) -> String {
 
 /** 构造稳定 IM 会话 key；群聊按用户隔离，私聊按 sender 隔离。 */
 fn build_channel_key(event: &FeishuInboundEvent) -> String {
-    let is_group_chat = event.chat_type == "group" || event.chat_id.starts_with("oc_");
+    let is_group_chat = is_group_chat_event(event);
 
     if is_group_chat {
         format!(
@@ -850,7 +822,7 @@ async fn send_text_reply(
 ) -> Result<(), String> {
     rate_limit_send_target(&event.chat_id).await?;
 
-    let app_secret = storage::load_feishu_app_secret()?
+    let app_secret = storage::load_im_provider_secret(IM_PROVIDER_FEISHU)?
         .ok_or_else(|| "飞书 appSecret 未配置，无法发送回复。".to_owned())?;
     let token = fetch_tenant_access_token(&settings.domain, &settings.app_id, &app_secret).await?;
     let base_url = feishu_base_url(&settings.domain);
@@ -905,11 +877,14 @@ async fn send_text_reply(
         AppEventBuilder::new(
             AppLogLevel::Debug,
             AppLogCategory::Im,
-            "feishu_reply_api",
+            "im_reply_api",
             "completed",
             "飞书发送 API 调用完成。",
         )
-        .metadata(json!({ "chatHash": hash_identifier(&event.chat_id) })),
+        .metadata(json!({
+            "providerId": IM_PROVIDER_FEISHU,
+            "chatHash": hash_identifier(&event.chat_id)
+        })),
     );
 
     Ok(())
@@ -1026,59 +1001,6 @@ fn truncate_chars(value: &str, max_chars: usize) -> String {
     format!("{}...", value.chars().take(max_chars).collect::<String>())
 }
 
-/** 构造 IM AgentSession，供 commands helper 创建新会话时复用。 */
-pub(crate) fn build_im_agent_session(
-    title: String,
-    knowledge_base_ids: Vec<String>,
-) -> AgentSession {
-    let now = format_local_datetime();
-
-    AgentSession {
-        id: create_id("session-im"),
-        title,
-        r#type: "knowledge-base".to_owned(),
-        knowledge_base_ids,
-        active_note_id: None,
-        pinned_note_ids: Vec::new(),
-        messages: Vec::new(),
-        pending_change: None,
-        created_at: now.clone(),
-        updated_at: now,
-        deleted_at: None,
-        model_provider_id: None,
-    }
-}
-
-/** 构造 IM 入口的乐观用户消息，和前端提交保持同一消息复用语义。 */
-pub(crate) fn build_im_user_message(prompt: &str) -> AgentMessage {
-    AgentMessage {
-        id: create_id("user-im"),
-        role: "user".to_owned(),
-        content: prompt.to_owned(),
-        action: Some("ask".to_owned()),
-        citations: None,
-        tool_calls: None,
-    }
-}
-
-/** 构造 IM AgentTurnRequest，active note 为空，scope 由 IM 会话控制。 */
-pub(crate) fn build_im_turn_request(
-    prompt: String,
-    session_id: String,
-    active_knowledge_base_id: String,
-    client_message_id: String,
-) -> AgentTurnRequest {
-    AgentTurnRequest {
-        prompt,
-        action: "ask".to_owned(),
-        session_id,
-        active_knowledge_base_id,
-        active_note_id: String::new(),
-        client_message_id: Some(client_message_id),
-        model_provider_id: None,
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1109,6 +1031,38 @@ mod tests {
 
         assert_eq!(build_channel_key(&event), build_channel_key(&event));
         assert!(build_channel_key(&event).starts_with("feishu:group:"));
+    }
+
+    /** 单聊可能使用 oc_* chat_id，但只要 chatType 是 p2p，就不能套用群聊 @ 规则。 */
+    #[test]
+    fn p2p_chat_with_oc_chat_id_is_not_treated_as_group() {
+        let settings = FeishuIntegrationSettings {
+            enabled: true,
+            domain: "feishu".to_owned(),
+            app_id: "cli_x".to_owned(),
+            secret_key_reference: "secret".to_owned(),
+            default_knowledge_base_ids: vec!["kb".to_owned()],
+            allowed_user_open_ids: vec!["ou_user".to_owned()],
+            allowed_chat_ids: Vec::new(),
+            discovered_user_open_ids: Vec::new(),
+            discovered_chat_ids: Vec::new(),
+            require_mention: true,
+            updated_at: "now".to_owned(),
+        };
+        let event = FeishuInboundEvent {
+            kind: "message".to_owned(),
+            event_id: "evt".to_owned(),
+            message_id: "msg".to_owned(),
+            chat_id: "oc_p2p_session".to_owned(),
+            chat_type: "p2p".to_owned(),
+            sender_open_id: "ou_user".to_owned(),
+            message_type: "text".to_owned(),
+            text: "hello".to_owned(),
+            mentions: Vec::new(),
+        };
+
+        assert!(decide_event_handling(&settings, &event).is_ok());
+        assert!(build_channel_key(&event).starts_with("feishu:dm:"));
     }
 
     /** 群聊默认必须直接 @ bot，广播 @all 不应被当作 bot mention。 */
@@ -1172,6 +1126,29 @@ mod tests {
         let mut blocked = event.clone();
         blocked.sender_open_id = "ou_other".to_owned();
         assert!(decide_event_handling(&settings, &blocked).is_err());
+    }
+
+    /** 未启用 provider 时不允许启动网关，避免 sidecar 已运行但消息统一被阻断。 */
+    #[test]
+    fn gateway_validation_rejects_disabled_provider() {
+        let settings = FeishuIntegrationSettings {
+            enabled: false,
+            domain: "feishu".to_owned(),
+            app_id: "cli_x".to_owned(),
+            secret_key_reference: "secret".to_owned(),
+            default_knowledge_base_ids: vec!["kb".to_owned()],
+            allowed_user_open_ids: vec!["ou_user".to_owned()],
+            allowed_chat_ids: Vec::new(),
+            discovered_user_open_ids: Vec::new(),
+            discovered_chat_ids: Vec::new(),
+            require_mention: true,
+            updated_at: "now".to_owned(),
+        };
+
+        assert_eq!(
+            validate_gateway_settings(&settings).unwrap_err(),
+            "请先启用飞书/Lark 集成。"
+        );
     }
 
     /** `/status` 和 `/reset` 使用纯文本命令，首版不依赖飞书 slash command 菜单。 */
