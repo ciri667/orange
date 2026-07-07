@@ -1,6 +1,5 @@
 import { convertFileSrc } from "@tauri-apps/api/core";
-import { ChevronDown, Clock3, Columns2, Eye, FileDown, FilePenLine, MoreHorizontal, PencilLine, Save, Tags, Trash2 } from "lucide-react";
-import { useState } from "react";
+import { Clock3, Columns2, Eye, PencilLine, Save, Tags } from "lucide-react";
 import type { ClipboardEventHandler, RefObject, UIEventHandler } from "react";
 import ReactMarkdown, { defaultUrlTransform } from "react-markdown";
 import type { UrlTransform } from "react-markdown";
@@ -10,10 +9,8 @@ import remarkGfm from "remark-gfm";
 import { DiffPanel } from "../diff/DiffPanel";
 import type { ReviewCommentDraft } from "../diff/DiffPanel";
 import { MarkdownLink } from "../shared/MarkdownLink";
-import { logDebug } from "../shared/logger";
-import { OverflowTooltipText } from "../shared/OverflowTooltipText";
-import { useDismissable } from "../shared/useDismissable";
 import type { ExportFormat, KnowledgeBase, MarkdownViewMode, Note, ProposedChange } from "../shared/types";
+import { EditorEmptyHeader, EditorFileHeader, EditorMetaStrip, EditorMoreActionMenu } from "./EditorFileChrome";
 import { LineNumberedTextarea } from "./LineNumberedTextarea";
 import { useSyncedMarkdownScroll } from "./useSyncedMarkdownScroll";
 
@@ -99,25 +96,11 @@ export function EditorPane({
 }) {
   /** 分屏模式下同步源码和预览滚动；非分屏时 hook 会保持静默。 */
   const { editorRef, previewRef, handleEditorScroll, handlePreviewScroll } = useSyncedMarkdownScroll(viewMode === "split");
-  /** 导出菜单只在当前编辑器头部短暂展开，不写入全局工作台状态。 */
-  const [isExportMenuOpen, setIsExportMenuOpen] = useState(false);
-  /** 低频文件操作收纳到更多菜单，降低编辑器标题区的视觉密度。 */
-  const [isMoreMenuOpen, setIsMoreMenuOpen] = useState(false);
-
-  // more-menu 已把触发按钮与浮层都包在 more-menu-wrapper 内，ref 挂到该 wrapper 即可；
-  // 点击编辑器其它区域或其它板块、按 Esc 时关闭更多菜单。
-  const moreMenuRef = useDismissable<HTMLDivElement>(isMoreMenuOpen, () => setIsMoreMenuOpen(false));
 
   if (!note) {
     return (
       <section className="editor-pane" aria-label="Markdown 编辑器">
-        <header className="editor-header">
-          <div>
-            <OverflowTooltipText as="p" className="path-label" text={knowledgeBase.name} logArea="editor_empty_knowledge_base" />
-            <h2>暂无 Markdown 笔记</h2>
-          </div>
-          <div className="editor-actions" />
-        </header>
+        <EditorEmptyHeader pathLabel={knowledgeBase.name} pathLogArea="editor_empty_knowledge_base" title="暂无 Markdown 笔记" />
         <div className="editor-empty-state">
           {knowledgeBase.status === "error" ? (
             <>
@@ -149,37 +132,18 @@ export function EditorPane({
     event.preventDefault();
     onPasteImages(imageFiles, event.currentTarget.selectionStart, event.currentTarget.selectionEnd);
   };
-  /** 切换低频操作菜单，并记录脱敏 UI 事件，便于排查菜单状态异常。 */
-  const handleMoreMenuToggle = () => {
-    const nextOpenState = !isMoreMenuOpen;
-
-    logDebug("切换 Markdown 更多操作菜单。", {
-      category: "frontend",
-      event: "markdown_more_menu_toggle",
-      status: nextOpenState ? "opened" : "closed",
-      metadata: {
-        isBusy,
-        isDirty,
-        viewMode,
-      },
-    });
-    setIsMoreMenuOpen(nextOpenState);
-    setIsExportMenuOpen(false);
-  };
 
   return (
     <section className="editor-pane" aria-label="Markdown 编辑器">
-      <header className="editor-header">
-        <div>
-          <OverflowTooltipText
-            as="p"
-            className="path-label"
-            text={`${knowledgeBase.name} / ${note.path}`}
-            logArea="editor_note_path"
-          />
-          <OverflowTooltipText as="h2" text={note.title} logArea="editor_note_title" />
-        </div>
-        <div className="editor-actions">
+      <EditorFileHeader
+        title={{
+          pathLabel: `${knowledgeBase.name} / ${note.path}`,
+          pathLogArea: "editor_note_path",
+          title: note.title,
+          titleLogArea: "editor_note_title",
+        }}
+        actions={
+          <>
           <div className="view-mode-toggle" aria-label="Markdown 视图模式">
             {MARKDOWN_VIEW_OPTIONS.map(({ mode, label, title, icon: Icon }) => (
               <button
@@ -198,95 +162,33 @@ export function EditorPane({
             <Save size={16} />
             {isDirty ? "保存草稿" : "已保存"}
           </button>
-          <div className="more-menu-wrapper" ref={moreMenuRef}>
-            <button
-              className="icon-button"
-              type="button"
-              title="更多文件操作"
-              aria-haspopup="menu"
-              aria-expanded={isMoreMenuOpen}
-              onClick={handleMoreMenuToggle}
-              disabled={isBusy}
-            >
-              <MoreHorizontal size={18} />
-            </button>
-            {isMoreMenuOpen && (
-              <div className="more-action-menu" role="menu">
-                <button
-                  type="button"
-                  role="menuitem"
-                  aria-haspopup="menu"
-                  aria-expanded={isExportMenuOpen}
-                  onClick={() => setIsExportMenuOpen((isOpen) => !isOpen)}
-                >
-                  <FileDown size={14} />
-                  导出当前文件
-                  <ChevronDown size={13} />
-                </button>
-                {isExportMenuOpen &&
-                  MARKDOWN_EXPORT_OPTIONS.map((option) => (
-                    <button
-                      className="nested-menu-item"
-                      key={option.format}
-                      type="button"
-                      role="menuitem"
-                      onClick={() => {
-                        setIsExportMenuOpen(false);
-                        setIsMoreMenuOpen(false);
-                        void onExportFile(option.format);
-                      }}
-                    >
-                      <FileDown size={14} />
-                      {option.label}
-                    </button>
-                  ))}
-                <button
-                  type="button"
-                  role="menuitem"
-                  onClick={() => {
-                    setIsMoreMenuOpen(false);
-                    onRenameNote();
-                  }}
-                >
-                  <FilePenLine size={14} />
-                  重命名
-                </button>
-                <button
-                  className="danger"
-                  type="button"
-                  role="menuitem"
-                  onClick={() => {
-                    setIsMoreMenuOpen(false);
-                    onDeleteNote();
-                  }}
-                >
-                  <Trash2 size={14} />
-                  删除
-                </button>
-              </div>
-            )}
-          </div>
-        </div>
-      </header>
+          <EditorMoreActionMenu
+            exportOptions={MARKDOWN_EXPORT_OPTIONS}
+            isBusy={isBusy}
+            logContext={{
+              event: "markdown_more_menu_toggle",
+              metadata: { isBusy, isDirty, viewMode },
+            }}
+            onExportFile={onExportFile}
+            onRename={onRenameNote}
+            onDelete={onDeleteNote}
+          />
+          </>
+        }
+      />
 
-      <div className="meta-strip">
-        <span>
-          <Clock3 size={14} />
-          {note.updatedAt}
-        </span>
-        <span>
-          <PencilLine size={14} />
-          {stats.words} 字，约 {stats.minutes} 分钟
-        </span>
-        <span>
-          <Tags size={14} />
-          {note.tags.length ? note.tags.join(" / ") : "无标签"}
-        </span>
-        <span className={isDirty ? "dirty-indicator" : ""}>
-          <Save size={14} />
-          {isDirty ? "未保存草稿" : "已保存到本地"}
-        </span>
-      </div>
+      <EditorMetaStrip
+        items={[
+          { icon: <Clock3 size={14} />, text: note.updatedAt },
+          { icon: <PencilLine size={14} />, text: `${stats.words} 字，约 ${stats.minutes} 分钟` },
+          { icon: <Tags size={14} />, text: note.tags.length ? note.tags.join(" / ") : "无标签" },
+          {
+            icon: <Save size={14} />,
+            text: isDirty ? "未保存草稿" : "已保存到本地",
+            className: isDirty ? "dirty-indicator" : undefined,
+          },
+        ]}
+      />
 
       <div className={`editor-body mode-${viewMode}`}>
         {shouldShowEditor && (

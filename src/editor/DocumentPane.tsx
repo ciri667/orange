@@ -1,10 +1,8 @@
 import { convertFileSrc } from "@tauri-apps/api/core";
-import { ChevronDown, Clock3, Eye, FileDown, FileImage, FilePenLine, FileText, MoreHorizontal, Save, Trash2 } from "lucide-react";
-import { useState } from "react";
-import { logDebug, logInfo, logWarn } from "../shared/logger";
-import { OverflowTooltipText } from "../shared/OverflowTooltipText";
-import { useDismissable } from "../shared/useDismissable";
+import { Clock3, Eye, FilePenLine, FileText, Save } from "lucide-react";
+import { logInfo, logWarn } from "../shared/logger";
 import type { DocumentFileType, DocumentPreview, ExportFormat, KnowledgeBase, WorkspaceDocument } from "../shared/types";
+import { EditorEmptyHeader, EditorFileHeader, EditorMetaStrip, EditorMoreActionMenu } from "./EditorFileChrome";
 import { LineNumberedTextarea } from "./LineNumberedTextarea";
 import { countLogicalLines } from "./lineNumberUtils";
 
@@ -87,25 +85,10 @@ export function DocumentPane({
   onRenameDocument: () => void;
   onDeleteDocument: () => void;
 }) {
-  /** 导出菜单是文档面板局部交互状态，切换文件时随组件自然重置。 */
-  const [isExportMenuOpen, setIsExportMenuOpen] = useState(false);
-  /** 低频文件操作统一放入更多菜单，保持文档和 Markdown 头部一致。 */
-  const [isMoreMenuOpen, setIsMoreMenuOpen] = useState(false);
-
-  // more-menu 的触发按钮与浮层都在 more-menu-wrapper 内，ref 挂到它即可；
-  // 点击其它板块或按 Esc 时关闭更多菜单。
-  const moreMenuRef = useDismissable<HTMLDivElement>(isMoreMenuOpen, () => setIsMoreMenuOpen(false));
-
   if (!document) {
     return (
       <section className="editor-pane" aria-label="文档预览">
-        <header className="editor-header">
-          <div>
-            <OverflowTooltipText as="p" className="path-label" text={knowledgeBase.name} logArea="document_empty_knowledge_base" />
-            <h2>暂无文档</h2>
-          </div>
-          <div className="editor-actions" />
-        </header>
+        <EditorEmptyHeader pathLabel={knowledgeBase.name} pathLogArea="document_empty_knowledge_base" title="暂无文档" />
         <div className="editor-empty-state">
           <strong>当前知识库还没有支持文档。</strong>
           <span>请在左侧目录树中新建 Markdown 或 TXT，或在本地目录中添加支持文件后重新扫描。</span>
@@ -118,145 +101,55 @@ export function DocumentPane({
   const stats = getTextStats(content);
   const isTextDocument = document.fileType === "txt";
   const exportOptions = DOCUMENT_EXPORT_OPTIONS[document.fileType];
-  /** 切换低频操作菜单，并记录脱敏 UI 事件，避免把文件路径或标题写入日志。 */
-  const handleMoreMenuToggle = () => {
-    const nextOpenState = !isMoreMenuOpen;
-
-    logDebug("切换文档更多操作菜单。", {
-      category: "frontend",
-      event: "document_more_menu_toggle",
-      status: nextOpenState ? "opened" : "closed",
-      metadata: {
-        fileType: document.fileType,
-        isBusy,
-        isDirty,
-      },
-    });
-    setIsMoreMenuOpen(nextOpenState);
-    setIsExportMenuOpen(false);
-  };
 
   return (
     <section className="editor-pane" aria-label="普通文档">
-      <header className="editor-header">
-        <div>
-          <OverflowTooltipText
-            as="p"
-            className="path-label"
-            text={`${knowledgeBase.name} / ${document.path}`}
-            logArea="document_path"
-          />
-          <OverflowTooltipText as="h2" text={document.title} logArea="document_title" />
-        </div>
-        <div className="editor-actions">
+      <EditorFileHeader
+        title={{
+          pathLabel: `${knowledgeBase.name} / ${document.path}`,
+          pathLogArea: "document_path",
+          title: document.title,
+          titleLogArea: "document_title",
+        }}
+        actions={
+          <>
           {isTextDocument && (
             <button className="text-button" type="button" onClick={onSaveDocument} disabled={isBusy || !isDirty}>
               <Save size={16} />
               {isDirty ? "保存草稿" : "已保存"}
             </button>
           )}
-          <div className="more-menu-wrapper" ref={moreMenuRef}>
-            <button
-              className="icon-button"
-              type="button"
-              title="更多文件操作"
-              aria-haspopup="menu"
-              aria-expanded={isMoreMenuOpen}
-              onClick={handleMoreMenuToggle}
-              disabled={isBusy}
-            >
-              <MoreHorizontal size={18} />
-            </button>
-            {isMoreMenuOpen && (
-              <div className="more-action-menu" role="menu">
-                <button
-                  type="button"
-                  role="menuitem"
-                  aria-haspopup="menu"
-                  aria-expanded={isExportMenuOpen}
-                  onClick={() => setIsExportMenuOpen((isOpen) => !isOpen)}
-                >
-                  <FileDown size={14} />
-                  导出当前文件
-                  <ChevronDown size={13} />
-                </button>
-                {isExportMenuOpen &&
-                  exportOptions.map((option) => (
-                    <button
-                      className="nested-menu-item"
-                      key={option.format}
-                      type="button"
-                      role="menuitem"
-                      onClick={() => {
-                        setIsExportMenuOpen(false);
-                        setIsMoreMenuOpen(false);
-                        void onExportFile(option.format);
-                      }}
-                    >
-                      <FileDown size={14} />
-                      {option.label}
-                    </button>
-                  ))}
-                {isTextDocument && (
-                  <button
-                    type="button"
-                    role="menuitem"
-                    onClick={() => {
-                      setIsMoreMenuOpen(false);
-                      onRenameDocument();
-                    }}
-                  >
-                    <FilePenLine size={14} />
-                    重命名
-                  </button>
-                )}
-                {isTextDocument && (
-                  <button
-                    className="danger"
-                    type="button"
-                    role="menuitem"
-                    onClick={() => {
-                      setIsMoreMenuOpen(false);
-                      onDeleteDocument();
-                    }}
-                  >
-                    <Trash2 size={14} />
-                    删除
-                  </button>
-                )}
-              </div>
-            )}
-          </div>
-        </div>
-      </header>
-
-      <div className="meta-strip">
-        <span>
-          <Clock3 size={14} />
-          {document.updatedAt}
-        </span>
-        <span>
-          <FileText size={14} />
-          {getDocumentTypeLabel(document)}
-        </span>
-        {isTextDocument ? (
-          <>
-            <span>
-              <FilePenLine size={14} />
-              {stats.words} 字，{stats.lines} 行
-            </span>
-            <span className={isDirty ? "dirty-indicator" : ""}>
-              <Save size={14} />
-              {isDirty ? "未保存草稿" : "已保存到本地"}
-            </span>
+          <EditorMoreActionMenu
+            exportOptions={exportOptions}
+            isBusy={isBusy}
+            logContext={{
+              event: "document_more_menu_toggle",
+              metadata: { fileType: document.fileType, isBusy, isDirty },
+            }}
+            onExportFile={onExportFile}
+            onRename={isTextDocument ? onRenameDocument : undefined}
+            onDelete={isTextDocument ? onDeleteDocument : undefined}
+          />
           </>
-        ) : (
-          <span>
-            <Eye size={14} />
-            只读预览
-          </span>
-        )}
-      </div>
+        }
+      />
+
+      <EditorMetaStrip
+        items={[
+          { icon: <Clock3 size={14} />, text: document.updatedAt },
+          { icon: <FileText size={14} />, text: getDocumentTypeLabel(document) },
+          ...(isTextDocument
+            ? [
+                { icon: <FilePenLine size={14} />, text: `${stats.words} 字，${stats.lines} 行` },
+                {
+                  icon: <Save size={14} />,
+                  text: isDirty ? "未保存草稿" : "已保存到本地",
+                  className: isDirty ? "dirty-indicator" : undefined,
+                },
+              ]
+            : [{ icon: <Eye size={14} />, text: "只读预览" }]),
+        ]}
+      />
 
       {isTextDocument ? (
         <LineNumberedTextarea
