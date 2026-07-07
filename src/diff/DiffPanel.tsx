@@ -1,5 +1,6 @@
 import { Check, ChevronDown, ChevronRight, MessageSquarePlus, SendHorizontal, X } from "lucide-react";
 import { useMemo, useState } from "react";
+import { OverflowTooltipText } from "../shared/OverflowTooltipText";
 import type { ProposedChange, ReviewComment } from "../shared/types";
 import { buildMarkdownDiff } from "./markdownDiff";
 import type { MarkdownDiffHunk, MarkdownDiffLine } from "./markdownDiff";
@@ -88,8 +89,8 @@ export function DiffPanel({
       <div className="diff-header review-header">
         <div className="review-title-block">
           <p className="section-label">{change.type === "create" ? "Agent 新建文件建议" : "Agent 文档变更审阅"}</p>
-          <h3>{change.title}</h3>
-          <span>{change.targetPath}</span>
+          <OverflowTooltipText as="h3" text={change.title} logArea="diff_change_title" />
+          <OverflowTooltipText text={change.targetPath} logArea="diff_target_path" />
         </div>
         <div className="diff-actions">
           <button className="ghost-button danger-action" type="button" onClick={onReject} disabled={isBusy}>
@@ -122,7 +123,7 @@ export function DiffPanel({
       <div className="review-body">
         <div className="unified-diff" aria-label="Markdown 行级 diff">
           <div className="unified-diff-file">
-            <span>{change.targetPath}</span>
+            <OverflowTooltipText text={change.targetPath} logArea="diff_file_path" />
             <span>{change.type === "create" ? "new file" : "pending"}</span>
           </div>
           {diff.hunks.map((hunk) => (

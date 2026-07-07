@@ -34,6 +34,7 @@ import {
 } from "../shared/selectors";
 import { MarkdownLink } from "../shared/MarkdownLink";
 import { logDebug } from "../shared/logger";
+import { OverflowTooltipText } from "../shared/OverflowTooltipText";
 import { useDismissable } from "../shared/useDismissable";
 import type { AgentSession, AgentSkill, KnowledgeBase, ModelConfig, Note } from "../shared/types";
 
@@ -423,7 +424,7 @@ export function AgentPanel({
       <header className="agent-header">
         <div>
           <p className="section-label">Agent</p>
-          <h2>{activeSession.title}</h2>
+          <OverflowTooltipText as="h2" text={activeSession.title} logArea="agent_session_title" />
         </div>
         <div className="agent-header-actions">
           <button className="icon-button" type="button" title="收起 Agent 协作区" onClick={onCollapsePanel}>
@@ -442,12 +443,16 @@ export function AgentPanel({
       </header>
 
       <div className="session-summary" aria-label="当前会话摘要">
-        <span>{selectedScopeLabel}</span>
-        <span>{getSessionNoteLabel(activeSession, notes)}</span>
-        {modelConfig.enabled && <span>{sessionProvider?.name ?? defaultProvider?.name ?? "模型未配置"}</span>}
-        <span className={`session-write-status ${activeSession.pendingChange?.status === "pending" ? "pending" : ""}`}>
-          {writeStatus}
-        </span>
+        <OverflowTooltipText text={selectedScopeLabel} logArea="agent_session_scope_summary" />
+        <OverflowTooltipText text={getSessionNoteLabel(activeSession, notes)} logArea="agent_session_note_summary" />
+        {modelConfig.enabled && (
+          <OverflowTooltipText text={sessionProvider?.name ?? defaultProvider?.name ?? "模型未配置"} logArea="agent_session_provider" />
+        )}
+        <OverflowTooltipText
+          className={`session-write-status ${activeSession.pendingChange?.status === "pending" ? "pending" : ""}`}
+          text={writeStatus}
+          logArea="agent_session_write_status"
+        />
       </div>
 
       {isSessionListOpen && (
@@ -470,12 +475,17 @@ export function AgentPanel({
                 <button className="session-row-main" type="button" onClick={() => onSelectSession(session.id)}>
                   <span className="session-row-title">
                     <MessageSquareText size={14} />
-                    <strong>{session.title}</strong>
+                    <OverflowTooltipText as="strong" text={session.title} logArea="agent_session_history_title" />
                   </span>
                   <span className="session-row-meta">
-                    <span>{getSessionTypeLabel(session.type)}</span>
-                    <span>{getSessionKnowledgeBaseLabel(session, knowledgeBases)}</span>
-                    <time dateTime={session.createdAt}>创建：{session.createdAt}</time>
+                    <OverflowTooltipText text={getSessionTypeLabel(session.type)} logArea="agent_session_history_type" />
+                    <OverflowTooltipText text={getSessionKnowledgeBaseLabel(session, knowledgeBases)} logArea="agent_session_history_scope" />
+                    <OverflowTooltipText
+                      as="time"
+                      dateTime={session.createdAt}
+                      text={`创建：${session.createdAt}`}
+                      logArea="agent_session_history_created_at"
+                    />
                   </span>
                   {session.pendingChange?.status === "pending" && <span className="session-pending">待确认 diff</span>}
                 </button>
@@ -508,11 +518,15 @@ export function AgentPanel({
             <div className="context-matrix">
               <div>
                 <span>工具检索范围</span>
-                <strong>{getSessionKnowledgeBaseLabel(activeSession, knowledgeBases)}</strong>
+                <OverflowTooltipText
+                  as="strong"
+                  text={getSessionKnowledgeBaseLabel(activeSession, knowledgeBases)}
+                  logArea="agent_context_scope"
+                />
               </div>
               <div>
                 <span>当前文件</span>
-                <strong>{getSessionNoteLabel(activeSession, notes)}</strong>
+                <OverflowTooltipText as="strong" text={getSessionNoteLabel(activeSession, notes)} logArea="agent_context_note" />
               </div>
               <div>
                 <span>消息</span>
@@ -558,7 +572,7 @@ export function AgentPanel({
       >
         <Layers3 size={17} />
         <span>
-          <strong>工具范围：{selectedScopeLabel}</strong>
+          <OverflowTooltipText as="strong" text={`工具范围：${selectedScopeLabel}`} logArea="agent_scope_selector_summary" />
           <span>当前知识库默认选中，Agent 不能越权检索未选目录</span>
         </span>
       </button>
@@ -596,8 +610,11 @@ export function AgentPanel({
                   <span className="scope-check">{isSelected && <Check size={12} />}</span>
                   <Database size={15} />
                   <span className="scope-option-copy">
-                    <strong>{knowledgeBase.name}</strong>
-                    <span>{isActiveKnowledgeBase ? "当前激活，默认选中" : knowledgeBase.path}</span>
+                    <OverflowTooltipText as="strong" text={knowledgeBase.name} logArea="agent_scope_option_name" />
+                    <OverflowTooltipText
+                      text={isActiveKnowledgeBase ? "当前激活，默认选中" : knowledgeBase.path}
+                      logArea="agent_scope_option_detail"
+                    />
                   </span>
                 </label>
               );
@@ -633,8 +650,8 @@ export function AgentPanel({
                 {selectedExplicitSkillChips.map((skill) => (
                   <span className={`selected-skill-chip ${skill.source === "unknown" ? "missing" : ""}`} key={skill.id}>
                     <Sparkles size={12} />
-                    <span>{skill.displayName}</span>
-                    <button type="button" title={`移除 ${skill.displayName}`} onClick={() => handleRemoveExplicitSkill(skill.id)}>
+                    <OverflowTooltipText text={skill.displayName} logArea="agent_selected_skill_chip" />
+                    <button type="button" aria-label={`移除 ${skill.displayName}`} onClick={() => handleRemoveExplicitSkill(skill.id)}>
                       <X size={12} />
                     </button>
                   </span>
@@ -675,8 +692,8 @@ export function AgentPanel({
                     onClick={() => handleSelectExplicitSkill(skill)}
                   >
                     <span>
-                      <strong>{skill.displayName}</strong>
-                      <small>{skill.name}</small>
+                      <OverflowTooltipText as="strong" text={skill.displayName} logArea="agent_skill_picker_name" />
+                      <OverflowTooltipText as="small" text={skill.name} logArea="agent_skill_picker_id" />
                     </span>
                     <em>{skill.source === "built-in" ? "内置" : "自定义"}</em>
                   </button>

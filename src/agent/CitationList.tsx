@@ -1,3 +1,4 @@
+import { OverflowTooltipText } from "../shared/OverflowTooltipText";
 import type { Citation } from "../shared/types";
 
 /** 引用来源列表，帮助用户追溯 Agent 回答依据和知识库边界。 */
@@ -20,10 +21,8 @@ export function CitationList({ citations }: { citations?: Citation[] }) {
       <div className="citation-items">
         {citations.map((citation) => (
           <article className="citation" key={`${citation.noteId}-${citation.path}`}>
-            <strong>{citation.title}</strong>
-            <span>
-              {citation.knowledgeBaseName} · {citation.path}
-            </span>
+            <OverflowTooltipText as="strong" text={citation.title} logArea="agent_citation_title" />
+            <OverflowTooltipText text={`${citation.knowledgeBaseName} · ${citation.path}`} logArea="agent_citation_path" />
             <p>{citation.snippet}</p>
           </article>
         ))}

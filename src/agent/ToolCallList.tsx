@@ -1,5 +1,6 @@
 import { BrainCircuit, CheckCircle2, ChevronDown, ChevronRight, Search, Sparkles, Wrench } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
+import { OverflowTooltipText } from "../shared/OverflowTooltipText";
 import type { AgentToolCall } from "../shared/types";
 
 /** 工具调用轨迹列表，让用户知道 Agent 本轮是否访问了知识库。 */
@@ -79,8 +80,8 @@ export function ToolCallList({ toolCalls }: { toolCalls?: AgentToolCall[] }) {
             return (
               <div className={`tool-call ${toolCall.status}`} key={toolCall.id}>
                 <Icon size={13} />
-                <span>{toolCall.name}</span>
-                <p>{toolCall.summary}</p>
+                <OverflowTooltipText text={toolCall.name} logArea="agent_tool_call_name" />
+                <OverflowTooltipText as="p" text={toolCall.summary} logArea="agent_tool_call_summary" />
               </div>
             );
           })}
