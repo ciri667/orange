@@ -6,6 +6,8 @@ export interface DismissableOptions {
   event?: "mousedown" | "click";
   /** 是否响应 Esc 键关闭，默认 true。 */
   escape?: boolean;
+  /** 通过 portal 渲染的浮层节点也应视为内部点击区域。 */
+  insideRefs?: RefObject<HTMLElement | null>[];
 }
 
 /**
@@ -49,8 +51,13 @@ export function useDismissable<TElement extends HTMLElement = HTMLElement>(
         return;
       }
 
+      const eventTarget = event.target;
+      const isInPortaledInsideArea = (options.insideRefs ?? []).some((insideRef) =>
+        insideRef.current?.contains(eventTarget),
+      );
+
       // 容器未挂载或点击不在容器内，视为外部点击，触发关闭。
-      if (!container || !container.contains(event.target)) {
+      if ((!container || !container.contains(eventTarget)) && !isInPortaledInsideArea) {
         onDismissRef.current();
       }
     }

@@ -10,10 +10,16 @@ import {
   getSessionNoteLabel,
   getSessionTypeLabel,
 } from "../shared/selectors";
+import {
+  encodeModelSelection,
+  FOLLOW_DEFAULT_MODEL_SELECTION,
+  getProviderModelSelectionLabel,
+  getSessionModelLabel,
+} from "../shared/modelSelection";
+import { ModelCascadeSelector } from "../shared/ModelCascadeSelector";
 import type { AgentSession, KnowledgeBase, ModelConfig, Note } from "../shared/types";
 import { CitationList } from "./CitationList";
 import { ToolCallList } from "./ToolCallList";
-import { FOLLOW_DEFAULT_VALUE } from "./AgentInput";
 
 /** 会话摘要条，展示工具范围、当前文件、模型和写入状态。 */
 export function AgentSessionSummary({
@@ -29,12 +35,6 @@ export function AgentSessionSummary({
 }) {
   /** 当前会话范围摘要，展示 Agent 可调用检索工具的权限边界。 */
   const selectedScopeLabel = getScopeSummaryLabel(activeSession, knowledgeBases);
-  /** 全局默认 provider 名称，用于“跟随默认”状态展示。 */
-  const defaultProvider = modelConfig.providers.find((provider) => provider.id === modelConfig.defaultProviderId);
-  /** 会话当前设置的默认 provider（可能未设置，回退到全局默认）。 */
-  const sessionProvider = activeSession.modelProviderId
-    ? modelConfig.providers.find((provider) => provider.id === activeSession.modelProviderId)
-    : undefined;
   /** 当前会话的写入状态，用不可点击标签展示，避免和上下文弹窗入口混淆。 */
   const writeStatus = activeSession.pendingChange?.status === "pending" ? "待确认 diff" : "写入需确认";
 
@@ -43,7 +43,7 @@ export function AgentSessionSummary({
       <OverflowTooltipText text={selectedScopeLabel} logArea="agent_session_scope_summary" />
       <OverflowTooltipText text={getSessionNoteLabel(activeSession, notes)} logArea="agent_session_note_summary" />
       {modelConfig.enabled && (
-        <OverflowTooltipText text={sessionProvider?.name ?? defaultProvider?.name ?? "模型未配置"} logArea="agent_session_provider" />
+        <OverflowTooltipText text={getSessionModelLabel(activeSession, modelConfig)} logArea="agent_session_provider" />
       )}
       <OverflowTooltipText
         className={`session-write-status ${activeSession.pendingChange?.status === "pending" ? "pending" : ""}`}
@@ -123,19 +123,27 @@ export function AgentSessionContextPopover({
   notes,
   modelConfig,
   onToggleSessionContext,
-  onSetSessionModelProvider,
+  onSetSessionModelSelection,
 }: {
   activeSession: AgentSession;
   knowledgeBases: KnowledgeBase[];
   notes: Note[];
   modelConfig: ModelConfig;
   onToggleSessionContext: () => void;
-  onSetSessionModelProvider: (providerId: string) => void;
+  onSetSessionModelSelection: (selection: string) => void;
 }) {
   /** 已启用的 Provider 列表；未启用的 provider 不出现在选择器中。 */
   const enabledProviders = modelConfig.providers.filter((provider) => provider.enabled);
   /** 全局默认 provider 名称，用于“跟随默认”选项的说明文案。 */
   const defaultProvider = modelConfig.providers.find((provider) => provider.id === modelConfig.defaultProviderId);
+  /** 旧会话可能只保存了 providerId；此时用该 provider 的默认模型补齐选择值。 */
+  const sessionProvider = activeSession.modelProviderId
+    ? modelConfig.providers.find((provider) => provider.id === activeSession.modelProviderId)
+    : undefined;
+  /** 会话默认模型的 select value；空字符串表示跟随全局默认。 */
+  const sessionModelSelection = sessionProvider
+    ? encodeModelSelection(sessionProvider.id, activeSession.modelId || sessionProvider.model)
+    : FOLLOW_DEFAULT_MODEL_SELECTION;
   /** 当前会话的写入状态，和摘要条使用同一语义。 */
   const writeStatus = activeSession.pendingChange?.status === "pending" ? "待确认 diff" : "写入需确认";
 
@@ -176,21 +184,15 @@ export function AgentSessionContextPopover({
         {modelConfig.enabled && (
           <label className="context-model-select">
             <span>会话默认模型</span>
-            <span className="select-control">
-              <select
-                value={activeSession.modelProviderId ?? FOLLOW_DEFAULT_VALUE}
-                onChange={(event) => onSetSessionModelProvider(event.target.value)}
-              >
-                <option value={FOLLOW_DEFAULT_VALUE}>
-                  跟随全局默认{defaultProvider ? `（${defaultProvider.name}）` : ""}
-                </option>
-                {enabledProviders.map((provider) => (
-                  <option key={provider.id} value={provider.id}>
-                    {provider.name}
-                  </option>
-                ))}
-              </select>
-            </span>
+            <ModelCascadeSelector
+              value={sessionModelSelection}
+              providers={enabledProviders}
+              defaultLabel={`跟随全局默认${defaultProvider ? `（${getProviderModelSelectionLabel(defaultProvider)}）` : ""}`}
+              ariaLabel="会话默认模型"
+              onChange={onSetSessionModelSelection}
+              variant="block"
+              logArea="agent_session_model_cascade"
+            />
           </label>
         )}
         <p className="context-note">

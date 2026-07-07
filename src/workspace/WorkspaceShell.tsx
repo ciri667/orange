@@ -10,6 +10,7 @@ import { ConfirmDialog, type ConfirmDialogConfig } from "../shared/ConfirmDialog
 import { buildMarkdownDiff } from "../diff/markdownDiff";
 import { createContentHash, createLocalId, formatLocalDateTime } from "../shared/id";
 import { logError, logInfo, logWarn } from "../shared/logger";
+import { decodeModelSelection } from "../shared/modelSelection";
 import {
   getActiveKnowledgeBase,
   getActiveDocument,
@@ -300,8 +301,8 @@ export function WorkspaceShell() {
   const {
     agentPrompt,
     setAgentPrompt,
-    turnModelProviderId,
-    setTurnModelProviderId,
+    turnModelSelection,
+    setTurnModelSelection,
     explicitSkillIds,
     setExplicitSkillIds,
     resetTurnSelection,
@@ -398,6 +399,7 @@ export function WorkspaceShell() {
     handleDeleteSkill,
     handleOpenUserSkillsFolder,
     handleSaveApiKey,
+    handleRefreshProviderModels,
     handleRefreshAuditLogs,
     handleRefreshAppEventLogs,
     handleClearAppEventLogs,
@@ -1393,16 +1395,18 @@ export function WorkspaceShell() {
     }
   }
 
-  /** 设置当前会话的默认 Provider；传入空字符串表示跟随全局默认 Provider。 */
-  async function handleSetSessionModelProvider(providerId: string) {
+  /** 设置当前会话的默认 provider/model；传入空字符串表示跟随全局默认模型。 */
+  async function handleSetSessionModelSelection(selection: string) {
     if (!isPersistedSession(currentSnapshot, activeSession)) {
       setNotice("请先新建或发送一条消息创建会话，再设置会话默认模型。");
       return;
     }
 
+    const decodedSelection = decodeModelSelection(selection);
     const nextSession: AgentSession = {
       ...activeSession,
-      modelProviderId: providerId || undefined,
+      modelProviderId: decodedSelection.providerId || undefined,
+      modelId: decodedSelection.modelId || undefined,
     };
 
     beginBusy("正在更新会话默认模型...");
@@ -1578,12 +1582,14 @@ export function WorkspaceShell() {
         activeNoteId: sourceActiveNote?.id ?? "",
         activeDocumentId: sourceActiveDocument?.id ?? "",
       };
+      const decodedTurnModelSelection = decodeModelSelection(turnModelSelection);
       const result = await runAgentTurn(
         turnSnapshot,
         prompt,
         action,
         optimisticMessage.id,
-        turnModelProviderId || undefined,
+        decodedTurnModelSelection.providerId || undefined,
+        decodedTurnModelSelection.modelId || undefined,
         turnExplicitSkillIds,
       );
 
@@ -2007,7 +2013,7 @@ export function WorkspaceShell() {
             skills={agentSkills}
             selectedSkillIds={explicitSkillIds}
             modelConfig={userSettings.modelConfig}
-            turnModelProviderId={turnModelProviderId}
+            turnModelSelection={turnModelSelection}
             isBusy={isBusy}
             isSessionListOpen={isSessionListOpen}
             isSessionContextOpen={isSessionContextOpen}
@@ -2023,8 +2029,8 @@ export function WorkspaceShell() {
             onPromptChange={setAgentPrompt}
             onSelectedSkillIdsChange={setExplicitSkillIds}
             onSubmitPrompt={() => handleSubmitPrompt("ask")}
-            onTurnModelProviderChange={setTurnModelProviderId}
-            onSetSessionModelProvider={handleSetSessionModelProvider}
+            onTurnModelSelectionChange={setTurnModelSelection}
+            onSetSessionModelSelection={handleSetSessionModelSelection}
           />
         )}
       </main>
@@ -2054,6 +2060,7 @@ export function WorkspaceShell() {
           onDeleteSkill={handleDeleteSkill}
           onOpenUserSkillsFolder={handleOpenUserSkillsFolder}
           onSaveApiKey={handleSaveApiKey}
+          onRefreshProviderModels={handleRefreshProviderModels}
           onSaveFeishuSecret={handleSaveFeishuSecret}
           onStartFeishuGateway={handleStartFeishuGateway}
           onStopFeishuGateway={handleStopFeishuGateway}

@@ -8,11 +8,16 @@ import {
   type KeyboardEventHandler,
 } from "react";
 import { logDebug } from "../shared/logger";
+import {
+  FOLLOW_DEFAULT_MODEL_SELECTION,
+  getProviderModelSelectionLabel,
+} from "../shared/modelSelection";
+import { ModelCascadeSelector } from "../shared/ModelCascadeSelector";
 import { OverflowTooltipText } from "../shared/OverflowTooltipText";
 import type { AgentSession, AgentSkill, ModelConfig } from "../shared/types";
 
-/** 会话/本轮模型选择器统一使用的“跟随默认”占位值，不写入具体 providerId。 */
-export const FOLLOW_DEFAULT_VALUE = "";
+/** 兼容旧组件导入的“跟随默认”占位值，实际定义集中在 shared/modelSelection。 */
+export const FOLLOW_DEFAULT_VALUE = FOLLOW_DEFAULT_MODEL_SELECTION;
 /** 输入法结束组词后的短保护窗口；部分中文输入法会先触发 compositionend，再派发 Enter keydown。 */
 const PROMPT_IME_ENTER_GUARD_MS = 150;
 /** v1 每轮最多显式激活 3 个 Skill，避免用户误选过多 instructions 挤占上下文。 */
@@ -64,25 +69,25 @@ export function AgentInput({
   skills,
   selectedSkillIds,
   modelConfig,
-  turnModelProviderId,
+  turnModelSelection,
   isBusy,
   onPromptChange,
   onSelectedSkillIdsChange,
   onSubmitPrompt,
-  onTurnModelProviderChange,
+  onTurnModelSelectionChange,
 }: {
   activeSession: AgentSession;
   prompt: string;
   skills: AgentSkill[];
   selectedSkillIds: string[];
   modelConfig: ModelConfig;
-  /** 本轮显式选择的 Provider，空字符串表示跟随会话/全局默认。 */
-  turnModelProviderId: string;
+  /** 本轮显式选择的 provider/model，空字符串表示跟随会话/全局默认。 */
+  turnModelSelection: string;
   isBusy: boolean;
   onPromptChange: (value: string) => void;
   onSelectedSkillIdsChange: (skillIds: string[]) => void;
   onSubmitPrompt: () => void;
-  onTurnModelProviderChange: (providerId: string) => void;
+  onTurnModelSelectionChange: (selection: string) => void;
 }) {
   /** 已启用的 Provider 列表；未启用的 provider 不出现在选择器中。 */
   const enabledProviders = modelConfig.providers.filter((provider) => provider.enabled);
@@ -92,6 +97,12 @@ export function AgentInput({
   const sessionProvider = activeSession.modelProviderId
     ? modelConfig.providers.find((provider) => provider.id === activeSession.modelProviderId)
     : undefined;
+  /** 跟随默认选项展示 provider/model，而不是只展示 provider。 */
+  const followDefaultLabel = sessionProvider
+    ? getProviderModelSelectionLabel(sessionProvider, activeSession.modelId || sessionProvider.model)
+    : defaultProvider
+      ? getProviderModelSelectionLabel(defaultProvider)
+      : "";
   /** 已启用 skill 会以名称和描述进入 system prompt，具体是否使用交给 Agent 判断。 */
   const enabledSkillCount = skills.filter((skill) => skill.enabled).length;
   /** 当前 Agent 输入框是否处于输入法组词状态，弥补不同浏览器 nativeEvent.isComposing 不一致的问题。 */
@@ -369,21 +380,18 @@ export function AgentInput({
           )}
         </div>
         {modelConfig.enabled && enabledProviders.length > 0 && (
-          <label className="turn-model-select" aria-label="本轮使用的模型">
+          <div className="turn-model-select" aria-label="本轮使用的模型">
             <BrainCircuit size={14} />
-            <span className="select-control inline-select-control">
-              <select value={turnModelProviderId} onChange={(event) => onTurnModelProviderChange(event.target.value)}>
-                <option value={FOLLOW_DEFAULT_VALUE}>
-                  本轮：跟随会话默认{sessionProvider ? `（${sessionProvider.name}）` : defaultProvider ? `（${defaultProvider.name}）` : ""}
-                </option>
-                {enabledProviders.map((provider) => (
-                  <option key={provider.id} value={provider.id}>
-                    本轮：{provider.name}
-                  </option>
-                ))}
-              </select>
-            </span>
-          </label>
+            <ModelCascadeSelector
+              value={turnModelSelection}
+              providers={enabledProviders}
+              defaultLabel={`本轮：跟随会话默认${followDefaultLabel ? `（${followDefaultLabel}）` : ""}`}
+              triggerPrefix="本轮："
+              ariaLabel="本轮使用的模型"
+              onChange={onTurnModelSelectionChange}
+              logArea="agent_turn_model_cascade"
+            />
+          </div>
         )}
       </div>
       <div className="agent-input-main">

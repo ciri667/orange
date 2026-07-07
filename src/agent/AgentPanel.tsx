@@ -23,7 +23,7 @@ export function AgentPanel({
   skills,
   selectedSkillIds,
   modelConfig,
-  turnModelProviderId,
+  turnModelSelection,
   isBusy,
   isSessionListOpen,
   isSessionContextOpen,
@@ -39,8 +39,8 @@ export function AgentPanel({
   onPromptChange,
   onSelectedSkillIdsChange,
   onSubmitPrompt,
-  onTurnModelProviderChange,
-  onSetSessionModelProvider,
+  onTurnModelSelectionChange,
+  onSetSessionModelSelection,
 }: {
   sessions: AgentSession[];
   activeSession: AgentSession;
@@ -52,8 +52,8 @@ export function AgentPanel({
   /** 本轮 slash picker 显式选择的 Skill ID，只作用于下一次用户提交。 */
   selectedSkillIds: string[];
   modelConfig: ModelConfig;
-  /** 本轮显式选择的 Provider，空字符串表示跟随会话/全局默认。 */
-  turnModelProviderId: string;
+  /** 本轮显式选择的 provider/model，空字符串表示跟随会话/全局默认。 */
+  turnModelSelection: string;
   isBusy: boolean;
   isSessionListOpen: boolean;
   isSessionContextOpen: boolean;
@@ -69,8 +69,8 @@ export function AgentPanel({
   onPromptChange: (value: string) => void;
   onSelectedSkillIdsChange: (skillIds: string[]) => void;
   onSubmitPrompt: () => void;
-  onTurnModelProviderChange: (providerId: string) => void;
-  onSetSessionModelProvider: (providerId: string) => void;
+  onTurnModelSelectionChange: (selection: string) => void;
+  onSetSessionModelSelection: (selection: string) => void;
 }) {
   // AgentPanel 三个 popover 共用同一个外层 aside 作为 ref 容器：
   // 点击 Agent 面板以外的区域才关闭浮层；面板内切入别的功能按钮时由各按钮的 toggle 自行处理。
@@ -127,7 +127,7 @@ export function AgentPanel({
           notes={notes}
           modelConfig={modelConfig}
           onToggleSessionContext={onToggleSessionContext}
-          onSetSessionModelProvider={onSetSessionModelProvider}
+          onSetSessionModelSelection={onSetSessionModelSelection}
         />
       )}
 
@@ -148,12 +148,12 @@ export function AgentPanel({
         skills={skills}
         selectedSkillIds={selectedSkillIds}
         modelConfig={modelConfig}
-        turnModelProviderId={turnModelProviderId}
+        turnModelSelection={turnModelSelection}
         isBusy={isBusy}
         onPromptChange={onPromptChange}
         onSelectedSkillIdsChange={onSelectedSkillIdsChange}
         onSubmitPrompt={onSubmitPrompt}
-        onTurnModelProviderChange={onTurnModelProviderChange}
+        onTurnModelSelectionChange={onTurnModelSelectionChange}
       />
     </aside>
   );
