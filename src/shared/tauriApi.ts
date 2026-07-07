@@ -34,6 +34,8 @@ import type {
   KnowledgeBase,
   KnowledgeBaseSelection,
   LlmProviderConfig,
+  LlmProviderModel,
+  LlmProviderModelRefreshResult,
   ModelApiKeyStatus,
   Note,
   NoteImageAttachmentInput,
@@ -60,6 +62,15 @@ const defaultBrowserProvider: LlmProviderConfig = {
   enabled: false,
   supportsTools: true,
   requiresApiKey: true,
+  models: [
+    {
+      id: "gpt-4o-mini",
+      name: "gpt-4o-mini",
+      enabled: true,
+      source: "manual",
+      updatedAt: "刚刚",
+    },
+  ],
   createdAt: "刚刚",
   updatedAt: "刚刚",
 };
@@ -776,6 +787,47 @@ export async function loadLlmProviderTemplates(): Promise<ProviderTemplate[]> {
   }
 
   return invokeLogged<ProviderTemplate[]>("load_llm_provider_templates");
+}
+
+/** 刷新单个 LLM provider 的模型列表；桌面端从 keyring 读取密钥，浏览器态返回 mock 列表。 */
+export async function refreshLlmProviderModels(providerId: string): Promise<LlmProviderModelRefreshResult> {
+  if (!isTauriRuntime()) {
+    const fetchedAt = formatLocalDateTime();
+    const provider = browserUserSettings.modelConfig.providers.find((item) => item.id === providerId);
+
+    if (!provider) {
+      throw new Error("找不到要获取模型列表的 Provider。");
+    }
+
+    const nextModels = mergeBrowserProviderModels(provider, createBrowserDiscoveredModels(provider), fetchedAt);
+    const nextProvider: LlmProviderConfig = {
+      ...provider,
+      models: nextModels,
+      modelsFetchedAt: fetchedAt,
+      model: nextModels.find((model) => model.enabled)?.id ?? provider.model,
+      updatedAt: fetchedAt,
+    };
+
+    browserUserSettings = {
+      ...browserUserSettings,
+      modelConfig: {
+        ...browserUserSettings.modelConfig,
+        providers: browserUserSettings.modelConfig.providers.map((item) => (item.id === providerId ? nextProvider : item)),
+      },
+    };
+
+    return {
+      settings: cloneUserSettings(browserUserSettings),
+      providerId,
+      fetchedAt,
+      fetchedCount: nextModels.length,
+      modelCount: nextModels.length,
+      enabledCount: nextModels.filter((model) => model.enabled).length,
+      message: `浏览器开发态已模拟获取 ${nextModels.length} 个模型。`,
+    };
+  }
+
+  return invokeLogged<LlmProviderModelRefreshResult>("refresh_llm_provider_models", { payload: { providerId } });
 }
 
 /** 读取最近请求审计日志，用于展示模型发送范围和工具调用摘要。 */
@@ -1534,6 +1586,7 @@ export async function runAgentTurn(
   action: AgentActionType,
   clientMessageId?: string,
   modelProviderId?: string,
+  modelId?: string,
   explicitSkillIds: string[] = [],
 ): Promise<AgentTurnResult> {
   const request: AgentTurnRequest = {
@@ -1544,6 +1597,7 @@ export async function runAgentTurn(
     activeNoteId: snapshot.activeNoteId,
     clientMessageId,
     modelProviderId,
+    modelId,
     explicitSkillIds,
   };
 
@@ -1795,9 +1849,63 @@ function cloneUserSettings(settings: UserSettings): UserSettings {
     ...settings,
     modelConfig: {
       ...settings.modelConfig,
-      providers: settings.modelConfig.providers.map((provider) => ({ ...provider })),
+      providers: settings.modelConfig.providers.map((provider) => ({
+        ...provider,
+        models: provider.models.map((model) => ({ ...model })),
+      })),
     },
   };
+}
+
+/** 浏览器开发态按 provider 模板生成少量模型，用于验证设置页模型选择交互。 */
+function createBrowserDiscoveredModels(provider: LlmProviderConfig): LlmProviderModel[] {
+  const lowerName = `${provider.name} ${provider.apiBase}`.toLowerCase();
+  const modelIds = lowerName.includes("deepseek")
+    ? ["deepseek-chat", "deepseek-reasoner"]
+    : lowerName.includes("openrouter")
+      ? ["openai/gpt-4o-mini", "anthropic/claude-sonnet-4", "google/gemini-2.5-flash"]
+      : lowerName.includes("ollama") || provider.apiBase.includes("11434")
+        ? ["llama3.1", "qwen2.5", "mistral"]
+        : ["gpt-4o-mini", "gpt-4.1-mini", "gpt-4.1"];
+
+  return modelIds.map((modelId) => ({
+    id: modelId,
+    name: modelId,
+    ownedBy: lowerName.includes("ollama") ? "ollama" : provider.name,
+    enabled: false,
+    source: "discovered",
+    updatedAt: formatLocalDateTime(),
+  }));
+}
+
+/** 浏览器开发态模型合并逻辑，保留现有启用状态并确保默认模型可用。 */
+function mergeBrowserProviderModels(
+  provider: LlmProviderConfig,
+  discoveredModels: LlmProviderModel[],
+  fetchedAt: string,
+): LlmProviderModel[] {
+  const existingById = new Map(provider.models.map((model) => [model.id, model]));
+  const mergedModels = discoveredModels.map((model) => ({
+    ...model,
+    enabled: existingById.get(model.id)?.enabled ?? model.id === provider.model,
+    updatedAt: fetchedAt,
+  }));
+
+  if (provider.model.trim() && !mergedModels.some((model) => model.id === provider.model)) {
+    mergedModels.unshift({
+      id: provider.model,
+      name: provider.model,
+      enabled: true,
+      source: "manual",
+      updatedAt: fetchedAt,
+    });
+  }
+
+  if (!mergedModels.some((model) => model.enabled) && mergedModels[0]) {
+    mergedModels[0] = { ...mergedModels[0], enabled: true };
+  }
+
+  return mergedModels;
 }
 
 /** 深拷贝即时通讯设置，保证浏览器开发态保存和读取行为接近桌面端持久化。 */

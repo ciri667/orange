@@ -10,6 +10,7 @@ import {
   loadRequestAuditLogs,
   openAppLogFolder,
   openUserSkillsFolder,
+  refreshLlmProviderModels,
   saveAgentSkill,
   saveImProviderSecret,
   saveImSettings,
@@ -307,6 +308,27 @@ export function useWorkspaceSettingsActions({
     }
   }
 
+  /** 刷新指定 provider 的模型列表；后端会读取已保存设置和 keyring，不接收明文密钥。 */
+  async function handleRefreshProviderModels(providerId: string): Promise<UserSettings> {
+    beginBusy("正在获取模型列表...");
+
+    try {
+      const result = await refreshLlmProviderModels(providerId);
+
+      setUserSettings(result.settings);
+      setNotice(result.message);
+
+      return result.settings;
+    } catch (error) {
+      const message = formatSettingsErrorMessage(error);
+
+      setNotice(message);
+      throw new Error(message);
+    } finally {
+      endBusy();
+    }
+  }
+
   /** 重新读取最近审计日志，便于设置页查看最新模型和工具调用边界。 */
   async function handleRefreshAuditLogs() {
     beginBusy("正在刷新审计日志...");
@@ -376,6 +398,7 @@ export function useWorkspaceSettingsActions({
     handleDeleteSkill,
     handleOpenUserSkillsFolder,
     handleSaveApiKey,
+    handleRefreshProviderModels,
     handleRefreshAuditLogs,
     handleRefreshAppEventLogs,
     handleClearAppEventLogs,

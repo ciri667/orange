@@ -11,6 +11,7 @@ import {
   Star,
   Trash2,
 } from "lucide-react";
+import { useState } from "react";
 import { OverflowTooltipText } from "../shared/OverflowTooltipText";
 import type {
   AgentSkill,
@@ -119,6 +120,8 @@ export function ModelSettingsSection({
   onRequestRemoveProvider,
   onApiKeyDraftChange,
   onSaveApiKey,
+  onRefreshProviderModels,
+  onProviderModelEnabledChange,
 }: {
   settingsDraft: UserSettings;
   providerTemplates: ProviderTemplate[];
@@ -136,8 +139,12 @@ export function ModelSettingsSection({
   onRequestRemoveProvider: (providerId: string) => void;
   onApiKeyDraftChange: (providerId: string, apiKey: string) => void;
   onSaveApiKey: (providerId: string) => void | Promise<void>;
+  onRefreshProviderModels: (providerId: string) => void | Promise<void>;
+  onProviderModelEnabledChange: (providerId: string, modelId: string, enabled: boolean) => void;
 }) {
   const providers = settingsDraft.modelConfig.providers;
+  /** 每个 provider 模型列表的本地搜索词，只影响当前设置页渲染，不进入持久化配置。 */
+  const [modelSearchByProvider, setModelSearchByProvider] = useState<Record<string, string>>({});
 
   return (
     <section className="settings-section" aria-labelledby="model-settings-title">
@@ -201,6 +208,27 @@ export function ModelSettingsSection({
             const keyStatus = modelApiKeyStatuses.find((status) => status.providerId === provider.id) ?? null;
             const isDefault = provider.id === settingsDraft.modelConfig.defaultProviderId;
             const apiKeyDraft = apiKeyDraftByProvider[provider.id] ?? "";
+            const enabledModels = provider.models.filter((model) => model.enabled);
+            const modelSearch = modelSearchByProvider[provider.id] ?? "";
+            const filteredModels = provider.models.filter((model) => {
+              const searchableText = [model.id, model.name, model.ownedBy ?? "", model.source].join(" ").toLowerCase();
+
+              return searchableText.includes(modelSearch.trim().toLowerCase());
+            });
+            const selectableDefaultModels = enabledModels.some((model) => model.id === provider.model)
+              ? enabledModels
+              : provider.model
+                ? [
+                    ...enabledModels,
+                    {
+                      id: provider.model,
+                      name: provider.model,
+                      enabled: true,
+                      source: "manual" as const,
+                      updatedAt: provider.updatedAt,
+                    },
+                  ]
+                : enabledModels;
 
             return (
               <article className="provider-card" key={provider.id}>
@@ -242,6 +270,15 @@ export function ModelSettingsSection({
                     >
                       <Trash2 size={14} />
                     </button>
+                    <button
+                      className="ghost-button compact"
+                      type="button"
+                      onClick={() => onRefreshProviderModels(provider.id)}
+                      disabled={isBusy || !provider.apiBase.trim()}
+                    >
+                      <RotateCw size={13} />
+                      获取模型
+                    </button>
                   </div>
                 </div>
                 <div className="provider-card-grid">
@@ -254,12 +291,27 @@ export function ModelSettingsSection({
                     />
                   </label>
                   <label>
-                    <span>模型</span>
-                    <input
-                      value={provider.model}
-                      onChange={(event) => onProviderFieldChange(provider.id, "model", event.target.value)}
-                      placeholder="gpt-4o-mini"
-                    />
+                    <span>默认模型</span>
+                    {provider.models.length ? (
+                      <span className="select-control">
+                        <select
+                          value={provider.model}
+                          onChange={(event) => onProviderFieldChange(provider.id, "model", event.target.value)}
+                        >
+                          {selectableDefaultModels.map((model) => (
+                            <option key={model.id} value={model.id}>
+                              {model.name || model.id}
+                            </option>
+                          ))}
+                        </select>
+                      </span>
+                    ) : (
+                      <input
+                        value={provider.model}
+                        onChange={(event) => onProviderFieldChange(provider.id, "model", event.target.value)}
+                        placeholder="gpt-4o-mini"
+                      />
+                    )}
                   </label>
                   <label className="toggle-row compact">
                     <input
@@ -301,6 +353,55 @@ export function ModelSettingsSection({
                         <OverflowTooltipText text={keyStatus?.message ?? "尚未读取模型密钥状态。"} logArea="settings_model_key_status" />
                       </div>
                     </label>
+                  )}
+                  {provider.models.length > 0 && (
+                    <div className="settings-full-row provider-models-panel">
+                      <div className="provider-models-header">
+                        <div>
+                          <span>可用模型</span>
+                          <strong>
+                            已启用 {enabledModels.length}/{provider.models.length}
+                          </strong>
+                          {provider.modelsFetchedAt && <small>上次获取：{provider.modelsFetchedAt}</small>}
+                        </div>
+                        <input
+                          value={modelSearch}
+                          onChange={(event) =>
+                            setModelSearchByProvider((current) => ({
+                              ...current,
+                              [provider.id]: event.target.value,
+                            }))
+                          }
+                          placeholder="搜索模型"
+                        />
+                      </div>
+                      <div className="provider-models-list">
+                        {filteredModels.length ? (
+                          filteredModels.map((model) => (
+                            <label className="provider-model-row" key={model.id}>
+                              <input
+                                className="control-checkbox-input"
+                                checked={model.enabled}
+                                disabled={model.id === provider.model}
+                                onChange={(event) => onProviderModelEnabledChange(provider.id, model.id, event.target.checked)}
+                                type="checkbox"
+                              />
+                              <span className="control-checkbox" aria-hidden="true" />
+                              <span className="provider-model-row-main">
+                                <OverflowTooltipText as="strong" text={model.name || model.id} logArea="settings_model_name" />
+                                <OverflowTooltipText as="code" text={model.id} logArea="settings_model_id" />
+                              </span>
+                              <span className={`provider-model-source ${model.source}`}>{model.source === "manual" ? "手动" : "发现"}</span>
+                              {model.contextLength ? <span>{model.contextLength.toLocaleString()} ctx</span> : null}
+                              {model.ownedBy ? <span>{model.ownedBy}</span> : null}
+                              {model.id === provider.model && <span className="provider-badge default">默认</span>}
+                            </label>
+                          ))
+                        ) : (
+                          <p className="settings-empty compact">没有匹配的模型。</p>
+                        )}
+                      </div>
+                    </div>
                   )}
                 </div>
               </article>

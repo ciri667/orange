@@ -31,6 +31,9 @@ export type AgentToolCallStatus = "planned" | "running" | "completed" | "failed"
 /** 首版云端模型提供商，M3 先固定 OpenAI-compatible BYOK 协议。 */
 export type ModelProvider = "openai-compatible";
 
+/** 模型条目来源：discovered 来自 provider API，manual 来自用户手填或兼容旧配置。 */
+export type LlmProviderModelSource = "discovered" | "manual";
+
 /** 用户选择的隐私策略，决定模型请求是否允许携带本地笔记片段。 */
 export type PrivacyPolicy = "local-only" | "allow-selected-scope";
 
@@ -281,6 +284,20 @@ export interface AgentSession {
   deletedAt?: string;
   /** 会话默认使用的 LLM Provider；缺省时回退到全局默认 provider。 */
   modelProviderId?: string;
+  /** 会话默认使用的模型 ID；必须和 modelProviderId 指向的 provider 配套使用。 */
+  modelId?: string;
+}
+
+/** 单个 provider 下可供用户启用和选择的模型条目。 */
+export interface LlmProviderModel {
+  id: string;
+  name: string;
+  ownedBy?: string;
+  enabled: boolean;
+  source: LlmProviderModelSource;
+  contextLength?: number;
+  created?: number;
+  updatedAt: string;
 }
 
 /** 单个 LLM Provider 实例配置；用户可以配置多个 provider 并按需切换。 */
@@ -295,6 +312,10 @@ export interface LlmProviderConfig {
   supportsTools: boolean;
   /** 是否需要配置 API key；本地免鉴权服务（如 Ollama）可以关闭 key 校验。 */
   requiresApiKey: boolean;
+  /** 自动发现或手动保留的模型列表；为空时仍使用 model 字段兼容旧配置。 */
+  models: LlmProviderModel[];
+  /** 最近一次从 provider API 获取模型列表的本地时间。 */
+  modelsFetchedAt?: string;
   createdAt: string;
   updatedAt: string;
 }
@@ -397,6 +418,17 @@ export interface ModelApiKeyStatus {
   message: string;
 }
 
+/** 刷新单个 provider 模型列表后的结果摘要，不包含密钥或响应正文。 */
+export interface LlmProviderModelRefreshResult {
+  settings: UserSettings;
+  providerId: string;
+  fetchedAt: string;
+  fetchedCount: number;
+  modelCount: number;
+  enabledCount: number;
+  message: string;
+}
+
 /** 模型请求和本地工具调用审计摘要，用于解释每轮 Agent 使用了哪些范围。 */
 export interface RequestAuditLog {
   id: string;
@@ -487,6 +519,8 @@ export interface AgentTurnRequest {
   clientMessageId?: string;
   /** 本轮显式选择的 Provider；优先级高于会话默认和全局默认。 */
   modelProviderId?: string;
+  /** 本轮显式选择的模型 ID；和 modelProviderId 一起参与选择优先级。 */
+  modelId?: string;
   /** 本轮通过 slash picker 显式激活的 Skill ID；只作用于当前 turn，不写入会话。 */
   explicitSkillIds?: string[];
 }

@@ -132,6 +132,7 @@ export function SettingsDrawer({
   onDeleteSkill,
   onOpenUserSkillsFolder,
   onSaveApiKey,
+  onRefreshProviderModels,
   onSaveFeishuSecret,
   onStartFeishuGateway,
   onStopFeishuGateway,
@@ -166,6 +167,7 @@ export function SettingsDrawer({
   onDeleteSkill: (skillId: string) => Promise<void> | void;
   onOpenUserSkillsFolder: () => Promise<void> | void;
   onSaveApiKey: (providerId: string, apiKey: string) => Promise<void> | void;
+  onRefreshProviderModels: (providerId: string) => Promise<UserSettings> | UserSettings;
   onSaveFeishuSecret: (appSecret: string) => Promise<void> | void;
   onStartFeishuGateway: () => Promise<void> | void;
   onStopFeishuGateway: () => Promise<void> | void;
@@ -570,6 +572,50 @@ export function SettingsDrawer({
     }
   }
 
+  /** 保存当前模型草稿和临时 API key 后刷新 provider 模型列表。 */
+  async function handleRefreshProviderModels(providerId: string) {
+    const startedAt = performance.now();
+    const apiKeyDraft = apiKeyDraftByProvider[providerId] ?? "";
+
+    logInfo("设置页刷新 Provider 模型列表。", {
+      category: "settings",
+      event: "provider_models_refresh",
+      status: "started",
+      metadata: {
+        providerId,
+        hasApiKeyDraft: Boolean(apiKeyDraft.trim()),
+      },
+    });
+
+    try {
+      if (apiKeyDraft.trim()) {
+        await onSaveApiKey(providerId, apiKeyDraft);
+        setApiKeyDraftByProvider((current) => ({ ...current, [providerId]: "" }));
+      }
+
+      await handleSaveSettings();
+      const nextSettings = await onRefreshProviderModels(providerId);
+
+      setSettingsDraft(nextSettings);
+      logInfo("设置页刷新 Provider 模型列表完成。", {
+        category: "settings",
+        event: "provider_models_refresh",
+        status: "completed",
+        durationMs: performance.now() - startedAt,
+        metadata: { providerId },
+      });
+    } catch (error) {
+      logError("设置页刷新 Provider 模型列表失败。", {
+        category: "settings",
+        event: "provider_models_refresh",
+        status: "failed",
+        durationMs: performance.now() - startedAt,
+        metadata: { providerId },
+        error,
+      });
+    }
+  }
+
   /** 更新模型配置草稿中的全局字段（启用开关等），保持 provider 列表不变。 */
   function updateModelConfig(field: "enabled", value: boolean) {
     setSettingsDraft((currentSettings) => ({
@@ -577,6 +623,15 @@ export function SettingsDrawer({
       modelConfig: {
         ...currentSettings.modelConfig,
         [field]: value,
+        // 开启云端模型时默认 Provider 必须同步启用；默认 Provider 在 UI 中不可关闭。
+        providers:
+          field === "enabled" && value
+            ? currentSettings.modelConfig.providers.map((provider) =>
+                provider.id === currentSettings.modelConfig.defaultProviderId
+                  ? { ...provider, enabled: true, updatedAt: formatLocalDateTime() }
+                  : provider,
+              )
+            : currentSettings.modelConfig.providers,
       },
     }));
   }
@@ -599,10 +654,35 @@ export function SettingsDrawer({
                     : field === "enabled"
                       ? Boolean(value)
                       : provider.enabled,
+                models:
+                  field === "model" && typeof value === "string"
+                    ? provider.models.map((model) => (model.id === value ? { ...model, enabled: true } : model))
+                    : provider.models,
                 updatedAt: formatLocalDateTime(),
               }
             : provider,
         ),
+      },
+    }));
+  }
+
+  /** 启停 provider 下的单个模型；默认模型必须保持启用，避免运行态无模型可用。 */
+  function updateProviderModelEnabled(providerId: string, modelId: string, enabled: boolean) {
+    setSettingsDraft((currentSettings) => ({
+      ...currentSettings,
+      modelConfig: {
+        ...currentSettings.modelConfig,
+        providers: currentSettings.modelConfig.providers.map((provider) => {
+          if (provider.id !== providerId || provider.model === modelId) {
+            return provider;
+          }
+
+          return {
+            ...provider,
+            models: provider.models.map((model) => (model.id === modelId ? { ...model, enabled } : model)),
+            updatedAt: formatLocalDateTime(),
+          };
+        }),
       },
     }));
   }
@@ -645,6 +725,18 @@ export function SettingsDrawer({
       enabled: true,
       supportsTools: true,
       requiresApiKey: template.requiresApiKey,
+      models: template.model
+        ? [
+            {
+              id: template.model,
+              name: template.model,
+              enabled: true,
+              source: "manual",
+              updatedAt: now,
+            },
+          ]
+        : [],
+      modelsFetchedAt: undefined,
       createdAt: now,
       updatedAt: now,
     };
@@ -824,6 +916,8 @@ export function SettingsDrawer({
             setApiKeyDraftByProvider((current) => ({ ...current, [providerId]: apiKey }))
           }
           onSaveApiKey={handleSaveApiKey}
+          onRefreshProviderModels={handleRefreshProviderModels}
+          onProviderModelEnabledChange={updateProviderModelEnabled}
         />
       );
     }
