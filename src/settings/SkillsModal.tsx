@@ -3,6 +3,7 @@ import type { FormEvent } from "react";
 import { useMemo, useState } from "react";
 import { ConfirmDialog, type ConfirmDialogConfig } from "../shared/ConfirmDialog";
 import { logError, logInfo } from "../shared/logger";
+import { OverflowTooltipText } from "../shared/OverflowTooltipText";
 import type {
   AgentSkill,
   AgentSkillSource,
@@ -389,8 +390,8 @@ export function SkillsModal({
                   }}
                 >
                   <span>
-                    <strong>{skill.displayName}</strong>
-                    <small>{sourceLabel(skill.source)}</small>
+                    <OverflowTooltipText as="strong" text={skill.displayName} logArea="skills_modal_row_name" />
+                    <OverflowTooltipText as="small" text={sourceLabel(skill.source)} logArea="skills_modal_row_source" />
                   </span>
                   <em className={skill.enabled ? "enabled" : "disabled"}>{skill.enabled ? "启用" : "停用"}</em>
                 </button>
@@ -461,8 +462,8 @@ function SkillDetail({
       <div className="skill-detail-header">
         <div>
           <p className="section-label">{sourceHeading(skill)}</p>
-          <h3>{skill.displayName}</h3>
-          <span>{skill.name}</span>
+          <OverflowTooltipText as="h3" text={skill.displayName} logArea="skills_modal_detail_name" />
+          <OverflowTooltipText text={skill.name} logArea="skills_modal_detail_id" />
         </div>
         <div className="skill-detail-actions">
           {isUserManagedSkill(skill) && (
@@ -483,7 +484,7 @@ function SkillDetail({
       {skill.source === "custom" && (
         <section className="skill-path-block">
           <h4>SKILL.md 路径</h4>
-          <code>{skill.path ?? skill.relativePath ?? "未返回路径"}</code>
+          <OverflowTooltipText as="code" text={skill.path ?? skill.relativePath ?? "未返回路径"} logArea="skills_modal_detail_path" />
         </section>
       )}
       <div className="skill-switches">
@@ -501,7 +502,7 @@ function SkillDetail({
       </div>
       <div className="skill-tags">
         {skill.tags.map((tag) => (
-          <span key={tag}>{tag}</span>
+          <OverflowTooltipText key={tag} text={tag} logArea="skills_modal_detail_tag" />
         ))}
       </div>
       <section className="skill-instructions">

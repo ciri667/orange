@@ -21,6 +21,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { ConfirmDialog } from "../shared/ConfirmDialog";
 import { createLocalId, formatLocalDateTime } from "../shared/id";
 import { logDebug, logError, logInfo } from "../shared/logger";
+import { OverflowTooltipText } from "../shared/OverflowTooltipText";
 import type {
   AgentSkill,
   AppEventLog,
@@ -765,10 +766,15 @@ export function SettingsDrawer({
               >
                 <SectionIcon size={17} />
                 <span className="settings-nav-text">
-                  <strong>{item.label}</strong>
-                  <small>{item.description}</small>
+                  <OverflowTooltipText as="strong" text={item.label} logArea="settings_nav_label" />
+                  <OverflowTooltipText as="small" text={item.description} logArea="settings_nav_description" />
                 </span>
-                <em className={`settings-nav-meta ${item.tone ?? "neutral"}`}>{item.meta}</em>
+                <OverflowTooltipText
+                  as="em"
+                  className={`settings-nav-meta ${item.tone ?? "neutral"}`}
+                  text={item.meta}
+                  logArea="settings_nav_meta"
+                />
               </button>
             );
           })}
@@ -799,12 +805,12 @@ export function SettingsDrawer({
                 <article className="settings-kb-card" key={knowledgeBase.id}>
                   <div>
                     <div className="kb-card-title">
-                      <strong>{knowledgeBase.name}</strong>
+                      <OverflowTooltipText as="strong" text={knowledgeBase.name} logArea="settings_kb_name" />
                       <span>{knowledgeBase.status === "error" ? "目录失效" : knowledgeBase.semanticIndexEnabled ? "本地向量" : "FTS5"}</span>
                       {knowledgeBase.id === activeKnowledgeBaseId && <span>当前激活</span>}
                     </div>
                     <p>{knowledgeBase.description}</p>
-                    <code>{knowledgeBase.path}</code>
+                    <OverflowTooltipText as="code" text={knowledgeBase.path} logArea="settings_kb_path" />
                     <ScanReportDetails knowledgeBase={knowledgeBase} />
                   </div>
                   <div className="setting-actions">
@@ -1011,7 +1017,7 @@ export function SettingsDrawer({
                           </div>
                           <div className={`key-status ${keyStatus?.configured ? "verified" : "missing"}`}>
                             <KeyRound size={13} />
-                            <span>{keyStatus?.message ?? "尚未读取模型密钥状态。"}</span>
+                            <OverflowTooltipText text={keyStatus?.message ?? "尚未读取模型密钥状态。"} logArea="settings_model_key_status" />
                           </div>
                         </label>
                       )}
@@ -1190,8 +1196,11 @@ export function SettingsDrawer({
                       {isSelected && <Check size={12} />}
                     </span>
                     <span className="scope-option-copy">
-                      <strong>{knowledgeBase.name}</strong>
-                      <span>{knowledgeBase.status === "error" ? "目录失效" : `${knowledgeBase.noteCount} 篇笔记`}</span>
+                      <OverflowTooltipText as="strong" text={knowledgeBase.name} logArea="settings_im_scope_name" />
+                      <OverflowTooltipText
+                        text={knowledgeBase.status === "error" ? "目录失效" : `${knowledgeBase.noteCount} 篇笔记`}
+                        logArea="settings_im_scope_detail"
+                      />
                     </span>
                   </label>
                 );
@@ -1212,7 +1221,7 @@ export function SettingsDrawer({
                   <div className="discovered-peer-row" key={openId}>
                     <span>
                       <strong>用户候选 {index + 1}</strong>
-                      <span>{formatIdentifierPreview(openId)}</span>
+                      <OverflowTooltipText text={formatIdentifierPreview(openId)} logArea="settings_im_discovered_user" />
                     </span>
                     <button className="ghost-button compact" type="button" onClick={() => allowDiscoveredFeishuUser(openId)}>
                       允许用户
@@ -1223,7 +1232,7 @@ export function SettingsDrawer({
                   <div className="discovered-peer-row" key={chatId}>
                     <span>
                       <strong>群候选 {index + 1}</strong>
-                      <span>{formatIdentifierPreview(chatId)}</span>
+                      <OverflowTooltipText text={formatIdentifierPreview(chatId)} logArea="settings_im_discovered_chat" />
                     </span>
                     <button className="ghost-button compact" type="button" onClick={() => allowDiscoveredFeishuChat(chatId)}>
                       允许群聊
@@ -1446,12 +1455,12 @@ function AuditLogCard({ log }: { log: RequestAuditLog }) {
   return (
     <article className="audit-card">
       <div className="audit-card-header">
-        <strong>{formatAuditKind(log.kind)}</strong>
-        <span>{log.createdAt}</span>
+        <OverflowTooltipText as="strong" text={formatAuditKind(log.kind)} logArea="settings_audit_kind" />
+        <OverflowTooltipText text={log.createdAt} logArea="settings_audit_created_at" />
       </div>
       <p>{log.scopeSummary}</p>
       <p>{log.contentSummary}</p>
-      <code>{log.toolSummary}</code>
+      <OverflowTooltipText as="code" text={log.toolSummary} logArea="settings_audit_tool_summary" />
     </article>
   );
 }
@@ -1461,16 +1470,16 @@ function AppEventLogCard({ log }: { log: AppEventLog }) {
   return (
     <article className={`audit-card event-log-card ${log.level}`}>
       <div className="audit-card-header">
-        <strong>
-          {formatEventLogLevel(log.level)} · {formatEventLogCategory(log.category)}
-        </strong>
-        <span>{log.createdAt}</span>
+        <OverflowTooltipText
+          as="strong"
+          text={`${formatEventLogLevel(log.level)} · ${formatEventLogCategory(log.category)}`}
+          logArea="settings_event_log_kind"
+        />
+        <OverflowTooltipText text={log.createdAt} logArea="settings_event_log_created_at" />
       </div>
-      <p>
-        {formatEventStatus(log.status)} / {log.event}
-      </p>
+      <OverflowTooltipText as="p" text={`${formatEventStatus(log.status)} / ${log.event}`} logArea="settings_event_log_status" />
       <p>{log.message}</p>
-      <code>{formatEventLogContext(log)}</code>
+      <OverflowTooltipText as="code" text={formatEventLogContext(log)} logArea="settings_event_log_context" />
     </article>
   );
 }
