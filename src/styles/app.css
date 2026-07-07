@@ -82,6 +82,23 @@ textarea:disabled {
   opacity: 0.62;
 }
 
+/** 全局溢出文本 Tooltip 通过 portal 挂到 body，避免被侧栏和弹层滚动容器裁剪。 */
+.overflow-tooltip {
+  position: fixed;
+  z-index: 10000;
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  border-radius: 7px;
+  padding: 7px 9px;
+  background: rgba(17, 27, 33, 0.96);
+  box-shadow: 0 10px 28px rgba(16, 24, 32, 0.22);
+  color: #ffffff;
+  font-size: 12px;
+  line-height: 1.45;
+  overflow-wrap: anywhere;
+  pointer-events: none;
+  white-space: normal;
+}
+
 @keyframes spin {
   to {
     transform: rotate(360deg);
