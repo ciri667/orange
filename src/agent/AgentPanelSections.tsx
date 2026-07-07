@@ -148,13 +148,13 @@ export function AgentSessionContextPopover({
   const writeStatus = activeSession.pendingChange?.status === "pending" ? "待确认 diff" : "写入需确认";
 
   return (
-    <section className="context-popover" aria-label="会话上下文包">
+    <section className="context-popover" aria-label="会话上下文">
       <div className="popover-header">
         <div>
           <p className="section-label">Context</p>
-          <h3>上下文包</h3>
+          <h3>上下文</h3>
         </div>
-        <button className="icon-button" type="button" title="关闭上下文包" onClick={onToggleSessionContext}>
+        <button className="icon-button" type="button" title="关闭上下文" onClick={onToggleSessionContext}>
           <X size={15} />
         </button>
       </div>

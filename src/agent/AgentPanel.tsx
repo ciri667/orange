@@ -1,4 +1,4 @@
-import { History, PanelRightClose, PanelRightOpen, Plus } from "lucide-react";
+import { History, Book, PanelRightClose, Plus } from "lucide-react";
 import { useRef } from "react";
 import { OverflowTooltipText } from "../shared/OverflowTooltipText";
 import { useDismissable } from "../shared/useDismissable";
@@ -91,7 +91,7 @@ export function AgentPanel({
             <PanelRightClose size={17} />
           </button>
           <button className="icon-button" type="button" title="查看上下文" onClick={onToggleSessionContext}>
-            <PanelRightOpen size={17} />
+            <Book size={17} />
           </button>
           <button className="icon-button" type="button" title="会话历史" onClick={onToggleSessionList}>
             <History size={17} />

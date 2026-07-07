@@ -1438,11 +1438,11 @@ export function WorkspaceShell() {
     setIsScopeSelectorOpen(false);
   }
 
-  /** 切换上下文包浮层；日志只记录数量和状态，不写入标题、正文、知识库名称或路径。 */
+  /** 切换上下文浮层；日志只记录数量和状态，不写入标题、正文、知识库名称或路径。 */
   function handleToggleSessionContext() {
     const nextOpen = !isSessionContextOpen;
 
-    logInfo("切换上下文包浮层。", {
+    logInfo("切换上下文浮层。", {
       category: "frontend",
       event: "toggle_session_context",
       status: nextOpen ? "opened" : "closed",
