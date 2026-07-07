@@ -1,4 +1,5 @@
 import { Database, Settings } from "lucide-react";
+import { OverflowTooltipText } from "../shared/OverflowTooltipText";
 import type { KnowledgeBase } from "../shared/types";
 
 /** 顶部应用栏，承载产品状态、激活知识库同步状态和设置入口。 */
@@ -26,7 +27,7 @@ export function TopBar({
         <Database size={15} />
         <div>
           <span>当前资料库</span>
-          <strong>{activeKnowledgeBase.name}</strong>
+          <OverflowTooltipText as="strong" text={activeKnowledgeBase.name} logArea="topbar_active_knowledge_base" />
         </div>
         <em>
           {knowledgeBaseCount} 个库 · {activeKnowledgeBase.updatedAt} 已索引

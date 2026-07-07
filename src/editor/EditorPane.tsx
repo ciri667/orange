@@ -11,6 +11,7 @@ import { DiffPanel } from "../diff/DiffPanel";
 import type { ReviewCommentDraft } from "../diff/DiffPanel";
 import { MarkdownLink } from "../shared/MarkdownLink";
 import { logDebug } from "../shared/logger";
+import { OverflowTooltipText } from "../shared/OverflowTooltipText";
 import { useDismissable } from "../shared/useDismissable";
 import type { ExportFormat, KnowledgeBase, MarkdownViewMode, Note, ProposedChange } from "../shared/types";
 import { LineNumberedTextarea } from "./LineNumberedTextarea";
@@ -112,7 +113,7 @@ export function EditorPane({
       <section className="editor-pane" aria-label="Markdown 编辑器">
         <header className="editor-header">
           <div>
-            <p className="path-label">{knowledgeBase.name}</p>
+            <OverflowTooltipText as="p" className="path-label" text={knowledgeBase.name} logArea="editor_empty_knowledge_base" />
             <h2>暂无 Markdown 笔记</h2>
           </div>
           <div className="editor-actions" />
@@ -170,10 +171,13 @@ export function EditorPane({
     <section className="editor-pane" aria-label="Markdown 编辑器">
       <header className="editor-header">
         <div>
-          <p className="path-label">
-            {knowledgeBase.name} / {note.path}
-          </p>
-          <h2>{note.title}</h2>
+          <OverflowTooltipText
+            as="p"
+            className="path-label"
+            text={`${knowledgeBase.name} / ${note.path}`}
+            logArea="editor_note_path"
+          />
+          <OverflowTooltipText as="h2" text={note.title} logArea="editor_note_title" />
         </div>
         <div className="editor-actions">
           <div className="view-mode-toggle" aria-label="Markdown 视图模式">

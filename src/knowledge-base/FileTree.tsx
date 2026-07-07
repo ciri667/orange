@@ -14,6 +14,7 @@ import {
 } from "lucide-react";
 import { useState } from "react";
 import { logDebug } from "../shared/logger";
+import { OverflowTooltipText } from "../shared/OverflowTooltipText";
 import { useDismissable } from "../shared/useDismissable";
 import type { FileTreeNode } from "../shared/types";
 
@@ -94,11 +95,12 @@ export function FileTree({
                   className="file-tree-open-button"
                   type="button"
                   aria-expanded={!isCollapsed}
+                  aria-label={`${isCollapsed ? "展开" : "收起"} ${node.name}`}
                   onClick={() => onToggleFolder(node.path)}
                 >
                   {isCollapsed ? <ChevronRight size={14} /> : <ChevronDown size={14} />}
                   <FolderOpen size={15} />
-                  <span className="file-tree-name">{node.name}</span>
+                  <OverflowTooltipText className="file-tree-name" text={node.name} logArea="file_tree_folder" />
                 </button>
                 <span className="file-tree-count">{node.children.length}</span>
                 <div className="file-tree-actions">
@@ -157,7 +159,7 @@ export function FileTree({
               <button
                 className="file-tree-open-button"
                 type="button"
-                title={node.name}
+                aria-label={`打开 ${node.name}`}
                 onClick={() => {
                   if (noteId) {
                     onSelectNote(noteId);
@@ -167,7 +169,7 @@ export function FileTree({
                 }}
               >
                 <FileTreeIcon node={node} />
-                <span className="file-tree-name">{node.name}</span>
+                <OverflowTooltipText className="file-tree-name" text={node.name} logArea="file_tree_file" />
                 <span className="file-tree-type">{formatFileTreeTypeLabel(node)}</span>
               </button>
               {(canRename || canDelete) && (
@@ -224,7 +226,7 @@ function CreateMenu({
       <button
         className="file-action-button"
         type="button"
-        title={`在「${folderName}」中新建`}
+        aria-label={`在「${folderName}」中新建`}
         aria-haspopup="menu"
         aria-expanded={isOpen}
         onClick={(event) => {

@@ -2,6 +2,7 @@ import { convertFileSrc } from "@tauri-apps/api/core";
 import { ChevronDown, Clock3, Eye, FileDown, FileImage, FilePenLine, FileText, MoreHorizontal, Save, Trash2 } from "lucide-react";
 import { useState } from "react";
 import { logDebug, logInfo, logWarn } from "../shared/logger";
+import { OverflowTooltipText } from "../shared/OverflowTooltipText";
 import { useDismissable } from "../shared/useDismissable";
 import type { DocumentFileType, DocumentPreview, ExportFormat, KnowledgeBase, WorkspaceDocument } from "../shared/types";
 import { LineNumberedTextarea } from "./LineNumberedTextarea";
@@ -100,7 +101,7 @@ export function DocumentPane({
       <section className="editor-pane" aria-label="文档预览">
         <header className="editor-header">
           <div>
-            <p className="path-label">{knowledgeBase.name}</p>
+            <OverflowTooltipText as="p" className="path-label" text={knowledgeBase.name} logArea="document_empty_knowledge_base" />
             <h2>暂无文档</h2>
           </div>
           <div className="editor-actions" />
@@ -139,10 +140,13 @@ export function DocumentPane({
     <section className="editor-pane" aria-label="普通文档">
       <header className="editor-header">
         <div>
-          <p className="path-label">
-            {knowledgeBase.name} / {document.path}
-          </p>
-          <h2>{document.title}</h2>
+          <OverflowTooltipText
+            as="p"
+            className="path-label"
+            text={`${knowledgeBase.name} / ${document.path}`}
+            logArea="document_path"
+          />
+          <OverflowTooltipText as="h2" text={document.title} logArea="document_title" />
         </div>
         <div className="editor-actions">
           {isTextDocument && (

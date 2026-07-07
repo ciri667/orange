@@ -1,5 +1,6 @@
 import { AlertCircle, BookOpen, Database, Loader2, Plus, RefreshCw, Search } from "lucide-react";
 import { FileTree } from "./FileTree";
+import { OverflowTooltipText } from "../shared/OverflowTooltipText";
 import type { FileTreeNode, KnowledgeBase } from "../shared/types";
 
 /** 汇总当前资料库文档数量，用于侧栏标题中的低噪音概览。 */
@@ -87,22 +88,25 @@ export function KnowledgeBaseSidebar({
           <p className="section-label">Library</p>
           <span>本地优先</span>
         </div>
-        {knowledgeBases.map((knowledgeBase) => (
-          <button
-            className={`kb-row ${knowledgeBase.id === activeKnowledgeBase.id ? "active" : ""} ${knowledgeBase.status === "error" ? "error" : ""}`}
-            key={knowledgeBase.id}
-            type="button"
-            onClick={() => onSelectKnowledgeBase(knowledgeBase.id)}
-          >
-            {knowledgeBase.status === "error" ? <AlertCircle size={15} /> : <Database size={15} />}
-            <span className="kb-row-copy">
-              <strong>{knowledgeBase.name}</strong>
-              <span>
-                {getKnowledgeBaseFileSummary(knowledgeBase)} · {getKnowledgeBaseStatusLabel(knowledgeBase)}
+        {knowledgeBases.map((knowledgeBase) => {
+          const knowledgeBaseSummary = `${getKnowledgeBaseFileSummary(knowledgeBase)} · ${getKnowledgeBaseStatusLabel(knowledgeBase)}`;
+
+          return (
+            <button
+              className={`kb-row ${knowledgeBase.id === activeKnowledgeBase.id ? "active" : ""} ${knowledgeBase.status === "error" ? "error" : ""}`}
+              key={knowledgeBase.id}
+              type="button"
+              aria-label={`${knowledgeBase.name}，${knowledgeBaseSummary}`}
+              onClick={() => onSelectKnowledgeBase(knowledgeBase.id)}
+            >
+              {knowledgeBase.status === "error" ? <AlertCircle size={15} /> : <Database size={15} />}
+              <span className="kb-row-copy">
+                <OverflowTooltipText as="strong" text={knowledgeBase.name} logArea="knowledge_base_row_name" />
+                <OverflowTooltipText text={knowledgeBaseSummary} logArea="knowledge_base_row_summary" />
               </span>
-            </span>
-          </button>
-        ))}
+            </button>
+          );
+        })}
         <button className="add-kb-button" type="button" onClick={onAddKnowledgeBase}>
           <Plus size={15} />
           连接资料库
@@ -143,7 +147,7 @@ export function KnowledgeBaseSidebar({
             </button>
           </div>
         </div>
-        <p className="root-path">{activeKnowledgeBase.path}</p>
+        <OverflowTooltipText as="p" className="root-path" text={activeKnowledgeBase.path} logArea="knowledge_base_root_path" />
         <ScanReportSummary knowledgeBase={activeKnowledgeBase} />
         <FileTree
           nodes={fileTree}
