@@ -113,6 +113,7 @@ pub(crate) fn build_im_agent_session(
         updated_at: now,
         deleted_at: None,
         model_provider_id: None,
+        model_id: None,
     }
 }
 
@@ -143,6 +144,7 @@ pub(crate) fn build_im_turn_request(
         active_note_id: String::new(),
         client_message_id: Some(client_message_id),
         model_provider_id: None,
+        model_id: None,
         explicit_skill_ids: Vec::new(),
     }
 }

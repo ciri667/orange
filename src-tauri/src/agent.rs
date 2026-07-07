@@ -264,6 +264,7 @@ mod tests {
             active_note_id: "note-a".to_owned(),
             client_message_id: None,
             model_provider_id: None,
+            model_id: None,
             explicit_skill_ids: Vec::new(),
         };
         let response = build_local_response(&request, &[], &[]);
@@ -282,6 +283,7 @@ mod tests {
             active_note_id: "note-a".to_owned(),
             client_message_id: None,
             model_provider_id: None,
+            model_id: None,
             explicit_skill_ids: Vec::new(),
         };
         let response = build_local_response(&request, &[], &[]);
@@ -313,6 +315,7 @@ mod tests {
             updated_at: "刚刚".to_owned(),
             deleted_at: None,
             model_provider_id: None,
+            model_id: None,
         };
         let request = AgentTurnRequest {
             prompt: "已发送消息".to_owned(),
@@ -322,6 +325,7 @@ mod tests {
             active_note_id: String::new(),
             client_message_id: Some("user-client".to_owned()),
             model_provider_id: None,
+            model_id: None,
             explicit_skill_ids: Vec::new(),
         };
 

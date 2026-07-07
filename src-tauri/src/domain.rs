@@ -321,11 +321,31 @@ pub struct AgentSession {
     /** 会话默认使用的 LLM Provider；缺省时回退到全局默认 provider。 */
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model_provider_id: Option<String>,
+    /** 会话默认使用的模型 ID；和 model_provider_id 配套决定具体模型。 */
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model_id: Option<String>,
 }
 
 /** 默认要求配置 API key；只有本地免鉴权服务（例如 Ollama）会显式关闭。 */
 fn default_requires_api_key() -> bool {
     true
+}
+
+/** 单个 provider 下可被用户启用和选择的模型条目。 */
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LlmProviderModel {
+    pub id: String,
+    pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub owned_by: Option<String>,
+    pub enabled: bool,
+    pub source: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context_length: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub created: Option<i64>,
+    pub updated_at: String,
 }
 
 /** 单个 LLM Provider 实例配置；用户可以配置多个 provider 并按需切换。 */
@@ -343,6 +363,12 @@ pub struct LlmProviderConfig {
     /** 是否需要配置 API key；本地免鉴权服务可以标记为 false 跳过 key 校验。 */
     #[serde(default = "default_requires_api_key")]
     pub requires_api_key: bool,
+    /** 自动发现或手动保留的模型列表；为空时继续使用 model 字段兼容旧配置。 */
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub models: Vec<LlmProviderModel>,
+    /** 最近一次从 provider API 获取模型列表的本地时间。 */
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub models_fetched_at: Option<String>,
     pub created_at: String,
     pub updated_at: String,
 }
@@ -512,6 +538,19 @@ pub struct ModelApiKeyStatus {
     pub message: String,
 }
 
+/** 刷新 provider 模型列表后的摘要；settings 是归一化并持久化后的完整设置。 */
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LlmProviderModelRefreshResult {
+    pub settings: UserSettings,
+    pub provider_id: String,
+    pub fetched_at: String,
+    pub fetched_count: usize,
+    pub model_count: usize,
+    pub enabled_count: usize,
+    pub message: String,
+}
+
 /** IM provider 凭证保存状态；只暴露是否存在，不返回明文。 */
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -640,6 +679,9 @@ pub struct AgentTurnRequest {
     /** 本轮显式选择的 Provider；优先级高于会话默认和全局默认。 */
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model_provider_id: Option<String>,
+    /** 本轮显式选择的模型 ID；和 model_provider_id 一起决定具体模型。 */
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model_id: Option<String>,
     /** 本轮通过 slash picker 显式激活的 Skill ID；默认空数组兼容历史请求。 */
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub explicit_skill_ids: Vec<String>,
@@ -916,6 +958,13 @@ pub struct SaveImSettingsPayload {
 pub struct SaveModelApiKeyPayload {
     pub provider_id: String,
     pub api_key: String,
+}
+
+/** 刷新指定 LLM provider 模型列表的命令入参；不包含明文 API key。 */
+#[derive(Clone, Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RefreshLlmProviderModelsPayload {
+    pub provider_id: String,
 }
 
 /** 保存 IM provider 密钥的命令入参；明文只进入系统安全存储。 */

@@ -141,6 +141,7 @@ pub fn run() {
             commands::save_model_api_key,
             commands::load_model_api_key_statuses,
             commands::load_llm_provider_templates,
+            commands::refresh_llm_provider_models,
             commands::load_request_audit_logs,
             commands::load_app_event_logs,
             commands::clear_app_event_logs,

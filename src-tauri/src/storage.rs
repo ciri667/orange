@@ -433,6 +433,8 @@ pub fn default_user_settings() -> UserSettings {
                 enabled: false,
                 supports_tools: true,
                 requires_api_key: true,
+                models: Vec::new(),
+                models_fetched_at: None,
                 created_at: now.clone(),
                 updated_at: now,
             }],
@@ -1348,7 +1350,7 @@ pub fn save_user_settings(
     let _write_guard = lock_database_writer()?;
     let mut normalized_settings = settings.clone();
 
-    model_provider::normalize_model_config_key_references(&mut normalized_settings.model_config);
+    model_provider::normalize_model_config(&mut normalized_settings.model_config);
 
     let payload_json = serde_json::to_string(&normalized_settings)
         .map_err(|error| format!("无法序列化用户设置：{error}"))?;
@@ -3877,6 +3879,7 @@ mod tests {
             updated_at: created_at.to_owned(),
             deleted_at: None,
             model_provider_id: None,
+            model_id: None,
         }
     }
 

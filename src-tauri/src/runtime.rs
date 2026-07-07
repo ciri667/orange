@@ -266,16 +266,22 @@ pub async fn run_agent_turn(
     let session_provider_id = resolve_session_index(&snapshot, &request)
         .ok()
         .and_then(|session_index| snapshot.sessions[session_index].model_provider_id.clone());
-    let provider = match model_provider::resolve_provider(
+    let session_model_id = resolve_session_index(&snapshot, &request)
+        .ok()
+        .and_then(|session_index| snapshot.sessions[session_index].model_id.clone());
+    let selection = match model_provider::resolve_model_selection(
         &settings.model_config,
         session_provider_id.as_deref(),
+        session_model_id.as_deref(),
         request.model_provider_id.as_deref(),
+        request.model_id.as_deref(),
     ) {
-        Ok(provider) => provider.clone(),
+        Ok(selection) => selection,
         Err(error) => {
             return model_error_turn(
                 snapshot,
                 request,
+                None,
                 None,
                 &available_skills,
                 &explicit_skills,
@@ -283,12 +289,15 @@ pub async fn run_agent_turn(
             )
         }
     };
+    let provider = selection.provider.clone();
+    let selected_model_id = selection.model_id.clone();
 
     if !provider.supports_tools {
         return model_error_turn(
             snapshot,
             request,
             Some(&provider),
+            Some(&selected_model_id),
             &available_skills,
             &explicit_skills,
             &format!(
@@ -306,6 +315,7 @@ pub async fn run_agent_turn(
                     snapshot,
                     request,
                     Some(&provider),
+                    Some(&selected_model_id),
                     &available_skills,
                     &explicit_skills,
                     &format!(
@@ -319,6 +329,7 @@ pub async fn run_agent_turn(
                     snapshot,
                     request,
                     Some(&provider),
+                    Some(&selected_model_id),
                     &available_skills,
                     &explicit_skills,
                     &error,
@@ -336,6 +347,7 @@ pub async fn run_agent_turn(
         available_skills.clone(),
         explicit_skills.clone(),
         provider.clone(),
+        selected_model_id.clone(),
         api_key,
     )
     .await
@@ -345,6 +357,7 @@ pub async fn run_agent_turn(
             snapshot,
             request,
             Some(&provider),
+            Some(&selected_model_id),
             &available_skills,
             &explicit_skills,
             &format!("模型请求失败：{error}"),
@@ -352,13 +365,15 @@ pub async fn run_agent_turn(
     }
 }
 
-/** 如果本轮请求显式选择了 providerId（AgentPanel 的“本轮模型”选择器），把它记为会话默认，
+/** 如果本轮请求显式选择了 providerId/modelId（AgentPanel 的“本轮模型”选择器），把它记为会话默认，
  * 让下次打开该会话时选择器展示“最后一次切换”的模型，而不是每次都回退成全局默认。
  * 未显式选择时保持会话原有设置不变——不能把所有发过消息的会话都动态固定成当前全局默认
  * provider，否则会话会失去“跟随全局默认变化”的语义。 */
 fn remember_requested_provider_on_session(
     session: &mut AgentSession,
     requested_provider_id: Option<&str>,
+    requested_model_id: Option<&str>,
+    resolved_model_id: &str,
 ) {
     let Some(requested_provider_id) = requested_provider_id
         .map(str::trim)
@@ -368,10 +383,24 @@ fn remember_requested_provider_on_session(
     };
 
     if session.model_provider_id.as_deref() == Some(requested_provider_id) {
-        return;
+        if requested_model_id
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .or(Some(resolved_model_id))
+            == session.model_id.as_deref()
+        {
+            return;
+        }
     }
 
     session.model_provider_id = Some(requested_provider_id.to_owned());
+    session.model_id = Some(
+        requested_model_id
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .unwrap_or(resolved_model_id)
+            .to_owned(),
+    );
     session.updated_at = format_local_datetime();
 }
 
@@ -383,6 +412,7 @@ async fn run_model_loop(
     available_skills: Vec<AgentSkill>,
     explicit_skills: Vec<AgentSkill>,
     provider: LlmProviderConfig,
+    selected_model_id: String,
     api_key: String,
 ) -> Result<RuntimeTurnResult, String> {
     let session_index = resolve_session_index(&snapshot, &request)?;
@@ -390,6 +420,8 @@ async fn run_model_loop(
     remember_requested_provider_on_session(
         &mut snapshot.sessions[session_index],
         request.model_provider_id.as_deref(),
+        request.model_id.as_deref(),
+        &selected_model_id,
     );
 
     let mut citations = Vec::new();
@@ -416,7 +448,12 @@ async fn run_model_loop(
     ));
     let mut last_failed_tool_summary: Option<String> = None;
 
-    tool_calls.push(model_request_tool_call(&provider, &endpoint, "completed"));
+    tool_calls.push(model_request_tool_call(
+        &provider,
+        &selected_model_id,
+        &endpoint,
+        "completed",
+    ));
 
     log::info!(
         target: "agent_runtime",
@@ -425,7 +462,7 @@ async fn run_model_loop(
         request.action,
         provider.id,
         provider.name,
-        provider.model,
+        selected_model_id,
         available_skills.iter().filter(|skill| skill.enabled).count(),
         explicit_skills.len(),
         explicit_skills
@@ -441,6 +478,7 @@ async fn run_model_loop(
         let response = send_chat_completion_logged(
             &client,
             &provider,
+            &selected_model_id,
             &endpoint,
             &api_key,
             &model_messages,
@@ -542,6 +580,7 @@ async fn run_model_loop(
     let response = send_chat_completion_logged(
         &client,
         &provider,
+        &selected_model_id,
         &endpoint,
         &api_key,
         &model_messages,
@@ -969,28 +1008,28 @@ fn build_model_messages(
 async fn send_chat_completion_logged(
     client: &Client,
     provider: &LlmProviderConfig,
+    model_id: &str,
     endpoint: &str,
     api_key: &str,
     messages: &[Value],
     include_tools: bool,
 ) -> Result<Value, String> {
     let started_at = Instant::now();
-    let result = send_chat_completion(
-        client,
-        endpoint,
-        api_key,
-        &provider.model,
-        messages,
-        include_tools,
-    )
-    .await;
+    let result =
+        send_chat_completion(client, endpoint, api_key, model_id, messages, include_tools).await;
 
     match &result {
-        Ok(_) => {
-            log_model_request_event(provider, endpoint, "completed", started_at.elapsed(), None)
-        }
+        Ok(_) => log_model_request_event(
+            provider,
+            model_id,
+            endpoint,
+            "completed",
+            started_at.elapsed(),
+            None,
+        ),
         Err(error) => log_model_request_event(
             provider,
+            model_id,
             endpoint,
             "failed",
             started_at.elapsed(),
@@ -1004,6 +1043,7 @@ async fn send_chat_completion_logged(
 /** 记录一次模型请求的分级日志；日志只包含 providerId/providerName/model/status/耗时/endpointHost，不含密钥或正文。 */
 fn log_model_request_event(
     provider: &LlmProviderConfig,
+    model_id: &str,
     endpoint: &str,
     status: &str,
     duration: Duration,
@@ -1017,7 +1057,7 @@ fn log_model_request_event(
             "模型请求失败：provider_id={} provider_name={} model={} status={} duration_ms={} endpoint_host={} error={}",
             provider.id,
             provider.name,
-            provider.model,
+            model_id,
             status,
             duration.as_millis(),
             endpoint_host,
@@ -1028,7 +1068,7 @@ fn log_model_request_event(
             "模型请求完成：provider_id={} provider_name={} model={} status={} duration_ms={} endpoint_host={}",
             provider.id,
             provider.name,
-            provider.model,
+            model_id,
             status,
             duration.as_millis(),
             endpoint_host
@@ -1164,6 +1204,7 @@ fn build_user_message(request: &AgentTurnRequest, id: String) -> AgentMessage {
 /** 构造模型请求轨迹；args 只记录非敏感配置，绝不包含 API key。 */
 fn model_request_tool_call(
     provider: &LlmProviderConfig,
+    model_id: &str,
     endpoint: &str,
     status: &str,
 ) -> AgentToolCall {
@@ -1173,14 +1214,14 @@ fn model_request_tool_call(
         status: status.to_owned(),
         summary: format!(
             "{}（{}）模型请求：{} @ {}",
-            provider.name, provider.provider, provider.model, endpoint
+            provider.name, provider.provider, model_id, endpoint
         ),
         args: json!({
             "providerId": provider.id,
             "providerName": provider.name,
             "provider": provider.provider,
             "apiBase": provider.api_base,
-            "model": provider.model,
+            "model": model_id,
             "endpoint": endpoint
         }),
     }
@@ -1298,6 +1339,7 @@ fn model_error_turn(
     mut snapshot: WorkspaceSnapshot,
     request: AgentTurnRequest,
     provider: Option<&LlmProviderConfig>,
+    selected_model_id: Option<&str>,
     available_skills: &[AgentSkill],
     explicit_skills: &[AgentSkill],
     reason: &str,
@@ -1307,7 +1349,12 @@ fn model_error_turn(
     let failed_request = match provider {
         Some(provider) => {
             let endpoint = model_provider::chat_completions_endpoint(&provider.api_base);
-            let mut call = model_request_tool_call(provider, &endpoint, "failed");
+            // 失败发生在选型之后时，工具轨迹必须记录本轮最终模型 ID，不能退回 provider 默认值。
+            let model_id = selected_model_id
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .unwrap_or(provider.model.as_str());
+            let mut call = model_request_tool_call(provider, model_id, &endpoint, "failed");
 
             call.summary = redacted_reason.clone();
             call
@@ -1678,6 +1725,7 @@ mod tests {
                 updated_at: "刚刚".to_owned(),
                 deleted_at: None,
                 model_provider_id: None,
+                model_id: None,
             }],
             active_knowledge_base_id: "kb-a".to_owned(),
             active_note_id: "note-a".to_owned(),
@@ -1696,6 +1744,7 @@ mod tests {
             active_note_id: "note-a".to_owned(),
             client_message_id: None,
             model_provider_id: None,
+            model_id: None,
             explicit_skill_ids: Vec::new(),
         }
     }
@@ -1755,6 +1804,7 @@ mod tests {
             snapshot,
             request,
             Some(&provider),
+            Some("selected-model"),
             &available_skills,
             &[],
             "模型请求失败：测试错误",
@@ -1769,7 +1819,7 @@ mod tests {
         assert_eq!(tool_calls.first().unwrap().name, "skill_context");
         assert_eq!(tool_call.name, "model_request");
         assert_eq!(tool_call.status, "failed");
-        assert_eq!(tool_call.args["model"], "test-model");
+        assert_eq!(tool_call.args["model"], "selected-model");
         assert_eq!(tool_call.args["providerId"], provider.id);
         assert!(tool_call.args.get("apiKey").is_none());
     }
@@ -1783,6 +1833,7 @@ mod tests {
         let result = model_error_turn(
             snapshot,
             request,
+            None,
             None,
             &available_skills,
             &[],
@@ -1959,12 +2010,18 @@ mod tests {
     fn remember_requested_provider_on_session_updates_session_when_explicitly_selected() {
         let mut snapshot = runtime_test_snapshot("正文内容足够用于测试。".to_owned());
 
-        remember_requested_provider_on_session(&mut snapshot.sessions[0], Some("provider-b"));
+        remember_requested_provider_on_session(
+            &mut snapshot.sessions[0],
+            Some("provider-b"),
+            Some("model-b"),
+            "model-b",
+        );
 
         assert_eq!(
             snapshot.sessions[0].model_provider_id,
             Some("provider-b".to_owned())
         );
+        assert_eq!(snapshot.sessions[0].model_id, Some("model-b".to_owned()));
     }
 
     /** 本轮没有显式选择 providerId 时，不能改动会话已有设置，否则会话会被意外固定到当前全局默认 provider。 */
@@ -1972,11 +2029,18 @@ mod tests {
     fn remember_requested_provider_on_session_keeps_session_unchanged_without_explicit_selection() {
         let mut snapshot = runtime_test_snapshot("正文内容足够用于测试。".to_owned());
 
-        remember_requested_provider_on_session(&mut snapshot.sessions[0], None);
+        remember_requested_provider_on_session(&mut snapshot.sessions[0], None, None, "test-model");
         assert_eq!(snapshot.sessions[0].model_provider_id, None);
+        assert_eq!(snapshot.sessions[0].model_id, None);
 
-        remember_requested_provider_on_session(&mut snapshot.sessions[0], Some("   "));
+        remember_requested_provider_on_session(
+            &mut snapshot.sessions[0],
+            Some("   "),
+            None,
+            "test-model",
+        );
         assert_eq!(snapshot.sessions[0].model_provider_id, None);
+        assert_eq!(snapshot.sessions[0].model_id, None);
     }
 
     /** 模型最终回答不能绕过工具系统自动生成 pending diff。 */

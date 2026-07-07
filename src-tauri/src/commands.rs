@@ -4,15 +4,16 @@ use crate::domain::{
     DeleteDocumentPayload, DeleteNotePayload, DeleteSessionPayload, DocumentPreview,
     FeishuCredentialStatus, FeishuGatewayStatus, FolderEntry, ImGatewayStatus,
     ImIntegrationSettings, ImProviderCredentialStatus, ImProviderPayload, InstallAgentSkillPayload,
-    InstallAgentSkillResult, KnowledgeBaseSelection, LoadAppEventLogsPayload,
-    LoadDocumentPreviewPayload, LoadSessionsPayload, ModelApiKeyStatus, ProposedChange,
-    RemoveKnowledgeBasePayload, RenameDocumentPayload, RenameNotePayload, RequestAuditLog,
-    RescanKnowledgeBasePayload, RestoreSessionContextPayload, SaveAgentSkillPayload,
-    SaveDocumentContentPayload, SaveFeishuSecretPayload, SaveImProviderSecretPayload,
-    SaveImSettingsPayload, SaveModelApiKeyPayload, SaveNoteContentPayload,
-    SaveNoteImageAttachmentsPayload, SaveSessionPayload, SaveUserSettingsPayload,
-    ScanKnowledgeBasePayload, ScanReport, ToggleAgentSkillPayload, UpdateSessionScopePayload,
-    UserSettings, WorkspaceSnapshot, IM_PROVIDER_FEISHU,
+    InstallAgentSkillResult, KnowledgeBaseSelection, LlmProviderModelRefreshResult,
+    LoadAppEventLogsPayload, LoadDocumentPreviewPayload, LoadSessionsPayload, ModelApiKeyStatus,
+    ProposedChange, RefreshLlmProviderModelsPayload, RemoveKnowledgeBasePayload,
+    RenameDocumentPayload, RenameNotePayload, RequestAuditLog, RescanKnowledgeBasePayload,
+    RestoreSessionContextPayload, SaveAgentSkillPayload, SaveDocumentContentPayload,
+    SaveFeishuSecretPayload, SaveImProviderSecretPayload, SaveImSettingsPayload,
+    SaveModelApiKeyPayload, SaveNoteContentPayload, SaveNoteImageAttachmentsPayload,
+    SaveSessionPayload, SaveUserSettingsPayload, ScanKnowledgeBasePayload, ScanReport,
+    ToggleAgentSkillPayload, UpdateSessionScopePayload, UserSettings, WorkspaceSnapshot,
+    IM_PROVIDER_FEISHU,
 };
 use crate::logging::{self, AppEventBuilder, AppLogCategory, AppLogLevel};
 use crate::model_provider::{self, ProviderTemplate};
@@ -25,9 +26,15 @@ use std::fs;
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 use tauri::{AppHandle, Manager};
 use tauri_plugin_dialog::DialogExt;
+
+/** 模型列表刷新最多保存的条目数，避免 OpenRouter 等聚合平台把设置 JSON 撑得过大。 */
+const MAX_REFRESHED_LLM_MODELS: usize = 500;
+
+/** 模型列表刷新超时时间；短于对话请求，保证设置页操作可快速失败重试。 */
+const MODEL_LIST_HTTP_TIMEOUT_SECONDS: u64 = 20;
 
 /** 加载工作台初始状态；从 SQLite 恢复已连接知识库并重新扫描真实支持文档。 */
 #[tauri::command]
@@ -828,6 +835,174 @@ pub async fn load_model_api_key_statuses(app: AppHandle) -> Result<Vec<ModelApiK
 #[tauri::command]
 pub async fn load_llm_provider_templates() -> Result<Vec<ProviderTemplate>, String> {
     Ok(model_provider::provider_templates())
+}
+
+/** 刷新指定 OpenAI-compatible provider 的可用模型列表，并把启用状态合并回用户设置。 */
+#[tauri::command]
+pub async fn refresh_llm_provider_models(
+    app: AppHandle,
+    payload: RefreshLlmProviderModelsPayload,
+) -> Result<LlmProviderModelRefreshResult, String> {
+    let provider_id = payload.provider_id.trim().to_owned();
+    let started_at = Instant::now();
+    let mut endpoint_host_for_log = "unknown-host".to_owned();
+    let result = async {
+        let load_app = app.clone();
+        let provider_id_for_load = provider_id.clone();
+        let (mut settings, provider, api_key) =
+            run_blocking("读取模型 provider 设置", move || {
+                let settings = storage::load_user_settings(&load_app)?;
+                let provider = settings
+                    .model_config
+                    .providers
+                    .iter()
+                    .find(|provider| provider.id == provider_id_for_load)
+                    .cloned()
+                    .ok_or_else(|| format!("未找到 Provider 配置：{provider_id_for_load}"))?;
+                let api_key = if provider.requires_api_key {
+                    storage::load_model_api_key(&provider.key_reference)?.ok_or_else(|| {
+                        format!(
+                            "Provider「{}」未找到模型密钥。请先保存 API key 后再获取模型列表。",
+                            provider.name
+                        )
+                    })?
+                } else {
+                    String::new()
+                };
+
+                Ok::<_, String>((settings, provider, api_key))
+            })
+            .await?;
+        let endpoint = model_provider::models_endpoint(&provider.api_base);
+        endpoint_host_for_log = model_provider::endpoint_host(&endpoint);
+        let client = reqwest::Client::builder()
+            .timeout(Duration::from_secs(MODEL_LIST_HTTP_TIMEOUT_SECONDS))
+            .build()
+            .map_err(|error| format!("无法创建模型列表 HTTP client：{error}"))?;
+        let response_body = match send_model_list_request(&client, &endpoint, &api_key).await {
+            Ok(body) => body,
+            Err(error) => {
+                if let Some(ollama_endpoint) =
+                    model_provider::ollama_tags_endpoint(&provider.api_base)
+                {
+                    send_model_list_request(&client, &ollama_endpoint, &api_key)
+                        .await
+                        .map_err(|fallback_error| {
+                            model_provider::redact_model_error_text(&format!(
+                                "{error}；Ollama fallback 也失败：{fallback_error}"
+                            ))
+                        })?
+                } else {
+                    return Err(error);
+                }
+            }
+        };
+        let fetched_at = storage::format_local_datetime();
+        let mut discovered_models =
+            model_provider::parse_provider_models_response(&response_body, &fetched_at)?;
+
+        discovered_models.truncate(MAX_REFRESHED_LLM_MODELS);
+        let fetched_count = discovered_models.len();
+        let provider_for_save = settings
+            .model_config
+            .providers
+            .iter_mut()
+            .find(|candidate| candidate.id == provider_id)
+            .ok_or_else(|| format!("未找到 Provider 配置：{provider_id}"))?;
+
+        model_provider::merge_discovered_models(provider_for_save, discovered_models, &fetched_at);
+
+        let model_count = provider_for_save.models.len();
+        let enabled_count = provider_for_save
+            .models
+            .iter()
+            .filter(|model| model.enabled)
+            .count();
+        let save_app = app.clone();
+        let saved_settings = run_blocking("保存刷新后的模型列表", move || {
+            storage::save_user_settings(&save_app, &settings)
+        })
+        .await?;
+
+        Ok::<_, String>(LlmProviderModelRefreshResult {
+            settings: saved_settings,
+            provider_id: provider_id.clone(),
+            fetched_at: fetched_at.clone(),
+            fetched_count,
+            model_count,
+            enabled_count,
+            message: format!("已获取 {fetched_count} 个模型，当前启用 {enabled_count} 个。"),
+        })
+    }
+    .await;
+
+    match &result {
+        Ok(result) => logging::write_app_event_best_effort(
+            &app,
+            AppEventBuilder::new(
+                AppLogLevel::Info,
+                AppLogCategory::Model,
+                "refresh_llm_provider_models",
+                "completed",
+                "已刷新模型列表。",
+            )
+            .duration(started_at.elapsed())
+            .metadata(json!({
+                "providerId": result.provider_id,
+                "endpointHost": endpoint_host_for_log.clone(),
+                "fetchedCount": result.fetched_count,
+                "modelCount": result.model_count,
+                "enabledCount": result.enabled_count,
+            })),
+        ),
+        Err(error) => logging::write_app_event_best_effort(
+            &app,
+            AppEventBuilder::new(
+                AppLogLevel::Warn,
+                AppLogCategory::Model,
+                "refresh_llm_provider_models",
+                "failed",
+                model_provider::redact_model_error_text(error),
+            )
+            .duration(started_at.elapsed())
+            .metadata(json!({
+                "providerId": provider_id,
+                "endpointHost": endpoint_host_for_log.clone(),
+            })),
+        ),
+    }
+
+    result
+}
+
+/** 发送模型列表请求；只返回响应正文，错误信息会脱敏并限制长度。 */
+async fn send_model_list_request(
+    client: &reqwest::Client,
+    endpoint: &str,
+    api_key: &str,
+) -> Result<String, String> {
+    let mut request_builder = client.get(endpoint);
+
+    if !api_key.trim().is_empty() {
+        request_builder = request_builder.bearer_auth(api_key);
+    }
+
+    let response = request_builder.send().await.map_err(|error| {
+        model_provider::redact_model_error_text(&format!("无法发送模型列表请求：{error}"))
+    })?;
+    let status = response.status();
+    let body = response
+        .text()
+        .await
+        .map_err(|error| format!("无法读取模型列表响应：{error}"))?;
+
+    if !status.is_success() {
+        return Err(model_provider::redact_model_error_text(&format!(
+            "模型列表请求失败：HTTP {status} {body}"
+        )));
+    }
+
+    Ok(body)
 }
 
 /** 读取最近模型请求和工具调用审计摘要，用于设置页解释发送边界。 */
@@ -3313,6 +3488,7 @@ mod tests {
             updated_at: "刚刚".to_owned(),
             deleted_at: None,
             model_provider_id: None,
+            model_id: None,
         }
     }
 

@@ -1220,6 +1220,7 @@ mod tests {
                 updated_at: "刚刚".to_owned(),
                 deleted_at: None,
                 model_provider_id: None,
+                model_id: None,
             }],
             active_knowledge_base_id: "kb-a".to_owned(),
             active_note_id: "note-a".to_owned(),
@@ -1238,6 +1239,7 @@ mod tests {
             active_note_id: "note-a".to_owned(),
             client_message_id: None,
             model_provider_id: None,
+            model_id: None,
             explicit_skill_ids: Vec::new(),
         }
     }
