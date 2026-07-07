@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useState } from "react";
 import { PanelRightOpen } from "lucide-react";
 import { AgentPanel } from "../agent/AgentPanel";
 import { DocumentPane } from "../editor/DocumentPane";
@@ -18,29 +18,15 @@ import {
 import {
   acceptProposedChange,
   attachKnowledgeBase,
-  clearAppEventLogs,
   createDocument,
   createFolder,
   createNote,
-  deleteAgentSkill,
   deleteDocument,
   deleteNote,
   exportCurrentFile,
   deleteSession,
-  loadDocumentPreview,
   loadAppEventLogs,
-  loadAgentSkills,
-  loadImGatewayStatus,
-  loadImSettings,
-  loadImProviderCredentialStatus,
-  installAgentSkill,
-  loadLlmProviderTemplates,
-  loadModelApiKeyStatuses,
   loadRequestAuditLogs,
-  loadUserSettings,
-  loadWorkspaceState,
-  openUserSkillsFolder,
-  openAppLogFolder,
   removeKnowledgeBase,
   renameDocument,
   renameNote,
@@ -48,52 +34,34 @@ import {
   rescanKnowledgeBase,
   restoreSessionContext,
   runAgentTurn,
-  saveAgentSkill,
   saveDocumentContent,
-  saveImProviderSecret,
-  saveImSettings,
   saveNoteContent,
   saveNoteImageAttachments,
-  saveModelApiKey,
   saveSession,
-  saveUserSettings,
   selectKnowledgeBaseDirectory,
-  startImGateway,
-  stopImGateway,
-  toggleAgentSkill,
   updateSessionScope,
 } from "../shared/tauriApi";
 import type {
   AgentActionType,
   AgentMessage,
-  AgentSkill,
   AgentSession,
-  AppEventLog,
-  AppEventLogCategory,
-  AppEventLogLevel,
-  DocumentPreview,
   ExportFormat,
-  FeishuCredentialStatus,
-  FeishuGatewayStatus,
-  ImIntegrationSettings,
-  InstallAgentSkillPayload,
-  InstallAgentSkillResult,
   KnowledgeBase,
   MarkdownViewMode,
-  ModelApiKeyStatus,
-  Note,
   NoteImageAttachmentInput,
   ProposedChange,
-  ProviderTemplate,
-  RequestAuditLog,
   ReviewComment,
-  UserSettings,
-  WorkspaceDocument,
   WorkspaceSnapshot,
 } from "../shared/types";
 import type { ReviewCommentDraft } from "../diff/DiffPanel";
 import { TopBar } from "./TopBar";
+import { useAgentTurnDraft } from "./useAgentTurnDraft";
+import { useDocumentPreview } from "./useDocumentPreview";
+import { useReviewChangeLogger } from "./useReviewChangeLogger";
 import { useResizableWorkspaceLayout } from "./useResizableWorkspaceLayout";
+import { useWorkspaceBootData } from "./useWorkspaceBootData";
+import { useWorkspaceDrafts } from "./useWorkspaceDrafts";
+import { useWorkspaceSettingsActions } from "./useWorkspaceSettingsActions";
 
 /** 将未知异常统一转换为可展示文案，避免启动错误页渲染空对象。 */
 function formatErrorMessage(error: unknown) {
@@ -157,16 +125,6 @@ function summarizeImageMimeTypes(files: File[]) {
   return Array.from(new Set(files.map((file) => file.type || "unknown")))
     .sort()
     .join(",");
-}
-
-/** 生成 skill 安装完成提示，保留 warning 数量但限制文本长度避免挤占全局 notice。 */
-function buildSkillInstallNotice(result: InstallAgentSkillResult, enabledAfterInstall: boolean) {
-  const statusText = enabledAfterInstall ? "已启用。" : "默认停用，审阅后可手动启用。";
-  const warningText = result.warnings.length ? ` 警告：${result.warnings.slice(0, 2).join("；")}` : "";
-  const extraWarningText = result.warnings.length > 2 ? ` 等 ${result.warnings.length} 条。` : "";
-  const notice = `${result.summary} ${statusText}${warningText}${extraWarningText}`;
-
-  return notice.length > 360 ? `${notice.slice(0, 360)}...` : notice;
 }
 
 /** 新建 Agent 会话对象，作为消息、检索范围和待确认 diff 的容器。 */
@@ -338,52 +296,52 @@ function buildReviewFeedbackPrompt(change: ProposedChange, comments: ReviewComme
 
 /** 正式工作台根组件，集中编排知识库、编辑器、Agent loop 和设置状态。 */
 export function WorkspaceShell() {
-  const [snapshot, setSnapshot] = useState<WorkspaceSnapshot | null>(null);
-  const [userSettings, setUserSettings] = useState<UserSettings | null>(null);
-  /** 即时通讯设置由后端持久化；敏感凭证状态单独读取。 */
-  const [imSettings, setImSettings] = useState<ImIntegrationSettings | null>(null);
-  /** Agent skills 列表由后端合并内置与用户自建定义，前端只保存展示状态。 */
-  const [agentSkills, setAgentSkills] = useState<AgentSkill[]>([]);
-  /** 模型密钥状态按 providerId 隔离，只保存是否可读，不包含明文 API key。 */
-  const [modelApiKeyStatuses, setModelApiKeyStatuses] = useState<ModelApiKeyStatus[]>([]);
-  /** 飞书 appSecret 状态只说明是否可读取，不包含明文 secret。 */
-  const [feishuCredentialStatus, setFeishuCredentialStatus] = useState<FeishuCredentialStatus | null>(null);
-  /** 飞书长连接网关运行态，用于设置页手动启停和错误展示。 */
-  const [feishuGatewayStatus, setFeishuGatewayStatus] = useState<FeishuGatewayStatus | null>(null);
-  /** 内置 LLM Provider 模板，驱动设置页“新增 Provider”入口。 */
-  const [providerTemplates, setProviderTemplates] = useState<ProviderTemplate[]>([]);
-  /** 本轮显式选择的 Provider；空字符串表示跟随会话/全局默认，切换会话后会被重置。 */
-  const [turnModelProviderId, setTurnModelProviderId] = useState("");
-  /** 本轮通过 slash picker 显式激活的 Skill ID；发送成功后清空，失败时保留便于重试。 */
-  const [explicitSkillIds, setExplicitSkillIds] = useState<string[]>([]);
-  /** 首屏初始化是否仍在进行，用于区分加载中和加载失败。 */
-  const [isBooting, setIsBooting] = useState(true);
-  /** 首屏初始化失败原因，失败后展示重试入口而不是停留在 loading。 */
-  const [bootError, setBootError] = useState("");
-  const [auditLogs, setAuditLogs] = useState<RequestAuditLog[]>([]);
-  /** 用户可读运行事件日志，只在设置页展示，不阻塞首屏工作台。 */
-  const [appEventLogs, setAppEventLogs] = useState<AppEventLog[]>([]);
+  /** Agent turn 草稿 hook 维护输入框、本轮 Provider 和显式 Skill 状态。 */
+  const {
+    agentPrompt,
+    setAgentPrompt,
+    turnModelProviderId,
+    setTurnModelProviderId,
+    explicitSkillIds,
+    setExplicitSkillIds,
+    resetTurnSelection,
+  } = useAgentTurnDraft();
+  /** 左侧目录搜索词，只影响当前前端文件树过滤，不写入持久化。 */
   const [searchTerm, setSearchTerm] = useState("");
-  const [agentPrompt, setAgentPrompt] = useState("");
+  /** 目录树折叠状态由前端维护，切换知识库、重扫或恢复会话时重置。 */
   const [collapsedFolderPaths, setCollapsedFolderPaths] = useState<Set<string>>(new Set());
+  /** 会话历史浮层开关，和上下文、scope 浮层互斥。 */
   const [isSessionListOpen, setIsSessionListOpen] = useState(false);
+  /** 当前会话上下文浮层开关，避免长消息列表挤占主输入区。 */
   const [isSessionContextOpen, setIsSessionContextOpen] = useState(false);
+  /** 会话工具范围选择器开关，用于多知识库 scope 管理。 */
   const [isScopeSelectorOpen, setIsScopeSelectorOpen] = useState(false);
   /** 桌面端手动折叠 Agent 协作区，窄窗口断点仍由 CSS 自动接管。 */
   const [isAgentPanelCollapsed, setIsAgentPanelCollapsed] = useState(false);
+  /** 设置抽屉打开状态，打开时会刷新非阻塞诊断日志。 */
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
+  /** 全局忙碌状态覆盖文件、会话、设置和日志刷新操作。 */
   const [isBusy, setIsBusy] = useState(false);
+  /** 忙碌状态文案只展示当前操作类型，不包含路径、密钥或请求内容。 */
   const [busyLabel, setBusyLabel] = useState("");
+  /** 顶部/侧栏轻量通知，展示用户操作结果和可恢复错误。 */
   const [notice, setNotice] = useState("");
-  const [editingBaseHashes, setEditingBaseHashes] = useState<Record<string, string>>({});
-  const [editingBaseDocumentHashes, setEditingBaseDocumentHashes] = useState<Record<string, string>>({});
-  const [dirtyNoteIds, setDirtyNoteIds] = useState<Set<string>>(new Set());
-  const [dirtyDocumentIds, setDirtyDocumentIds] = useState<Set<string>>(new Set());
+  /** 编辑草稿 hook 维护 dirty 集合和保存基准 hash，文件写入仍由原有 Tauri API 执行。 */
+  const {
+    editingBaseHashes,
+    editingBaseDocumentHashes,
+    dirtyNoteIds,
+    setDirtyNoteIds,
+    dirtyDocumentIds,
+    setDirtyDocumentIds,
+    initializeDraftBaselines,
+    commitDraftSnapshot,
+  } = useWorkspaceDrafts();
+  /** Markdown 编辑区视图模式，保持编辑/预览切换不影响文件内容。 */
   const [markdownViewMode, setMarkdownViewMode] = useState<MarkdownViewMode>("edit");
-  const [documentPreview, setDocumentPreview] = useState<DocumentPreview | null>(null);
-  const [documentPreviewError, setDocumentPreviewError] = useState("");
-  const [isDocumentPreviewLoading, setIsDocumentPreviewLoading] = useState(false);
+  /** 文件重命名弹窗草稿，同时支持 Markdown 和可编辑 TXT。 */
   const [renameDialog, setRenameDialog] = useState<{ kind: "note" | "document"; id: string; fileName: string } | null>(null);
+  /** 目录树新建弹窗草稿，创建位置由被点击的父目录决定。 */
   const [createDialog, setCreateDialog] = useState<{
     kind: "markdown" | "text" | "folder";
     knowledgeBaseId: string;
@@ -394,204 +352,72 @@ export function WorkspaceShell() {
   const [pendingConfirmation, setPendingConfirmation] = useState<PendingConfirmation | null>(null);
   /** 主工作台三栏布局偏好，负责拖拽分隔条、键盘调整和本机持久化。 */
   const { workspaceRef, gridTemplateColumns, resizingPane, getSeparatorProps } = useResizableWorkspaceLayout();
-  /** 记录已上报打开事件的 change，避免保存评论等快照刷新造成日志噪声。 */
-  const loggedReviewOpenChangeIdRef = useRef("");
-
-  useEffect(() => {
-    let isMounted = true;
-
-    void loadInitialData(() => isMounted);
-
-    return () => {
-      isMounted = false;
-    };
-  }, []);
-
-  useEffect(() => {
-    if (!snapshot?.activeDocumentId) {
-      setDocumentPreview(null);
-      setDocumentPreviewError("");
-      setIsDocumentPreviewLoading(false);
-      return;
-    }
-
-    const activeDocument = snapshot.documents.find((document) => document.id === snapshot.activeDocumentId);
-
-    if (!activeDocument || activeDocument.fileType === "txt") {
-      setDocumentPreview(null);
-      setDocumentPreviewError("");
-      setIsDocumentPreviewLoading(false);
-      return;
-    }
-
-    let isMounted = true;
-
-    setDocumentPreview(null);
-    setDocumentPreviewError("");
-    setIsDocumentPreviewLoading(true);
-
-    void loadDocumentPreview(snapshot, activeDocument.id)
-      .then((preview) => {
-        if (isMounted) {
-          setDocumentPreview(preview);
-        }
-      })
-      .catch((error) => {
-        if (isMounted) {
-          setDocumentPreviewError(formatErrorMessage(error));
-        }
-      })
-      .finally(() => {
-        if (isMounted) {
-          setIsDocumentPreviewLoading(false);
-        }
-      });
-
-    return () => {
-      isMounted = false;
-    };
-  }, [snapshot?.activeDocumentId, snapshot?.documents]);
-
-  useEffect(() => {
-    const pendingChange = snapshot?.sessions
-      .find((session) => session.id === snapshot.activeSessionId)
-      ?.pendingChange;
-
-    if (!pendingChange || pendingChange.status !== "pending") {
-      return;
-    }
-
-    if (loggedReviewOpenChangeIdRef.current === pendingChange.id) {
-      return;
-    }
-
-    loggedReviewOpenChangeIdRef.current = pendingChange.id;
-    logInfo("打开 diff 审阅工作台。", {
-      category: "frontend",
-      event: "review_change_open",
-      status: "completed",
-      metadata: {
-        changeId: pendingChange.id,
-        sessionId: snapshot.activeSessionId,
-        changeType: pendingChange.type,
-        commentCount: pendingChange.reviewComments?.length ?? 0,
-        addedLines: pendingChange.diffStats?.addedLines,
-        removedLines: pendingChange.diffStats?.removedLines,
-      },
-    });
-  }, [snapshot?.activeSessionId, snapshot?.sessions]);
-
-  /** 加载首屏必需数据；诊断日志失败不阻断进入工作台。 */
-  async function loadInitialData(shouldCommit: () => boolean = () => true) {
-    setIsBooting(true);
-    setBootError("");
-    setNotice("");
-
-    try {
-      // 工作台快照和用户设置是首屏必需数据，必须同时成功后才能进入主界面。
-      const [
-        nextSnapshot,
-        nextUserSettings,
-        nextImSettings,
-        nextAgentSkills,
-        nextModelApiKeyStatuses,
-        nextProviderTemplates,
-        nextFeishuCredentialStatus,
-        nextFeishuGatewayStatus,
-      ] = await Promise.all([
-        loadWorkspaceState(),
-        loadUserSettings(),
-        loadImSettings(),
-        loadAgentSkills(),
-        loadModelApiKeyStatuses().catch((error) => {
-          logWarn("读取模型密钥状态失败。", { category: "settings", event: "model_api_key_status_load", status: "failed", error });
-
-          return [] as ModelApiKeyStatus[];
-        }),
-        loadLlmProviderTemplates().catch((error) => {
-          logWarn("读取 Provider 模板失败。", { category: "settings", event: "provider_templates_load", status: "failed", error });
-
-          return [] as ProviderTemplate[];
-        }),
-        loadImProviderCredentialStatus("feishu").catch((error) => {
-          logWarn("读取 IM provider 凭证状态失败。", {
-            category: "im",
-            event: "im_provider_credential_status_load",
-            status: "failed",
-            metadata: { providerId: "feishu" },
-            error,
-          });
-
-          return null;
-        }),
-        loadImGatewayStatus("feishu").catch((error) => {
-          logWarn("读取 IM 网关状态失败。", {
-            category: "im",
-            event: "im_gateway_status_load",
-            status: "failed",
-            metadata: { providerId: "feishu" },
-            error,
-          });
-
-          return null;
-        }),
-      ]);
-
-      if (!shouldCommit()) {
-        return;
-      }
-
-      setSnapshot(nextSnapshot);
-      setUserSettings(nextUserSettings);
-      setImSettings(nextImSettings);
-      setAgentSkills(nextAgentSkills);
-      setModelApiKeyStatuses(nextModelApiKeyStatuses);
-      setProviderTemplates(nextProviderTemplates);
-      setFeishuCredentialStatus(nextFeishuCredentialStatus);
-      setFeishuGatewayStatus(nextFeishuGatewayStatus);
-      setEditingBaseHashes(buildNoteHashMap(nextSnapshot.notes));
-      setEditingBaseDocumentHashes(buildDocumentHashMap(nextSnapshot.documents));
-      setIsBooting(false);
-
-      void loadInitialDiagnosticLogs(shouldCommit);
-    } catch (error) {
-      if (shouldCommit()) {
-        setSnapshot(null);
-        setUserSettings(null);
-        setImSettings(null);
-        setAgentSkills([]);
-        setFeishuCredentialStatus(null);
-        setFeishuGatewayStatus(null);
-        setAuditLogs([]);
-        setAppEventLogs([]);
-        setBootError(formatErrorMessage(error));
-      }
-    } finally {
-      if (shouldCommit()) {
-        setIsBooting(false);
-      }
-    }
-  }
-
-  /** 后台加载非首屏必需的诊断日志，失败时降级为空列表并提示用户。 */
-  async function loadInitialDiagnosticLogs(shouldCommit: () => boolean = () => true) {
-    try {
-      const [nextAuditLogs, nextAppEventLogs] = await Promise.all([loadRequestAuditLogs(), loadAppEventLogs()]);
-
-      if (!shouldCommit()) {
-        return;
-      }
-
-      setAuditLogs(nextAuditLogs);
-      setAppEventLogs(nextAppEventLogs);
-    } catch (error) {
-      if (shouldCommit()) {
-        setAuditLogs([]);
-        setAppEventLogs([]);
-        setNotice(`诊断日志加载失败：${formatErrorMessage(error)}`);
-      }
-    }
-  }
+  /** 启动和诊断数据 hook 返回工作台全局状态及刷新入口，根组件继续负责业务动作。 */
+  const {
+    snapshot,
+    setSnapshot,
+    userSettings,
+    setUserSettings,
+    imSettings,
+    setImSettings,
+    agentSkills,
+    setAgentSkills,
+    modelApiKeyStatuses,
+    setModelApiKeyStatuses,
+    feishuCredentialStatus,
+    setFeishuCredentialStatus,
+    feishuGatewayStatus,
+    setFeishuGatewayStatus,
+    providerTemplates,
+    isBooting,
+    bootError,
+    auditLogs,
+    setAuditLogs,
+    appEventLogs,
+    setAppEventLogs,
+    loadInitialData,
+    loadInitialDiagnosticLogs,
+  } = useWorkspaceBootData({
+    onSnapshotInitialized: initializeDraftBaselines,
+    onNoticeChange: setNotice,
+  });
+  useReviewChangeLogger(snapshot);
+  /** 只读文档预览 hook 负责异步加载和错误状态，TXT 仍由可编辑正文面板处理。 */
+  const { documentPreview, documentPreviewError, isDocumentPreviewLoading } = useDocumentPreview(snapshot);
+  /** 设置动作 hook 统一处理保存、凭证、Skills 和诊断日志刷新，复用原有 Tauri API。 */
+  const {
+    handleSaveSettings,
+    handleSaveImSettings,
+    handleSaveFeishuSecret,
+    handleStartFeishuGateway,
+    handleStopFeishuGateway,
+    handleRefreshFeishuStatus,
+    handleSaveSkill,
+    handleInstallSkill,
+    handleToggleSkill,
+    handleDeleteSkill,
+    handleOpenUserSkillsFolder,
+    handleSaveApiKey,
+    handleRefreshAuditLogs,
+    handleRefreshAppEventLogs,
+    handleClearAppEventLogs,
+    handleOpenAppLogFolder,
+  } = useWorkspaceSettingsActions({
+    beginBusy,
+    endBusy,
+    setNotice,
+    imSettings,
+    feishuCredentialStatus,
+    feishuGatewayStatus,
+    setUserSettings,
+    setImSettings,
+    setAgentSkills,
+    setModelApiKeyStatuses,
+    setFeishuCredentialStatus,
+    setFeishuGatewayStatus,
+    setAuditLogs,
+    setAppEventLogs,
+  });
 
   if (isBooting) {
     return (
@@ -700,56 +526,8 @@ export function WorkspaceShell() {
     dirtyNotesToKeep = dirtyNoteIds,
     dirtyDocumentsToKeep = dirtyDocumentIds,
   ) {
-    const nextNoteIds = new Set(nextSnapshot.notes.map((note) => note.id));
-    const nextDirtyNoteIds = new Set(Array.from(dirtyNotesToKeep).filter((noteId) => nextNoteIds.has(noteId)));
-    const nextDocumentIds = new Set(nextSnapshot.documents.map((document) => document.id));
-    const nextDirtyDocumentIds = new Set(
-      Array.from(dirtyDocumentsToKeep).filter((documentId) => nextDocumentIds.has(documentId)),
-    );
-
     setSnapshot(nextSnapshot);
-    setEditingBaseHashes((currentHashes) => {
-      const nextHashes = { ...currentHashes };
-
-      // 新增或成功保存后的笔记需要更新保存基准；仍处于草稿状态的笔记保留原始 hash 用于冲突校验。
-      nextSnapshot.notes.forEach((note) => {
-        if (!nextDirtyNoteIds.has(note.id)) {
-          nextHashes[note.id] = note.contentHash;
-        } else if (!nextHashes[note.id]) {
-          nextHashes[note.id] = note.contentHash;
-        }
-      });
-
-      Object.keys(nextHashes).forEach((noteId) => {
-        if (!nextNoteIds.has(noteId)) {
-          delete nextHashes[noteId];
-        }
-      });
-
-      return nextHashes;
-    });
-    setEditingBaseDocumentHashes((currentHashes) => {
-      const nextHashes = { ...currentHashes };
-
-      // TXT 文档保存成功或重扫后更新基准 hash；仍在编辑的文档保留原始 hash 做冲突检测。
-      nextSnapshot.documents.forEach((document) => {
-        if (!nextDirtyDocumentIds.has(document.id)) {
-          nextHashes[document.id] = document.contentHash;
-        } else if (!nextHashes[document.id]) {
-          nextHashes[document.id] = document.contentHash;
-        }
-      });
-
-      Object.keys(nextHashes).forEach((documentId) => {
-        if (!nextDocumentIds.has(documentId)) {
-          delete nextHashes[documentId];
-        }
-      });
-
-      return nextHashes;
-    });
-    setDirtyNoteIds(nextDirtyNoteIds);
-    setDirtyDocumentIds(nextDirtyDocumentIds);
+    commitDraftSnapshot(nextSnapshot, dirtyNotesToKeep, dirtyDocumentsToKeep);
   }
 
   /** 选择知识库时只切换浏览焦点；会话最多切到该知识库已有会话，不再隐式创建。 */
@@ -1513,8 +1291,7 @@ export function WorkspaceShell() {
       setIsSessionListOpen(false);
       setIsSessionContextOpen(false);
       setIsScopeSelectorOpen(false);
-      setTurnModelProviderId("");
-      setExplicitSkillIds([]);
+      resetTurnSelection();
     } catch (error) {
       setNotice(error instanceof Error ? error.message : String(error));
     } finally {
@@ -1541,8 +1318,7 @@ export function WorkspaceShell() {
       setIsSessionListOpen(false);
       setIsSessionContextOpen(false);
       setIsScopeSelectorOpen(false);
-      setTurnModelProviderId("");
-      setExplicitSkillIds([]);
+      resetTurnSelection();
     } catch (error) {
       setNotice(error instanceof Error ? error.message : String(error));
     } finally {
@@ -2120,287 +1896,10 @@ export function WorkspaceShell() {
     }
   }
 
-  /** 保存模型、隐私和写入设置，密钥由单独入口写入系统安全存储。 */
-  async function handleSaveSettings(nextSettings: UserSettings) {
-    beginBusy("正在保存 Agent 设置...");
-
-    try {
-      setUserSettings(await saveUserSettings(nextSettings));
-      setNotice("已保存 Agent 设置。");
-    } catch (error) {
-      setNotice(error instanceof Error ? error.message : String(error));
-    } finally {
-      endBusy();
-    }
-  }
-
-  /** 保存即时通讯设置；敏感凭证由单独入口写入系统安全存储。 */
-  async function handleSaveImSettings(nextSettings: ImIntegrationSettings) {
-    beginBusy("正在保存即时通讯设置...");
-
-    try {
-      setImSettings(await saveImSettings(nextSettings));
-      setFeishuGatewayStatus(await loadImGatewayStatus("feishu").catch(() => feishuGatewayStatus));
-      setNotice("已保存即时通讯设置。");
-    } catch (error) {
-      setNotice(error instanceof Error ? error.message : String(error));
-      throw error;
-    } finally {
-      endBusy();
-    }
-  }
-
-  /** 保存飞书 appSecret；明文只在本次调用中传给后端 keyring 命令。 */
-  async function handleSaveFeishuSecret(appSecret: string) {
-    beginBusy("正在保存飞书 appSecret...");
-
-    try {
-      const status = await saveImProviderSecret("feishu", appSecret);
-
-      setFeishuCredentialStatus(status);
-      setFeishuGatewayStatus(await loadImGatewayStatus("feishu").catch(() => feishuGatewayStatus));
-      setNotice("已保存飞书 appSecret。");
-    } catch (error) {
-      setNotice(error instanceof Error ? error.message : String(error));
-      throw error;
-    } finally {
-      endBusy();
-    }
-  }
-
-  /** 手动启动飞书长连接网关；启动失败时保留现有配置供用户修正。 */
-  async function handleStartFeishuGateway() {
-    beginBusy("正在启动飞书长连接...");
-
-    try {
-      setFeishuGatewayStatus(await startImGateway("feishu"));
-      setNotice("已启动飞书长连接网关。");
-    } catch (error) {
-      setFeishuGatewayStatus(await loadImGatewayStatus("feishu").catch(() => feishuGatewayStatus));
-      setNotice(error instanceof Error ? error.message : String(error));
-      throw error;
-    } finally {
-      endBusy();
-    }
-  }
-
-  /** 手动停止飞书长连接网关；不会清空凭证或白名单。 */
-  async function handleStopFeishuGateway() {
-    beginBusy("正在停止飞书长连接...");
-
-    try {
-      setFeishuGatewayStatus(await stopImGateway("feishu"));
-      setNotice("已停止飞书长连接网关。");
-    } catch (error) {
-      setNotice(error instanceof Error ? error.message : String(error));
-    } finally {
-      endBusy();
-    }
-  }
-
-  /** 刷新飞书网关、凭证和 IM 设置；未授权消息发现的候选对象也通过这里进入设置页。 */
-  async function handleRefreshFeishuStatus() {
-    beginBusy("正在刷新飞书状态...");
-
-    try {
-      const [credentialStatus, gatewayStatus, nextImSettings] = await Promise.all([
-        loadImProviderCredentialStatus("feishu").catch(() => feishuCredentialStatus),
-        loadImGatewayStatus("feishu").catch(() => feishuGatewayStatus),
-        loadImSettings().catch(() => imSettings),
-      ]);
-
-      setFeishuCredentialStatus(credentialStatus);
-      setFeishuGatewayStatus(gatewayStatus);
-      setImSettings(nextImSettings);
-    } catch (error) {
-      setNotice(error instanceof Error ? error.message : String(error));
-    } finally {
-      endBusy();
-    }
-  }
-
-  /** 保存用户自建 skill 后刷新列表，保证后端归一化后的 ID、name 和时间进入 UI。 */
-  async function handleSaveSkill(skill: AgentSkill) {
-    beginBusy("正在保存 Skill...");
-
-    try {
-      const savedSkill = await saveAgentSkill(skill);
-      const nextSkills = await loadAgentSkills();
-
-      setAgentSkills(nextSkills);
-      setNotice("已保存 Skill。");
-
-      return savedSkill;
-    } catch (error) {
-      setNotice(error instanceof Error ? error.message : String(error));
-      throw error;
-    } finally {
-      endBusy();
-    }
-  }
-
-  /** 安装第三方 skill 包并刷新列表；日志由 API 层和后端记录脱敏摘要。 */
-  async function handleInstallSkill(payload: InstallAgentSkillPayload): Promise<InstallAgentSkillResult> {
-    beginBusy("正在安装 Skill...");
-
-    try {
-      const result = await installAgentSkill(payload);
-
-      setAgentSkills(result.skills);
-      setNotice(buildSkillInstallNotice(result, payload.enableAfterInstall));
-
-      return result;
-    } catch (error) {
-      const message = formatErrorMessage(error);
-
-      setNotice(message);
-      throw new Error(message);
-    } finally {
-      endBusy();
-    }
-  }
-
-  /** 启停 skill 后刷新列表；启用的 skill 会以名称和描述进入 Agent system prompt。 */
-  async function handleToggleSkill(skillId: string, enabled: boolean) {
-    beginBusy("正在更新 Skill...");
-
-    try {
-      await toggleAgentSkill(skillId, enabled);
-      const nextSkills = await loadAgentSkills();
-
-      setAgentSkills(nextSkills);
-      setNotice("已更新 Skill。");
-    } catch (error) {
-      setNotice(error instanceof Error ? error.message : String(error));
-      throw error;
-    } finally {
-      endBusy();
-    }
-  }
-
-  /** 删除用户自建 skill；内置 skill 由后端拒绝删除并保留为可禁用项。 */
-  async function handleDeleteSkill(skillId: string) {
-    beginBusy("正在删除 Skill...");
-
-    try {
-      const nextSkills = await deleteAgentSkill(skillId);
-
-      setAgentSkills(nextSkills);
-      setNotice("已删除 Skill。");
-    } catch (error) {
-      setNotice(error instanceof Error ? error.message : String(error));
-      throw error;
-    } finally {
-      endBusy();
-    }
-  }
-
-  /** 打开橘记 用户 Skills 文件夹；浏览器开发态只展示 mock 路径。 */
-  async function handleOpenUserSkillsFolder() {
-    beginBusy("正在打开用户 Skills 文件夹...");
-
-    try {
-      const skillsFolderPath = await openUserSkillsFolder();
-
-      setNotice(`用户 Skills 文件夹：${skillsFolderPath}`);
-    } catch (error) {
-      setNotice(error instanceof Error ? error.message : String(error));
-      throw error;
-    } finally {
-      endBusy();
-    }
-  }
-
-  /** 保存指定 provider 的 BYOK API key；桌面端写入系统 keyring，避免明文进入 SQLite。 */
-  async function handleSaveApiKey(providerId: string, apiKey: string) {
-    const trimmedApiKey = apiKey.trim();
-
-    if (!trimmedApiKey) {
-      setNotice("API key 不能为空。");
-      return;
-    }
-
-    beginBusy("正在保存模型密钥...");
-
-    try {
-      const nextStatus = await saveModelApiKey(providerId, trimmedApiKey);
-
-      setModelApiKeyStatuses((current) => {
-        const withoutProvider = current.filter((status) => status.providerId !== providerId);
-
-        return [...withoutProvider, nextStatus];
-      });
-      setNotice(nextStatus.message);
-    } catch (error) {
-      const message = formatErrorMessage(error);
-
-      setNotice(message);
-      throw new Error(message);
-    } finally {
-      endBusy();
-    }
-  }
-
-  /** 重新读取最近审计日志，便于设置页查看最新模型和工具调用边界。 */
-  async function handleRefreshAuditLogs() {
-    beginBusy("正在刷新审计日志...");
-
-    try {
-      setAuditLogs(await loadRequestAuditLogs());
-    } catch (error) {
-      setNotice(error instanceof Error ? error.message : String(error));
-    } finally {
-      endBusy();
-    }
-  }
-
   /** 打开设置抽屉时刷新非阻塞诊断信息，避免展示过旧的日志列表。 */
   function handleOpenSettings() {
     setIsSettingsOpen(true);
     void loadInitialDiagnosticLogs();
-  }
-
-  /** 重新读取最近应用事件日志，支持设置页级别和分类筛选。 */
-  async function handleRefreshAppEventLogs(filters?: { level?: AppEventLogLevel | ""; category?: AppEventLogCategory | "" }) {
-    beginBusy("正在刷新运行日志...");
-
-    try {
-      setAppEventLogs(await loadAppEventLogs({ limit: 100, ...filters }));
-    } catch (error) {
-      setNotice(error instanceof Error ? error.message : String(error));
-    } finally {
-      endBusy();
-    }
-  }
-
-  /** 清空用户可读事件日志后立即重载列表，保留桌面端文件诊断日志。 */
-  async function handleClearAppEventLogs(filters?: { level?: AppEventLogLevel | ""; category?: AppEventLogCategory | "" }) {
-    beginBusy("正在清空运行日志...");
-
-    try {
-      await clearAppEventLogs();
-      setAppEventLogs(await loadAppEventLogs({ limit: 100, ...filters }));
-      setNotice("已清空应用事件日志。");
-    } catch (error) {
-      setNotice(error instanceof Error ? error.message : String(error));
-    } finally {
-      endBusy();
-    }
-  }
-
-  /** 打开系统 app log 目录，便于用户附带文件诊断日志排查问题。 */
-  async function handleOpenAppLogFolder() {
-    beginBusy("正在打开应用日志目录...");
-
-    try {
-      const logFolderPath = await openAppLogFolder();
-
-      setNotice(`应用日志目录：${logFolderPath}`);
-    } catch (error) {
-      setNotice(error instanceof Error ? error.message : String(error));
-    } finally {
-      endBusy();
-    }
   }
 
   return (
@@ -2650,16 +2149,6 @@ export function WorkspaceShell() {
       )}
     </div>
   );
-}
-
-/** 为笔记建立当前文件 hash 映射，保存草稿时用于外部修改冲突校验。 */
-function buildNoteHashMap(notes: Note[]) {
-  return Object.fromEntries(notes.map((note) => [note.id, note.contentHash]));
-}
-
-/** 为普通文档建立当前文件 hash 映射，保存 txt 草稿时用于外部修改冲突校验。 */
-function buildDocumentHashMap(documents: WorkspaceDocument[]) {
-  return Object.fromEntries(documents.map((document) => [document.id, document.contentHash]));
 }
 
 /** 从知识库相对路径中取最后一级文件名，用于重命名弹窗默认值。 */
