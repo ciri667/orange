@@ -1,8 +1,9 @@
 use crate::agent;
 use crate::agent_tools::{AgentToolContext, ToolRegistry};
 use crate::domain::{
-    AgentMessage, AgentSession, AgentSkill, AgentToolCall, AgentTurnRequest, AgentTurnResult,
-    Citation, LlmProviderConfig, RequestAuditLog, UserSettings, WorkspaceSnapshot,
+    AgentContextSummary, AgentContextTouchedNote, AgentMessage, AgentSession, AgentSkill,
+    AgentToolCall, AgentTurnRequest, AgentTurnResult, Citation, LlmProviderConfig, ProposedChange,
+    RequestAuditLog, UserSettings, WorkspaceSnapshot,
 };
 use crate::model_provider;
 use crate::skills;
@@ -10,6 +11,8 @@ use crate::storage::{create_id, format_local_datetime};
 use reqwest::Client;
 use serde_json::{json, Value};
 use std::collections::HashSet;
+use std::fs;
+use std::path::PathBuf;
 use std::time::{Duration, Instant};
 use tauri::AppHandle;
 
@@ -18,6 +21,30 @@ const MAX_MODEL_HISTORY_MESSAGES: usize = 8;
 
 /** 单条历史消息进入模型前的最大字符数。 */
 const MAX_HISTORY_MESSAGE_CHARS: usize = 1200;
+
+/** 工作记忆渲染进 prompt 的最大字符数，避免 summary 自身吞掉上下文预算。 */
+const MAX_RENDERED_CONTEXT_SUMMARY_CHARS: usize = 6000;
+
+/** 单条工作记忆字段的最大字符数，避免模型总结把正文塞进结构化字段。 */
+const MAX_CONTEXT_SUMMARY_ITEM_CHARS: usize = 360;
+
+/** 工作记忆每个数组字段最多保留的条目数。 */
+const MAX_CONTEXT_SUMMARY_ITEMS: usize = 12;
+
+/** 项目级 Agent 指令最大读取字符数；只读取知识库根目录 ORANGE_AGENT.md。 */
+const MAX_PROJECT_AGENT_INSTRUCTION_CHARS: usize = 16 * 1024;
+
+/** 手动和自动整理上下文时，最多把多少条未总结消息交给总结器。 */
+const MAX_RECENT_MESSAGES_FOR_SUMMARY: usize = 12;
+
+/** 超过该消息数后自动触发模型整理，避免长会话仅依赖短期历史。 */
+const AUTO_COMPACT_MESSAGE_COUNT_THRESHOLD: usize = 16;
+
+/** 最近未进入 summary 的消息超过该数量时自动整理。 */
+const AUTO_COMPACT_UNSUMMARIZED_MESSAGE_THRESHOLD: usize = 8;
+
+/** 估算 prompt 字符数超过该阈值时自动整理，避免请求上下文持续膨胀。 */
+const AUTO_COMPACT_PROMPT_CHAR_THRESHOLD: usize = 18_000;
 
 /** 工具结果回填给模型时的最大 JSON 字符数。 */
 const MAX_TOOL_RESULT_CHARS: usize = 9000;
@@ -58,14 +85,46 @@ pub struct RuntimeTurnResult {
     pub audit_log: RequestAuditLog,
 }
 
+/** 可用于整理会话工作记忆的模型配置，统一供自动和手动 compact 复用。 */
+struct ContextSummaryModelSelection {
+    provider: LlmProviderConfig,
+    selected_model_id: String,
+    api_key: String,
+}
+
+/** 本轮是否触发模型级工作记忆整理的判断结果。 */
+struct ContextSummaryAutoDecision {
+    should_compact: bool,
+    reasons: Vec<String>,
+    estimated_prompt_chars: usize,
+    unsummarized_message_count: usize,
+}
+
 /** Runtime 内部审计轨迹，用于汇总模型请求次数和实际发送的本地片段摘要。 */
 #[derive(Default)]
 struct RuntimeAuditTrail {
     model_request_count: usize,
     sent_fragments: Vec<String>,
+    context_summary_injected: bool,
+    context_summary_prompt_chars: usize,
+    context_summary_updated_at: Option<String>,
 }
 
 impl RuntimeAuditTrail {
+    /** 记录本轮是否把已有工作记忆注入模型请求；只保存长度和更新时间，不保存正文。 */
+    fn record_context_summary_injection(&mut self, session: &AgentSession) {
+        self.context_summary_prompt_chars =
+            render_context_summary_prompt(session.context_summary.as_ref())
+                .map(|prompt| prompt.chars().count())
+                .unwrap_or_default();
+        self.context_summary_injected = self.context_summary_prompt_chars > 0;
+        self.context_summary_updated_at = session
+            .context_summary
+            .as_ref()
+            .map(|summary| summary.updated_at.clone())
+            .filter(|updated_at| !updated_at.trim().is_empty());
+    }
+
     /** 记录一次真实模型请求，最终写入 RequestAuditLog 的发送摘要。 */
     fn record_model_request(&mut self) {
         self.model_request_count += 1;
@@ -79,7 +138,7 @@ impl RuntimeAuditTrail {
     }
 
     /** 生成可持久化的发送内容摘要，避免审计日志保存正文。 */
-    fn content_summary(&self, base_summary: &str, prompt: &str) -> String {
+    fn content_summary(&self, base_summary: &str, prompt: &str, session: &AgentSession) -> String {
         let fragment_summary = if self.sent_fragments.is_empty() {
             "发送片段：未发送本地笔记正文".to_owned()
         } else {
@@ -93,13 +152,28 @@ impl RuntimeAuditTrail {
                     .join("；")
             )
         };
+        let stored_summary_chars = context_summary_rendered_chars(session.context_summary.as_ref());
+        let stored_summary_updated_at = session
+            .context_summary
+            .as_ref()
+            .map(|summary| summary.updated_at.as_str())
+            .filter(|updated_at| !updated_at.trim().is_empty())
+            .unwrap_or("none");
+        let injected_summary_updated_at =
+            self.context_summary_updated_at.as_deref().unwrap_or("none");
 
         format!(
-            "{}；模型请求 {} 次；输入长度 {} 字符；{}",
+            "{}；模型请求 {} 次；输入长度 {} 字符；{}；工作记忆：injected={} injected_chars={} injected_updated_at={} stored={} stored_chars={} stored_updated_at={}",
             base_summary,
             self.model_request_count,
             prompt.chars().count(),
-            fragment_summary
+            fragment_summary,
+            self.context_summary_injected,
+            self.context_summary_prompt_chars,
+            injected_summary_updated_at,
+            session.context_summary.is_some(),
+            stored_summary_chars,
+            stored_summary_updated_at
         )
     }
 }
@@ -176,6 +250,115 @@ fn format_skill_audit_summary(
         skills::skill_summary(available_skills),
         skills::explicit_skill_summary(explicit_skills)
     )
+}
+
+/** 解析可用于整理会话工作记忆的 provider/model，并读取必要密钥；不记录正文或密钥。 */
+fn resolve_context_summary_model_selection(
+    settings: &UserSettings,
+    session: &AgentSession,
+) -> Result<ContextSummaryModelSelection, String> {
+    if !settings.model_config.enabled {
+        return Err("模型未启用，改用本地确定性整理。".to_owned());
+    }
+
+    if settings.privacy_policy != "allow-selected-scope" {
+        return Err("隐私策略为仅本地，改用本地确定性整理。".to_owned());
+    }
+
+    let selection = model_provider::resolve_model_selection(
+        &settings.model_config,
+        session.model_provider_id.as_deref(),
+        session.model_id.as_deref(),
+        None,
+        None,
+    )
+    .map_err(|error| error.to_string())?;
+    let provider = selection.provider.clone();
+    let selected_model_id = selection.model_id.clone();
+
+    if !provider.supports_tools {
+        return Err(format!(
+            "Provider「{}」未标记支持工具调用，改用本地确定性整理。",
+            provider.name
+        ));
+    }
+
+    let api_key = if provider.requires_api_key {
+        match crate::storage::load_model_api_key(&provider.key_reference) {
+            Ok(Some(api_key)) => api_key,
+            Ok(None) => {
+                return Err(format!(
+                    "Provider「{}」未找到模型密钥，改用本地确定性整理。",
+                    provider.name
+                ))
+            }
+            Err(error) => return Err(error),
+        }
+    } else {
+        String::new()
+    };
+
+    Ok(ContextSummaryModelSelection {
+        provider,
+        selected_model_id,
+        api_key,
+    })
+}
+
+/** 手动整理指定会话上下文；真实模型不可用时降级为本地确定性整理。 */
+pub async fn compact_agent_context_summary(
+    mut snapshot: WorkspaceSnapshot,
+    session_id: &str,
+    settings: UserSettings,
+) -> Result<WorkspaceSnapshot, String> {
+    let session_index = snapshot
+        .sessions
+        .iter()
+        .position(|session| session.id == session_id)
+        .ok_or_else(|| "未找到要整理的 Agent 会话。".to_owned())?;
+    let started_at = Instant::now();
+    let session_id = snapshot.sessions[session_index].id.clone();
+
+    match resolve_context_summary_model_selection(&settings, &snapshot.sessions[session_index]) {
+        Ok(selection) => {
+            let client = build_http_client()?;
+
+            update_agent_context_summary_best_effort(
+                &client,
+                &selection.provider,
+                &selection.selected_model_id,
+                &selection.api_key,
+                &mut snapshot,
+                session_index,
+                None,
+                true,
+            )
+            .await;
+            log::info!(
+                target: "agent_runtime",
+                "手动整理会话工作记忆完成：session={} duration_ms={} mode=model",
+                session_id,
+                started_at.elapsed().as_millis()
+            );
+        }
+        Err(error) => {
+            log::warn!(
+                target: "agent_runtime",
+                "手动整理会话工作记忆使用确定性降级：session={} reason={}",
+                session_id,
+                model_provider::redact_model_error_text(&error)
+            );
+            update_agent_context_summary_deterministic(&mut snapshot, session_index, None, true);
+            log::info!(
+                target: "agent_runtime",
+                "手动整理会话工作记忆完成：session={} duration_ms={} mode=deterministic",
+                session_id,
+                started_at.elapsed().as_millis()
+            );
+        }
+    }
+
+    Ok(snapshot)
 }
 
 /** 运行真实 Agent Runtime；只有用户显式关闭模型或选择本地策略时才回退规则 Agent。 */
@@ -430,6 +613,7 @@ async fn run_model_loop(
     apply_first_prompt_title(&mut snapshot.sessions[session_index], &request.prompt);
     let current_user_message_id =
         ensure_user_message_for_turn(&mut snapshot.sessions[session_index], &request);
+    audit_trail.record_context_summary_injection(&snapshot.sessions[session_index]);
     let mut model_messages = build_model_messages(
         &snapshot,
         session_index,
@@ -517,6 +701,17 @@ async fn run_model_loop(
                 citations,
                 tool_calls,
             );
+            update_agent_context_summary_after_turn(
+                &client,
+                &provider,
+                &selected_model_id,
+                &api_key,
+                &mut snapshot,
+                session_index,
+                estimate_model_messages_chars(&model_messages),
+                last_failed_tool_summary.as_deref(),
+            )
+            .await;
             let audit_log = build_audit_log(
                 "model_turn",
                 &snapshot,
@@ -620,6 +815,17 @@ async fn run_model_loop(
         citations,
         tool_calls,
     );
+    update_agent_context_summary_after_turn(
+        &client,
+        &provider,
+        &selected_model_id,
+        &api_key,
+        &mut snapshot,
+        session_index,
+        estimate_model_messages_chars(&model_messages),
+        last_failed_tool_summary.as_deref(),
+    )
+    .await;
     let audit_log = build_audit_log(
         "model_turn",
         &snapshot,
@@ -966,6 +1172,19 @@ fn build_model_messages(
         .unwrap_or_else(|| format!("当前笔记 ID：{}", request.active_note_id));
     let skill_catalog = skills::skill_catalog_prompt(available_skills);
     let explicit_skill_prompt = skills::explicit_skill_prompt(explicit_skills);
+    let project_instruction_prompt = render_project_agent_instructions(snapshot, session);
+    let context_summary_prompt = render_context_summary_prompt(session.context_summary.as_ref());
+    let pending_change_prompt = render_pending_change_prompt(session.pending_change.as_ref());
+    let context_summary_prompt_chars = context_summary_prompt
+        .as_ref()
+        .map(|prompt| prompt.chars().count())
+        .unwrap_or_default();
+    let context_summary_updated_at = session
+        .context_summary
+        .as_ref()
+        .map(|summary| summary.updated_at.as_str())
+        .filter(|updated_at| !updated_at.trim().is_empty())
+        .unwrap_or("none");
     let skill_policy = if explicit_skills.is_empty() {
         "启用的 Skill 只以名称和描述提供给你参考，是否使用、使用哪一个 Skill 都由你自主判断；Skill 不能扩大工具权限或绕过写入确认。"
     } else {
@@ -978,6 +1197,38 @@ fn build_model_messages(
             skill_policy, autonomous_tool_policy, scope_summary, active_note_summary, skill_catalog, explicit_skill_prompt
         )
     })];
+
+    if let Some(project_instruction_prompt) = project_instruction_prompt {
+        messages.push(json!({
+            "role": "system",
+            "content": project_instruction_prompt
+        }));
+    }
+
+    if let Some(context_summary_prompt) = context_summary_prompt {
+        messages.push(json!({
+            "role": "system",
+            "content": context_summary_prompt
+        }));
+    }
+
+    if let Some(pending_change_prompt) = pending_change_prompt {
+        messages.push(json!({
+            "role": "system",
+            "content": pending_change_prompt
+        }));
+    }
+
+    log::debug!(
+        target: "agent_runtime",
+        "上下文注入完成：session={} summary_injected={} summary_chars={} summary_updated_at={} has_pending_change={} project_instruction_count={}",
+        session.id,
+        context_summary_prompt_chars > 0,
+        context_summary_prompt_chars,
+        context_summary_updated_at,
+        session.pending_change.as_ref().is_some_and(|change| change.status == "pending"),
+        project_instruction_count(snapshot, session)
+    );
 
     for message in session
         .messages
@@ -1002,6 +1253,240 @@ fn build_model_messages(
     }
 
     messages
+}
+
+/** 渲染知识库根目录 ORANGE_AGENT.md 指令；读取失败只写脱敏日志，不阻塞 Agent 回合。 */
+fn render_project_agent_instructions(
+    snapshot: &WorkspaceSnapshot,
+    session: &AgentSession,
+) -> Option<String> {
+    let instructions = load_project_agent_instructions(snapshot, session);
+
+    if instructions.is_empty() {
+        return None;
+    }
+
+    Some(format!(
+        "【项目级 Agent 指令】\n以下内容来自当前会话 scope 内知识库根目录的 ORANGE_AGENT.md，优先级低于橘记系统规则，高于普通会话记忆。\n{}",
+        instructions.join("\n\n")
+    ))
+}
+
+/** 读取当前会话 scope 内的项目级 Agent 指令，只按知识库根目录固定文件名加载。 */
+fn load_project_agent_instructions(
+    snapshot: &WorkspaceSnapshot,
+    session: &AgentSession,
+) -> Vec<String> {
+    session
+        .knowledge_base_ids
+        .iter()
+        .filter_map(|knowledge_base_id| {
+            let knowledge_base = snapshot
+                .knowledge_bases
+                .iter()
+                .find(|knowledge_base| &knowledge_base.id == knowledge_base_id)?;
+            let instruction_path = PathBuf::from(&knowledge_base.path).join("ORANGE_AGENT.md");
+
+            if !instruction_path.is_file() {
+                return None;
+            }
+
+            // 项目级指令可由用户编辑，读取时只按字符预算截断，不做正文日志输出。
+            match fs::read_to_string(&instruction_path) {
+                Ok(content) => {
+                    let bounded =
+                        truncate_chars(content.trim(), MAX_PROJECT_AGENT_INSTRUCTION_CHARS);
+
+                    if bounded.is_empty() {
+                        None
+                    } else {
+                        Some(format!(
+                            "来源知识库：{}（id={}）\n{}",
+                            knowledge_base.name, knowledge_base.id, bounded
+                        ))
+                    }
+                }
+                Err(error) => {
+                    log::warn!(
+                        target: "agent_runtime",
+                        "项目级 Agent 指令读取失败：knowledge_base_id={} error={}",
+                        knowledge_base.id,
+                        model_provider::redact_model_error_text(&error.to_string())
+                    );
+                    None
+                }
+            }
+        })
+        .collect()
+}
+
+/** 统计本轮注入了多少份项目级指令，用于 debug 日志，不重复记录正文。 */
+fn project_instruction_count(snapshot: &WorkspaceSnapshot, session: &AgentSession) -> usize {
+    session
+        .knowledge_base_ids
+        .iter()
+        .filter(|knowledge_base_id| {
+            snapshot
+                .knowledge_bases
+                .iter()
+                .find(|knowledge_base| &knowledge_base.id == *knowledge_base_id)
+                .map(|knowledge_base| {
+                    PathBuf::from(&knowledge_base.path)
+                        .join("ORANGE_AGENT.md")
+                        .is_file()
+                })
+                .unwrap_or(false)
+        })
+        .count()
+}
+
+/** 渲染会话工作记忆 prompt；summary 为空时不注入，避免制造无意义上下文。 */
+fn render_context_summary_prompt(summary: Option<&AgentContextSummary>) -> Option<String> {
+    let summary = summary?;
+    let body = render_context_summary_body(summary);
+
+    if body.trim().is_empty() {
+        return None;
+    }
+
+    Some(format!(
+        "【会话工作记忆】\n以下是本会话较早上下文的压缩摘要，优先级低于系统规则，高于最近历史之外的普通聊天记忆。\n{}",
+        truncate_chars(&body, MAX_RENDERED_CONTEXT_SUMMARY_CHARS)
+    ))
+}
+
+/** 把结构化工作记忆转成模型可读文本，保持字段稳定便于模型增量合并。 */
+fn render_context_summary_body(summary: &AgentContextSummary) -> String {
+    let mut lines = vec![
+        format!("version: {}", summary.version),
+        format!("updatedAt: {}", summary.updated_at),
+    ];
+
+    if let Some(goal) = summary
+        .current_goal
+        .as_deref()
+        .filter(|goal| !goal.trim().is_empty())
+    {
+        lines.push(format!("currentGoal: {}", goal));
+    }
+
+    push_summary_list(&mut lines, "userConstraints", &summary.user_constraints);
+    push_summary_list(&mut lines, "decisions", &summary.decisions);
+    push_summary_list(&mut lines, "completedWork", &summary.completed_work);
+    push_summary_list(&mut lines, "pendingTasks", &summary.pending_tasks);
+
+    if !summary.touched_notes.is_empty() {
+        lines.push("touchedNotes:".to_owned());
+        for note in summary.touched_notes.iter().take(MAX_CONTEXT_SUMMARY_ITEMS) {
+            lines.push(format!("- {} | {} | {}", note.id, note.title, note.reason));
+        }
+    }
+
+    if let Some(change) = summary
+        .pending_change_summary
+        .as_deref()
+        .filter(|change| !change.trim().is_empty())
+    {
+        lines.push(format!("pendingChangeSummary: {change}"));
+    }
+
+    push_summary_list(&mut lines, "openQuestions", &summary.open_questions);
+
+    if let Some(message_id) = summary
+        .last_summarized_message_id
+        .as_deref()
+        .filter(|message_id| !message_id.trim().is_empty())
+    {
+        lines.push(format!("lastSummarizedMessageId: {message_id}"));
+    }
+
+    if let Some(message_id) = summary
+        .last_compacted_message_id
+        .as_deref()
+        .filter(|message_id| !message_id.trim().is_empty())
+    {
+        lines.push(format!("lastCompactedMessageId: {message_id}"));
+    }
+
+    lines.join("\n")
+}
+
+/** 只计算工作记忆渲染长度，供日志和审计记录使用，不暴露 summary 正文。 */
+fn context_summary_rendered_chars(summary: Option<&AgentContextSummary>) -> usize {
+    summary
+        .map(render_context_summary_body)
+        .map(|body| body.chars().count())
+        .unwrap_or_default()
+}
+
+/** 追加工作记忆数组字段，空数组不输出以节省 prompt 预算。 */
+fn push_summary_list(lines: &mut Vec<String>, label: &str, items: &[String]) {
+    if items.is_empty() {
+        return;
+    }
+
+    lines.push(format!("{label}:"));
+    for item in items.iter().take(MAX_CONTEXT_SUMMARY_ITEMS) {
+        lines.push(format!("- {item}"));
+    }
+}
+
+/** 渲染待确认 diff 摘要，只暴露状态和统计，不把 original/next 正文放进 prompt。 */
+fn render_pending_change_prompt(change: Option<&ProposedChange>) -> Option<String> {
+    let change = change?;
+    if change.status != "pending" {
+        return None;
+    }
+
+    let summary = summarize_pending_change(change)?;
+
+    Some(format!(
+        "【当前待确认变更】\n以下是当前会话的 diff 状态摘要。不要把它当成已写入文件；只有用户确认后才会落盘。\n{summary}"
+    ))
+}
+
+/** 生成 pending change 的脱敏摘要，供 prompt、summary 和日志复用。 */
+fn summarize_pending_change(change: &ProposedChange) -> Option<String> {
+    if change.status.trim().is_empty() {
+        return None;
+    }
+
+    let operation = change.operation.as_deref().unwrap_or("create");
+    let stats = change.diff_stats.as_ref().map(|stats| {
+        format!(
+            "addedLines={} removedLines={} hunkCount={} originalChars={} nextChars={}",
+            stats.added_lines,
+            stats.removed_lines,
+            stats.hunk_count,
+            stats.original_char_count,
+            stats.next_char_count
+        )
+    });
+
+    Some(format!(
+        "- 类型：{}\n- 操作：{}\n- 标题：{}\n- 目标路径：{}\n- 状态：{}\n- 统计：{}",
+        change.r#type,
+        operation,
+        change.title,
+        change.target_path,
+        change.status,
+        stats.unwrap_or_else(|| {
+            format!(
+                "originalChars={} nextChars={}",
+                change.original.chars().count(),
+                change.next.chars().count()
+            )
+        })
+    ))
+}
+
+/** 当前仍等待确认的 diff 摘要；accepted/rejected 不再作为待确认状态注入模型。 */
+fn current_pending_change_summary(session: &AgentSession) -> Option<String> {
+    session
+        .pending_change
+        .as_ref()
+        .filter(|change| change.status == "pending")
+        .and_then(summarize_pending_change)
 }
 
 /** 发送一次 chat completions 请求并记录 providerId/model/status/耗时/endpointHost；错误统一脱敏。 */
@@ -1121,6 +1606,579 @@ async fn send_chat_completion(
     serde_json::from_str(&body).map_err(|error| format!("无法解析模型响应：{error}"))
 }
 
+/** 用模型增量合并会话工作记忆；失败时降级为确定性摘要，且不影响主 Agent 回合。 */
+async fn update_agent_context_summary_best_effort(
+    client: &Client,
+    provider: &LlmProviderConfig,
+    selected_model_id: &str,
+    api_key: &str,
+    snapshot: &mut WorkspaceSnapshot,
+    session_index: usize,
+    failure_reason: Option<&str>,
+    update_compacted_marker: bool,
+) {
+    let started_at = Instant::now();
+    let endpoint = model_provider::chat_completions_endpoint(&provider.api_base);
+    let session_id = snapshot.sessions[session_index].id.clone();
+    let messages =
+        build_context_summary_model_messages(&snapshot.sessions[session_index], failure_reason);
+    let result = send_chat_completion_logged(
+        client,
+        provider,
+        selected_model_id,
+        &endpoint,
+        api_key,
+        &messages,
+        false,
+    )
+    .await
+    .and_then(parse_context_summary_response);
+
+    match result {
+        Ok(summary) => {
+            let summary = normalize_context_summary(
+                summary,
+                &snapshot.sessions[session_index],
+                update_compacted_marker,
+            );
+            let rendered_chars = render_context_summary_body(&summary).chars().count();
+            let field_count = context_summary_field_count(&summary);
+            let updated_at = summary.updated_at.clone();
+
+            snapshot.sessions[session_index].context_summary = Some(summary);
+            snapshot.sessions[session_index].updated_at = format_local_datetime();
+            log::info!(
+                target: "agent_runtime",
+                "会话工作记忆更新成功：session={} duration_ms={} rendered_chars={} field_count={} updated_at={}",
+                session_id,
+                started_at.elapsed().as_millis(),
+                rendered_chars,
+                field_count,
+                updated_at
+            );
+        }
+        Err(error) => {
+            log::warn!(
+                target: "agent_runtime",
+                "会话工作记忆模型更新失败，已使用确定性摘要：session={} duration_ms={} failure_reason_chars={} error={}",
+                session_id,
+                started_at.elapsed().as_millis(),
+                failure_reason.map(|reason| reason.chars().count()).unwrap_or_default(),
+                model_provider::redact_model_error_text(&error)
+            );
+            update_agent_context_summary_deterministic(
+                snapshot,
+                session_index,
+                failure_reason,
+                update_compacted_marker,
+            );
+        }
+    }
+}
+
+/** 根据 自动触发条件决定使用模型 compact 还是轻量确定性同步。 */
+async fn update_agent_context_summary_after_turn(
+    client: &Client,
+    provider: &LlmProviderConfig,
+    selected_model_id: &str,
+    api_key: &str,
+    snapshot: &mut WorkspaceSnapshot,
+    session_index: usize,
+    estimated_prompt_chars: usize,
+    failure_reason: Option<&str>,
+) {
+    let decision =
+        context_summary_auto_decision(&snapshot.sessions[session_index], estimated_prompt_chars);
+
+    log::debug!(
+        target: "agent_runtime",
+        "会话工作记忆自动触发检查：session={} should_compact={} reasons={} message_count={} unsummarized_messages={} estimated_prompt_chars={}",
+        snapshot.sessions[session_index].id,
+        decision.should_compact,
+        if decision.reasons.is_empty() { "none".to_owned() } else { decision.reasons.join(",") },
+        snapshot.sessions[session_index].messages.len(),
+        decision.unsummarized_message_count,
+        decision.estimated_prompt_chars
+    );
+
+    if decision.should_compact {
+        update_agent_context_summary_best_effort(
+            client,
+            provider,
+            selected_model_id,
+            api_key,
+            snapshot,
+            session_index,
+            failure_reason,
+            true,
+        )
+        .await;
+    } else {
+        update_agent_context_summary_deterministic(snapshot, session_index, failure_reason, false);
+    }
+}
+
+/** 计算 自动整理触发条件，返回原因列表供日志观测。 */
+fn context_summary_auto_decision(
+    session: &AgentSession,
+    estimated_prompt_chars: usize,
+) -> ContextSummaryAutoDecision {
+    let mut reasons = Vec::new();
+    let unsummarized_message_count = compact_unsummarized_message_count(session);
+    let has_compacted = session
+        .context_summary
+        .as_ref()
+        .and_then(|summary| summary.last_compacted_message_id.as_deref())
+        .is_some();
+
+    if session.context_summary.is_none() && !session.messages.is_empty() {
+        reasons.push("firstSummary".to_owned());
+    }
+
+    if session.messages.len() > AUTO_COMPACT_MESSAGE_COUNT_THRESHOLD && !has_compacted {
+        reasons.push("messageCountOverThreshold".to_owned());
+    }
+
+    if unsummarized_message_count > AUTO_COMPACT_UNSUMMARIZED_MESSAGE_THRESHOLD {
+        reasons.push("unsummarizedMessagesOverThreshold".to_owned());
+    }
+
+    if estimated_prompt_chars > AUTO_COMPACT_PROMPT_CHAR_THRESHOLD && unsummarized_message_count > 0
+    {
+        reasons.push("promptCharsOverThreshold".to_owned());
+    }
+
+    if pending_change_summary_changed(session) {
+        reasons.push("pendingChangeChanged".to_owned());
+    }
+
+    ContextSummaryAutoDecision {
+        should_compact: !reasons.is_empty(),
+        reasons,
+        estimated_prompt_chars,
+        unsummarized_message_count,
+    }
+}
+
+/** 估算模型消息字符数，用于触发 prompt 过大时的自动 compact。 */
+fn estimate_model_messages_chars(messages: &[Value]) -> usize {
+    messages
+        .iter()
+        .map(|message| message.to_string().chars().count())
+        .sum()
+}
+
+/** 统计距离上一次模型 compact 后新增的消息数；确定性同步不会重置该计数。 */
+fn compact_unsummarized_message_count(session: &AgentSession) -> usize {
+    let Some(last_compacted_message_id) = session
+        .context_summary
+        .as_ref()
+        .and_then(|summary| summary.last_compacted_message_id.as_deref())
+    else {
+        return session.messages.len();
+    };
+
+    session
+        .messages
+        .iter()
+        .position(|message| message.id == last_compacted_message_id)
+        .map(|index| session.messages.len().saturating_sub(index + 1))
+        .unwrap_or(session.messages.len())
+}
+
+/** 当前待确认 diff 与 summary 内记录不一致时触发整理，避免模型忘记待确认状态。 */
+fn pending_change_summary_changed(session: &AgentSession) -> bool {
+    let recorded = session
+        .context_summary
+        .as_ref()
+        .and_then(|summary| summary.pending_change_summary.as_deref());
+    let current = current_pending_change_summary(session);
+
+    recorded != current.as_deref()
+}
+
+/** 构造 summary-only 模型请求，不携带工具 schema，不进入用户可见消息列表。 */
+fn build_context_summary_model_messages(
+    session: &AgentSession,
+    failure_reason: Option<&str>,
+) -> Vec<Value> {
+    let old_summary = session
+        .context_summary
+        .as_ref()
+        .map(|summary| serde_json::to_string(summary).unwrap_or_default())
+        .filter(|summary| !summary.is_empty())
+        .unwrap_or_else(|| "null".to_owned());
+    let recent_messages = context_summary_recent_message_payload(session);
+    let pending_change =
+        current_pending_change_summary(session).unwrap_or_else(|| "无待确认变更".to_owned());
+    let turn_failure = failure_reason
+        .map(truncate_summary_item)
+        .filter(|reason| !reason.trim().is_empty())
+        .unwrap_or_else(|| "无".to_owned());
+
+    vec![
+        json!({
+            "role": "system",
+            "content": "你负责维护橘记 Agent 会话工作记忆。只输出一个 JSON 对象，字段必须是 version、updatedAt、currentGoal、userConstraints、decisions、completedWork、pendingTasks、touchedNotes、pendingChangeSummary、openQuestions、lastSummarizedMessageId、lastCompactedMessageId。不要输出 Markdown。不要保存 API key、完整正文、完整 diff、手机号、身份证号或密码。每个数组最多 12 条，每条尽量短。"
+        }),
+        json!({
+            "role": "user",
+            "content": format!(
+                "旧工作记忆 JSON：\n{}\n\n最近未整理消息和工具摘要 JSON：\n{}\n\n当前 pending diff 摘要：\n{}\n\n本轮失败摘要：\n{}\n\n请合并为新的工作记忆 JSON。",
+                old_summary,
+                recent_messages,
+                pending_change,
+                turn_failure
+            )
+        }),
+    ]
+}
+
+/** 把最近消息压缩成 summary 模型可读 JSON，正文按预算截断且工具只保留摘要。 */
+fn context_summary_recent_message_payload(session: &AgentSession) -> String {
+    let last_compacted_id = session
+        .context_summary
+        .as_ref()
+        .and_then(|summary| summary.last_compacted_message_id.as_deref());
+    let mut messages = session
+        .messages
+        .iter()
+        .skip_while(|message| Some(message.id.as_str()) != last_compacted_id)
+        .skip(if last_compacted_id.is_some() { 1 } else { 0 })
+        .collect::<Vec<_>>();
+
+    if messages.is_empty() {
+        messages = session
+            .messages
+            .iter()
+            .rev()
+            .take(MAX_RECENT_MESSAGES_FOR_SUMMARY)
+            .collect::<Vec<_>>();
+        messages.reverse();
+    }
+
+    let payload = messages
+        .into_iter()
+        .rev()
+        .take(MAX_RECENT_MESSAGES_FOR_SUMMARY)
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+        .map(|message| {
+            json!({
+                "id": &message.id,
+                "role": &message.role,
+                "action": message.action.as_deref(),
+                "content": truncate_chars(&message.content, MAX_HISTORY_MESSAGE_CHARS),
+                "tools": message.tool_calls.as_ref().map(|tool_calls| {
+                    tool_calls.iter().map(|tool_call| {
+                        json!({
+                            "name": &tool_call.name,
+                            "status": &tool_call.status,
+                            "summary": &tool_call.summary,
+                        })
+                    }).collect::<Vec<_>>()
+                }).unwrap_or_default(),
+                "citations": message.citations.as_ref().map(|citations| {
+                    citations.iter().map(|citation| {
+                        json!({
+                            "noteId": &citation.note_id,
+                            "title": &citation.title,
+                        })
+                    }).collect::<Vec<_>>()
+                }).unwrap_or_default()
+            })
+        })
+        .collect::<Vec<_>>();
+
+    serde_json::to_string(&payload).unwrap_or_else(|_| "[]".to_owned())
+}
+
+/** 解析 summary 模型响应；只接受 JSON object，兼容模型误包的 fenced code block。 */
+fn parse_context_summary_response(response: Value) -> Result<AgentContextSummary, String> {
+    let content = response
+        .get("choices")
+        .and_then(Value::as_array)
+        .and_then(|choices| choices.first())
+        .and_then(|choice| choice.get("message"))
+        .and_then(|message| message.get("content"))
+        .and_then(Value::as_str)
+        .ok_or_else(|| "summary 响应缺少 content".to_owned())?;
+    let json_text = extract_json_object_text(content)
+        .ok_or_else(|| "summary 响应不是 JSON object".to_owned())?;
+
+    serde_json::from_str::<AgentContextSummary>(&json_text)
+        .map_err(|error| format!("summary JSON 解析失败：{error}"))
+}
+
+/** 从模型响应中提取第一个 JSON object，避免 fenced JSON 导致解析失败。 */
+fn extract_json_object_text(content: &str) -> Option<String> {
+    let trimmed = content.trim();
+
+    if trimmed.starts_with('{') && trimmed.ends_with('}') {
+        return Some(trimmed.to_owned());
+    }
+
+    let start = trimmed.find('{')?;
+    let end = trimmed.rfind('}')?;
+
+    (start < end).then(|| trimmed[start..=end].to_owned())
+}
+
+/** 模型总结失败或本地 fallback 时，用确定性规则维护最低可用工作记忆。 */
+pub(crate) fn update_agent_context_summary_deterministic(
+    snapshot: &mut WorkspaceSnapshot,
+    session_index: usize,
+    failure_reason: Option<&str>,
+    update_compacted_marker: bool,
+) {
+    let session = &snapshot.sessions[session_index];
+    let mut summary = session
+        .context_summary
+        .clone()
+        .unwrap_or_else(|| AgentContextSummary {
+            version: 1,
+            updated_at: format_local_datetime(),
+            ..AgentContextSummary::default()
+        });
+
+    summary.version = 1;
+    summary.updated_at = format_local_datetime();
+    summary.current_goal = latest_user_message(session)
+        .map(|message| truncate_summary_item(&message.content))
+        .or(summary.current_goal);
+
+    if let Some(last_assistant) = latest_assistant_message(session) {
+        append_bounded_unique(
+            &mut summary.completed_work,
+            truncate_summary_item(&format!("本轮回复：{}", last_assistant.content)),
+        );
+
+        if let Some(tool_calls) = &last_assistant.tool_calls {
+            for tool_call in tool_calls
+                .iter()
+                .filter(|tool_call| tool_call.status == "completed")
+            {
+                append_bounded_unique(
+                    &mut summary.completed_work,
+                    truncate_summary_item(&format!(
+                        "工具 {}：{}",
+                        tool_call.name, tool_call.summary
+                    )),
+                );
+            }
+        }
+    }
+
+    if let Some(reason) = failure_reason.filter(|reason| !reason.trim().is_empty()) {
+        append_bounded_unique(
+            &mut summary.pending_tasks,
+            truncate_summary_item(&format!("上轮未完全成功，需要继续确认或重试：{reason}")),
+        );
+    }
+
+    summary.pending_change_summary = current_pending_change_summary(session);
+    if let Some(change_summary) = summary.pending_change_summary.clone() {
+        if change_summary.contains("状态：pending") {
+            append_bounded_unique(
+                &mut summary.pending_tasks,
+                "等待用户确认当前 pending diff。".to_owned(),
+            );
+        }
+    }
+
+    if let Some(change) = session
+        .pending_change
+        .as_ref()
+        .filter(|change| change.status == "accepted" || change.status == "rejected")
+    {
+        append_bounded_unique(
+            &mut summary.completed_work,
+            truncate_summary_item(&format!(
+                "待确认 diff 已处理：status={} title={} path={}",
+                change.status, change.title, change.target_path
+            )),
+        );
+    }
+
+    merge_recent_citation_notes(&mut summary, session);
+    summary.last_summarized_message_id = session.messages.last().map(|message| message.id.clone());
+    summary = normalize_context_summary(summary, session, update_compacted_marker);
+
+    let rendered_chars = render_context_summary_body(&summary).chars().count();
+    let field_count = context_summary_field_count(&summary);
+
+    snapshot.sessions[session_index].context_summary = Some(summary);
+    snapshot.sessions[session_index].updated_at = format_local_datetime();
+    let updated_at = snapshot.sessions[session_index]
+        .context_summary
+        .as_ref()
+        .map(|summary| summary.updated_at.as_str())
+        .unwrap_or("none");
+    log::info!(
+        target: "agent_runtime",
+        "会话工作记忆确定性更新成功：session={} rendered_chars={} field_count={} updated_at={}",
+        snapshot.sessions[session_index].id,
+        rendered_chars,
+        field_count,
+        updated_at
+    );
+}
+
+/** 规范模型或规则生成的工作记忆，统一长度、数量和 pending diff 状态。 */
+fn normalize_context_summary(
+    mut summary: AgentContextSummary,
+    session: &AgentSession,
+    update_compacted_marker: bool,
+) -> AgentContextSummary {
+    summary.version = if summary.version == 0 {
+        1
+    } else {
+        summary.version
+    };
+    if summary.updated_at.trim().is_empty() {
+        summary.updated_at = format_local_datetime();
+    }
+    summary.current_goal = summary
+        .current_goal
+        .filter(|goal| !goal.trim().is_empty())
+        .map(|goal| truncate_summary_item(&goal));
+    summary.user_constraints = normalize_summary_items(summary.user_constraints);
+    summary.decisions = normalize_summary_items(summary.decisions);
+    summary.completed_work = normalize_summary_items(summary.completed_work);
+    summary.pending_tasks = normalize_summary_items(summary.pending_tasks);
+    summary.open_questions = normalize_summary_items(summary.open_questions);
+    summary.touched_notes = normalize_touched_notes(summary.touched_notes);
+    summary.pending_change_summary = current_pending_change_summary(session);
+    summary.last_summarized_message_id = session.messages.last().map(|message| message.id.clone());
+    if update_compacted_marker {
+        summary.last_compacted_message_id =
+            session.messages.last().map(|message| message.id.clone());
+    }
+
+    summary
+}
+
+/** 返回 summary 中有内容的字段数量，供日志观测，不记录字段正文。 */
+fn context_summary_field_count(summary: &AgentContextSummary) -> usize {
+    usize::from(summary.current_goal.is_some())
+        + usize::from(!summary.user_constraints.is_empty())
+        + usize::from(!summary.decisions.is_empty())
+        + usize::from(!summary.completed_work.is_empty())
+        + usize::from(!summary.pending_tasks.is_empty())
+        + usize::from(!summary.touched_notes.is_empty())
+        + usize::from(summary.pending_change_summary.is_some())
+        + usize::from(!summary.open_questions.is_empty())
+        + usize::from(summary.last_summarized_message_id.is_some())
+        + usize::from(summary.last_compacted_message_id.is_some())
+}
+
+/** 规范字符串数组字段，去空、去重、截断并限制条数。 */
+fn normalize_summary_items(items: Vec<String>) -> Vec<String> {
+    let mut seen = HashSet::new();
+    let mut normalized = Vec::new();
+
+    for item in items {
+        let item = truncate_summary_item(&item);
+
+        if !item.is_empty() && seen.insert(item.clone()) {
+            normalized.push(item);
+        }
+
+        if normalized.len() >= MAX_CONTEXT_SUMMARY_ITEMS {
+            break;
+        }
+    }
+
+    normalized
+}
+
+/** 规范 touched notes 字段，避免同一笔记重复占用 summary 预算。 */
+fn normalize_touched_notes(notes: Vec<AgentContextTouchedNote>) -> Vec<AgentContextTouchedNote> {
+    let mut seen = HashSet::new();
+    let mut normalized = Vec::new();
+
+    for note in notes {
+        if note.id.trim().is_empty() || !seen.insert(note.id.clone()) {
+            continue;
+        }
+
+        normalized.push(AgentContextTouchedNote {
+            id: truncate_summary_item(&note.id),
+            title: truncate_summary_item(&note.title),
+            reason: truncate_summary_item(&note.reason),
+        });
+
+        if normalized.len() >= MAX_CONTEXT_SUMMARY_ITEMS {
+            break;
+        }
+    }
+
+    normalized
+}
+
+/** 截断单个 summary 字段，并折叠空白，避免长正文进入工作记忆。 */
+fn truncate_summary_item(value: &str) -> String {
+    let collapsed = value.split_whitespace().collect::<Vec<_>>().join(" ");
+
+    truncate_chars(&collapsed, MAX_CONTEXT_SUMMARY_ITEM_CHARS)
+}
+
+/** 向受限数组追加去重条目，超过预算时移除最旧条目。 */
+fn append_bounded_unique(items: &mut Vec<String>, item: String) {
+    if item.trim().is_empty() || items.iter().any(|existing| existing == &item) {
+        return;
+    }
+
+    items.push(item);
+    if items.len() > MAX_CONTEXT_SUMMARY_ITEMS {
+        let overflow = items.len() - MAX_CONTEXT_SUMMARY_ITEMS;
+        items.drain(0..overflow);
+    }
+}
+
+/** 把最近消息引用的笔记合并进 touchedNotes，便于后续回合记住读过哪些笔记。 */
+fn merge_recent_citation_notes(summary: &mut AgentContextSummary, session: &AgentSession) {
+    let mut notes = summary.touched_notes.clone();
+
+    for message in session
+        .messages
+        .iter()
+        .rev()
+        .take(MAX_RECENT_MESSAGES_FOR_SUMMARY)
+    {
+        if let Some(citations) = &message.citations {
+            for citation in citations {
+                notes.push(AgentContextTouchedNote {
+                    id: citation.note_id.clone(),
+                    title: citation.title.clone(),
+                    reason: "本会话工具读取或引用过。".to_owned(),
+                });
+            }
+        }
+    }
+
+    summary.touched_notes = normalize_touched_notes(notes);
+}
+
+/** 查找最新用户消息，供确定性 summary 更新当前目标。 */
+fn latest_user_message(session: &AgentSession) -> Option<&AgentMessage> {
+    session
+        .messages
+        .iter()
+        .rev()
+        .find(|message| message.role == "user")
+}
+
+/** 查找最新 assistant 消息，供确定性 summary 记录本轮完成项。 */
+fn latest_assistant_message(session: &AgentSession) -> Option<&AgentMessage> {
+    session
+        .messages
+        .iter()
+        .rev()
+        .find(|message| message.role == "assistant")
+}
+
 /** 在模型未配置或失败时运行本地规则 Agent，并生成对应审计。 */
 fn fallback_agent_turn(
     app: &AppHandle,
@@ -1152,6 +2210,13 @@ fn fallback_agent_turn(
             .get_or_insert_with(Vec::new)
             .insert(0, skill_context_tool_call(available_skills));
     }
+
+    update_agent_context_summary_deterministic(
+        &mut turn_result.snapshot,
+        session_index,
+        Some(reason),
+        false,
+    );
 
     let audit_log = build_audit_log(
         "local_rule_turn",
@@ -1397,6 +2462,12 @@ fn model_error_turn(
             tool_calls: Some(tool_calls),
         });
     snapshot.sessions[session_index].updated_at = "刚刚".to_owned();
+    update_agent_context_summary_deterministic(
+        &mut snapshot,
+        session_index,
+        Some(&redacted_reason),
+        false,
+    );
 
     let audit_log = build_audit_log(
         "model_error_turn",
@@ -1461,6 +2532,12 @@ fn skill_activation_error_turn(
             tool_calls: Some(tool_calls),
         });
     snapshot.sessions[session_index].updated_at = "刚刚".to_owned();
+    update_agent_context_summary_deterministic(
+        &mut snapshot,
+        session_index,
+        Some(&redacted_reason),
+        false,
+    );
 
     log::warn!(
         target: "agent_runtime",
@@ -1637,7 +2714,7 @@ fn build_audit_log(
         kind: kind.to_owned(),
         session_id: Some(session.id.clone()),
         scope_summary,
-        content_summary: audit_trail.content_summary(content_summary, prompt),
+        content_summary: audit_trail.content_summary(content_summary, prompt, session),
         tool_summary,
         created_at: format_local_datetime(),
     }
@@ -1721,6 +2798,7 @@ mod tests {
                 pinned_note_ids: vec!["note-a".to_owned()],
                 messages: Vec::new(),
                 pending_change: None,
+                context_summary: None,
                 created_at: "刚刚".to_owned(),
                 updated_at: "刚刚".to_owned(),
                 deleted_at: None,
@@ -1766,6 +2844,35 @@ mod tests {
         runtime_test_settings().model_config.providers[0].clone()
     }
 
+    /** 构造测试用待确认变更，正文只用于验证 prompt 和 summary 不泄露完整 diff。 */
+    fn runtime_test_pending_change(status: &str) -> ProposedChange {
+        ProposedChange {
+            id: "change-a".to_owned(),
+            knowledge_base_id: "kb-a".to_owned(),
+            note_id: Some("note-a".to_owned()),
+            r#type: "rewrite".to_owned(),
+            operation: Some("replace".to_owned()),
+            title: "授权笔记".to_owned(),
+            target_path: "Notes/授权笔记.md".to_owned(),
+            original: "旧正文里有较长内容".to_owned(),
+            next: "新正文里有较长内容".to_owned(),
+            original_hash: hash_content("旧正文里有较长内容"),
+            status: status.to_owned(),
+            review_comments: None,
+            review_state: None,
+            diff_stats: Some(crate::domain::ProposedChangeDiffStats {
+                added_lines: 2,
+                removed_lines: 1,
+                context_lines: 3,
+                hunk_count: 1,
+                original_line_count: 4,
+                next_line_count: 5,
+                original_char_count: 9,
+                next_char_count: 9,
+            }),
+        }
+    }
+
     /** System prompt 应把工具选择权交给模型，而不是由宿主分支决定。 */
     #[test]
     fn model_messages_delegate_tool_choice_to_model() {
@@ -1791,6 +2898,184 @@ mod tests {
         assert!(system_content.contains("是否使用、使用哪一个 Skill 都由你自主判断"));
         assert!(!system_content.contains("执行要求"));
         assert!(!system_content.contains("当用户要求查找"));
+    }
+
+    /** 会话工作记忆必须在 system 指令之后、短期历史之前注入，确保长会话目标不被最近 8 条限制丢掉。 */
+    #[test]
+    fn model_messages_inject_context_summary_before_recent_history() {
+        let mut snapshot = runtime_test_snapshot("正文内容足够用于测试。".to_owned());
+        let request = runtime_test_request("ask", "继续处理");
+        let available_skills = crate::skills::built_in_skills();
+
+        snapshot.sessions[0].context_summary = Some(AgentContextSummary {
+            version: 1,
+            updated_at: "2026-07-08 10:00:00".to_owned(),
+            current_goal: Some("按产品分析框架整理这篇文章".to_owned()),
+            user_constraints: vec!["保留用户已确认的小标题".to_owned()],
+            decisions: vec!["采用问题-洞察-行动的结构".to_owned()],
+            completed_work: vec!["已读取授权笔记".to_owned()],
+            pending_tasks: vec!["下一轮继续生成待确认 diff".to_owned()],
+            touched_notes: vec![AgentContextTouchedNote {
+                id: "note-a".to_owned(),
+                title: "授权笔记".to_owned(),
+                reason: "本会话已读取。".to_owned(),
+            }],
+            pending_change_summary: None,
+            open_questions: Vec::new(),
+            last_summarized_message_id: Some("user-old".to_owned()),
+            last_compacted_message_id: Some("user-old".to_owned()),
+        });
+        snapshot.sessions[0].messages.push(AgentMessage {
+            id: "user-current".to_owned(),
+            role: "user".to_owned(),
+            content: "继续处理".to_owned(),
+            action: Some("ask".to_owned()),
+            citations: None,
+            tool_calls: None,
+        });
+
+        let messages = build_model_messages(
+            &snapshot,
+            0,
+            &request,
+            &available_skills,
+            &[],
+            "user-current",
+        );
+        let memory_content = messages[1]["content"].as_str().unwrap_or_default();
+
+        assert_eq!(messages[0]["role"], "system");
+        assert_eq!(messages[1]["role"], "system");
+        assert!(memory_content.contains("【会话工作记忆】"));
+        assert!(memory_content.contains("按产品分析框架整理这篇文章"));
+        assert_eq!(messages[2]["role"], "user");
+    }
+
+    /** RequestAuditLog 只记录工作记忆注入和更新后的长度/时间，不保存 summary 正文。 */
+    #[test]
+    fn audit_log_records_context_summary_metrics_without_body() {
+        let mut snapshot = runtime_test_snapshot("正文内容足够用于测试。".to_owned());
+        let mut audit_trail = RuntimeAuditTrail::default();
+
+        snapshot.sessions[0].context_summary = Some(AgentContextSummary {
+            version: 1,
+            updated_at: "2026-07-08 10:00:00".to_owned(),
+            current_goal: Some("敏感目标正文不应进入审计".to_owned()),
+            user_constraints: Vec::new(),
+            decisions: Vec::new(),
+            completed_work: Vec::new(),
+            pending_tasks: Vec::new(),
+            touched_notes: Vec::new(),
+            pending_change_summary: None,
+            open_questions: Vec::new(),
+            last_summarized_message_id: None,
+            last_compacted_message_id: None,
+        });
+        audit_trail.record_context_summary_injection(&snapshot.sessions[0]);
+
+        let audit_log = build_audit_log(
+            "model_turn",
+            &snapshot,
+            0,
+            "用户输入",
+            "OpenAI-compatible 模型请求",
+            &audit_trail,
+        );
+
+        assert!(audit_log
+            .content_summary
+            .contains("工作记忆：injected=true"));
+        assert!(audit_log.content_summary.contains("stored=true"));
+        assert!(audit_log
+            .content_summary
+            .contains("injected_updated_at=2026-07-08 10:00:00"));
+        assert!(!audit_log.content_summary.contains("敏感目标正文"));
+    }
+
+    /** 自动整理会按消息数、未 compact 消息数、prompt 预算和 pending diff 变化触发。 */
+    #[test]
+    fn context_summary_auto_decision_reports_triggers() {
+        let mut snapshot = runtime_test_snapshot("正文内容足够用于测试。".to_owned());
+
+        snapshot.sessions[0].messages = (0..18)
+            .map(|index| AgentMessage {
+                id: format!("message-{index}"),
+                role: if index % 2 == 0 { "user" } else { "assistant" }.to_owned(),
+                content: format!("消息 {index}"),
+                action: Some("ask".to_owned()),
+                citations: None,
+                tool_calls: None,
+            })
+            .collect();
+        snapshot.sessions[0].context_summary = Some(AgentContextSummary {
+            version: 1,
+            updated_at: "2026-07-08 10:00:00".to_owned(),
+            current_goal: Some("旧目标".to_owned()),
+            user_constraints: Vec::new(),
+            decisions: Vec::new(),
+            completed_work: Vec::new(),
+            pending_tasks: Vec::new(),
+            touched_notes: Vec::new(),
+            pending_change_summary: None,
+            open_questions: Vec::new(),
+            last_summarized_message_id: Some("message-17".to_owned()),
+            last_compacted_message_id: Some("message-0".to_owned()),
+        });
+        snapshot.sessions[0].pending_change = Some(runtime_test_pending_change("pending"));
+
+        let decision = context_summary_auto_decision(
+            &snapshot.sessions[0],
+            AUTO_COMPACT_PROMPT_CHAR_THRESHOLD + 1,
+        );
+
+        assert!(decision.should_compact);
+        assert!(decision
+            .reasons
+            .contains(&"unsummarizedMessagesOverThreshold".to_owned()));
+        assert!(decision
+            .reasons
+            .contains(&"promptCharsOverThreshold".to_owned()));
+        assert!(decision
+            .reasons
+            .contains(&"pendingChangeChanged".to_owned()));
+        assert_eq!(decision.unsummarized_message_count, 17);
+    }
+
+    /** 增量 summary 请求从上次模型 compact 后截取消息，而不是被每轮确定性同步重置。 */
+    #[test]
+    fn context_summary_recent_payload_uses_last_compacted_marker() {
+        let mut snapshot = runtime_test_snapshot("正文内容足够用于测试。".to_owned());
+
+        snapshot.sessions[0].messages = (0..6)
+            .map(|index| AgentMessage {
+                id: format!("message-{index}"),
+                role: "user".to_owned(),
+                content: format!("消息正文 {index}"),
+                action: Some("ask".to_owned()),
+                citations: None,
+                tool_calls: None,
+            })
+            .collect();
+        snapshot.sessions[0].context_summary = Some(AgentContextSummary {
+            version: 1,
+            updated_at: "2026-07-08 10:00:00".to_owned(),
+            current_goal: Some("旧目标".to_owned()),
+            user_constraints: Vec::new(),
+            decisions: Vec::new(),
+            completed_work: Vec::new(),
+            pending_tasks: Vec::new(),
+            touched_notes: Vec::new(),
+            pending_change_summary: None,
+            open_questions: Vec::new(),
+            last_summarized_message_id: Some("message-5".to_owned()),
+            last_compacted_message_id: Some("message-2".to_owned()),
+        });
+
+        let payload = context_summary_recent_message_payload(&snapshot.sessions[0]);
+
+        assert!(!payload.contains("message-2"));
+        assert!(payload.contains("message-3"));
+        assert!(payload.contains("message-5"));
     }
 
     /** 模型启用后的配置或请求错误必须进入可见会话消息，不能静默伪装成本地规则回答。 */
@@ -1872,6 +3157,71 @@ mod tests {
         assert!(system_content.contains(&explicit_skill.instructions));
         assert!(system_content.contains("可用 Skills"));
         assert!(system_content.contains("不能扩大工具权限"));
+    }
+
+    /** summary-only 请求要显式带上本轮失败摘要，避免工具失败只藏在最近消息里。 */
+    #[test]
+    fn context_summary_model_messages_include_turn_failure_summary() {
+        let snapshot = runtime_test_snapshot("正文内容足够用于测试。".to_owned());
+        let messages = build_context_summary_model_messages(
+            &snapshot.sessions[0],
+            Some("read_note 工具失败：目标笔记不在 scope 内"),
+        );
+        let user_content = messages[1]["content"].as_str().unwrap_or_default();
+
+        assert!(user_content.contains("本轮失败摘要"));
+        assert!(user_content.contains("目标笔记不在 scope 内"));
+    }
+
+    /** 待确认 diff 只在 pending 状态进入模型 prompt，accepted/rejected 不再伪装成当前待确认变更。 */
+    #[test]
+    fn pending_change_prompt_only_includes_pending_status() {
+        let pending = runtime_test_pending_change("pending");
+        let accepted = runtime_test_pending_change("accepted");
+
+        assert!(render_pending_change_prompt(Some(&pending))
+            .unwrap()
+            .contains("状态：pending"));
+        assert!(render_pending_change_prompt(Some(&accepted)).is_none());
+    }
+
+    /** 确定性 summary fallback 要保留失败原因和 pending diff 摘要，但不写入完整正文。 */
+    #[test]
+    fn deterministic_context_summary_records_failure_and_pending_change() {
+        let mut snapshot = runtime_test_snapshot("正文内容足够用于测试。".to_owned());
+
+        snapshot.sessions[0].messages.push(AgentMessage {
+            id: "user-a".to_owned(),
+            role: "user".to_owned(),
+            content: "继续生成 diff".to_owned(),
+            action: Some("rewrite".to_owned()),
+            citations: None,
+            tool_calls: None,
+        });
+        snapshot.sessions[0].pending_change = Some(runtime_test_pending_change("pending"));
+
+        update_agent_context_summary_deterministic(
+            &mut snapshot,
+            0,
+            Some("read_note 工具失败：目标笔记不在 scope 内"),
+            false,
+        );
+
+        let summary = snapshot.sessions[0].context_summary.as_ref().unwrap();
+        let rendered = render_context_summary_body(summary);
+
+        assert!(summary
+            .pending_tasks
+            .iter()
+            .any(|task| task.contains("目标笔记不在 scope 内")));
+        assert!(summary
+            .pending_change_summary
+            .as_deref()
+            .unwrap_or_default()
+            .contains("状态：pending"));
+        assert!(rendered.contains("addedLines=2"));
+        assert!(!rendered.contains("旧正文里有较长内容"));
+        assert!(!rendered.contains("新正文里有较长内容"));
     }
 
     /** resolve_explicit_skills 会按选择顺序去重、限制数量并拒绝已禁用 Skill。 */
