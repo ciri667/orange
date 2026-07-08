@@ -19,6 +19,7 @@ import {
 import {
   acceptProposedChange,
   attachKnowledgeBase,
+  compactAgentContext,
   createDocument,
   createFolder,
   createNote,
@@ -1420,6 +1421,55 @@ export function WorkspaceShell() {
     }
   }
 
+  /** 手动整理当前会话工作记忆；日志只记录消息数量和摘要状态，不写入正文。 */
+  async function handleCompactAgentContext() {
+    if (!isPersistedSession(currentSnapshot, activeSession)) {
+      setNotice("请先新建或发送一条消息创建会话，再整理上下文。");
+      return;
+    }
+
+    beginBusy("正在整理上下文...");
+
+    try {
+      logInfo("开始手动整理会话上下文。", {
+        category: "frontend",
+        event: "compact_agent_context",
+        status: "started",
+        metadata: {
+          sessionId: activeSession.id,
+          messageCount: activeSession.messages.length,
+          hasContextSummary: Boolean(activeSession.contextSummary),
+          hasActivePendingChange: activeSession.pendingChange?.status === "pending",
+        },
+      });
+      commitSnapshot(await compactAgentContext(currentSnapshot, activeSession.id));
+      setNotice("已整理上下文。");
+      logInfo("手动整理会话上下文完成。", {
+        category: "frontend",
+        event: "compact_agent_context",
+        status: "completed",
+        metadata: {
+          sessionId: activeSession.id,
+          messageCount: activeSession.messages.length,
+          hasActivePendingChange: activeSession.pendingChange?.status === "pending",
+        },
+      });
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : String(error));
+      logWarn("手动整理会话上下文失败。", {
+        category: "frontend",
+        event: "compact_agent_context",
+        status: "failed",
+        metadata: {
+          sessionId: activeSession.id,
+          messageCount: activeSession.messages.length,
+        },
+      });
+    } finally {
+      endBusy();
+    }
+  }
+
   /** 切换会话历史浮层；日志只记录状态和数量，不写入会话标题、消息正文或路径。 */
   function handleToggleSessionList() {
     const nextOpen = !isSessionListOpen;
@@ -2031,6 +2081,7 @@ export function WorkspaceShell() {
             onSubmitPrompt={() => handleSubmitPrompt("ask")}
             onTurnModelSelectionChange={setTurnModelSelection}
             onSetSessionModelSelection={handleSetSessionModelSelection}
+            onCompactAgentContext={handleCompactAgentContext}
           />
         )}
       </main>

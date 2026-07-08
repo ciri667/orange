@@ -11,6 +11,7 @@ import {
 } from "./mockWorkspace";
 import type {
   AgentActionType,
+  AgentContextSummary,
   AgentSkill,
   AgentSession,
   AgentTurnRequest,
@@ -1611,6 +1612,60 @@ export async function runAgentTurn(
   }
 
   return invokeLogged<AgentTurnResult>("run_agent_turn", { payload: { snapshot, request } });
+}
+
+/** 手动整理当前 Agent 会话工作记忆，桌面端由后端决定使用模型或本地降级。 */
+export async function compactAgentContext(snapshot: WorkspaceSnapshot, sessionId: string): Promise<WorkspaceSnapshot> {
+  if (!isTauriRuntime()) {
+    return normalizeMockSnapshotSessions({
+      ...snapshot,
+      sessions: snapshot.sessions.map((session) =>
+        session.id === sessionId ? { ...session, contextSummary: buildMockContextSummary(session) } : session,
+      ),
+    });
+  }
+
+  return invokeLogged<WorkspaceSnapshot>("compact_agent_context", { payload: { snapshot, sessionId } });
+}
+
+/** 浏览器开发态的轻量上下文整理，只保存短摘要和计数，避免把完整消息正文塞进 contextSummary。 */
+function buildMockContextSummary(session: AgentSession): AgentContextSummary {
+  const lastUserMessage = [...session.messages].reverse().find((message) => message.role === "user");
+  const lastAssistantMessage = [...session.messages].reverse().find((message) => message.role === "assistant");
+  const pendingChangeSummary =
+    session.pendingChange?.status === "pending"
+      ? [
+          `type=${session.pendingChange.type}`,
+          `operation=${session.pendingChange.operation ?? "create"}`,
+          `title=${session.pendingChange.title}`,
+          `path=${session.pendingChange.targetPath}`,
+          `status=${session.pendingChange.status}`,
+          `addedLines=${session.pendingChange.diffStats?.addedLines ?? 0}`,
+          `removedLines=${session.pendingChange.diffStats?.removedLines ?? 0}`,
+        ].join(" ")
+      : undefined;
+
+  return {
+    version: 1,
+    updatedAt: formatLocalDateTime(),
+    currentGoal: lastUserMessage ? truncateSummaryText(lastUserMessage.content) : session.contextSummary?.currentGoal,
+    userConstraints: session.contextSummary?.userConstraints ?? [],
+    decisions: session.contextSummary?.decisions ?? [],
+    completedWork: lastAssistantMessage ? [truncateSummaryText(`本轮回复：${lastAssistantMessage.content}`)] : [],
+    pendingTasks: pendingChangeSummary ? ["等待用户确认当前 pending diff。"] : [],
+    touchedNotes: session.contextSummary?.touchedNotes ?? [],
+    pendingChangeSummary,
+    openQuestions: session.contextSummary?.openQuestions ?? [],
+    lastSummarizedMessageId: session.messages.at(-1)?.id,
+    lastCompactedMessageId: session.messages.at(-1)?.id,
+  };
+}
+
+/** 折叠空白并限制单条 mock summary 长度，和 Rust 侧的脱敏预算保持同类行为。 */
+function truncateSummaryText(value: string) {
+  const collapsed = value.trim().split(/\s+/).join(" ");
+
+  return collapsed.length > 360 ? `${collapsed.slice(0, 360)}…` : collapsed;
 }
 
 /** 接受当前会话的待确认变更，Tauri 环境中由本地层执行安全写入。 */

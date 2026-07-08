@@ -122,15 +122,19 @@ export function AgentSessionContextPopover({
   knowledgeBases,
   notes,
   modelConfig,
+  isBusy,
   onToggleSessionContext,
   onSetSessionModelSelection,
+  onCompactAgentContext,
 }: {
   activeSession: AgentSession;
   knowledgeBases: KnowledgeBase[];
   notes: Note[];
   modelConfig: ModelConfig;
+  isBusy: boolean;
   onToggleSessionContext: () => void;
   onSetSessionModelSelection: (selection: string) => void;
+  onCompactAgentContext: () => void;
 }) {
   /** 已启用的 Provider 列表；未启用的 provider 不出现在选择器中。 */
   const enabledProviders = modelConfig.providers.filter((provider) => provider.enabled);
@@ -146,6 +150,10 @@ export function AgentSessionContextPopover({
     : FOLLOW_DEFAULT_MODEL_SELECTION;
   /** 当前会话的写入状态，和摘要条使用同一语义。 */
   const writeStatus = activeSession.pendingChange?.status === "pending" ? "待确认 diff" : "写入需确认";
+  /** 工作记忆状态只展示字段数和更新时间，不暴露 summary 正文。 */
+  const memoryStatus = activeSession.contextSummary
+    ? `${getContextSummaryFieldCount(activeSession)} 项 · ${activeSession.contextSummary.updatedAt || "刚刚"}`
+    : "未整理";
 
   return (
     <section className="context-popover" aria-label="会话上下文">
@@ -154,9 +162,14 @@ export function AgentSessionContextPopover({
           <p className="section-label">Context</p>
           <h3>上下文</h3>
         </div>
-        <button className="icon-button" type="button" title="关闭上下文" onClick={onToggleSessionContext}>
-          <X size={15} />
-        </button>
+        <div className="popover-header-actions">
+          <button className="icon-button" type="button" title="整理上下文" onClick={onCompactAgentContext} disabled={isBusy}>
+            <Sparkles size={15} />
+          </button>
+          <button className="icon-button" type="button" title="关闭上下文" onClick={onToggleSessionContext}>
+            <X size={15} />
+          </button>
+        </div>
       </div>
       <div className="context-popover-body">
         <div className="context-matrix">
@@ -180,6 +193,10 @@ export function AgentSessionContextPopover({
             <span>写入</span>
             <strong>{writeStatus}</strong>
           </div>
+          <div>
+            <span>工作记忆</span>
+            <strong>{memoryStatus}</strong>
+          </div>
         </div>
         {modelConfig.enabled && (
           <label className="context-model-select">
@@ -201,6 +218,28 @@ export function AgentSessionContextPopover({
       </div>
     </section>
   );
+}
+
+/** 统计工作记忆里有内容的字段数量，UI 不展示任何 summary 正文。 */
+function getContextSummaryFieldCount(session: AgentSession) {
+  const summary = session.contextSummary;
+
+  if (!summary) {
+    return 0;
+  }
+
+  return [
+    summary.currentGoal,
+    summary.userConstraints.length,
+    summary.decisions.length,
+    summary.completedWork.length,
+    summary.pendingTasks.length,
+    summary.touchedNotes.length,
+    summary.pendingChangeSummary,
+    summary.openQuestions.length,
+    summary.lastSummarizedMessageId,
+    summary.lastCompactedMessageId,
+  ].filter(Boolean).length;
 }
 
 /** 工具范围选择器，当前激活知识库始终保持选中。 */

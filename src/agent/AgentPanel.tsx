@@ -41,6 +41,7 @@ export function AgentPanel({
   onSubmitPrompt,
   onTurnModelSelectionChange,
   onSetSessionModelSelection,
+  onCompactAgentContext,
 }: {
   sessions: AgentSession[];
   activeSession: AgentSession;
@@ -71,6 +72,7 @@ export function AgentPanel({
   onSubmitPrompt: () => void;
   onTurnModelSelectionChange: (selection: string) => void;
   onSetSessionModelSelection: (selection: string) => void;
+  onCompactAgentContext: () => void;
 }) {
   // AgentPanel 三个 popover 共用同一个外层 aside 作为 ref 容器：
   // 点击 Agent 面板以外的区域才关闭浮层；面板内切入别的功能按钮时由各按钮的 toggle 自行处理。
@@ -126,8 +128,10 @@ export function AgentPanel({
           knowledgeBases={knowledgeBases}
           notes={notes}
           modelConfig={modelConfig}
+          isBusy={isBusy}
           onToggleSessionContext={onToggleSessionContext}
           onSetSessionModelSelection={onSetSessionModelSelection}
+          onCompactAgentContext={onCompactAgentContext}
         />
       )}
 
