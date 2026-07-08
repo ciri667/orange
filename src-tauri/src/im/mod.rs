@@ -109,6 +109,7 @@ pub(crate) fn build_im_agent_session(
         pinned_note_ids: Vec::new(),
         messages: Vec::new(),
         pending_change: None,
+        context_summary: None,
         created_at: now.clone(),
         updated_at: now,
         deleted_at: None,

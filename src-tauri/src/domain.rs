@@ -302,6 +302,43 @@ pub struct ProposedChangeDiffStats {
     pub next_char_count: usize,
 }
 
+/** 工作记忆中被引用过的笔记摘要，只保存 id/title/reason，不保存正文。 */
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentContextTouchedNote {
+    pub id: String,
+    pub title: String,
+    pub reason: String,
+}
+
+/** Agent 会话滚动工作记忆，压缩早期对话和工具结果以支撑长会话。 */
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentContextSummary {
+    pub version: u32,
+    pub updated_at: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub current_goal: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub user_constraints: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub decisions: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub completed_work: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub pending_tasks: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub touched_notes: Vec<AgentContextTouchedNote>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pending_change_summary: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub open_questions: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_summarized_message_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_compacted_message_id: Option<String>,
+}
+
 /** Agent 会话上下文容器。 */
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -314,6 +351,9 @@ pub struct AgentSession {
     pub pinned_note_ids: Vec<String>,
     pub messages: Vec<AgentMessage>,
     pub pending_change: Option<ProposedChange>,
+    /** 会话滚动工作记忆，用于让模型在只带最近历史时仍保留早期目标和决定。 */
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context_summary: Option<AgentContextSummary>,
     pub created_at: String,
     pub updated_at: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -895,6 +935,14 @@ pub struct AgentTurnPayload {
 #[serde(rename_all = "camelCase")]
 pub struct ChangePayload {
     pub snapshot: WorkspaceSnapshot,
+}
+
+/** 手动整理当前 Agent 会话上下文的命令入参。 */
+#[derive(Clone, Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CompactAgentContextPayload {
+    pub snapshot: WorkspaceSnapshot,
+    pub session_id: String,
 }
 
 /** 持久化或更新单个 Agent 会话的命令入参。 */

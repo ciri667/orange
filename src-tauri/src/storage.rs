@@ -3875,6 +3875,7 @@ mod tests {
             pinned_note_ids: Vec::new(),
             messages: Vec::new(),
             pending_change: None,
+            context_summary: None,
             created_at: created_at.to_owned(),
             updated_at: created_at.to_owned(),
             deleted_at: None,

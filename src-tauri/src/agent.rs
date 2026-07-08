@@ -311,6 +311,7 @@ mod tests {
                 tool_calls: None,
             }],
             pending_change: None,
+            context_summary: None,
             created_at: "刚刚".to_owned(),
             updated_at: "刚刚".to_owned(),
             deleted_at: None,

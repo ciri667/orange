@@ -21,6 +21,9 @@ export type AgentToolName =
   | "read_note"
   | "list_tree"
   | "get_current_note"
+  | "get_session_summary"
+  | "search_session_messages"
+  | "read_session_context"
   | "propose_note_change"
   | "create_note_draft"
   | "suggest_organization";
@@ -250,6 +253,29 @@ export interface ProposedChangeDiffStats {
   nextCharCount: number;
 }
 
+/** 工作记忆中被引用过的笔记摘要，只保存 id/title/reason，不保存正文。 */
+export interface AgentContextTouchedNote {
+  id: string;
+  title: string;
+  reason: string;
+}
+
+/** Agent 会话滚动工作记忆，压缩早期对话和工具结果以支撑长会话。 */
+export interface AgentContextSummary {
+  version: number;
+  updatedAt: string;
+  currentGoal?: string;
+  userConstraints: string[];
+  decisions: string[];
+  completedWork: string[];
+  pendingTasks: string[];
+  touchedNotes: AgentContextTouchedNote[];
+  pendingChangeSummary?: string;
+  openQuestions: string[];
+  lastSummarizedMessageId?: string;
+  lastCompactedMessageId?: string;
+}
+
 /** Agent 对笔记提出的待确认变更，确认前不能修改本地 Markdown。 */
 export interface ProposedChange {
   id: string;
@@ -278,6 +304,8 @@ export interface AgentSession {
   pinnedNoteIds: string[];
   messages: AgentMessage[];
   pendingChange?: ProposedChange;
+  /** 会话滚动工作记忆，用于让模型在只带最近历史时仍保留早期目标和决定。 */
+  contextSummary?: AgentContextSummary;
   createdAt: string;
   updatedAt: string;
   /** 逻辑删除时间；有值的会话只保留在持久化记录中，不再进入普通会话列表。 */
