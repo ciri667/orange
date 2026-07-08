@@ -162,6 +162,7 @@ pub fn run() {
             commands::load_document_preview,
             export::export_current_file,
             commands::run_agent_turn,
+            commands::compact_agent_context,
             commands::apply_proposed_change,
             commands::reject_proposed_change
         ])

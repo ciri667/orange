@@ -17,6 +17,12 @@ pub(crate) const MAX_READ_NOTE_CHARS: usize = 6000;
 /** list_tree 工具最多发送的目录、Markdown 和普通文档摘要数量。 */
 const MAX_TREE_ITEMS: usize = 120;
 
+/** 会话历史检索最多返回的消息数量，避免旧对话一次性塞满模型上下文。 */
+const MAX_SESSION_CONTEXT_MESSAGES: usize = 8;
+
+/** 会话历史工具单条消息最多返回的字符数。 */
+const MAX_SESSION_CONTEXT_MESSAGE_CHARS: usize = 1200;
+
 /** list_tree 按支持文档类型输出的计数，避免模型把未知扩展名误认为已索引内容。 */
 #[derive(Clone, Debug)]
 struct ListTreeFileTypeCounts {
@@ -107,6 +113,9 @@ impl Default for ToolRegistry {
                 Box::new(ReadNoteTool),
                 Box::new(ListTreeTool),
                 Box::new(GetCurrentNoteTool),
+                Box::new(GetSessionSummaryTool),
+                Box::new(SearchSessionMessagesTool),
+                Box::new(ReadSessionContextTool),
                 Box::new(ProposeNoteChangeTool),
                 Box::new(CreateNoteDraftTool),
                 Box::new(SuggestOrganizationTool),
@@ -315,6 +324,80 @@ impl AgentTool for ProposeNoteChangeTool {
 
     fn execute(&self, context: &mut AgentToolContext<'_>, args: &Value) -> ToolExecutionResult {
         execute_propose_note_change(context.snapshot, context.session_index, args)
+    }
+}
+
+/** get_session_summary 工具，返回当前会话工作记忆和 pending diff 摘要。 */
+struct GetSessionSummaryTool;
+
+impl AgentTool for GetSessionSummaryTool {
+    fn name(&self) -> &'static str {
+        "get_session_summary"
+    }
+
+    fn description(&self) -> &'static str {
+        "Read the current session context summary and pending change summary. It does not read note contents."
+    }
+
+    fn parameters(&self) -> Value {
+        json!({ "type": "object", "properties": {} })
+    }
+
+    fn execute(&self, context: &mut AgentToolContext<'_>, _args: &Value) -> ToolExecutionResult {
+        execute_get_session_summary(context.snapshot, context.session_index)
+    }
+}
+
+/** search_session_messages 工具，只检索当前会话历史消息。 */
+struct SearchSessionMessagesTool;
+
+impl AgentTool for SearchSessionMessagesTool {
+    fn name(&self) -> &'static str {
+        "search_session_messages"
+    }
+
+    fn description(&self) -> &'static str {
+        "Search messages in the current Agent session history when the user asks about earlier discussion."
+    }
+
+    fn parameters(&self) -> Value {
+        json!({
+            "type": "object",
+            "properties": { "query": { "type": "string" } },
+            "required": ["query"]
+        })
+    }
+
+    fn execute(&self, context: &mut AgentToolContext<'_>, args: &Value) -> ToolExecutionResult {
+        execute_search_session_messages(context.snapshot, context.session_index, args)
+    }
+}
+
+/** read_session_context 工具，按 messageId 或 1-based 范围读取当前会话历史。 */
+struct ReadSessionContextTool;
+
+impl AgentTool for ReadSessionContextTool {
+    fn name(&self) -> &'static str {
+        "read_session_context"
+    }
+
+    fn description(&self) -> &'static str {
+        "Read bounded current-session chat history by messageId or 1-based startIndex/endIndex."
+    }
+
+    fn parameters(&self) -> Value {
+        json!({
+            "type": "object",
+            "properties": {
+                "messageId": { "type": "string" },
+                "startIndex": { "type": "integer", "minimum": 1 },
+                "endIndex": { "type": "integer", "minimum": 1 }
+            }
+        })
+    }
+
+    fn execute(&self, context: &mut AgentToolContext<'_>, args: &Value) -> ToolExecutionResult {
+        execute_read_session_context(context.snapshot, context.session_index, args)
     }
 }
 
@@ -646,6 +729,179 @@ fn execute_list_tree(snapshot: &WorkspaceSnapshot, session_index: usize) -> Tool
             if truncated { "（已截断）" } else { "" }
         )),
     }
+}
+
+/** 执行 get_session_summary，只返回当前会话工作记忆和 diff 状态摘要。 */
+fn execute_get_session_summary(
+    snapshot: &WorkspaceSnapshot,
+    session_index: usize,
+) -> ToolExecutionResult {
+    let session = &snapshot.sessions[session_index];
+    let pending_change_summary = session.pending_change.as_ref().map(|change| {
+        json!({
+            "id": &change.id,
+            "type": &change.r#type,
+            "operation": change.operation.as_deref().unwrap_or("create"),
+            "title": &change.title,
+            "targetPath": &change.target_path,
+            "status": &change.status,
+            "diffStats": &change.diff_stats,
+            "originalChars": change.original.chars().count(),
+            "nextChars": change.next.chars().count(),
+        })
+    });
+
+    ToolExecutionResult {
+        success: true,
+        summary: "已读取当前会话工作记忆摘要".to_owned(),
+        payload: json!({
+            "contextSummary": &session.context_summary,
+            "pendingChange": pending_change_summary,
+            "messageCount": session.messages.len()
+        }),
+        citations: Vec::new(),
+        audit_fragment: Some(format!(
+            "get_session_summary 发送工作记忆字段 summary_present={} message_count={} pending_change={}",
+            session.context_summary.is_some(),
+            session.messages.len(),
+            session.pending_change.as_ref().map(|change| change.status.as_str()).unwrap_or("none")
+        )),
+    }
+}
+
+/** 执行 search_session_messages，只在当前会话消息和工具摘要内做大小写不敏感匹配。 */
+fn execute_search_session_messages(
+    snapshot: &WorkspaceSnapshot,
+    session_index: usize,
+    args: &Value,
+) -> ToolExecutionResult {
+    let session = &snapshot.sessions[session_index];
+    let query = args
+        .get("query")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .trim();
+
+    if query.is_empty() {
+        return ToolExecutionResult::failed("会话历史检索 query 不能为空。");
+    }
+
+    let query_lower = query.to_lowercase();
+    let matches = session
+        .messages
+        .iter()
+        .enumerate()
+        .filter(|(_, message)| {
+            session_message_search_text(message)
+                .to_lowercase()
+                .contains(&query_lower)
+        })
+        .take(MAX_SESSION_CONTEXT_MESSAGES)
+        .map(|(index, message)| {
+            json!({
+                "index": index + 1,
+                "id": &message.id,
+                "role": &message.role,
+                "action": message.action.as_deref(),
+                "preview": truncate_chars(&message.content, 260),
+            })
+        })
+        .collect::<Vec<_>>();
+    let match_count = matches.len();
+
+    ToolExecutionResult {
+        success: true,
+        summary: format!("会话历史检索命中 {match_count} 条消息"),
+        payload: json!({ "matches": matches, "truncated": session.messages.len() > MAX_SESSION_CONTEXT_MESSAGES }),
+        citations: Vec::new(),
+        audit_fragment: Some(format!(
+            "search_session_messages query_chars={} match_count={}",
+            query.chars().count(),
+            match_count
+        )),
+    }
+}
+
+/** 执行 read_session_context，按 messageId 精确读取或按 1-based 索引读取受限范围。 */
+fn execute_read_session_context(
+    snapshot: &WorkspaceSnapshot,
+    session_index: usize,
+    args: &Value,
+) -> ToolExecutionResult {
+    let session = &snapshot.sessions[session_index];
+    let selected = if let Some(message_id) = args.get("messageId").and_then(Value::as_str) {
+        session
+            .messages
+            .iter()
+            .enumerate()
+            .filter(|(_, message)| message.id == message_id)
+            .collect::<Vec<_>>()
+    } else {
+        let start_index = args
+            .get("startIndex")
+            .and_then(Value::as_u64)
+            .unwrap_or(1)
+            .max(1) as usize;
+        let end_index = args
+            .get("endIndex")
+            .and_then(Value::as_u64)
+            .map(|value| value.max(1) as usize)
+            .unwrap_or(start_index);
+        let start = start_index.min(end_index).saturating_sub(1);
+        let end = start_index.max(end_index).min(session.messages.len());
+
+        session
+            .messages
+            .iter()
+            .enumerate()
+            .skip(start)
+            .take(end.saturating_sub(start).min(MAX_SESSION_CONTEXT_MESSAGES))
+            .collect::<Vec<_>>()
+    };
+
+    if selected.is_empty() {
+        return ToolExecutionResult::failed("未找到匹配的会话历史消息。");
+    }
+
+    let messages = selected
+        .iter()
+        .map(|(index, message)| {
+            json!({
+                "index": index + 1,
+                "id": &message.id,
+                "role": &message.role,
+                "action": message.action.as_deref(),
+                "content": truncate_chars(&message.content, MAX_SESSION_CONTEXT_MESSAGE_CHARS),
+                "toolSummaries": message.tool_calls.as_ref().map(|tool_calls| {
+                    tool_calls.iter().map(|tool_call| {
+                        json!({ "name": &tool_call.name, "status": &tool_call.status, "summary": &tool_call.summary })
+                    }).collect::<Vec<_>>()
+                }).unwrap_or_default(),
+            })
+        })
+        .collect::<Vec<_>>();
+    let message_count = messages.len();
+
+    ToolExecutionResult {
+        success: true,
+        summary: format!("已读取 {message_count} 条会话历史消息"),
+        payload: json!({ "messages": messages, "maxReturned": MAX_SESSION_CONTEXT_MESSAGES }),
+        citations: Vec::new(),
+        audit_fragment: Some(format!(
+            "read_session_context message_count={message_count}"
+        )),
+    }
+}
+
+/** 构造会话历史检索文本，仅在内存中使用，不进入审计日志。 */
+fn session_message_search_text(message: &crate::domain::AgentMessage) -> String {
+    let mut parts = vec![message.content.clone()];
+
+    if let Some(tool_calls) = &message.tool_calls {
+        parts.extend(tool_calls.iter().map(|tool_call| tool_call.summary.clone()));
+    }
+
+    parts.join("\n")
 }
 
 impl ListTreeFileTypeCounts {
@@ -1216,6 +1472,7 @@ mod tests {
                 pinned_note_ids: vec!["note-a".to_owned()],
                 messages: Vec::new(),
                 pending_change: None,
+                context_summary: None,
                 created_at: "刚刚".to_owned(),
                 updated_at: "刚刚".to_owned(),
                 deleted_at: None,

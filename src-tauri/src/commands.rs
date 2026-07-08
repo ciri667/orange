@@ -1,8 +1,8 @@
 use crate::domain::{
     AgentSession, AgentSkill, AgentTurnPayload, AgentTurnResult, AppEventLog, ChangePayload,
-    CreateDocumentPayload, CreateFolderPayload, CreateNotePayload, DeleteAgentSkillPayload,
-    DeleteDocumentPayload, DeleteNotePayload, DeleteSessionPayload, DocumentPreview,
-    FeishuCredentialStatus, FeishuGatewayStatus, FolderEntry, ImGatewayStatus,
+    CompactAgentContextPayload, CreateDocumentPayload, CreateFolderPayload, CreateNotePayload,
+    DeleteAgentSkillPayload, DeleteDocumentPayload, DeleteNotePayload, DeleteSessionPayload,
+    DocumentPreview, FeishuCredentialStatus, FeishuGatewayStatus, FolderEntry, ImGatewayStatus,
     ImIntegrationSettings, ImProviderCredentialStatus, ImProviderPayload, InstallAgentSkillPayload,
     InstallAgentSkillResult, KnowledgeBaseSelection, LlmProviderModelRefreshResult,
     LoadAppEventLogsPayload, LoadDocumentPreviewPayload, LoadSessionsPayload, ModelApiKeyStatus,
@@ -2407,6 +2407,72 @@ pub async fn run_agent_turn(
     Ok(runtime_result.turn_result)
 }
 
+/** 手动整理当前 Agent 会话工作记忆，成功后持久化会话快照。 */
+#[tauri::command]
+pub async fn compact_agent_context(
+    app: AppHandle,
+    payload: CompactAgentContextPayload,
+) -> Result<WorkspaceSnapshot, String> {
+    let started_at = Instant::now();
+    let operation_id = storage::create_id("op");
+    let session_id = payload.session_id.clone();
+
+    logging::write_app_event_best_effort(
+        &app,
+        AppEventBuilder::new(
+            AppLogLevel::Info,
+            AppLogCategory::Agent,
+            "compact_agent_context",
+            "started",
+            "开始整理 Agent 会话上下文。",
+        )
+        .operation_id(operation_id.clone())
+        .session_id(session_id.clone()),
+    );
+
+    let settings_app = app.clone();
+    let settings = run_blocking("读取模型设置", move || {
+        storage::load_user_settings(&settings_app)
+    })
+    .await?;
+    let snapshot = hydrate_persisted_sessions_for_turn(&app, payload.snapshot).await?;
+    let snapshot = runtime::compact_agent_context_summary(snapshot, &session_id, settings).await?;
+
+    if let Err(error) = index_snapshot_in_background(app.clone(), &snapshot).await {
+        logging::write_app_event_best_effort(
+            &app,
+            AppEventBuilder::new(
+                AppLogLevel::Error,
+                AppLogCategory::Agent,
+                "compact_agent_context",
+                "failed",
+                error.clone(),
+            )
+            .operation_id(operation_id)
+            .session_id(session_id)
+            .duration(started_at.elapsed()),
+        );
+
+        return Err(error);
+    }
+
+    logging::write_app_event_best_effort(
+        &app,
+        AppEventBuilder::new(
+            AppLogLevel::Info,
+            AppLogCategory::Agent,
+            "compact_agent_context",
+            "completed",
+            "已整理 Agent 会话上下文。",
+        )
+        .operation_id(operation_id)
+        .session_id(session_id)
+        .duration(started_at.elapsed()),
+    );
+
+    Ok(snapshot)
+}
+
 /** IM 后台入口复用 Agent runtime：创建或复用映射会话，持久化消息、审计和索引。 */
 pub(crate) async fn run_agent_turn_from_im(
     app: AppHandle,
@@ -2706,6 +2772,7 @@ pub async fn apply_proposed_change(
         status: "accepted".to_owned(),
         ..change
     });
+    runtime::update_agent_context_summary_deterministic(&mut snapshot, session_index, None, false);
     index_snapshot_in_background(app.clone(), &snapshot).await?;
 
     logging::write_app_event_best_effort(
@@ -2818,6 +2885,12 @@ pub async fn reject_proposed_change(
             ..change
         });
         snapshot.sessions[session_index].updated_at = "刚刚".to_owned();
+        runtime::update_agent_context_summary_deterministic(
+            &mut snapshot,
+            session_index,
+            None,
+            false,
+        );
 
         logging::write_app_event_best_effort(
             &app,
@@ -3484,6 +3557,7 @@ mod tests {
                 review_state: None,
                 diff_stats: None,
             }),
+            context_summary: None,
             created_at: "刚刚".to_owned(),
             updated_at: "刚刚".to_owned(),
             deleted_at: None,
