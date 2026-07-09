@@ -366,6 +366,40 @@ pub struct AgentSession {
     pub model_id: Option<String>,
 }
 
+/** 跨会话记忆的分类枚举，覆盖计划文档列举的长期偏好类型。 */
+pub const MEMORY_CATEGORY_NOTE_STRUCTURE: &str = "noteStructure";
+pub const MEMORY_CATEGORY_TAG_CONVENTION: &str = "tagConvention";
+pub const MEMORY_CATEGORY_ORGANIZATION: &str = "organization";
+pub const MEMORY_CATEGORY_CONVENTION: &str = "convention";
+pub const MEMORY_CATEGORY_OTHER: &str = "other";
+
+/** 跨会话记忆条目的来源取值；user 表示手动录入，auto 预留给后续 Agent 自动生成路径。 */
+pub const MEMORY_SOURCE_USER: &str = "user";
+pub const MEMORY_SOURCE_AUTO: &str = "auto";
+
+/** 跨会话记忆单条；只保存用户偏好与约定，保存前会做敏感信息脱敏。 */
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentMemoryEntry {
+    pub id: String,
+    pub category: String,
+    pub content: String,
+    pub source: String,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+/** 单个知识库的跨会话记忆集合；默认关闭，用户在设置页手动开启后注入 Runtime。 */
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct KnowledgeBaseMemory {
+    pub knowledge_base_id: String,
+    pub enabled: bool,
+    #[serde(default)]
+    pub entries: Vec<AgentMemoryEntry>,
+    pub updated_at: String,
+}
+
 /** 默认要求配置 API key；只有本地免鉴权服务（例如 Ollama）会显式关闭。 */
 fn default_requires_api_key() -> bool {
     true
@@ -943,6 +977,21 @@ pub struct ChangePayload {
 pub struct CompactAgentContextPayload {
     pub snapshot: WorkspaceSnapshot,
     pub session_id: String,
+}
+
+/** 保存或更新单个知识库跨会话记忆的命令入参。 */
+#[derive(Clone, Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SaveKnowledgeBaseMemoryPayload {
+    pub knowledge_base_id: String,
+    pub memory: KnowledgeBaseMemory,
+}
+
+/** 删除单个知识库跨会话记忆的命令入参。 */
+#[derive(Clone, Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DeleteKnowledgeBaseMemoryPayload {
+    pub knowledge_base_id: String,
 }
 
 /** 持久化或更新单个 Agent 会话的命令入参。 */
