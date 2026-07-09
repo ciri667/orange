@@ -1,12 +1,13 @@
 use crate::domain::{
-    AgentSession, AppEventLog, DocumentPreview, DocumentPreviewBlock, FeishuCredentialStatus,
-    FeishuIntegrationSettings, FolderEntry, ImIntegrationSettings, ImProviderConfig,
-    ImProviderCredentialStatus, ImProviderSettings, KnowledgeBase, KnowledgeBaseMemory,
-    KnowledgeBaseSelection, LlmProviderConfig, ModelApiKeyStatus, ModelConfig, Note,
-    NoteImageAttachmentInput, RequestAuditLog, SavedNoteImageAttachment, ScanReport, UserSettings,
-    WorkspaceDocument, WorkspaceSnapshot, IM_PROVIDER_FEISHU, MEMORY_CATEGORY_CONVENTION,
-    MEMORY_CATEGORY_NOTE_STRUCTURE, MEMORY_CATEGORY_ORGANIZATION, MEMORY_CATEGORY_OTHER,
-    MEMORY_CATEGORY_TAG_CONVENTION, MEMORY_SOURCE_AUTO, MEMORY_SOURCE_USER,
+    AgentSession, AppEventLog, DocumentHistoryEntry, DocumentHistoryEntryDetail, DocumentPreview,
+    DocumentPreviewBlock, FeishuCredentialStatus, FeishuIntegrationSettings, FolderEntry,
+    ImIntegrationSettings, ImProviderConfig, ImProviderCredentialStatus, ImProviderSettings,
+    KnowledgeBase, KnowledgeBaseMemory, KnowledgeBaseSelection, LlmProviderConfig,
+    ModelApiKeyStatus, ModelConfig, Note, NoteImageAttachmentInput, RequestAuditLog,
+    SavedNoteImageAttachment, ScanReport, UserSettings, WorkspaceDocument, WorkspaceSnapshot,
+    IM_PROVIDER_FEISHU, MEMORY_CATEGORY_CONVENTION, MEMORY_CATEGORY_NOTE_STRUCTURE,
+    MEMORY_CATEGORY_ORGANIZATION, MEMORY_CATEGORY_OTHER, MEMORY_CATEGORY_TAG_CONVENTION,
+    MEMORY_SOURCE_AUTO, MEMORY_SOURCE_USER,
 };
 use crate::model_provider;
 use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
@@ -14,7 +15,7 @@ use base64::Engine as _;
 use chrono::{Duration as ChronoDuration, Local, NaiveDateTime, TimeZone};
 use quick_xml::events::Event;
 use quick_xml::Reader;
-use rusqlite::{params, Connection, TransactionBehavior};
+use rusqlite::{params, Connection, OptionalExtension, TransactionBehavior};
 use serde::Deserialize;
 use serde_json::Value;
 use sha2::{Digest, Sha256};
@@ -61,6 +62,15 @@ const MAX_APP_EVENT_LOGS: usize = 2_000;
 
 /** 用户可读事件日志最长保留天数，和条数限制共同控制本地数据库体积。 */
 const APP_EVENT_LOG_RETENTION_DAYS: i64 = 30;
+
+/** 单个 Markdown/TXT 文件最多保留的历史版本数量。 */
+const MAX_DOCUMENT_HISTORY_ENTRIES_PER_FILE: usize = 100;
+
+/** 文档历史记录最长保留天数，超过后在下一次捕获或清空时清理。 */
+const DOCUMENT_HISTORY_RETENTION_DAYS: i64 = 90;
+
+/** 文档历史正文快照目录，位于 app data 下且文件名不包含用户路径。 */
+const DOCUMENT_HISTORY_SNAPSHOT_DIR: &str = "document-history/v1";
 
 /** 系统安全存储中的模型密钥引用，SQLite 只保存这个引用而不保存明文 key。 */
 pub const MODEL_KEY_REFERENCE: &str = "orange-openai-compatible-api-key";
@@ -671,6 +681,30 @@ fn ensure_database_schema(connection: &Connection, database_path: &Path) -> Resu
               metadata_json TEXT,
               created_at TEXT NOT NULL
             );
+
+            CREATE TABLE IF NOT EXISTS document_history_entries (
+              id TEXT PRIMARY KEY,
+              target_kind TEXT NOT NULL,
+              knowledge_base_id TEXT NOT NULL,
+              target_id TEXT NOT NULL,
+              relative_path TEXT NOT NULL,
+              title TEXT NOT NULL,
+              file_type TEXT NOT NULL,
+              content_hash TEXT NOT NULL,
+              byte_size INTEGER NOT NULL,
+              line_count INTEGER NOT NULL,
+              source TEXT NOT NULL,
+              session_id TEXT,
+              change_id TEXT,
+              operation_id TEXT,
+              created_at TEXT NOT NULL
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_document_history_target
+              ON document_history_entries(target_kind, target_id, created_at);
+
+            CREATE INDEX IF NOT EXISTS idx_document_history_created_at
+              ON document_history_entries(created_at);
 
             CREATE TABLE IF NOT EXISTS im_session_mappings (
               channel_key TEXT PRIMARY KEY,
@@ -2575,6 +2609,549 @@ where
     Ok(logs)
 }
 
+/** 捕获文档历史记录所需的完整上下文；正文只写入快照文件，不进入 SQLite 表。 */
+#[derive(Clone, Debug)]
+pub struct DocumentHistoryCapture {
+    pub target_kind: String,
+    pub knowledge_base_id: String,
+    pub target_id: String,
+    pub relative_path: String,
+    pub title: String,
+    pub file_type: String,
+    pub content: String,
+    pub source: String,
+    pub session_id: Option<String>,
+    pub change_id: Option<String>,
+    pub operation_id: Option<String>,
+}
+
+/** 历史清理结果；cleanup_failure_count 只用于脱敏日志，不阻止用户文件删除。 */
+#[derive(Clone, Debug, Default)]
+pub struct DocumentHistoryClearSummary {
+    pub removed_count: usize,
+    pub cleanup_failure_count: usize,
+}
+
+/** 历史捕获结果；entry 为空表示最新 hash 相同而跳过，prune_summary 用于调用层写清理失败日志。 */
+#[derive(Clone, Debug, Default)]
+pub struct DocumentHistoryCaptureResult {
+    pub entry: Option<DocumentHistoryEntry>,
+    pub prune_summary: DocumentHistoryClearSummary,
+}
+
+/** 捕获当前磁盘正文为历史版本；相同文件最新 hash 一致时跳过重复记录。 */
+pub fn capture_document_history(
+    app: &AppHandle,
+    capture: DocumentHistoryCapture,
+) -> Result<DocumentHistoryCaptureResult, String> {
+    validate_document_history_capture(&capture)?;
+
+    let content_hash = hash_content(&capture.content);
+    let byte_size = capture.content.as_bytes().len();
+    let line_count = count_document_history_lines(&capture.content);
+    let connection = open_database(app)?;
+    let _write_guard = lock_database_writer()?;
+    let latest_hash =
+        load_latest_document_history_hash(&connection, &capture.target_kind, &capture.target_id)?;
+
+    if latest_hash.as_deref() == Some(content_hash.as_str()) {
+        return Ok(DocumentHistoryCaptureResult::default());
+    }
+
+    let snapshot_root = document_history_root(app)?;
+    let entry = DocumentHistoryEntry {
+        id: create_id("history"),
+        target_kind: capture.target_kind,
+        knowledge_base_id: capture.knowledge_base_id,
+        target_id: capture.target_id,
+        relative_path: capture.relative_path,
+        title: capture.title,
+        file_type: capture.file_type,
+        content_hash,
+        byte_size,
+        line_count,
+        source: capture.source,
+        session_id: capture.session_id,
+        change_id: capture.change_id,
+        operation_id: capture.operation_id,
+        created_at: format_local_datetime(),
+    };
+
+    write_document_history_snapshot(&snapshot_root, &entry.id, &capture.content)?;
+
+    if let Err(error) = insert_document_history_entry(&connection, &entry) {
+        let _ = remove_document_history_snapshot(&snapshot_root, &entry.id);
+        return Err(error);
+    }
+
+    let prune_summary = prune_document_history_entries(
+        &connection,
+        &snapshot_root,
+        &entry.target_kind,
+        &entry.target_id,
+    )?;
+
+    Ok(DocumentHistoryCaptureResult {
+        entry: Some(entry),
+        prune_summary,
+    })
+}
+
+/** 读取当前文件的历史版本列表，按最新创建时间倒序返回。 */
+pub fn load_document_history(
+    app: &AppHandle,
+    target_kind: &str,
+    target_id: &str,
+) -> Result<Vec<DocumentHistoryEntry>, String> {
+    validate_document_history_target(target_kind, target_id)?;
+
+    let connection = open_database(app)?;
+    let mut statement = connection
+        .prepare(
+            "SELECT id, target_kind, knowledge_base_id, target_id, relative_path, title,
+                    file_type, content_hash, byte_size, line_count, source, session_id,
+                    change_id, operation_id, created_at
+             FROM document_history_entries
+             WHERE target_kind = ?1 AND target_id = ?2
+             ORDER BY rowid DESC",
+        )
+        .map_err(|error| format!("无法准备文档历史读取：{error}"))?;
+    let rows = statement
+        .query_map(
+            params![target_kind, target_id],
+            document_history_entry_from_row,
+        )
+        .map_err(|error| format!("无法查询文档历史记录：{error}"))?;
+    let mut entries = Vec::new();
+
+    for row in rows {
+        entries.push(row.map_err(|error| format!("无法解析文档历史记录：{error}"))?);
+    }
+
+    Ok(entries)
+}
+
+/** 读取单条历史记录详情，并从安全快照目录加载正文内容。 */
+pub fn load_document_history_entry(
+    app: &AppHandle,
+    entry_id: &str,
+) -> Result<DocumentHistoryEntryDetail, String> {
+    validate_document_history_entry_id(entry_id)?;
+
+    let connection = open_database(app)?;
+    let entry = connection
+        .query_row(
+            "SELECT id, target_kind, knowledge_base_id, target_id, relative_path, title,
+                    file_type, content_hash, byte_size, line_count, source, session_id,
+                    change_id, operation_id, created_at
+             FROM document_history_entries
+             WHERE id = ?1",
+            params![entry_id],
+            document_history_entry_from_row,
+        )
+        .optional()
+        .map_err(|error| format!("无法读取文档历史详情：{error}"))?
+        .ok_or_else(|| "找不到该历史记录。".to_owned())?;
+    let snapshot_root = document_history_root(app)?;
+    let content = read_document_history_snapshot(&snapshot_root, &entry.id)?;
+
+    Ok(DocumentHistoryEntryDetail { entry, content })
+}
+
+/** 清空当前文件历史记录和对应快照；不会删除用户知识库中的文档。 */
+pub fn clear_document_history(
+    app: &AppHandle,
+    target_kind: &str,
+    target_id: &str,
+) -> Result<DocumentHistoryClearSummary, String> {
+    validate_document_history_target(target_kind, target_id)?;
+
+    let connection = open_database(app)?;
+    let _write_guard = lock_database_writer()?;
+    let snapshot_root = document_history_root(app)?;
+    let entry_ids = load_document_history_ids_for_target(&connection, target_kind, target_id)?;
+
+    connection
+        .execute(
+            "DELETE FROM document_history_entries WHERE target_kind = ?1 AND target_id = ?2",
+            params![target_kind, target_id],
+        )
+        .map_err(|error| format!("无法清空文档历史记录：{error}"))?;
+    let cleanup_failure_count =
+        remove_document_history_snapshots_best_effort(&snapshot_root, &entry_ids);
+
+    Ok(DocumentHistoryClearSummary {
+        removed_count: entry_ids.len(),
+        cleanup_failure_count,
+    })
+}
+
+/** 重命名文件后迁移历史元数据，保证旧版本仍挂在新的文件 ID 上。 */
+pub fn migrate_document_history_target(
+    app: &AppHandle,
+    target_kind: &str,
+    previous_target_id: &str,
+    next_target_id: &str,
+    knowledge_base_id: &str,
+    next_relative_path: &str,
+    next_title: &str,
+) -> Result<usize, String> {
+    validate_document_history_target(target_kind, previous_target_id)?;
+    validate_document_history_target(target_kind, next_target_id)?;
+    validate_document_history_relative_path(next_relative_path)?;
+
+    let connection = open_database(app)?;
+    let _write_guard = lock_database_writer()?;
+    let changed_rows = connection
+        .execute(
+            "UPDATE document_history_entries
+             SET target_id = ?1, knowledge_base_id = ?2, relative_path = ?3, title = ?4
+             WHERE target_kind = ?5 AND target_id = ?6",
+            params![
+                next_target_id,
+                knowledge_base_id,
+                next_relative_path,
+                next_title,
+                target_kind,
+                previous_target_id
+            ],
+        )
+        .map_err(|error| format!("无法迁移文档历史记录：{error}"))?;
+
+    Ok(changed_rows)
+}
+
+/** 校验文档历史捕获上下文，避免无效类型或越界相对路径进入持久层。 */
+fn validate_document_history_capture(capture: &DocumentHistoryCapture) -> Result<(), String> {
+    validate_document_history_target(&capture.target_kind, &capture.target_id)?;
+    validate_document_history_relative_path(&capture.relative_path)?;
+
+    if capture.knowledge_base_id.trim().is_empty() {
+        return Err("文档历史记录缺少知识库 ID。".to_owned());
+    }
+
+    if !matches!(capture.file_type.as_str(), "markdown" | "txt") {
+        return Err("该文件类型暂不支持历史记录。".to_owned());
+    }
+
+    if !matches!(
+        capture.source.as_str(),
+        "manual-save" | "agent-change" | "restore"
+    ) {
+        return Err("未知的文档历史来源。".to_owned());
+    }
+
+    Ok(())
+}
+
+/** 校验历史目标类型和实体 ID；首版只支持 Markdown note 与 TXT document。 */
+fn validate_document_history_target(target_kind: &str, target_id: &str) -> Result<(), String> {
+    if !matches!(target_kind, "note" | "document") {
+        return Err("该目标类型暂不支持历史记录。".to_owned());
+    }
+
+    if target_id.trim().is_empty() {
+        return Err("文档历史记录缺少目标 ID。".to_owned());
+    }
+
+    Ok(())
+}
+
+/** 校验知识库内相对路径，历史元数据不得保存绝对路径或上级目录。 */
+fn validate_document_history_relative_path(relative_path: &str) -> Result<(), String> {
+    let requested_path = Path::new(relative_path);
+
+    if relative_path.trim().is_empty()
+        || requested_path.components().any(|component| {
+            matches!(
+                component,
+                Component::ParentDir | Component::RootDir | Component::Prefix(_)
+            )
+        })
+    {
+        return Err("文档历史记录路径超出知识库根目录。".to_owned());
+    }
+
+    Ok(())
+}
+
+/** 校验历史快照文件名来源 ID，防止 entryId 被拼成路径穿越。 */
+fn validate_document_history_entry_id(entry_id: &str) -> Result<(), String> {
+    if entry_id.trim().is_empty()
+        || !entry_id
+            .chars()
+            .all(|character| character.is_ascii_alphanumeric() || matches!(character, '-' | '_'))
+    {
+        return Err("历史记录 ID 不合法。".to_owned());
+    }
+
+    Ok(())
+}
+
+/** 统计正文行数；空正文显示 0 行，带尾随换行的文本按可见逻辑行计数。 */
+fn count_document_history_lines(content: &str) -> usize {
+    if content.is_empty() {
+        0
+    } else {
+        content.split('\n').count()
+    }
+}
+
+/** 返回文档历史快照根目录，创建目录失败时直接阻止写入。 */
+fn document_history_root(app: &AppHandle) -> Result<PathBuf, String> {
+    let app_data_dir = app
+        .path()
+        .app_data_dir()
+        .map_err(|error| format!("无法获取应用数据目录：{error}"))?;
+    let history_root = app_data_dir.join(DOCUMENT_HISTORY_SNAPSHOT_DIR);
+
+    fs::create_dir_all(&history_root).map_err(|error| format!("无法创建文档历史目录：{error}"))?;
+
+    Ok(history_root)
+}
+
+/** 根据安全 entryId 生成快照路径；文件名不包含用户知识库路径。 */
+fn document_history_snapshot_path(root: &Path, entry_id: &str) -> Result<PathBuf, String> {
+    validate_document_history_entry_id(entry_id)?;
+
+    Ok(root.join(format!("{entry_id}.snapshot")))
+}
+
+/** 原子写入历史正文快照，确保 SQLite 元数据不会指向半截文件。 */
+fn write_document_history_snapshot(
+    root: &Path,
+    entry_id: &str,
+    content: &str,
+) -> Result<(), String> {
+    let target_path = document_history_snapshot_path(root, entry_id)?;
+    let mut temp_file = NamedTempFile::new_in(root)
+        .map_err(|error| format!("无法创建历史快照临时文件：{error}"))?;
+
+    temp_file
+        .write_all(content.as_bytes())
+        .map_err(|error| format!("无法写入历史快照：{error}"))?;
+    temp_file
+        .persist(&target_path)
+        .map_err(|error| format!("无法保存历史快照：{}", error.error))?;
+
+    Ok(())
+}
+
+/** 读取历史正文快照，并校验最终路径仍位于历史目录内。 */
+fn read_document_history_snapshot(root: &Path, entry_id: &str) -> Result<String, String> {
+    let target_path = document_history_snapshot_path(root, entry_id)?;
+    let canonical_root =
+        fs::canonicalize(root).map_err(|error| format!("无法解析文档历史目录：{error}"))?;
+    let canonical_target = fs::canonicalize(&target_path)
+        .map_err(|error| format!("历史快照不存在或不可访问：{error}"))?;
+
+    if !canonical_target.starts_with(&canonical_root) || !canonical_target.is_file() {
+        return Err("历史快照路径不合法。".to_owned());
+    }
+
+    fs::read_to_string(&canonical_target).map_err(|error| format!("无法读取历史快照：{error}"))
+}
+
+/** 删除单个历史快照；用于 DB 插入失败后的回滚清理。 */
+fn remove_document_history_snapshot(root: &Path, entry_id: &str) -> Result<(), String> {
+    let target_path = document_history_snapshot_path(root, entry_id)?;
+
+    match fs::remove_file(&target_path) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(format!("无法删除历史快照：{error}")),
+    }
+}
+
+/** 批量尽力删除历史快照，返回失败数量供调用层写脱敏日志。 */
+fn remove_document_history_snapshots_best_effort(root: &Path, entry_ids: &[String]) -> usize {
+    entry_ids
+        .iter()
+        .filter(|entry_id| remove_document_history_snapshot(root, entry_id).is_err())
+        .count()
+}
+
+/** 查询当前目标最新历史 hash，用于避免同一版本重复捕获。 */
+fn load_latest_document_history_hash(
+    connection: &Connection,
+    target_kind: &str,
+    target_id: &str,
+) -> Result<Option<String>, String> {
+    connection
+        .query_row(
+            "SELECT content_hash
+             FROM document_history_entries
+             WHERE target_kind = ?1 AND target_id = ?2
+             ORDER BY rowid DESC
+             LIMIT 1",
+            params![target_kind, target_id],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(|error| format!("无法读取最新文档历史 hash：{error}"))
+}
+
+/** 写入文档历史元数据；正文内容由同 ID 的快照文件承载。 */
+fn insert_document_history_entry(
+    connection: &Connection,
+    entry: &DocumentHistoryEntry,
+) -> Result<(), String> {
+    connection
+        .execute(
+            "INSERT INTO document_history_entries
+             (id, target_kind, knowledge_base_id, target_id, relative_path, title, file_type,
+              content_hash, byte_size, line_count, source, session_id, change_id,
+              operation_id, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
+            params![
+                &entry.id,
+                &entry.target_kind,
+                &entry.knowledge_base_id,
+                &entry.target_id,
+                &entry.relative_path,
+                &entry.title,
+                &entry.file_type,
+                &entry.content_hash,
+                entry.byte_size as i64,
+                entry.line_count as i64,
+                &entry.source,
+                entry.session_id.as_deref(),
+                entry.change_id.as_deref(),
+                entry.operation_id.as_deref(),
+                &entry.created_at
+            ],
+        )
+        .map_err(|error| format!("无法写入文档历史记录：{error}"))?;
+
+    Ok(())
+}
+
+/** 按保留策略清理当前文件历史，并同步删除被裁剪的快照文件。 */
+fn prune_document_history_entries(
+    connection: &Connection,
+    snapshot_root: &Path,
+    target_kind: &str,
+    target_id: &str,
+) -> Result<DocumentHistoryClearSummary, String> {
+    let oldest_created_at = (Local::now() - ChronoDuration::days(DOCUMENT_HISTORY_RETENTION_DAYS))
+        .format("%Y/%m/%d %H:%M")
+        .to_string();
+    let mut entry_ids_to_delete = HashSet::new();
+    let expired_ids = query_document_history_ids(
+        connection,
+        "SELECT id
+         FROM document_history_entries
+         WHERE target_kind = ?1 AND target_id = ?2 AND created_at < ?3",
+        params![target_kind, target_id, oldest_created_at],
+    )?;
+    let overflow_ids = query_document_history_ids(
+        connection,
+        "SELECT id
+         FROM document_history_entries
+         WHERE target_kind = ?1 AND target_id = ?2
+           AND rowid NOT IN (
+             SELECT rowid
+             FROM document_history_entries
+             WHERE target_kind = ?1 AND target_id = ?2
+             ORDER BY rowid DESC
+             LIMIT ?3
+           )",
+        params![
+            target_kind,
+            target_id,
+            MAX_DOCUMENT_HISTORY_ENTRIES_PER_FILE as i64
+        ],
+    )?;
+
+    entry_ids_to_delete.extend(expired_ids);
+    entry_ids_to_delete.extend(overflow_ids);
+
+    if entry_ids_to_delete.is_empty() {
+        return Ok(DocumentHistoryClearSummary::default());
+    }
+
+    let entry_ids = entry_ids_to_delete.into_iter().collect::<Vec<_>>();
+
+    for entry_id in &entry_ids {
+        connection
+            .execute(
+                "DELETE FROM document_history_entries WHERE id = ?1",
+                params![entry_id],
+            )
+            .map_err(|error| format!("无法删除过期文档历史记录：{error}"))?;
+    }
+    let cleanup_failure_count =
+        remove_document_history_snapshots_best_effort(snapshot_root, &entry_ids);
+
+    Ok(DocumentHistoryClearSummary {
+        removed_count: entry_ids.len(),
+        cleanup_failure_count,
+    })
+}
+
+/** 查询当前目标下所有历史 ID，用于清空或删除文件后的快照清理。 */
+fn load_document_history_ids_for_target(
+    connection: &Connection,
+    target_kind: &str,
+    target_id: &str,
+) -> Result<Vec<String>, String> {
+    query_document_history_ids(
+        connection,
+        "SELECT id FROM document_history_entries WHERE target_kind = ?1 AND target_id = ?2",
+        params![target_kind, target_id],
+    )
+}
+
+/** 执行只返回 id 的历史记录查询，集中处理 SQLite row 错误。 */
+fn query_document_history_ids<P>(
+    connection: &Connection,
+    sql: &str,
+    params: P,
+) -> Result<Vec<String>, String>
+where
+    P: rusqlite::Params,
+{
+    let mut statement = connection
+        .prepare(sql)
+        .map_err(|error| format!("无法准备文档历史清理查询：{error}"))?;
+    let rows = statement
+        .query_map(params, |row| row.get::<_, String>(0))
+        .map_err(|error| format!("无法查询文档历史清理列表：{error}"))?;
+    let mut entry_ids = Vec::new();
+
+    for row in rows {
+        entry_ids.push(row.map_err(|error| format!("无法解析文档历史清理列表：{error}"))?);
+    }
+
+    Ok(entry_ids)
+}
+
+/** 将 SQLite row 转成文档历史摘要模型，并把无符号数做边界收敛。 */
+fn document_history_entry_from_row(
+    row: &rusqlite::Row<'_>,
+) -> rusqlite::Result<DocumentHistoryEntry> {
+    let byte_size = row.get::<_, i64>(8)?.max(0) as usize;
+    let line_count = row.get::<_, i64>(9)?.max(0) as usize;
+
+    Ok(DocumentHistoryEntry {
+        id: row.get(0)?,
+        target_kind: row.get(1)?,
+        knowledge_base_id: row.get(2)?,
+        target_id: row.get(3)?,
+        relative_path: row.get(4)?,
+        title: row.get(5)?,
+        file_type: row.get(6)?,
+        content_hash: row.get(7)?,
+        byte_size,
+        line_count,
+        source: row.get(10)?,
+        session_id: row.get(11)?,
+        change_id: row.get(12)?,
+        operation_id: row.get(13)?,
+        created_at: row.get(14)?,
+    })
+}
+
 /** 从 SQLite 恢复已连接知识库，并重新扫描支持文档生成可用工作台快照。 */
 pub fn load_workspace_snapshot(app: &AppHandle) -> Result<WorkspaceSnapshot, String> {
     let connection = open_database(app)?;
@@ -4212,25 +4789,28 @@ mod tests {
     use super::{
         atomic_write_markdown, atomic_write_text_document, create_blank_markdown_file,
         create_blank_text_document_file, create_folder, create_id, create_stable_note_id,
-        ensure_persistent_model_keyring, extract_docx_preview_blocks, file_modified_local_datetime,
-        format_local_datetime, format_local_datetime_from_millis, hash_bytes, hash_content,
-        insert_app_event_log, is_missing_keyring_entry_error, load_document_preview,
-        load_model_api_key_from_cache, model_keyring_persists_until_delete,
-        normalize_audit_log_created_at, normalize_im_settings, normalize_knowledge_base_memory,
-        normalize_session_created_at, parse_im_settings_payload, prune_app_event_logs,
-        query_app_event_logs, redact_memory_secrets, rename_markdown_file,
+        ensure_database_schema, ensure_persistent_model_keyring, extract_docx_preview_blocks,
+        file_modified_local_datetime, format_local_datetime, format_local_datetime_from_millis,
+        hash_bytes, hash_content, insert_app_event_log, insert_document_history_entry,
+        is_missing_keyring_entry_error, load_document_history_ids_for_target,
+        load_document_preview, load_latest_document_history_hash, load_model_api_key_from_cache,
+        model_keyring_persists_until_delete, normalize_audit_log_created_at, normalize_im_settings,
+        normalize_knowledge_base_memory, normalize_session_created_at, parse_im_settings_payload,
+        prune_app_event_logs, prune_document_history_entries, query_app_event_logs,
+        read_document_history_snapshot, redact_memory_secrets, rename_markdown_file,
         rename_text_document_file, resolve_existing_file_inside_root, resolve_inside_root,
         save_note_image_attachments, scan_markdown_directory, scan_supported_documents_directory,
         sort_sessions_by_created_at_desc, store_model_api_key_in_cache, trash_markdown_file,
         trash_text_document_file_with, validate_folder_name, validate_markdown_file_name,
         validate_new_markdown_file_name, validate_new_text_document_file_name,
-        validate_text_document_file_name, BASE64_STANDARD,
+        validate_text_document_file_name, write_document_history_snapshot, BASE64_STANDARD,
+        MAX_DOCUMENT_HISTORY_ENTRIES_PER_FILE,
     };
     use crate::domain::{
-        AgentMemoryEntry, AgentSession, AppEventLog, FeishuIntegrationSettings,
-        ImIntegrationSettings, ImProviderSettings, KnowledgeBaseMemory, KnowledgeBaseSelection,
-        NoteImageAttachmentInput, RequestAuditLog, WorkspaceDocument, IM_PROVIDER_FEISHU,
-        MEMORY_CATEGORY_OTHER, MEMORY_SOURCE_USER,
+        AgentMemoryEntry, AgentSession, AppEventLog, DocumentHistoryEntry,
+        FeishuIntegrationSettings, ImIntegrationSettings, ImProviderSettings, KnowledgeBaseMemory,
+        KnowledgeBaseSelection, NoteImageAttachmentInput, RequestAuditLog, WorkspaceDocument,
+        IM_PROVIDER_FEISHU, MEMORY_CATEGORY_OTHER, MEMORY_SOURCE_USER,
     };
     use base64::Engine as _;
     use rusqlite::Connection;
@@ -4481,6 +5061,36 @@ mod tests {
         }
     }
 
+    /** 构造文档历史元数据；正文由调用方另行写入快照文件。 */
+    fn test_document_history_entry(
+        id: &str,
+        target_id: &str,
+        content: &str,
+        created_at: &str,
+    ) -> DocumentHistoryEntry {
+        DocumentHistoryEntry {
+            id: id.to_owned(),
+            target_kind: "note".to_owned(),
+            knowledge_base_id: "kb-test".to_owned(),
+            target_id: target_id.to_owned(),
+            relative_path: "folder/note.md".to_owned(),
+            title: "测试笔记".to_owned(),
+            file_type: "markdown".to_owned(),
+            content_hash: hash_content(content),
+            byte_size: content.as_bytes().len(),
+            line_count: if content.is_empty() {
+                0
+            } else {
+                content.split('\n').count()
+            },
+            source: "manual-save".to_owned(),
+            session_id: None,
+            change_id: None,
+            operation_id: None,
+            created_at: created_at.to_owned(),
+        }
+    }
+
     /** hash 内容变化时必须变化，用于写入冲突检测。 */
     #[test]
     fn hash_changes_when_content_changes() {
@@ -4648,6 +5258,83 @@ mod tests {
 
         assert_eq!(logs.len(), 1);
         assert_eq!(logs[0].id, "event-current");
+    }
+
+    /** 文档历史 schema 应幂等创建，避免旧数据库升级时缺表。 */
+    #[test]
+    fn document_history_schema_is_created_idempotently() {
+        let dir = tempdir().unwrap();
+        let database_path = dir.path().join("history-schema.sqlite3");
+        let connection = Connection::open(&database_path).unwrap();
+
+        ensure_database_schema(&connection, &database_path).unwrap();
+        ensure_database_schema(&connection, &database_path).unwrap();
+
+        let table_count: i64 = connection
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'document_history_entries'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+
+        assert_eq!(table_count, 1);
+    }
+
+    /** 历史快照读取必须拒绝路径穿越和缺失文件。 */
+    #[test]
+    fn document_history_snapshot_path_is_validated() {
+        let dir = tempdir().unwrap();
+
+        write_document_history_snapshot(dir.path(), "history-safe", "第一版").unwrap();
+
+        assert_eq!(
+            read_document_history_snapshot(dir.path(), "history-safe").unwrap(),
+            "第一版"
+        );
+        assert!(read_document_history_snapshot(dir.path(), "../history-safe").is_err());
+        assert!(read_document_history_snapshot(dir.path(), "history-missing").is_err());
+    }
+
+    /** 文档历史应跳过最新相同 hash，并按数量保留策略删除旧快照。 */
+    #[test]
+    fn document_history_dedupes_latest_hash_and_prunes_snapshots() {
+        let dir = tempdir().unwrap();
+        let database_path = dir.path().join("history-prune.sqlite3");
+        let connection = Connection::open(&database_path).unwrap();
+
+        ensure_database_schema(&connection, &database_path).unwrap();
+
+        for index in 0..=MAX_DOCUMENT_HISTORY_ENTRIES_PER_FILE {
+            let content = format!("版本 {index}");
+            let entry = test_document_history_entry(
+                &format!("history-prune-{index}"),
+                "note-a",
+                &content,
+                &format_local_datetime(),
+            );
+
+            write_document_history_snapshot(dir.path(), &entry.id, &content).unwrap();
+            insert_document_history_entry(&connection, &entry).unwrap();
+        }
+
+        assert_eq!(
+            load_latest_document_history_hash(&connection, "note", "note-a").unwrap(),
+            Some(hash_content(&format!(
+                "版本 {}",
+                MAX_DOCUMENT_HISTORY_ENTRIES_PER_FILE
+            )))
+        );
+
+        let summary =
+            prune_document_history_entries(&connection, dir.path(), "note", "note-a").unwrap();
+        let remaining_ids =
+            load_document_history_ids_for_target(&connection, "note", "note-a").unwrap();
+
+        assert_eq!(summary.removed_count, 1);
+        assert_eq!(summary.cleanup_failure_count, 0);
+        assert_eq!(remaining_ids.len(), MAX_DOCUMENT_HISTORY_ENTRIES_PER_FILE);
+        assert!(read_document_history_snapshot(dir.path(), "history-prune-0").is_err());
     }
 
     /** 路径穿越必须被阻止，防止 Agent 写出知识库根目录。 */
