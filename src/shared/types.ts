@@ -49,6 +49,15 @@ export type ExportFormat = "original" | "markdown" | "pdf";
 /** 当前文件导出目标类型，note 对应 Markdown，document 对应 TXT/DOCX/PDF/图片。 */
 export type ExportTargetKind = "note" | "document";
 
+/** 文档历史记录目标类型；首版只覆盖可写 Markdown 和 TXT 文件。 */
+export type DocumentHistoryTargetKind = "note" | "document";
+
+/** 文档历史记录来源，用于区分用户保存、Agent 写入和回档写入。 */
+export type DocumentHistorySource = "manual-save" | "agent-change" | "restore";
+
+/** 文档历史记录文件类型；Markdown 使用独立值，TXT 沿用普通文档能力。 */
+export type DocumentHistoryFileType = "markdown" | "txt";
+
 /** 可预览文档的正文块类型，首版 docx 只抽取段落级文本。 */
 export type DocumentPreviewBlockType = "heading" | "paragraph";
 
@@ -170,6 +179,30 @@ export interface DocumentPreview {
   contentHash: string;
   assetPath?: string;
   blocks?: DocumentPreviewBlock[];
+}
+
+/** 单条文档历史记录摘要；正文内容只在打开详情时按需读取。 */
+export interface DocumentHistoryEntry {
+  id: string;
+  targetKind: DocumentHistoryTargetKind;
+  knowledgeBaseId: string;
+  targetId: string;
+  relativePath: string;
+  title: string;
+  fileType: DocumentHistoryFileType;
+  contentHash: string;
+  byteSize: number;
+  lineCount: number;
+  source: DocumentHistorySource;
+  sessionId?: string;
+  changeId?: string;
+  operationId?: string;
+  createdAt: string;
+}
+
+/** 文档历史记录详情，包含可用于 diff 和回档写入的正文快照。 */
+export interface DocumentHistoryEntryDetail extends DocumentHistoryEntry {
+  content: string;
 }
 
 /** 当前文件导出结果；targetPath 仅用于前端即时提示，不进入前端日志。 */

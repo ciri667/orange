@@ -19,6 +19,11 @@ import type {
   AppEventLog,
   AppEventLogCategory,
   AppEventLogLevel,
+  DocumentHistoryEntry,
+  DocumentHistoryEntryDetail,
+  DocumentHistoryFileType,
+  DocumentHistorySource,
+  DocumentHistoryTargetKind,
   DocumentPreview,
   ExportFileResult,
   ExportFormat,
@@ -179,9 +184,148 @@ let browserAuditLogs: RequestAuditLog[] = [];
 /** 浏览器 fallback 的临时应用事件日志，模拟桌面端设置页诊断列表。 */
 let browserAppEventLogs: AppEventLog[] = [];
 
+/** 浏览器 fallback 的临时文档历史元数据，只用于开发态演示历史记录流程。 */
+let browserDocumentHistoryEntries: DocumentHistoryEntry[] = [];
+
+/** 浏览器 fallback 的临时文档历史正文快照，模拟桌面端 app data 快照文件。 */
+let browserDocumentHistoryContents = new Map<string, string>();
+
+/** 浏览器 fallback 的 Markdown 磁盘正文镜像，用于在 dirty 快照外模拟保存前版本。 */
+let browserNoteDiskContents = new Map<string, string>();
+
+/** 浏览器 fallback 的 TXT 磁盘正文镜像，用于历史捕获和 hash 冲突模拟。 */
+let browserDocumentDiskContents = new Map<string, string>();
+
 /** 从 IM 设置中读取飞书 provider；浏览器态缺失时回退默认值，避免旧 mock 状态崩溃。 */
 function getFeishuProvider(settings: ImIntegrationSettings): ImProviderSettings {
   return settings.providers.find((provider) => provider.providerId === "feishu") ?? defaultBrowserFeishuProvider;
+}
+
+/** 浏览器历史捕获上下文；正文只进入内存快照 Map，不进入前端日志。 */
+interface BrowserDocumentHistoryCapture {
+  targetKind: DocumentHistoryTargetKind;
+  knowledgeBaseId: string;
+  targetId: string;
+  relativePath: string;
+  title: string;
+  fileType: DocumentHistoryFileType;
+  content: string;
+  source: DocumentHistorySource;
+  sessionId?: string;
+  changeId?: string;
+  operationId?: string;
+}
+
+/** 浏览器历史记录每个文件保留的最大版本数，和 Rust 常量保持一致。 */
+const BROWSER_DOCUMENT_HISTORY_MAX_ENTRIES = 100;
+
+/** 浏览器历史记录最长保留天数，正式桌面端由 Rust 层执行同一策略。 */
+const BROWSER_DOCUMENT_HISTORY_RETENTION_DAYS = 90;
+
+/** 统计历史快照行数；空正文显示 0 行，尾随换行保留为可见逻辑行。 */
+function countBrowserHistoryLines(content: string) {
+  return content ? content.split("\n").length : 0;
+}
+
+/** 判断某条浏览器历史记录是否属于指定文件。 */
+function isBrowserHistoryTarget(entry: DocumentHistoryEntry, targetKind: DocumentHistoryTargetKind, targetId: string) {
+  return entry.targetKind === targetKind && entry.targetId === targetId;
+}
+
+/** 捕获浏览器开发态历史版本；相同目标最新 hash 一致时不重复写入。 */
+function captureBrowserDocumentHistory(capture: BrowserDocumentHistoryCapture) {
+  const contentHash = createContentHash(capture.content);
+  const latestEntry = browserDocumentHistoryEntries.find((entry) => isBrowserHistoryTarget(entry, capture.targetKind, capture.targetId));
+
+  if (latestEntry?.contentHash === contentHash) {
+    return;
+  }
+
+  const entry: DocumentHistoryEntry = {
+    id: createLocalId("history"),
+    targetKind: capture.targetKind,
+    knowledgeBaseId: capture.knowledgeBaseId,
+    targetId: capture.targetId,
+    relativePath: capture.relativePath,
+    title: capture.title,
+    fileType: capture.fileType,
+    contentHash,
+    byteSize: new TextEncoder().encode(capture.content).length,
+    lineCount: countBrowserHistoryLines(capture.content),
+    source: capture.source,
+    sessionId: capture.sessionId,
+    changeId: capture.changeId,
+    operationId: capture.operationId,
+    createdAt: formatLocalDateTime(),
+  };
+
+  browserDocumentHistoryEntries = [entry, ...browserDocumentHistoryEntries];
+  browserDocumentHistoryContents.set(entry.id, capture.content);
+  pruneBrowserDocumentHistory(capture.targetKind, capture.targetId);
+}
+
+/** 对浏览器历史记录执行数量和时间保留策略，并同步清理正文 Map。 */
+function pruneBrowserDocumentHistory(targetKind: DocumentHistoryTargetKind, targetId: string) {
+  const cutoffTime = Date.now() - BROWSER_DOCUMENT_HISTORY_RETENTION_DAYS * 24 * 60 * 60 * 1000;
+  let keptForTarget = 0;
+
+  browserDocumentHistoryEntries = browserDocumentHistoryEntries.filter((entry) => {
+    if (!isBrowserHistoryTarget(entry, targetKind, targetId)) {
+      return true;
+    }
+
+    const createdTime = Date.parse(entry.createdAt.replace(/\//g, "-"));
+    const isExpired = Number.isFinite(createdTime) && createdTime < cutoffTime;
+    const shouldKeep = !isExpired && keptForTarget < BROWSER_DOCUMENT_HISTORY_MAX_ENTRIES;
+
+    if (shouldKeep) {
+      keptForTarget += 1;
+    } else {
+      browserDocumentHistoryContents.delete(entry.id);
+    }
+
+    return shouldKeep;
+  });
+}
+
+/** 重命名浏览器 mock 文件后迁移历史元数据，让旧版本继续挂在新文件 ID 下。 */
+function migrateBrowserDocumentHistoryTarget(
+  targetKind: DocumentHistoryTargetKind,
+  previousTargetId: string,
+  nextTargetId: string,
+  relativePath: string,
+  title: string,
+) {
+  browserDocumentHistoryEntries = browserDocumentHistoryEntries.map((entry) =>
+    isBrowserHistoryTarget(entry, targetKind, previousTargetId)
+      ? {
+          ...entry,
+          targetId: nextTargetId,
+          relativePath,
+          title,
+        }
+      : entry,
+  );
+}
+
+/** 清理浏览器 mock 当前文件历史，不影响其他文件或当前文档正文。 */
+function clearBrowserDocumentHistory(targetKind: DocumentHistoryTargetKind, targetId: string) {
+  const removedIds = browserDocumentHistoryEntries
+    .filter((entry) => isBrowserHistoryTarget(entry, targetKind, targetId))
+    .map((entry) => entry.id);
+
+  removedIds.forEach((entryId) => browserDocumentHistoryContents.delete(entryId));
+  browserDocumentHistoryEntries = browserDocumentHistoryEntries.filter((entry) => !removedIds.includes(entry.id));
+}
+
+/** 从初始 mock 快照建立磁盘正文镜像；只在浏览器 loadWorkspaceState 时整体重置。 */
+function resetBrowserDiskContents(snapshot: WorkspaceSnapshot) {
+  browserNoteDiskContents = new Map(snapshot.notes.map((note) => [note.id, note.content]));
+  browserDocumentDiskContents = new Map(
+    snapshot.documents
+      .filter((document) => document.fileType === "txt")
+      .map((document) => [document.id, document.content ?? ""]),
+  );
 }
 
 /** 带脱敏日志的 Tauri invoke 包装，只记录命令名、状态和耗时，不记录 payload。 */
@@ -343,7 +487,13 @@ export function isTauriRuntime() {
 /** 从 Tauri 本地层加载工作台状态，浏览器中回退到 mock 数据。 */
 export async function loadWorkspaceState(): Promise<WorkspaceSnapshot> {
   if (!isTauriRuntime()) {
-    return createMockWorkspaceSnapshot();
+    const snapshot = createMockWorkspaceSnapshot();
+
+    browserDocumentHistoryEntries = [];
+    browserDocumentHistoryContents = new Map();
+    resetBrowserDiskContents(snapshot);
+
+    return snapshot;
   }
 
   return invokeLogged<WorkspaceSnapshot>("load_workspace_state");
@@ -1001,6 +1151,8 @@ export async function attachKnowledgeBase(
     nextSnapshot.folders = [...nextSnapshot.folders, newFolder];
     nextSnapshot.notes = [newNote, ...nextSnapshot.notes];
     nextSnapshot.documents = [newDocument, ...nextSnapshot.documents];
+    browserNoteDiskContents.set(newNote.id, newNote.content);
+    browserDocumentDiskContents.set(newDocument.id, newDocument.content ?? "");
     nextSnapshot.activeKnowledgeBaseId = newKnowledgeBase.id;
     nextSnapshot.activeNoteId = newNote.id;
     nextSnapshot.activeDocumentId = "";
@@ -1068,6 +1220,7 @@ export async function createNote(
     };
 
     nextSnapshot.notes = [newNote, ...nextSnapshot.notes];
+    browserNoteDiskContents.set(newNote.id, newNote.content);
     nextSnapshot.knowledgeBases = nextSnapshot.knowledgeBases.map((item) =>
       item.id === knowledgeBaseId
         ? {
@@ -1141,6 +1294,7 @@ export async function createDocument(
     };
 
     nextSnapshot.documents = [newDocument, ...nextSnapshot.documents];
+    browserDocumentDiskContents.set(newDocument.id, newDocument.content ?? "");
     nextSnapshot.knowledgeBases = nextSnapshot.knowledgeBases.map((item) =>
       item.id === knowledgeBaseId
         ? {
@@ -1228,9 +1382,33 @@ export async function saveNoteContent(
 ): Promise<WorkspaceSnapshot> {
   if (!isTauriRuntime()) {
     const nextSnapshot = cloneWorkspaceSnapshot(snapshot);
+    const note = nextSnapshot.notes.find((item) => item.id === noteId);
 
-    nextSnapshot.notes = nextSnapshot.notes.map((note) =>
-      note.id === noteId ? { ...note, content, contentHash: createContentHash(content), updatedAt: "刚刚" } : note,
+    if (!note) {
+      throw new Error("找不到要保存的笔记。");
+    }
+
+    const diskContent = browserNoteDiskContents.get(note.id) ?? note.content;
+    const diskHash = createContentHash(diskContent);
+
+    if (diskHash !== expectedHash) {
+      throw new Error("目标文件已被外部修改，已阻止保存。请重新扫描后再编辑。");
+    }
+
+    captureBrowserDocumentHistory({
+      targetKind: "note",
+      knowledgeBaseId: note.knowledgeBaseId,
+      targetId: note.id,
+      relativePath: note.path,
+      title: note.title,
+      fileType: "markdown",
+      content: diskContent,
+      source: "manual-save",
+    });
+
+    browserNoteDiskContents.set(note.id, content);
+    nextSnapshot.notes = nextSnapshot.notes.map((item) =>
+      item.id === noteId ? { ...item, content, contentHash: createContentHash(content), updatedAt: "刚刚" } : item,
     );
 
     return nextSnapshot;
@@ -1273,10 +1451,25 @@ export async function saveDocumentContent(
       throw new Error("只有 TXT 文档支持保存。");
     }
 
-    if (document.contentHash !== expectedHash) {
+    const diskContent = browserDocumentDiskContents.get(document.id) ?? document.content ?? "";
+    const diskHash = createContentHash(diskContent);
+
+    if (diskHash !== expectedHash) {
       throw new Error("目标文件已被外部修改，已阻止保存。请重新扫描后再编辑。");
     }
 
+    captureBrowserDocumentHistory({
+      targetKind: "document",
+      knowledgeBaseId: document.knowledgeBaseId,
+      targetId: document.id,
+      relativePath: document.path,
+      title: document.title,
+      fileType: "txt",
+      content: diskContent,
+      source: "manual-save",
+    });
+
+    browserDocumentDiskContents.set(document.id, content);
     nextSnapshot.documents = nextSnapshot.documents.map((item) =>
       item.id === documentId ? { ...item, content, contentHash: createContentHash(content), updatedAt: "刚刚" } : item,
     );
@@ -1317,6 +1510,8 @@ export async function renameNote(
     }
 
     const nextNoteId = createLocalId("note-renamed");
+    const diskContent = browserNoteDiskContents.get(note.id) ?? note.content;
+    const nextTitle = getTitleFromMarkdownOrFileName(note.content, safeFileName);
 
     nextSnapshot.notes = nextSnapshot.notes.map((item) =>
       item.id === note.id
@@ -1324,11 +1519,14 @@ export async function renameNote(
             ...item,
             id: nextNoteId,
             path: nextPath,
-            title: getTitleFromMarkdownOrFileName(item.content, safeFileName),
+            title: nextTitle,
             updatedAt: "刚刚",
           }
         : item,
     );
+    browserNoteDiskContents.delete(note.id);
+    browserNoteDiskContents.set(nextNoteId, diskContent);
+    migrateBrowserDocumentHistoryTarget("note", note.id, nextNoteId, nextPath, nextTitle);
     migrateNoteReferencesAfterRename(nextSnapshot, note.id, nextNoteId, nextPath);
     nextSnapshot.activeDocumentId = "";
 
@@ -1370,6 +1568,8 @@ export async function renameDocument(
     }
 
     const nextDocumentId = createLocalId("document-renamed");
+    const diskContent = browserDocumentDiskContents.get(document.id) ?? document.content ?? "";
+    const nextTitle = safeFileName.replace(/\.txt$/i, "");
 
     nextSnapshot.documents = nextSnapshot.documents.map((item) =>
       item.id === document.id
@@ -1377,11 +1577,14 @@ export async function renameDocument(
             ...item,
             id: nextDocumentId,
             path: nextPath,
-            title: safeFileName.replace(/\.txt$/i, ""),
+            title: nextTitle,
             updatedAt: "刚刚",
           }
         : item,
     );
+    browserDocumentDiskContents.delete(document.id);
+    browserDocumentDiskContents.set(nextDocumentId, diskContent);
+    migrateBrowserDocumentHistoryTarget("document", document.id, nextDocumentId, nextPath, nextTitle);
 
     if (nextSnapshot.activeDocumentId === document.id) {
       nextSnapshot.activeDocumentId = nextDocumentId;
@@ -1409,11 +1612,15 @@ export async function deleteNote(
     }
 
     // 与桌面 Tauri command 保持一致：删除前必须确认操作基于同一份文件版本。
-    if (note.contentHash !== expectedHash) {
+    const diskContent = browserNoteDiskContents.get(note.id) ?? note.content;
+
+    if (createContentHash(diskContent) !== expectedHash) {
       throw new Error("目标文件已被外部修改，已阻止删除。请重新扫描后再操作。");
     }
 
     nextSnapshot.notes = nextSnapshot.notes.filter((item) => item.id !== noteId);
+    browserNoteDiskContents.delete(noteId);
+    clearBrowserDocumentHistory("note", noteId);
     nextSnapshot.knowledgeBases = nextSnapshot.knowledgeBases.map((knowledgeBase) =>
       knowledgeBase.id === note.knowledgeBaseId
         ? {
@@ -1467,11 +1674,15 @@ export async function deleteDocument(
     }
 
     // 与桌面 Tauri command 保持一致：删除前必须确认操作基于同一份文件版本。
-    if (document.contentHash !== expectedHash) {
+    const diskContent = browserDocumentDiskContents.get(document.id) ?? document.content ?? "";
+
+    if (createContentHash(diskContent) !== expectedHash) {
       throw new Error("目标文件已被外部修改，已阻止删除。请重新扫描后再操作。");
     }
 
     nextSnapshot.documents = nextSnapshot.documents.filter((item) => item.id !== documentId);
+    browserDocumentDiskContents.delete(documentId);
+    clearBrowserDocumentHistory("document", documentId);
     nextSnapshot.knowledgeBases = nextSnapshot.knowledgeBases.map((knowledgeBase) =>
       knowledgeBase.id === document.knowledgeBaseId
         ? {
@@ -1540,6 +1751,146 @@ export async function loadDocumentPreview(snapshot: WorkspaceSnapshot, documentI
   return invokeLogged<DocumentPreview>("load_document_preview", { payload: { snapshot, documentId } });
 }
 
+/** 读取当前 Markdown/TXT 文件历史列表；DOCX/PDF/图片不会调用该接口。 */
+export async function loadDocumentHistory(
+  snapshot: WorkspaceSnapshot,
+  targetKind: DocumentHistoryTargetKind,
+  targetId: string,
+): Promise<DocumentHistoryEntry[]> {
+  if (!isTauriRuntime()) {
+    return browserDocumentHistoryEntries
+      .filter((entry) => isBrowserHistoryTarget(entry, targetKind, targetId))
+      .map((entry) => ({ ...entry }));
+  }
+
+  return invokeLogged<DocumentHistoryEntry[]>("load_document_history", {
+    payload: { snapshot, targetKind, targetId },
+  });
+}
+
+/** 读取单条历史记录正文快照，供恢复 diff 预览使用。 */
+export async function loadDocumentHistoryEntry(entryId: string): Promise<DocumentHistoryEntryDetail> {
+  if (!isTauriRuntime()) {
+    const entry = browserDocumentHistoryEntries.find((item) => item.id === entryId);
+
+    if (!entry) {
+      throw new Error("找不到该历史记录。");
+    }
+
+    const content = browserDocumentHistoryContents.get(entryId);
+
+    if (typeof content !== "string") {
+      throw new Error("历史快照不存在或不可访问。");
+    }
+
+    return { ...entry, content };
+  }
+
+  return invokeLogged<DocumentHistoryEntryDetail>("load_document_history_entry", {
+    payload: { entryId },
+  });
+}
+
+/** 恢复指定历史版本；恢复前会先保存当前磁盘版本为历史记录。 */
+export async function restoreDocumentHistoryEntry(
+  snapshot: WorkspaceSnapshot,
+  entryId: string,
+  expectedHash: string,
+): Promise<WorkspaceSnapshot> {
+  if (!isTauriRuntime()) {
+    const detail = await loadDocumentHistoryEntry(entryId);
+    const nextSnapshot = cloneWorkspaceSnapshot(snapshot);
+
+    if (detail.targetKind === "note") {
+      const note = nextSnapshot.notes.find((item) => item.id === detail.targetId);
+
+      if (!note) {
+        throw new Error("找不到要恢复的 Markdown 笔记。");
+      }
+
+      const diskContent = browserNoteDiskContents.get(note.id) ?? note.content;
+
+      if (createContentHash(diskContent) !== expectedHash) {
+        throw new Error("目标文件已被外部修改，已阻止恢复。请重新扫描后再操作。");
+      }
+
+      captureBrowserDocumentHistory({
+        targetKind: "note",
+        knowledgeBaseId: note.knowledgeBaseId,
+        targetId: note.id,
+        relativePath: note.path,
+        title: note.title,
+        fileType: "markdown",
+        content: diskContent,
+        source: "restore",
+      });
+      browserNoteDiskContents.set(note.id, detail.content);
+      nextSnapshot.notes = nextSnapshot.notes.map((item) =>
+        item.id === note.id
+          ? { ...item, content: detail.content, contentHash: createContentHash(detail.content), updatedAt: "刚刚" }
+          : item,
+      );
+      nextSnapshot.activeNoteId = note.id;
+      nextSnapshot.activeDocumentId = "";
+
+      return nextSnapshot;
+    }
+
+    const document = nextSnapshot.documents.find((item) => item.id === detail.targetId);
+
+    if (!document || document.fileType !== "txt") {
+      throw new Error("找不到要恢复的 TXT 文档。");
+    }
+
+    const diskContent = browserDocumentDiskContents.get(document.id) ?? document.content ?? "";
+
+    if (createContentHash(diskContent) !== expectedHash) {
+      throw new Error("目标文件已被外部修改，已阻止恢复。请重新扫描后再操作。");
+    }
+
+    captureBrowserDocumentHistory({
+      targetKind: "document",
+      knowledgeBaseId: document.knowledgeBaseId,
+      targetId: document.id,
+      relativePath: document.path,
+      title: document.title,
+      fileType: "txt",
+      content: diskContent,
+      source: "restore",
+    });
+    browserDocumentDiskContents.set(document.id, detail.content);
+    nextSnapshot.documents = nextSnapshot.documents.map((item) =>
+      item.id === document.id
+        ? { ...item, content: detail.content, contentHash: createContentHash(detail.content), updatedAt: "刚刚" }
+        : item,
+    );
+    nextSnapshot.activeNoteId = "";
+    nextSnapshot.activeDocumentId = document.id;
+
+    return nextSnapshot;
+  }
+
+  return invokeLogged<WorkspaceSnapshot>("restore_document_history_entry", {
+    payload: { snapshot, entryId, expectedHash },
+  });
+}
+
+/** 清空当前文件历史记录；不会删除用户文档正文。 */
+export async function clearDocumentHistory(
+  snapshot: WorkspaceSnapshot,
+  targetKind: DocumentHistoryTargetKind,
+  targetId: string,
+): Promise<void> {
+  if (!isTauriRuntime()) {
+    clearBrowserDocumentHistory(targetKind, targetId);
+    return;
+  }
+
+  await invokeLogged<void>("clear_document_history", {
+    payload: { snapshot, targetKind, targetId },
+  });
+}
+
 /** 浏览器开发态没有 Tauri asset 协议，用轻量 SVG data URL 模拟图片预览。 */
 function createMockImagePreviewDataUrl(title: string) {
   const safeTitle = title.replace(/[<>&"]/g, "");
@@ -1573,6 +1924,20 @@ export async function removeKnowledgeBase(snapshot: WorkspaceSnapshot, knowledge
     nextSnapshot.folders = nextSnapshot.folders.filter((folder) => folder.knowledgeBaseId !== knowledgeBaseId);
     nextSnapshot.notes = nextSnapshot.notes.filter((note) => note.knowledgeBaseId !== knowledgeBaseId);
     nextSnapshot.documents = nextSnapshot.documents.filter((document) => document.knowledgeBaseId !== knowledgeBaseId);
+    browserDocumentHistoryEntries
+      .filter((entry) => entry.knowledgeBaseId === knowledgeBaseId)
+      .forEach((entry) => browserDocumentHistoryContents.delete(entry.id));
+    browserDocumentHistoryEntries = browserDocumentHistoryEntries.filter((entry) => entry.knowledgeBaseId !== knowledgeBaseId);
+    Array.from(browserNoteDiskContents.keys()).forEach((noteId) => {
+      if (!nextSnapshot.notes.some((note) => note.id === noteId)) {
+        browserNoteDiskContents.delete(noteId);
+      }
+    });
+    Array.from(browserDocumentDiskContents.keys()).forEach((documentId) => {
+      if (!nextSnapshot.documents.some((document) => document.id === documentId)) {
+        browserDocumentDiskContents.delete(documentId);
+      }
+    });
     nextSnapshot.sessions = nextSnapshot.sessions
       .map((session) => ({
         ...session,
@@ -1704,7 +2069,45 @@ function truncateSummaryText(value: string) {
 /** 接受当前会话的待确认变更，Tauri 环境中由本地层执行安全写入。 */
 export async function acceptProposedChange(snapshot: WorkspaceSnapshot): Promise<WorkspaceSnapshot> {
   if (!isTauriRuntime()) {
-    return normalizeMockSnapshotSessions(acceptMockProposedChange(snapshot));
+    const pendingChange = snapshot.sessions.find((session) => session.id === snapshot.activeSessionId)?.pendingChange;
+    const targetNote = pendingChange?.noteId
+      ? snapshot.notes.find((note) => note.id === pendingChange.noteId)
+      : undefined;
+
+    if (pendingChange && pendingChange.type !== "create" && targetNote) {
+      const diskContent = browserNoteDiskContents.get(targetNote.id) ?? targetNote.content;
+
+      captureBrowserDocumentHistory({
+        targetKind: "note",
+        knowledgeBaseId: targetNote.knowledgeBaseId,
+        targetId: targetNote.id,
+        relativePath: targetNote.path,
+        title: targetNote.title,
+        fileType: "markdown",
+        content: diskContent,
+        source: "agent-change",
+        sessionId: snapshot.activeSessionId,
+        changeId: pendingChange.id,
+      });
+    }
+
+    const nextSnapshot = normalizeMockSnapshotSessions(acceptMockProposedChange(snapshot));
+
+    if (pendingChange?.type === "create") {
+      const createdNote = nextSnapshot.notes.find((note) => note.path === pendingChange.targetPath);
+
+      if (createdNote) {
+        browserNoteDiskContents.set(createdNote.id, createdNote.content);
+      }
+    } else if (targetNote) {
+      const nextNote = nextSnapshot.notes.find((note) => note.id === targetNote.id);
+
+      if (nextNote) {
+        browserNoteDiskContents.set(nextNote.id, nextNote.content);
+      }
+    }
+
+    return nextSnapshot;
   }
 
   return invokeLogged<WorkspaceSnapshot>("apply_proposed_change", { payload: { snapshot } });
