@@ -1,4 +1,4 @@
-import { ChevronDown, FileDown, FilePenLine, MoreHorizontal, Trash2 } from "lucide-react";
+import { ChevronDown, FileDown, FilePenLine, History, MoreHorizontal, Trash2 } from "lucide-react";
 import { useState, type ReactNode } from "react";
 import { logDebug } from "../shared/logger";
 import { OverflowTooltipText } from "../shared/OverflowTooltipText";
@@ -92,6 +92,7 @@ export function EditorMoreActionMenu({
   isBusy,
   logContext,
   onExportFile,
+  onOpenHistory,
   onRename,
   onDelete,
 }: {
@@ -99,6 +100,7 @@ export function EditorMoreActionMenu({
   isBusy: boolean;
   logContext: EditorMoreActionLogContext;
   onExportFile: (format: ExportFormat) => void | Promise<void>;
+  onOpenHistory?: () => void;
   onRename?: () => void;
   onDelete?: () => void;
 }) {
@@ -166,6 +168,19 @@ export function EditorMoreActionMenu({
                 {option.label}
               </button>
             ))}
+          {onOpenHistory && (
+            <button
+              type="button"
+              role="menuitem"
+              onClick={() => {
+                setIsMoreMenuOpen(false);
+                onOpenHistory();
+              }}
+            >
+              <History size={14} />
+              历史记录
+            </button>
+          )}
           {onRename && (
             <button
               type="button"

@@ -69,6 +69,7 @@ export function EditorPane({
   onContentChange,
   onPasteImages,
   onExportFile,
+  onOpenHistory,
   onRenameNote,
   onDeleteNote,
   onAcceptChange,
@@ -87,6 +88,7 @@ export function EditorPane({
   onContentChange: (content: string) => void;
   onPasteImages: (files: File[], selectionStart: number, selectionEnd: number) => void;
   onExportFile: (format: ExportFormat) => void | Promise<void>;
+  onOpenHistory: () => void;
   onRenameNote: () => void;
   onDeleteNote: () => void;
   onAcceptChange: () => void;
@@ -170,6 +172,7 @@ export function EditorPane({
               metadata: { isBusy, isDirty, viewMode },
             }}
             onExportFile={onExportFile}
+            onOpenHistory={onOpenHistory}
             onRename={onRenameNote}
             onDelete={onDeleteNote}
           />

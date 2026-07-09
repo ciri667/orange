@@ -8,6 +8,7 @@ import {
   FileType,
   FolderOpen,
   FolderPlus,
+  History,
   MoreHorizontal,
   Plus,
   Trash2,
@@ -30,8 +31,10 @@ export function FileTree({
   onSelectDocument,
   onRenameNote,
   onDeleteNote,
+  onOpenNoteHistory,
   onRenameDocument,
   onDeleteDocument,
+  onOpenDocumentHistory,
   onCreateMarkdown,
   onCreateText,
   onCreateFolder,
@@ -46,8 +49,10 @@ export function FileTree({
   onSelectDocument: (documentId: string) => void;
   onRenameNote: (noteId: string) => void;
   onDeleteNote: (noteId: string) => void;
+  onOpenNoteHistory: (noteId: string) => void;
   onRenameDocument: (documentId: string) => void;
   onDeleteDocument: (documentId: string) => void;
+  onOpenDocumentHistory: (documentId: string) => void;
   onCreateMarkdown: (parentPath: string) => void;
   onCreateText: (parentPath: string) => void;
   onCreateFolder: (parentPath: string) => void;
@@ -131,8 +136,10 @@ export function FileTree({
                   onSelectDocument={onSelectDocument}
                   onRenameNote={onRenameNote}
                   onDeleteNote={onDeleteNote}
+                  onOpenNoteHistory={onOpenNoteHistory}
                   onRenameDocument={onRenameDocument}
                   onDeleteDocument={onDeleteDocument}
+                  onOpenDocumentHistory={onOpenDocumentHistory}
                   onCreateMarkdown={onCreateMarkdown}
                   onCreateText={onCreateText}
                   onCreateFolder={onCreateFolder}
@@ -145,6 +152,7 @@ export function FileTree({
         const noteId = node.noteId;
         const documentId = node.documentId;
         const isActiveFile = noteId === activeNoteId || documentId === activeDocumentId;
+        const canOpenHistory = Boolean(node.capabilities?.canEdit);
         const canRename = Boolean(node.capabilities?.canRename);
         const canDelete = Boolean(node.capabilities?.canDelete);
 
@@ -172,16 +180,19 @@ export function FileTree({
                 <OverflowTooltipText className="file-tree-name" text={node.name} logArea="file_tree_file" />
                 <span className="file-tree-type">{formatFileTreeTypeLabel(node)}</span>
               </button>
-              {(canRename || canDelete) && (
+              {(canOpenHistory || canRename || canDelete) && (
                 <div className="file-tree-actions">
                   <FileActionMenu
                     isOpen={openFileActionPath === node.path}
                     onToggle={() => handleToggleFileActionMenu(node)}
                     onClose={() => setOpenFileActionPath(null)}
+                    canOpenHistory={canOpenHistory}
                     canRename={canRename}
                     canDelete={canDelete}
                     noteId={noteId}
                     documentId={documentId}
+                    onOpenNoteHistory={onOpenNoteHistory}
+                    onOpenDocumentHistory={onOpenDocumentHistory}
                     onRenameNote={onRenameNote}
                     onDeleteNote={onDeleteNote}
                     onRenameDocument={onRenameDocument}
@@ -282,10 +293,13 @@ function FileActionMenu({
   isOpen,
   onToggle,
   onClose,
+  canOpenHistory,
   canRename,
   canDelete,
   noteId,
   documentId,
+  onOpenNoteHistory,
+  onOpenDocumentHistory,
   onRenameNote,
   onDeleteNote,
   onRenameDocument,
@@ -294,10 +308,13 @@ function FileActionMenu({
   isOpen: boolean;
   onToggle: () => void;
   onClose: () => void;
+  canOpenHistory: boolean;
   canRename: boolean;
   canDelete: boolean;
   noteId: string | undefined;
   documentId: string | undefined;
+  onOpenNoteHistory: (noteId: string) => void;
+  onOpenDocumentHistory: (documentId: string) => void;
   onRenameNote: (noteId: string) => void;
   onDeleteNote: (noteId: string) => void;
   onRenameDocument: (documentId: string) => void;
@@ -322,6 +339,23 @@ function FileActionMenu({
       </button>
       {isOpen && (
         <div className="file-action-menu" role="menu">
+          {canOpenHistory && (
+            <button
+              type="button"
+              role="menuitem"
+              onClick={() => {
+                onClose();
+                if (noteId) {
+                  onOpenNoteHistory(noteId);
+                } else if (documentId) {
+                  onOpenDocumentHistory(documentId);
+                }
+              }}
+            >
+              <History size={14} />
+              历史记录
+            </button>
+          )}
           {canRename && (
             <button
               type="button"

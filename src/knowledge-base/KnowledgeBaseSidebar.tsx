@@ -35,8 +35,10 @@ export function KnowledgeBaseSidebar({
   onSelectDocument,
   onRenameNote,
   onDeleteNote,
+  onOpenNoteHistory,
   onRenameDocument,
   onDeleteDocument,
+  onOpenDocumentHistory,
   onCreateMarkdown,
   onCreateText,
   onCreateFolder,
@@ -60,8 +62,10 @@ export function KnowledgeBaseSidebar({
   onSelectDocument: (documentId: string) => void;
   onRenameNote: (noteId: string) => void;
   onDeleteNote: (noteId: string) => void;
+  onOpenNoteHistory: (noteId: string) => void;
   onRenameDocument: (documentId: string) => void;
   onDeleteDocument: (documentId: string) => void;
+  onOpenDocumentHistory: (documentId: string) => void;
   onCreateMarkdown: (parentPath: string) => void;
   onCreateText: (parentPath: string) => void;
   onCreateFolder: (parentPath: string) => void;
@@ -159,8 +163,10 @@ export function KnowledgeBaseSidebar({
           onSelectDocument={onSelectDocument}
           onRenameNote={onRenameNote}
           onDeleteNote={onDeleteNote}
+          onOpenNoteHistory={onOpenNoteHistory}
           onRenameDocument={onRenameDocument}
           onDeleteDocument={onDeleteDocument}
+          onOpenDocumentHistory={onOpenDocumentHistory}
           onCreateMarkdown={onCreateMarkdown}
           onCreateText={onCreateText}
           onCreateFolder={onCreateFolder}

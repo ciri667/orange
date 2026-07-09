@@ -69,6 +69,7 @@ export function DocumentPane({
   onSaveDocument,
   onContentChange,
   onExportFile,
+  onOpenHistory,
   onRenameDocument,
   onDeleteDocument,
 }: {
@@ -82,6 +83,7 @@ export function DocumentPane({
   onSaveDocument: () => void;
   onContentChange: (content: string) => void;
   onExportFile: (format: ExportFormat) => void | Promise<void>;
+  onOpenHistory: () => void;
   onRenameDocument: () => void;
   onDeleteDocument: () => void;
 }) {
@@ -127,6 +129,7 @@ export function DocumentPane({
               metadata: { fileType: document.fileType, isBusy, isDirty },
             }}
             onExportFile={onExportFile}
+            onOpenHistory={isTextDocument ? onOpenHistory : undefined}
             onRename={isTextDocument ? onRenameDocument : undefined}
             onDelete={isTextDocument ? onDeleteDocument : undefined}
           />

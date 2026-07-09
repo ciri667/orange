@@ -47,6 +47,7 @@ import type {
   AgentActionType,
   AgentMessage,
   AgentSession,
+  DocumentHistoryTargetKind,
   ExportFormat,
   KnowledgeBase,
   MarkdownViewMode,
@@ -55,6 +56,7 @@ import type {
   ReviewComment,
   WorkspaceSnapshot,
 } from "../shared/types";
+import { DocumentHistoryDialog } from "./DocumentHistoryDialog";
 import type { ReviewCommentDraft } from "../diff/DiffPanel";
 import { TopBar } from "./TopBar";
 import { useAgentTurnDraft } from "./useAgentTurnDraft";
@@ -341,6 +343,8 @@ export function WorkspaceShell() {
   } = useWorkspaceDrafts();
   /** Markdown 编辑区视图模式，保持编辑/预览切换不影响文件内容。 */
   const [markdownViewMode, setMarkdownViewMode] = useState<MarkdownViewMode>("edit");
+  /** 当前打开的文档历史弹窗目标；只允许 Markdown 和 TXT。 */
+  const [historyDialog, setHistoryDialog] = useState<{ targetKind: DocumentHistoryTargetKind; targetId: string } | null>(null);
   /** 文件重命名弹窗草稿，同时支持 Markdown 和可编辑 TXT。 */
   const [renameDialog, setRenameDialog] = useState<{ kind: "note" | "document"; id: string; fileName: string } | null>(null);
   /** 目录树新建弹窗草稿，创建位置由被点击的父目录决定。 */
@@ -492,6 +496,31 @@ export function WorkspaceShell() {
     documents: currentSnapshot.documents,
     searchTerm,
   });
+  const historyNote = historyDialog?.targetKind === "note"
+    ? currentSnapshot.notes.find((note) => note.id === historyDialog.targetId)
+    : undefined;
+  const historyDocument = historyDialog?.targetKind === "document"
+    ? currentSnapshot.documents.find((document) => document.id === historyDialog.targetId && document.fileType === "txt")
+    : undefined;
+  const historyTarget = historyNote
+    ? {
+        targetKind: "note" as const,
+        targetId: historyNote.id,
+        title: historyNote.title,
+        content: historyNote.content,
+        contentHash: historyNote.contentHash,
+        isDirty: dirtyNoteIds.has(historyNote.id),
+      }
+    : historyDocument
+      ? {
+          targetKind: "document" as const,
+          targetId: historyDocument.id,
+          title: historyDocument.title,
+          content: historyDocument.content ?? "",
+          contentHash: historyDocument.contentHash,
+          isDirty: dirtyDocumentIds.has(historyDocument.id),
+        }
+      : null;
 
   /** 统一进入忙碌状态，附带可展示的操作说明。 */
   function beginBusy(label: string) {
@@ -801,6 +830,42 @@ export function WorkspaceShell() {
       ),
     });
     setDirtyDocumentIds((currentDocumentIds) => new Set(currentDocumentIds).add(activeDocument.id));
+  }
+
+  /** 打开 Markdown 历史记录弹窗；允许存在草稿，但恢复动作会在弹窗内禁用。 */
+  function openNoteHistory(noteId = activeNote?.id ?? "") {
+    const note = currentSnapshot.notes.find((item) => item.id === noteId);
+
+    if (!note) {
+      return;
+    }
+
+    setHistoryDialog({ targetKind: "note", targetId: note.id });
+  }
+
+  /** 打开 TXT 历史记录弹窗；DOCX/PDF/图片不暴露该入口。 */
+  function openDocumentHistory(documentId = activeDocument?.id ?? "") {
+    const document = currentSnapshot.documents.find((item) => item.id === documentId);
+
+    if (!document || document.fileType !== "txt") {
+      return;
+    }
+
+    setHistoryDialog({ targetKind: "document", targetId: document.id });
+  }
+
+  /** 应用历史回档返回的新快照，并清理该文件的草稿状态。 */
+  function handleHistoryRestored(nextSnapshot: WorkspaceSnapshot) {
+    const nextDirtyNoteIds = new Set(dirtyNoteIds);
+    const nextDirtyDocumentIds = new Set(dirtyDocumentIds);
+
+    if (historyDialog?.targetKind === "note") {
+      nextDirtyNoteIds.delete(historyDialog.targetId);
+    } else if (historyDialog?.targetKind === "document") {
+      nextDirtyDocumentIds.delete(historyDialog.targetId);
+    }
+
+    commitSnapshot(nextSnapshot, nextDirtyNoteIds, nextDirtyDocumentIds);
   }
 
   /** 打开目录树新建弹窗；创建位置完全由被点击的目录节点决定。 */
@@ -1994,8 +2059,10 @@ export function WorkspaceShell() {
           onSelectDocument={handleSelectDocument}
           onRenameNote={openRenameDialog}
           onDeleteNote={handleDeleteNote}
+          onOpenNoteHistory={openNoteHistory}
           onRenameDocument={openRenameDocumentDialog}
           onDeleteDocument={handleDeleteDocument}
+          onOpenDocumentHistory={openDocumentHistory}
           onCreateMarkdown={(parentPath) => openCreateDialog("markdown", parentPath)}
           onCreateText={(parentPath) => openCreateDialog("text", parentPath)}
           onCreateFolder={(parentPath) => openCreateDialog("folder", parentPath)}
@@ -2017,6 +2084,7 @@ export function WorkspaceShell() {
             onSaveDocument={handleSaveActiveDocument}
             onContentChange={handleDocumentContentChange}
             onExportFile={handleExportActiveFile}
+            onOpenHistory={() => openDocumentHistory()}
             onRenameDocument={() => openRenameDocumentDialog()}
             onDeleteDocument={() => handleDeleteDocument()}
           />
@@ -2033,6 +2101,7 @@ export function WorkspaceShell() {
             onContentChange={handleContentChange}
             onPasteImages={handlePasteImages}
             onExportFile={handleExportActiveFile}
+            onOpenHistory={() => openNoteHistory()}
             onRenameNote={() => openRenameDialog()}
             onDeleteNote={() => handleDeleteNote()}
             onAcceptChange={handleAcceptChange}
@@ -2129,6 +2198,21 @@ export function WorkspaceShell() {
           onClearAppEventLogs={handleClearAppEventLogs}
           onOpenAppLogFolder={handleOpenAppLogFolder}
           onClose={() => setIsSettingsOpen(false)}
+        />
+      )}
+      {historyDialog && historyTarget && (
+        <DocumentHistoryDialog
+          snapshot={currentSnapshot}
+          targetKind={historyTarget.targetKind}
+          targetId={historyTarget.targetId}
+          title={historyTarget.title}
+          currentContent={historyTarget.content}
+          currentHash={historyTarget.contentHash}
+          isDirty={historyTarget.isDirty}
+          isBusy={isBusy}
+          onClose={() => setHistoryDialog(null)}
+          onRestored={handleHistoryRestored}
+          onNotice={setNotice}
         />
       )}
       {renameDialog && (
