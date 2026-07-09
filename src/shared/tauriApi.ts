@@ -33,6 +33,7 @@ import type {
   InstallAgentSkillPayload,
   InstallAgentSkillResult,
   KnowledgeBase,
+  KnowledgeBaseMemory,
   KnowledgeBaseSelection,
   LlmProviderConfig,
   LlmProviderModel,
@@ -704,6 +705,38 @@ export async function deleteAgentSkill(skillId: string): Promise<AgentSkill[]> {
   }
 
   return invokeLogged<AgentSkill[]>("delete_agent_skill", { payload: { skillId } });
+}
+
+/** 读取全部知识库的跨会话记忆；浏览器开发态返回空列表。 */
+export async function loadKnowledgeBaseMemories(): Promise<KnowledgeBaseMemory[]> {
+  if (!isTauriRuntime()) {
+    return [];
+  }
+
+  return invokeLogged<KnowledgeBaseMemory[]>("load_knowledge_base_memories");
+}
+
+/** 保存单个知识库的跨会话记忆；桌面端写入前会做敏感信息脱敏并返回归一化结果。 */
+export async function saveKnowledgeBaseMemory(
+  knowledgeBaseId: string,
+  memory: KnowledgeBaseMemory,
+): Promise<KnowledgeBaseMemory> {
+  if (!isTauriRuntime()) {
+    return { ...memory, knowledgeBaseId, updatedAt: new Date().toISOString() };
+  }
+
+  return invokeLogged<KnowledgeBaseMemory>("save_knowledge_base_memory", {
+    payload: { knowledgeBaseId, memory },
+  });
+}
+
+/** 删除单个知识库的跨会话记忆。 */
+export async function deleteKnowledgeBaseMemory(knowledgeBaseId: string): Promise<void> {
+  if (!isTauriRuntime()) {
+    return;
+  }
+
+  await invokeLogged<void>("delete_knowledge_base_memory", { payload: { knowledgeBaseId } });
 }
 
 /** 安装标准 SKILL.md 包；第三方来源默认停用，用户审阅后再启用。 */

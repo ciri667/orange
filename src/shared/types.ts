@@ -276,6 +276,24 @@ export interface AgentContextSummary {
   lastCompactedMessageId?: string;
 }
 
+/** 跨会话记忆单条；保存前会做敏感信息脱敏，content 中可能含 `[已脱敏]` 占位。 */
+export interface AgentMemoryEntry {
+  id: string;
+  category: string;
+  content: string;
+  source: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+/** 单个知识库的跨会话记忆集合；默认关闭，用户在设置页手动开启后注入 Runtime。 */
+export interface KnowledgeBaseMemory {
+  knowledgeBaseId: string;
+  enabled: boolean;
+  entries: AgentMemoryEntry[];
+  updatedAt: string;
+}
+
 /** Agent 对笔记提出的待确认变更，确认前不能修改本地 Markdown。 */
 export interface ProposedChange {
   id: string;
