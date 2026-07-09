@@ -1,19 +1,20 @@
 use crate::domain::{
     AgentSession, AgentSkill, AgentTurnPayload, AgentTurnResult, AppEventLog, ChangePayload,
     CompactAgentContextPayload, CreateDocumentPayload, CreateFolderPayload, CreateNotePayload,
-    DeleteAgentSkillPayload, DeleteDocumentPayload, DeleteNotePayload, DeleteSessionPayload,
-    DocumentPreview, FeishuCredentialStatus, FeishuGatewayStatus, FolderEntry, ImGatewayStatus,
-    ImIntegrationSettings, ImProviderCredentialStatus, ImProviderPayload, InstallAgentSkillPayload,
-    InstallAgentSkillResult, KnowledgeBaseSelection, LlmProviderModelRefreshResult,
-    LoadAppEventLogsPayload, LoadDocumentPreviewPayload, LoadSessionsPayload, ModelApiKeyStatus,
-    ProposedChange, RefreshLlmProviderModelsPayload, RemoveKnowledgeBasePayload,
-    RenameDocumentPayload, RenameNotePayload, RequestAuditLog, RescanKnowledgeBasePayload,
-    RestoreSessionContextPayload, SaveAgentSkillPayload, SaveDocumentContentPayload,
-    SaveFeishuSecretPayload, SaveImProviderSecretPayload, SaveImSettingsPayload,
-    SaveModelApiKeyPayload, SaveNoteContentPayload, SaveNoteImageAttachmentsPayload,
-    SaveSessionPayload, SaveUserSettingsPayload, ScanKnowledgeBasePayload, ScanReport,
-    ToggleAgentSkillPayload, UpdateSessionScopePayload, UserSettings, WorkspaceSnapshot,
-    IM_PROVIDER_FEISHU,
+    DeleteAgentSkillPayload, DeleteDocumentPayload, DeleteKnowledgeBaseMemoryPayload,
+    DeleteNotePayload, DeleteSessionPayload, DocumentPreview, FeishuCredentialStatus,
+    FeishuGatewayStatus, FolderEntry, ImGatewayStatus, ImIntegrationSettings,
+    ImProviderCredentialStatus, ImProviderPayload, InstallAgentSkillPayload,
+    InstallAgentSkillResult, KnowledgeBaseMemory, KnowledgeBaseSelection,
+    LlmProviderModelRefreshResult, LoadAppEventLogsPayload, LoadDocumentPreviewPayload,
+    LoadSessionsPayload, ModelApiKeyStatus, ProposedChange, RefreshLlmProviderModelsPayload,
+    RemoveKnowledgeBasePayload, RenameDocumentPayload, RenameNotePayload, RequestAuditLog,
+    RescanKnowledgeBasePayload, RestoreSessionContextPayload, SaveAgentSkillPayload,
+    SaveDocumentContentPayload, SaveFeishuSecretPayload, SaveImProviderSecretPayload,
+    SaveImSettingsPayload, SaveKnowledgeBaseMemoryPayload, SaveModelApiKeyPayload,
+    SaveNoteContentPayload, SaveNoteImageAttachmentsPayload, SaveSessionPayload,
+    SaveUserSettingsPayload, ScanKnowledgeBasePayload, ScanReport, ToggleAgentSkillPayload,
+    UpdateSessionScopePayload, UserSettings, WorkspaceSnapshot, IM_PROVIDER_FEISHU,
 };
 use crate::logging::{self, AppEventBuilder, AppLogCategory, AppLogLevel};
 use crate::model_provider::{self, ProviderTemplate};
@@ -242,6 +243,142 @@ pub async fn save_user_settings(
     result
 }
 
+/** 读取全部知识库的跨会话记忆，供设置页列表展示；记录脱敏审计事件。 */
+#[tauri::command]
+pub async fn load_knowledge_base_memories(
+    app: AppHandle,
+) -> Result<Vec<KnowledgeBaseMemory>, String> {
+    let started_at = Instant::now();
+    let load_app = app.clone();
+    let result = run_blocking("读取跨会话记忆", move || {
+        storage::load_knowledge_base_memories(&load_app)
+    })
+    .await;
+
+    match &result {
+        Ok(memories) => logging::write_app_event_best_effort(
+            &app,
+            AppEventBuilder::new(
+                AppLogLevel::Info,
+                AppLogCategory::Agent,
+                "load_knowledge_base_memories",
+                "completed",
+                "已读取跨会话记忆。",
+            )
+            .duration(started_at.elapsed())
+            .metadata(json!({ "memoryCount": memories.len() })),
+        ),
+        Err(error) => logging::write_app_event_best_effort(
+            &app,
+            AppEventBuilder::new(
+                AppLogLevel::Error,
+                AppLogCategory::Agent,
+                "load_knowledge_base_memories",
+                "failed",
+                error,
+            )
+            .duration(started_at.elapsed()),
+        ),
+    }
+
+    result
+}
+
+/** 保存单个知识库的跨会话记忆；写入前归一化并做敏感信息脱敏，返回脱敏后的 memory。
+ * metadata 只记录 enabled、entryCount 和 knowledgeBaseId 是否非空，不暴露正文。 */
+#[tauri::command]
+pub async fn save_knowledge_base_memory(
+    app: AppHandle,
+    payload: SaveKnowledgeBaseMemoryPayload,
+) -> Result<KnowledgeBaseMemory, String> {
+    let started_at = Instant::now();
+    let knowledge_base_id = payload.knowledge_base_id.clone();
+    let memory_enabled = payload.memory.enabled;
+    let memory_entry_count = payload.memory.entries.len();
+
+    let save_app = app.clone();
+    let result = run_blocking("保存跨会话记忆", move || {
+        storage::save_knowledge_base_memory(&save_app, &payload.knowledge_base_id, payload.memory)
+    })
+    .await;
+
+    match &result {
+        Ok(_) => logging::write_app_event_best_effort(
+            &app,
+            AppEventBuilder::new(
+                AppLogLevel::Info,
+                AppLogCategory::Agent,
+                "save_knowledge_base_memory",
+                "completed",
+                "已保存跨会话记忆。",
+            )
+            .duration(started_at.elapsed())
+            .metadata(json!({
+                "knowledgeBaseIdPresent": !knowledge_base_id.is_empty(),
+                "enabled": memory_enabled,
+                "entryCount": memory_entry_count,
+            })),
+        ),
+        Err(error) => logging::write_app_event_best_effort(
+            &app,
+            AppEventBuilder::new(
+                AppLogLevel::Error,
+                AppLogCategory::Agent,
+                "save_knowledge_base_memory",
+                "failed",
+                error,
+            )
+            .duration(started_at.elapsed()),
+        ),
+    }
+
+    result
+}
+
+/** 删除单个知识库的跨会话记忆；metadata 只记录知识库 ID 是否非空。 */
+#[tauri::command]
+pub async fn delete_knowledge_base_memory(
+    app: AppHandle,
+    payload: DeleteKnowledgeBaseMemoryPayload,
+) -> Result<(), String> {
+    let started_at = Instant::now();
+    let knowledge_base_id = payload.knowledge_base_id.clone();
+
+    let delete_app = app.clone();
+    let result = run_blocking("删除跨会话记忆", move || {
+        storage::delete_knowledge_base_memory(&delete_app, &payload.knowledge_base_id)
+    })
+    .await;
+
+    match &result {
+        Ok(_) => logging::write_app_event_best_effort(
+            &app,
+            AppEventBuilder::new(
+                AppLogLevel::Info,
+                AppLogCategory::Agent,
+                "delete_knowledge_base_memory",
+                "completed",
+                "已删除跨会话记忆。",
+            )
+            .duration(started_at.elapsed())
+            .metadata(json!({ "knowledgeBaseIdPresent": !knowledge_base_id.is_empty() })),
+        ),
+        Err(error) => logging::write_app_event_best_effort(
+            &app,
+            AppEventBuilder::new(
+                AppLogLevel::Error,
+                AppLogCategory::Agent,
+                "delete_knowledge_base_memory",
+                "failed",
+                error,
+            )
+            .duration(started_at.elapsed()),
+        ),
+    }
+
+    result
+}
+
 /** 读取即时通讯集成设置；敏感凭证只返回 keyring 状态不返回明文。 */
 #[tauri::command]
 pub async fn load_im_settings(app: AppHandle) -> Result<ImIntegrationSettings, String> {
@@ -250,7 +387,6 @@ pub async fn load_im_settings(app: AppHandle) -> Result<ImIntegrationSettings, S
     })
     .await
 }
-
 /** 保存即时通讯集成设置；飞书 appSecret 必须走独立 keyring 命令。 */
 #[tauri::command]
 pub async fn save_im_settings(
