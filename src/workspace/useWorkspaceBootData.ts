@@ -6,6 +6,7 @@ import {
   loadImGatewayStatus,
   loadImProviderCredentialStatus,
   loadImSettings,
+  loadKnowledgeBaseMemories,
   loadLlmProviderTemplates,
   loadModelApiKeyStatuses,
   loadRequestAuditLogs,
@@ -18,6 +19,7 @@ import type {
   FeishuCredentialStatus,
   FeishuGatewayStatus,
   ImIntegrationSettings,
+  KnowledgeBaseMemory,
   ModelApiKeyStatus,
   ProviderTemplate,
   RequestAuditLog,
@@ -62,6 +64,8 @@ export function useWorkspaceBootData({ onSnapshotInitialized, onNoticeChange }: 
   const [auditLogs, setAuditLogs] = useState<RequestAuditLog[]>([]);
   /** 用户可读运行事件日志，只在设置页展示，不阻塞首屏工作台。 */
   const [appEventLogs, setAppEventLogs] = useState<AppEventLog[]>([]);
+  /** 跨会话记忆集合，每知识库一份；默认关闭，用户在设置页手动开启后注入 Runtime。 */
+  const [knowledgeBaseMemories, setKnowledgeBaseMemories] = useState<KnowledgeBaseMemory[]>([]);
 
   useEffect(() => {
     let isMounted = true;
@@ -90,6 +94,7 @@ export function useWorkspaceBootData({ onSnapshotInitialized, onNoticeChange }: 
         nextProviderTemplates,
         nextFeishuCredentialStatus,
         nextFeishuGatewayStatus,
+        nextKnowledgeBaseMemories,
       ] = await Promise.all([
         loadWorkspaceState(),
         loadUserSettings(),
@@ -127,6 +132,11 @@ export function useWorkspaceBootData({ onSnapshotInitialized, onNoticeChange }: 
 
           return null;
         }),
+        loadKnowledgeBaseMemories().catch((error) => {
+          logWarn("读取跨会话记忆失败。", { category: "settings", event: "kb_memory_load", status: "failed", error });
+
+          return [] as KnowledgeBaseMemory[];
+        }),
       ]);
 
       if (!shouldCommit()) {
@@ -141,6 +151,7 @@ export function useWorkspaceBootData({ onSnapshotInitialized, onNoticeChange }: 
       setProviderTemplates(nextProviderTemplates);
       setFeishuCredentialStatus(nextFeishuCredentialStatus);
       setFeishuGatewayStatus(nextFeishuGatewayStatus);
+      setKnowledgeBaseMemories(nextKnowledgeBaseMemories);
       onSnapshotInitialized(nextSnapshot);
       setIsBooting(false);
 
@@ -202,6 +213,8 @@ export function useWorkspaceBootData({ onSnapshotInitialized, onNoticeChange }: 
     providerTemplates,
     isBooting,
     bootError,
+    knowledgeBaseMemories,
+    setKnowledgeBaseMemories,
     auditLogs,
     setAuditLogs,
     appEventLogs,

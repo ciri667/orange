@@ -373,6 +373,8 @@ export function WorkspaceShell() {
     providerTemplates,
     isBooting,
     bootError,
+    knowledgeBaseMemories,
+    setKnowledgeBaseMemories,
     auditLogs,
     setAuditLogs,
     appEventLogs,
@@ -390,6 +392,8 @@ export function WorkspaceShell() {
   const {
     handleSaveSettings,
     handleSaveImSettings,
+    handleSaveKnowledgeBaseMemory,
+    handleDeleteKnowledgeBaseMemory,
     handleSaveFeishuSecret,
     handleStartFeishuGateway,
     handleStopFeishuGateway,
@@ -418,6 +422,7 @@ export function WorkspaceShell() {
     setModelApiKeyStatuses,
     setFeishuCredentialStatus,
     setFeishuGatewayStatus,
+    setKnowledgeBaseMemories,
     setAuditLogs,
     setAppEventLogs,
   });
@@ -2098,6 +2103,7 @@ export function WorkspaceShell() {
           providerTemplates={providerTemplates}
           auditLogs={auditLogs}
           appEventLogs={appEventLogs}
+          knowledgeBaseMemories={knowledgeBaseMemories}
           isBusy={isBusy}
           onSelectKnowledgeBase={handleSelectKnowledgeBase}
           onAddKnowledgeBase={handleAddKnowledgeBase}
@@ -2105,6 +2111,8 @@ export function WorkspaceShell() {
           onRemoveKnowledgeBase={handleRemoveKnowledgeBase}
           onSaveSettings={handleSaveSettings}
           onSaveImSettings={handleSaveImSettings}
+          onSaveKnowledgeBaseMemory={handleSaveKnowledgeBaseMemory}
+          onDeleteKnowledgeBaseMemory={handleDeleteKnowledgeBaseMemory}
           onSaveSkill={handleSaveSkill}
           onInstallSkill={handleInstallSkill}
           onToggleSkill={handleToggleSkill}

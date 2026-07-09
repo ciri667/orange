@@ -1,6 +1,7 @@
 import {
   clearAppEventLogs,
   deleteAgentSkill,
+  deleteKnowledgeBaseMemory,
   installAgentSkill,
   loadAgentSkills,
   loadAppEventLogs,
@@ -14,6 +15,7 @@ import {
   saveAgentSkill,
   saveImProviderSecret,
   saveImSettings,
+  saveKnowledgeBaseMemory,
   saveModelApiKey,
   saveUserSettings,
   startImGateway,
@@ -30,6 +32,7 @@ import type {
   ImIntegrationSettings,
   InstallAgentSkillPayload,
   InstallAgentSkillResult,
+  KnowledgeBaseMemory,
   ModelApiKeyStatus,
   RequestAuditLog,
   UserSettings,
@@ -64,6 +67,7 @@ interface WorkspaceSettingsActionsOptions {
   setModelApiKeyStatuses: (updater: (current: ModelApiKeyStatus[]) => ModelApiKeyStatus[]) => void;
   setFeishuCredentialStatus: (status: FeishuCredentialStatus | null) => void;
   setFeishuGatewayStatus: (status: FeishuGatewayStatus | null) => void;
+  setKnowledgeBaseMemories: (updater: (current: KnowledgeBaseMemory[]) => KnowledgeBaseMemory[]) => void;
   setAuditLogs: (logs: RequestAuditLog[]) => void;
   setAppEventLogs: (logs: AppEventLog[]) => void;
 }
@@ -82,6 +86,7 @@ export function useWorkspaceSettingsActions({
   setModelApiKeyStatuses,
   setFeishuCredentialStatus,
   setFeishuGatewayStatus,
+  setKnowledgeBaseMemories,
   setAuditLogs,
   setAppEventLogs,
 }: WorkspaceSettingsActionsOptions) {
@@ -94,6 +99,43 @@ export function useWorkspaceSettingsActions({
       setNotice("已保存 Agent 设置。");
     } catch (error) {
       setNotice(formatSettingsErrorMessage(error));
+    } finally {
+      endBusy();
+    }
+  }
+
+  /** 保存单个知识库的跨会话记忆；后端写入前会做敏感信息脱敏，前端只接收归一化结果。 */
+  async function handleSaveKnowledgeBaseMemory(nextMemory: KnowledgeBaseMemory) {
+    beginBusy("正在保存跨会话记忆...");
+
+    try {
+      const saved = await saveKnowledgeBaseMemory(nextMemory.knowledgeBaseId, nextMemory);
+      setKnowledgeBaseMemories((current) => {
+        const others = current.filter((memory) => memory.knowledgeBaseId !== saved.knowledgeBaseId);
+
+        return [saved, ...others];
+      });
+      setNotice("已保存跨会话记忆。");
+      return saved;
+    } catch (error) {
+      setNotice(formatSettingsErrorMessage(error));
+      throw error;
+    } finally {
+      endBusy();
+    }
+  }
+
+  /** 删除单个知识库的跨会话记忆；删除后不会再注入 Agent 上下文。 */
+  async function handleDeleteKnowledgeBaseMemory(knowledgeBaseId: string) {
+    beginBusy("正在删除跨会话记忆...");
+
+    try {
+      await deleteKnowledgeBaseMemory(knowledgeBaseId);
+      setKnowledgeBaseMemories((current) => current.filter((memory) => memory.knowledgeBaseId !== knowledgeBaseId));
+      setNotice("已删除跨会话记忆。");
+    } catch (error) {
+      setNotice(formatSettingsErrorMessage(error));
+      throw error;
     } finally {
       endBusy();
     }
@@ -388,6 +430,8 @@ export function useWorkspaceSettingsActions({
   return {
     handleSaveSettings,
     handleSaveImSettings,
+    handleSaveKnowledgeBaseMemory,
+    handleDeleteKnowledgeBaseMemory,
     handleSaveFeishuSecret,
     handleStartFeishuGateway,
     handleStopFeishuGateway,
