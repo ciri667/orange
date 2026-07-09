@@ -23,6 +23,12 @@ const MAX_SESSION_CONTEXT_MESSAGES: usize = 8;
 /** 会话历史工具单条消息最多返回的字符数。 */
 const MAX_SESSION_CONTEXT_MESSAGE_CHARS: usize = 1200;
 
+/** 跨会话记忆工具最多返回的条目数量，避免一次工具结果挤占模型上下文。 */
+const MAX_KB_MEMORY_TOOL_ENTRIES: usize = 32;
+
+/** 跨会话记忆工具单条内容最多返回的字符数，保存层和读取层都会做长度保护。 */
+const MAX_KB_MEMORY_TOOL_ENTRY_CHARS: usize = 800;
+
 /** list_tree 按支持文档类型输出的计数，避免模型把未知扩展名误认为已索引内容。 */
 #[derive(Clone, Debug)]
 struct ListTreeFileTypeCounts {
@@ -116,6 +122,7 @@ impl Default for ToolRegistry {
                 Box::new(GetSessionSummaryTool),
                 Box::new(SearchSessionMessagesTool),
                 Box::new(ReadSessionContextTool),
+                Box::new(GetKnowledgeBaseMemoryTool),
                 Box::new(ProposeNoteChangeTool),
                 Box::new(CreateNoteDraftTool),
                 Box::new(SuggestOrganizationTool),
@@ -398,6 +405,27 @@ impl AgentTool for ReadSessionContextTool {
 
     fn execute(&self, context: &mut AgentToolContext<'_>, args: &Value) -> ToolExecutionResult {
         execute_read_session_context(context.snapshot, context.session_index, args)
+    }
+}
+
+/** get_knowledge_base_memory 工具，只读取当前会话 scope 内已启用的跨会话记忆。 */
+struct GetKnowledgeBaseMemoryTool;
+
+impl AgentTool for GetKnowledgeBaseMemoryTool {
+    fn name(&self) -> &'static str {
+        "get_knowledge_base_memory"
+    }
+
+    fn description(&self) -> &'static str {
+        "Read the long-term cross-session memory (user preferences and conventions) for the current session's knowledge bases. Use when recalling stable conventions the user set."
+    }
+
+    fn parameters(&self) -> Value {
+        json!({ "type": "object", "properties": {} })
+    }
+
+    fn execute(&self, context: &mut AgentToolContext<'_>, _args: &Value) -> ToolExecutionResult {
+        execute_get_knowledge_base_memory(context.app, context.snapshot, context.session_index)
     }
 }
 
@@ -765,6 +793,78 @@ fn execute_get_session_summary(
             session.context_summary.is_some(),
             session.messages.len(),
             session.pending_change.as_ref().map(|change| change.status.as_str()).unwrap_or("none")
+        )),
+    }
+}
+
+/** 执行 get_knowledge_base_memory，只返回当前会话 scope 内已启用记忆的脱敏摘要。 */
+fn execute_get_knowledge_base_memory(
+    app: Option<&AppHandle>,
+    snapshot: &WorkspaceSnapshot,
+    session_index: usize,
+) -> ToolExecutionResult {
+    let session = &snapshot.sessions[session_index];
+    let knowledge_base_ids = session.knowledge_base_ids.clone();
+
+    // 没有持久化 app 句柄（例如单元测试）时直接返回空集，避免误以为已检索到结果。
+    let mut entries = Vec::new();
+    let mut kb_count = 0usize;
+    let mut kb_names = Vec::new();
+
+    if let Some(app) = app {
+        for knowledge_base_id in &knowledge_base_ids {
+            match crate::storage::load_knowledge_base_memory(app, knowledge_base_id) {
+                Ok(Some(memory)) if memory.enabled => {
+                    kb_count += 1;
+                    let kb_name = snapshot
+                        .knowledge_bases
+                        .iter()
+                        .find(|knowledge_base| knowledge_base.id == memory.knowledge_base_id)
+                        .map(|knowledge_base| knowledge_base.name.clone())
+                        .unwrap_or_else(|| memory.knowledge_base_id.clone());
+                    kb_names.push(kb_name.clone());
+                    for entry in &memory.entries {
+                        if entry.content.trim().is_empty() {
+                            continue;
+                        }
+                        if entries.len() >= MAX_KB_MEMORY_TOOL_ENTRIES {
+                            break;
+                        }
+                        // 工具返回前再次脱敏，防止旧数据或手动改库绕过保存入口后进入模型。
+                        let redacted_content =
+                            crate::storage::redact_memory_secrets(entry.content.trim());
+                        entries.push(json!({
+                            "category": entry.category,
+                            "content": truncate_chars(&redacted_content, MAX_KB_MEMORY_TOOL_ENTRY_CHARS),
+                            "source": entry.source
+                        }));
+                    }
+                }
+                Ok(_) => {}
+                Err(error) => {
+                    log::warn!(
+                        target: "agent_tools",
+                        "get_knowledge_base_memory 读取失败：knowledge_base_id_chars={} error={}",
+                        knowledge_base_id.chars().count(),
+                        crate::logging::sanitize_log_text(&error)
+                    );
+                }
+            }
+        }
+    }
+
+    ToolExecutionResult {
+        success: true,
+        summary: "已读取当前知识库跨会话记忆".to_owned(),
+        payload: json!({
+            "knowledgeBases": kb_names,
+            "entries": entries,
+        }),
+        citations: Vec::new(),
+        audit_fragment: Some(format!(
+            "get_knowledge_base_memory 发送跨会话记忆 kb_count={} entry_count={}",
+            kb_count,
+            entries.len()
         )),
     }
 }

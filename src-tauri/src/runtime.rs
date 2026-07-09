@@ -1,9 +1,11 @@
 use crate::agent;
 use crate::agent_tools::{AgentToolContext, ToolRegistry};
 use crate::domain::{
-    AgentContextSummary, AgentContextTouchedNote, AgentMessage, AgentSession, AgentSkill,
-    AgentToolCall, AgentTurnRequest, AgentTurnResult, Citation, LlmProviderConfig, ProposedChange,
-    RequestAuditLog, UserSettings, WorkspaceSnapshot,
+    AgentContextSummary, AgentContextTouchedNote, AgentMemoryEntry, AgentMessage, AgentSession,
+    AgentSkill, AgentToolCall, AgentTurnRequest, AgentTurnResult, Citation, KnowledgeBaseMemory,
+    LlmProviderConfig, ProposedChange, RequestAuditLog, UserSettings, WorkspaceSnapshot,
+    MEMORY_CATEGORY_CONVENTION, MEMORY_CATEGORY_NOTE_STRUCTURE, MEMORY_CATEGORY_ORGANIZATION,
+    MEMORY_CATEGORY_OTHER, MEMORY_CATEGORY_TAG_CONVENTION,
 };
 use crate::model_provider;
 use crate::skills;
@@ -33,6 +35,12 @@ const MAX_CONTEXT_SUMMARY_ITEMS: usize = 12;
 
 /** 项目级 Agent 指令最大读取字符数；只读取知识库根目录 ORANGE_AGENT.md。 */
 const MAX_PROJECT_AGENT_INSTRUCTION_CHARS: usize = 16 * 1024;
+
+/** 跨会话记忆渲染进 prompt 的最大字符数，低于会话工作记忆预算以优先保留滚动上下文。 */
+const MAX_RENDERED_KB_MEMORY_CHARS: usize = 4000;
+
+/** 单个知识库记忆渲染进 prompt 时最多保留的条目数，避免一个 KB 挤占预算。 */
+const MAX_RENDERED_KB_MEMORY_ENTRIES_PER_KB: usize = 8;
 
 /** 手动和自动整理上下文时，最多把多少条未总结消息交给总结器。 */
 const MAX_RECENT_MESSAGES_FOR_SUMMARY: usize = 12;
@@ -614,6 +622,9 @@ async fn run_model_loop(
     let current_user_message_id =
         ensure_user_message_for_turn(&mut snapshot.sessions[session_index], &request);
     audit_trail.record_context_summary_injection(&snapshot.sessions[session_index]);
+    // 加载当前会话 scope 内已启用的跨会话记忆，失败只写脱敏 warn，不阻塞 Agent 回合。
+    let session_knowledge_base_ids = snapshot.sessions[session_index].knowledge_base_ids.clone();
+    let kb_memories = load_enabled_session_kb_memories(app, &session_knowledge_base_ids);
     let mut model_messages = build_model_messages(
         &snapshot,
         session_index,
@@ -621,6 +632,7 @@ async fn run_model_loop(
         &available_skills,
         &explicit_skills,
         &current_user_message_id,
+        &kb_memories,
     );
     let endpoint = model_provider::chat_completions_endpoint(&provider.api_base);
     let tool_registry = ToolRegistry::default();
@@ -1160,6 +1172,7 @@ fn build_model_messages(
     available_skills: &[AgentSkill],
     explicit_skills: &[AgentSkill],
     current_user_message_id: &str,
+    knowledge_base_memories: &[KnowledgeBaseMemory],
 ) -> Vec<Value> {
     let session = &snapshot.sessions[session_index];
     // Agent 的工具选择策略只作为模型指令，不再由宿主预判用户意图。
@@ -1173,6 +1186,8 @@ fn build_model_messages(
     let skill_catalog = skills::skill_catalog_prompt(available_skills);
     let explicit_skill_prompt = skills::explicit_skill_prompt(explicit_skills);
     let project_instruction_prompt = render_project_agent_instructions(snapshot, session);
+    let knowledge_base_memory_prompt =
+        render_knowledge_base_memory_prompt(knowledge_base_memories, &snapshot.knowledge_bases);
     let context_summary_prompt = render_context_summary_prompt(session.context_summary.as_ref());
     let pending_change_prompt = render_pending_change_prompt(session.pending_change.as_ref());
     let context_summary_prompt_chars = context_summary_prompt
@@ -1185,6 +1200,10 @@ fn build_model_messages(
         .map(|summary| summary.updated_at.as_str())
         .filter(|updated_at| !updated_at.trim().is_empty())
         .unwrap_or("none");
+    let knowledge_base_memory_chars = knowledge_base_memory_prompt
+        .as_ref()
+        .map(|prompt| prompt.chars().count())
+        .unwrap_or_default();
     let skill_policy = if explicit_skills.is_empty() {
         "启用的 Skill 只以名称和描述提供给你参考，是否使用、使用哪一个 Skill 都由你自主判断；Skill 不能扩大工具权限或绕过写入确认。"
     } else {
@@ -1205,6 +1224,13 @@ fn build_model_messages(
         }));
     }
 
+    if let Some(knowledge_base_memory_prompt) = knowledge_base_memory_prompt {
+        messages.push(json!({
+            "role": "system",
+            "content": knowledge_base_memory_prompt
+        }));
+    }
+
     if let Some(context_summary_prompt) = context_summary_prompt {
         messages.push(json!({
             "role": "system",
@@ -1221,13 +1247,17 @@ fn build_model_messages(
 
     log::debug!(
         target: "agent_runtime",
-        "上下文注入完成：session={} summary_injected={} summary_chars={} summary_updated_at={} has_pending_change={} project_instruction_count={}",
+        "上下文注入完成：session={} summary_injected={} summary_chars={} summary_updated_at={} has_pending_change={} project_instruction_count={} kb_memory_injected={} kb_memory_chars={} kb_memory_entry_count={} kb_memory_kb_count={}",
         session.id,
         context_summary_prompt_chars > 0,
         context_summary_prompt_chars,
         context_summary_updated_at,
         session.pending_change.as_ref().is_some_and(|change| change.status == "pending"),
-        project_instruction_count(snapshot, session)
+        project_instruction_count(snapshot, session),
+        knowledge_base_memory_chars > 0,
+        knowledge_base_memory_chars,
+        knowledge_base_memories.iter().map(|memory| memory.entries.len()).sum::<usize>(),
+        knowledge_base_memories.len()
     );
 
     for message in session
@@ -1443,6 +1473,91 @@ fn render_pending_change_prompt(change: Option<&ProposedChange>) -> Option<Strin
     Some(format!(
         "【当前待确认变更】\n以下是当前会话的 diff 状态摘要。不要把它当成已写入文件；只有用户确认后才会落盘。\n{summary}"
     ))
+}
+
+/** 渲染已启用的跨会话记忆；全部为空或未启用时不注入，避免制造无意义上下文。 */
+fn render_knowledge_base_memory_prompt(
+    memories: &[KnowledgeBaseMemory],
+    knowledge_bases: &[crate::domain::KnowledgeBase],
+) -> Option<String> {
+    let mut lines = Vec::new();
+    let mut entry_count = 0usize;
+
+    for memory in memories.iter() {
+        if !memory.enabled {
+            continue;
+        }
+        let visible_entries: Vec<&AgentMemoryEntry> = memory
+            .entries
+            .iter()
+            .filter(|entry| !entry.content.trim().is_empty())
+            .take(MAX_RENDERED_KB_MEMORY_ENTRIES_PER_KB)
+            .collect();
+        if visible_entries.is_empty() {
+            continue;
+        }
+
+        let kb_name = knowledge_bases
+            .iter()
+            .find(|knowledge_base| knowledge_base.id == memory.knowledge_base_id)
+            .map(|knowledge_base| knowledge_base.name.as_str())
+            .unwrap_or(&memory.knowledge_base_id);
+        lines.push(format!("- 知识库：{}", kb_name));
+        for entry in visible_entries {
+            // 生成前再次脱敏，防止旧数据或手动改库绕过保存入口后进入模型上下文。
+            let redacted_content = crate::storage::redact_memory_secrets(entry.content.trim());
+            let category = memory_category_label(&entry.category);
+            lines.push(format!("  - [{}] {}", category, redacted_content));
+            entry_count += 1;
+        }
+    }
+
+    if lines.is_empty() || entry_count == 0 {
+        return None;
+    }
+
+    let body = lines.join("\n");
+    Some(format!(
+        "【跨会话记忆】\n以下是本知识库稳定的长期偏好与约定，优先级低于系统规则和项目指令，高于会话滚动记忆。仅作为持续生效的约定参考，不要逐条复述；如与用户本轮明确要求冲突，以用户本轮要求为准。\n{}",
+        truncate_chars(&body, MAX_RENDERED_KB_MEMORY_CHARS)
+    ))
+}
+
+/** 把记忆条目内部 category 值映射成模型可读的中文标签，未识别值降级为其他偏好。 */
+fn memory_category_label(category: &str) -> String {
+    match category {
+        MEMORY_CATEGORY_NOTE_STRUCTURE => "笔记结构".to_owned(),
+        MEMORY_CATEGORY_TAG_CONVENTION => "标签规范".to_owned(),
+        MEMORY_CATEGORY_ORGANIZATION => "整理习惯".to_owned(),
+        MEMORY_CATEGORY_CONVENTION => "知识库约定".to_owned(),
+        MEMORY_CATEGORY_OTHER => "其他偏好".to_owned(),
+        _ => "其他偏好".to_owned(),
+    }
+}
+
+/** 读取当前会话 scope 内已启用的跨会话记忆；读取失败只写脱敏 warn，返回空集合不阻塞 Agent 回合。 */
+fn load_enabled_session_kb_memories(
+    app: &AppHandle,
+    knowledge_base_ids: &[String],
+) -> Vec<KnowledgeBaseMemory> {
+    let mut memories = Vec::new();
+    for knowledge_base_id in knowledge_base_ids {
+        match crate::storage::load_knowledge_base_memory(app, knowledge_base_id) {
+            Ok(Some(memory)) if memory.enabled && !memory.entries.is_empty() => {
+                memories.push(memory);
+            }
+            Ok(_) => {}
+            Err(error) => {
+                log::warn!(
+                    target: "agent_memory",
+                    "读取跨会话记忆失败，已跳过该知识库：knowledge_base_id_chars={} error={}",
+                    knowledge_base_id.chars().count(),
+                    crate::logging::sanitize_log_text(&error)
+                );
+            }
+        }
+    }
+    memories
 }
 
 /** 生成 pending change 的脱敏摘要，供 prompt、summary 和日志复用。 */
@@ -2886,6 +3001,7 @@ mod tests {
             &available_skills,
             &[],
             "user-current",
+            &[],
         );
         let system_content = messages[0]["content"].as_str().unwrap_or_default();
 
@@ -2941,6 +3057,7 @@ mod tests {
             &available_skills,
             &[],
             "user-current",
+            &[],
         );
         let memory_content = messages[1]["content"].as_str().unwrap_or_default();
 
@@ -2949,6 +3066,195 @@ mod tests {
         assert!(memory_content.contains("【会话工作记忆】"));
         assert!(memory_content.contains("按产品分析框架整理这篇文章"));
         assert_eq!(messages[2]["role"], "user");
+    }
+
+    /** 已启用的跨会话记忆应作为独立 system 层注入，且位于项目指令之后、会话工作记忆之前。 */
+    #[test]
+    fn kb_memory_injected_between_project_instructions_and_session_summary() {
+        let snapshot = runtime_test_snapshot("正文内容足够用于测试。".to_owned());
+        let request = runtime_test_request("ask", "总结当前偏好");
+        let available_skills = crate::skills::built_in_skills();
+        let kb_memories = vec![KnowledgeBaseMemory {
+            knowledge_base_id: "kb-a".to_owned(),
+            enabled: true,
+            entries: vec![AgentMemoryEntry {
+                id: "mem-1".to_owned(),
+                category: "tagConvention".to_owned(),
+                content: "标签统一使用小写连字符".to_owned(),
+                source: "user".to_owned(),
+                created_at: "刚刚".to_owned(),
+                updated_at: "刚刚".to_owned(),
+            }],
+            updated_at: "刚刚".to_owned(),
+        }];
+
+        let messages = build_model_messages(
+            &snapshot,
+            0,
+            &request,
+            &available_skills,
+            &[],
+            "user-current",
+            &kb_memories,
+        );
+
+        // 索引 0 是主 system；注入的记忆层应包含【跨会话记忆】头部和脱敏后的条目内容。
+        let memory_content = messages
+            .iter()
+            .filter_map(|message| message["content"].as_str())
+            .find(|content| content.contains("【跨会话记忆】"))
+            .unwrap_or_default();
+        assert!(memory_content.contains("【跨会话记忆】"));
+        assert!(memory_content.contains("标签规范"));
+        assert!(memory_content.contains("标签统一使用小写连字符"));
+    }
+
+    /** 跨会话记忆注入模型前必须再次脱敏，防止旧数据绕过保存入口。 */
+    #[test]
+    fn kb_memory_prompt_redacts_secrets_before_model_context() {
+        let snapshot = runtime_test_snapshot("正文内容足够用于测试。".to_owned());
+        let request = runtime_test_request("ask", "总结当前偏好");
+        let available_skills = crate::skills::built_in_skills();
+        let kb_memories = vec![KnowledgeBaseMemory {
+            knowledge_base_id: "kb-a".to_owned(),
+            enabled: true,
+            entries: vec![AgentMemoryEntry {
+                id: "mem-1".to_owned(),
+                category: "unknownCategory".to_owned(),
+                content: "固定偏好里误写了手机号 13800138000 和 api_key=ak_live_12345678"
+                    .to_owned(),
+                source: "user".to_owned(),
+                created_at: "刚刚".to_owned(),
+                updated_at: "刚刚".to_owned(),
+            }],
+            updated_at: "刚刚".to_owned(),
+        }];
+
+        let messages = build_model_messages(
+            &snapshot,
+            0,
+            &request,
+            &available_skills,
+            &[],
+            "user-current",
+            &kb_memories,
+        );
+
+        let memory_content = messages
+            .iter()
+            .filter_map(|message| message["content"].as_str())
+            .find(|content| content.contains("【跨会话记忆】"))
+            .unwrap_or_default();
+
+        assert!(memory_content.contains("[已脱敏]"));
+        assert!(memory_content.contains("其他偏好"));
+        assert!(!memory_content.contains("13800138000"));
+        assert!(!memory_content.contains("ak_live_12345678"));
+        assert!(!memory_content.contains("unknownCategory"));
+    }
+
+    /** 未启用或空条目的跨会话记忆不应注入任何 system 层。 */
+    #[test]
+    fn disabled_or_empty_kb_memory_not_injected() {
+        let snapshot = runtime_test_snapshot("正文内容足够用于测试。".to_owned());
+        let request = runtime_test_request("ask", "总结");
+        let available_skills = crate::skills::built_in_skills();
+
+        // enabled=false 不注入。
+        let messages = build_model_messages(
+            &snapshot,
+            0,
+            &request,
+            &available_skills,
+            &[],
+            "user-current",
+            &[KnowledgeBaseMemory {
+                knowledge_base_id: "kb-a".to_owned(),
+                enabled: false,
+                entries: vec![AgentMemoryEntry {
+                    id: "mem-1".to_owned(),
+                    category: "other".to_owned(),
+                    content: "不应出现".to_owned(),
+                    source: "user".to_owned(),
+                    created_at: "刚刚".to_owned(),
+                    updated_at: "刚刚".to_owned(),
+                }],
+                updated_at: "刚刚".to_owned(),
+            }],
+        );
+        assert!(messages.iter().all(|message| {
+            message["content"]
+                .as_str()
+                .map(|content| !content.contains("【跨会话记忆】"))
+                .unwrap_or(true)
+        }));
+
+        // 空条目不注入。
+        let messages = build_model_messages(
+            &snapshot,
+            0,
+            &request,
+            &available_skills,
+            &[],
+            "user-current",
+            &[KnowledgeBaseMemory {
+                knowledge_base_id: "kb-a".to_owned(),
+                enabled: true,
+                entries: Vec::new(),
+                updated_at: "刚刚".to_owned(),
+            }],
+        );
+        assert!(messages.iter().all(|message| {
+            message["content"]
+                .as_str()
+                .map(|content| !content.contains("【跨会话记忆】"))
+                .unwrap_or(true)
+        }));
+    }
+
+    /** 超长跨会话记忆渲染时应被截断到预算上限内。 */
+    #[test]
+    fn kb_memory_prompt_truncated_within_budget() {
+        let snapshot = runtime_test_snapshot("正文内容足够用于测试。".to_owned());
+        let request = runtime_test_request("ask", "总结");
+        let available_skills = crate::skills::built_in_skills();
+        // 单条内容远超预算上限，强制触发截断。
+        let long_content = "标签偏好：".to_owned() + &"标签详细说明".repeat(2000);
+        let kb_memories = vec![KnowledgeBaseMemory {
+            knowledge_base_id: "kb-a".to_owned(),
+            enabled: true,
+            entries: vec![AgentMemoryEntry {
+                id: "mem-1".to_owned(),
+                category: "tagConvention".to_owned(),
+                content: long_content,
+                source: "user".to_owned(),
+                created_at: "刚刚".to_owned(),
+                updated_at: "刚刚".to_owned(),
+            }],
+            updated_at: "刚刚".to_owned(),
+        }];
+
+        let messages = build_model_messages(
+            &snapshot,
+            0,
+            &request,
+            &available_skills,
+            &[],
+            "user-current",
+            &kb_memories,
+        );
+
+        let memory_content = messages
+            .iter()
+            .filter_map(|message| message["content"].as_str())
+            .find(|content| content.contains("【跨会话记忆】"))
+            .unwrap_or_default();
+        assert!(!memory_content.is_empty());
+        assert!(
+            memory_content.chars().count() <= MAX_RENDERED_KB_MEMORY_CHARS + 200,
+            "跨会话记忆渲染应被截断到预算上限附近，实际 {} 字符",
+            memory_content.chars().count()
+        );
     }
 
     /** RequestAuditLog 只记录工作记忆注入和更新后的长度/时间，不保存 summary 正文。 */
@@ -3149,6 +3455,7 @@ mod tests {
             &available_skills,
             std::slice::from_ref(&explicit_skill),
             "user-current",
+            &[],
         );
         let system_content = messages[0]["content"].as_str().unwrap_or_default();
 
