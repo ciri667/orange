@@ -1181,6 +1181,166 @@ textarea:disabled {
   background: var(--danger);
 }
 
+.history-backdrop {
+  z-index: 30;
+}
+
+.history-dialog {
+  display: grid;
+  width: min(980px, calc(100vw - 40px));
+  max-height: min(760px, calc(100vh - 40px));
+  grid-template-rows: auto minmax(0, 1fr) auto;
+  overflow: hidden;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface);
+  box-shadow: var(--shadow);
+}
+
+.history-dialog-header,
+.history-dialog-actions {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 14px 16px;
+}
+
+.history-dialog-header {
+  border-bottom: 1px solid var(--border);
+}
+
+.history-dialog-header h2 {
+  margin: 4px 0 0;
+  color: #111b21;
+  font-size: 18px;
+  line-height: 1.25;
+}
+
+.history-dialog-body {
+  display: grid;
+  min-height: 0;
+  grid-template-columns: 260px minmax(0, 1fr);
+}
+
+.history-version-list {
+  min-height: 0;
+  overflow: auto;
+  border-right: 1px solid var(--border);
+  background: #f8fafb;
+}
+
+.history-version-list button {
+  display: grid;
+  width: 100%;
+  gap: 4px;
+  border: 0;
+  border-bottom: 1px solid #edf1f3;
+  border-left: 3px solid transparent;
+  padding: 11px 12px;
+  background: transparent;
+  color: #26343d;
+  text-align: left;
+}
+
+.history-version-list button:hover,
+.history-version-list button.active {
+  border-left-color: var(--accent);
+  background: #edf6f5;
+}
+
+.history-version-list button:disabled {
+  cursor: default;
+}
+
+.history-version-list span {
+  color: #111b21;
+  font-size: 13px;
+  font-weight: 800;
+}
+
+.history-version-list strong {
+  color: var(--accent-strong);
+  font-size: 12px;
+}
+
+.history-version-list em {
+  color: var(--text-muted);
+  font-size: 12px;
+  font-style: normal;
+}
+
+.history-preview {
+  display: flex;
+  min-width: 0;
+  min-height: 0;
+  flex-direction: column;
+  background: #ffffff;
+}
+
+.history-preview-toolbar {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  border-bottom: 1px solid var(--border);
+  padding: 9px 12px;
+  color: var(--text-muted);
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.history-preview-toolbar span {
+  display: inline-flex;
+  min-width: 0;
+  align-items: center;
+  gap: 6px;
+}
+
+.history-diff-scroll {
+  min-height: 0;
+  overflow: auto;
+}
+
+.history-message,
+.history-empty {
+  margin: 12px;
+  color: var(--text-muted);
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+.history-message {
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  padding: 9px 10px;
+  background: #f8fafb;
+}
+
+.history-message.warning {
+  border-color: #f4d8a8;
+  background: #fff8e8;
+  color: #8a5b16;
+}
+
+.history-message.error {
+  border-color: #f2b8a8;
+  background: var(--danger-soft);
+  color: var(--danger);
+}
+
+.history-dialog-actions {
+  border-top: 1px solid var(--border);
+}
+
+.history-dialog-actions .ghost-button,
+.history-dialog-actions .primary-button {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
 .modal-header h2 {
   margin: 4px 0 0;
   color: #111b21;
@@ -5712,6 +5872,14 @@ select::-ms-expand {
   .skills-modal-body {
     grid-template-columns: minmax(220px, 280px) minmax(0, 1fr);
   }
+
+  .history-dialog {
+    width: min(920px, calc(100vw - 24px));
+  }
+
+  .history-dialog-body {
+    grid-template-columns: 220px minmax(0, 1fr);
+  }
 }
 
 @media (max-width: 760px) {
@@ -5722,6 +5890,7 @@ select::-ms-expand {
 
   .settings-drawer,
   .skills-modal,
+  .history-dialog,
   .rename-dialog,
   .confirm-dialog {
     width: min(100%, calc(100vw - 20px));
@@ -5743,6 +5912,30 @@ select::-ms-expand {
   .skills-list-pane {
     border-right: 0;
     border-bottom: 1px solid var(--border);
+  }
+
+  .history-dialog {
+    height: calc(100vh - 20px);
+  }
+
+  .history-dialog-body {
+    grid-template-columns: 1fr;
+    grid-template-rows: minmax(150px, 32%) minmax(0, 1fr);
+  }
+
+  .history-version-list {
+    border-right: 0;
+    border-bottom: 1px solid var(--border);
+  }
+
+  .history-dialog-actions {
+    align-items: stretch;
+    flex-direction: column-reverse;
+  }
+
+  .history-dialog-actions .ghost-button,
+  .history-dialog-actions .primary-button {
+    justify-content: center;
   }
 
   .agent-input-toolbar,
