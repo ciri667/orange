@@ -228,15 +228,17 @@ function getContextSummaryFieldCount(session: AgentSession) {
     return 0;
   }
 
+  // 后端数组字段使用 skip_serializing_if="Vec::is_empty"，空数组在 JSON 中会被省略，
+  // 因此这里对每个数组字段做空值保护，避免 undefined 时崩溃。
   return [
     summary.currentGoal,
-    summary.userConstraints.length,
-    summary.decisions.length,
-    summary.completedWork.length,
-    summary.pendingTasks.length,
-    summary.touchedNotes.length,
+    summary.userConstraints?.length,
+    summary.decisions?.length,
+    summary.completedWork?.length,
+    summary.pendingTasks?.length,
+    summary.touchedNotes?.length,
     summary.pendingChangeSummary,
-    summary.openQuestions.length,
+    summary.openQuestions?.length,
     summary.lastSummarizedMessageId,
     summary.lastCompactedMessageId,
   ].filter(Boolean).length;
