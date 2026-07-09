@@ -2833,6 +2833,186 @@ button.diff-line:not(:disabled):hover,
   gap: 12px;
 }
 
+.agent-memory-title-actions {
+  align-items: center;
+}
+
+.agent-memory-delete-button {
+  min-height: 34px;
+  padding: 0 10px;
+}
+
+.agent-memory-hint {
+  max-width: 760px;
+}
+
+.agent-memory-layout {
+  display: grid;
+  grid-template-columns: minmax(180px, 240px) minmax(0, 1fr);
+  gap: 12px;
+  align-items: start;
+}
+
+.agent-memory-kb-list,
+.agent-memory-entry-list {
+  display: grid;
+  gap: 8px;
+}
+
+.agent-memory-kb-card {
+  display: grid;
+  width: 100%;
+  min-width: 0;
+  gap: 6px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-control);
+  padding: 10px;
+  background: #fbfaf7;
+  color: var(--text);
+  text-align: left;
+}
+
+.agent-memory-kb-card:hover:not(:disabled),
+.agent-memory-kb-card.active {
+  border-color: rgba(var(--primary-rgb), 0.34);
+  background: var(--surface-hover);
+}
+
+.agent-memory-kb-card.active {
+  box-shadow: inset 3px 0 0 var(--accent);
+}
+
+.agent-memory-kb-card-header,
+.agent-memory-editor-title,
+.agent-memory-entry-meta {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: 8px;
+}
+
+.agent-memory-kb-card strong,
+.agent-memory-editor-title strong {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--text-strong);
+  font-size: 13px;
+  font-weight: 700;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.agent-memory-kb-card > span:last-child {
+  color: var(--text-muted);
+  font-size: 12px;
+}
+
+.agent-memory-status {
+  display: inline-flex;
+  flex: 0 0 auto;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  padding: 2px 7px;
+  background: rgba(255, 255, 255, 0.62);
+  color: var(--text-muted);
+  font-size: 11px;
+  font-weight: 700;
+}
+
+.agent-memory-status.enabled {
+  border-color: rgba(47, 111, 104, 0.28);
+  background: var(--accent-soft);
+  color: var(--accent-strong);
+}
+
+.agent-memory-editor {
+  display: grid;
+  min-width: 0;
+  gap: 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-control);
+  padding: 12px;
+  background: var(--color-warm-panel);
+}
+
+.agent-memory-editor-header {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.settings-section .agent-memory-toggle {
+  flex: 0 0 auto;
+  grid-column: auto;
+  color: var(--text);
+}
+
+.agent-memory-entry {
+  display: grid;
+  min-width: 0;
+  gap: 8px;
+  border: 1px solid rgba(var(--border-rgb), 0.76);
+  border-radius: var(--radius-control);
+  padding: 10px;
+  background: var(--surface);
+}
+
+.agent-memory-entry-meta {
+  align-items: end;
+}
+
+.agent-memory-entry-meta label {
+  flex: 1 1 180px;
+  gap: 5px;
+}
+
+.agent-memory-entry-meta .select-control select {
+  min-height: 32px;
+  font-size: 12px;
+  line-height: 32px;
+}
+
+.agent-memory-source {
+  display: inline-flex;
+  min-height: 32px;
+  align-items: center;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-control);
+  padding: 0 9px;
+  background: rgba(255, 255, 255, 0.68);
+  color: var(--text-muted);
+  font-size: 12px;
+  font-weight: 700;
+  white-space: nowrap;
+}
+
+.agent-memory-entry-delete {
+  width: 32px;
+  min-height: 32px;
+}
+
+.agent-memory-textarea {
+  width: 100%;
+  min-height: 76px;
+  min-width: 0;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-control);
+  padding: 10px;
+  resize: vertical;
+  background: var(--control-bg);
+  color: var(--text);
+  font: inherit;
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+.agent-memory-entry-actions {
+  display: flex;
+  justify-content: flex-start;
+}
+
 .settings-kb-list.compact {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -3274,6 +3454,7 @@ button.diff-line:not(:disabled):hover,
   .settings-grid,
   .event-log-filters,
   .skills-summary,
+  .agent-memory-layout,
   .provider-card-grid,
   .provider-models-header,
   .provider-add-row {
@@ -3283,6 +3464,12 @@ button.diff-line:not(:disabled):hover,
   .settings-kb-card,
   .key-save-row {
     grid-template-columns: 1fr;
+  }
+
+  .agent-memory-editor-header,
+  .agent-memory-entry-meta {
+    align-items: flex-start;
+    flex-wrap: wrap;
   }
 
   .settings-content-title {

@@ -1,5 +1,6 @@
 import {
   BookOpen,
+  Brain,
   History,
   MessageCircle,
   ScrollText,
@@ -25,6 +26,7 @@ import type {
   FeishuGatewayStatus,
   ImIntegrationSettings,
   KnowledgeBase,
+  KnowledgeBaseMemory,
   LlmProviderConfig,
   ModelApiKeyStatus,
   ProviderTemplate,
@@ -33,6 +35,7 @@ import type {
 } from "../shared/types";
 import { SkillsModal } from "./SkillsModal";
 import {
+  AgentMemorySettingsSection,
   AuditLogsSettingsSection,
   EventLogsSettingsSection,
   ImSettingsSection,
@@ -42,7 +45,7 @@ import {
 } from "./SettingsSections";
 
 /** 设置页左侧导航的可选分区，和右侧主内容一一对应。 */
-type SettingsSectionId = "knowledge" | "model" | "im" | "skills" | "eventLogs" | "auditLogs";
+type SettingsSectionId = "knowledge" | "model" | "im" | "skills" | "agentMemory" | "eventLogs" | "auditLogs";
 
 /** 设置页导航分组，帮助用户区分可配置项和只读诊断项。 */
 type SettingsSectionGroup = "配置" | "诊断";
@@ -119,6 +122,7 @@ export function SettingsDrawer({
   providerTemplates,
   auditLogs,
   appEventLogs,
+  knowledgeBaseMemories,
   isBusy,
   onSelectKnowledgeBase,
   onAddKnowledgeBase,
@@ -126,6 +130,8 @@ export function SettingsDrawer({
   onRemoveKnowledgeBase,
   onSaveSettings,
   onSaveImSettings,
+  onSaveKnowledgeBaseMemory,
+  onDeleteKnowledgeBaseMemory,
   onSaveSkill,
   onInstallSkill,
   onToggleSkill,
@@ -154,6 +160,7 @@ export function SettingsDrawer({
   providerTemplates: ProviderTemplate[];
   auditLogs: RequestAuditLog[];
   appEventLogs: AppEventLog[];
+  knowledgeBaseMemories: KnowledgeBaseMemory[];
   isBusy: boolean;
   onSelectKnowledgeBase: (knowledgeBaseId: string) => void;
   onAddKnowledgeBase: () => void;
@@ -161,6 +168,8 @@ export function SettingsDrawer({
   onRemoveKnowledgeBase: (knowledgeBaseId: string) => void;
   onSaveSettings: (settings: UserSettings) => Promise<void> | void;
   onSaveImSettings: (settings: ImIntegrationSettings) => Promise<void> | void;
+  onSaveKnowledgeBaseMemory: (memory: KnowledgeBaseMemory) => Promise<KnowledgeBaseMemory> | KnowledgeBaseMemory;
+  onDeleteKnowledgeBaseMemory: (knowledgeBaseId: string) => Promise<void> | void;
   onSaveSkill: (skill: AgentSkill) => Promise<AgentSkill | void> | AgentSkill | void;
   onInstallSkill: (payload: InstallAgentSkillPayload) => Promise<InstallAgentSkillResult> | InstallAgentSkillResult;
   onToggleSkill: (skillId: string, enabled: boolean) => Promise<void> | void;
@@ -204,6 +213,8 @@ export function SettingsDrawer({
   const enabledSkillCount = skills.filter((skill) => skill.enabled).length;
   /** 自定义 skill 数量用于确认用户目录扫描是否已生效。 */
   const customSkillCount = skills.filter((skill) => skill.source === "custom").length;
+  /** 已启用跨会话记忆的知识库数量，用于设置页导航计数。 */
+  const enabledMemoryCount = knowledgeBaseMemories.filter((memory) => memory.enabled).length;
   /** 当前可配置的飞书 provider 草稿；后续多 IM provider 可在此扩展为 tabs/list。 */
   const feishuProviderDraft = getFeishuProvider(imSettingsDraft);
   /** 设置工作台顶部摘要只展示计数和状态，避免路径、密钥和请求内容外露。 */
@@ -254,6 +265,15 @@ export function SettingsDrawer({
         tone: enabledSkillCount > 0 ? "success" : "neutral",
       },
       {
+        id: "agentMemory",
+        group: "配置",
+        label: "Agent 记忆",
+        description: "跨会话长期偏好和约定",
+        meta: `${enabledMemoryCount}/${knowledgeBaseMemories.length}`,
+        icon: Brain,
+        tone: enabledMemoryCount > 0 ? "success" : "neutral",
+      },
+      {
         id: "eventLogs",
         group: "诊断",
         label: "运行日志",
@@ -275,9 +295,11 @@ export function SettingsDrawer({
     [
       appEventLogs,
       auditLogs.length,
+      enabledMemoryCount,
       enabledSkillCount,
       feishuGatewayStatus?.running,
       feishuProviderDraft.enabled,
+      knowledgeBaseMemories,
       settingsSummary.feishuStatus,
       knowledgeBases,
       settingsDraft.modelConfig.enabled,
@@ -931,6 +953,18 @@ export function SettingsDrawer({
           isBusy={isBusy}
           onOpenSkillsModal={() => setIsSkillsModalOpen(true)}
           onSaveSettings={handleSaveSettings}
+        />
+      );
+    }
+
+    if (activeSection === "agentMemory") {
+      return (
+        <AgentMemorySettingsSection
+          knowledgeBases={knowledgeBases}
+          knowledgeBaseMemories={knowledgeBaseMemories}
+          isBusy={isBusy}
+          onSaveKnowledgeBaseMemory={onSaveKnowledgeBaseMemory}
+          onDeleteKnowledgeBaseMemory={onDeleteKnowledgeBaseMemory}
         />
       );
     }
