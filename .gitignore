@@ -6,4 +6,5 @@ src-tauri/sidecars/bin/feishu-gateway
 src-tauri/sidecars/bin/feishu-gateway.exe
 docs/
 .idea/
+.zcode/
 .DS_Store
