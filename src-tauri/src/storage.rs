@@ -391,29 +391,43 @@ fn normalize_session_created_at(session: &mut AgentSession) {
         .unwrap_or_else(format_local_datetime);
 }
 
-/** 将会话创建时间转换为可排序时间戳，无法解析时放到列表末尾。 */
-fn session_created_sort_key(session: &AgentSession) -> i64 {
-    if let Some(timestamp_millis) = timestamp_millis_from_session_id(&session.id) {
-        return timestamp_millis;
-    }
-
-    NaiveDateTime::parse_from_str(&session.created_at, "%Y/%m/%d %H:%M")
+/** 将本地展示时间字符串（%Y/%m/%d %H:%M）解析为毫秒时间戳，无法解析时返回 None。 */
+fn parse_local_datetime_millis(value: &str) -> Option<i64> {
+    NaiveDateTime::parse_from_str(value.trim(), "%Y/%m/%d %H:%M")
         .ok()
-        .and_then(|created_at| {
+        .and_then(|naive| {
             // 按本地时区解释 UI 展示时间，保证与 format_local_datetime 的来源一致。
             Local
-                .from_local_datetime(&created_at)
+                .from_local_datetime(&naive)
                 .single()
                 .map(|datetime| datetime.timestamp_millis())
         })
+}
+
+/**
+ * 将会话“最后使用时间”转换为可排序时间戳。
+ *
+ * `updated_at` 在前端每次发消息或改 diff 时刷新为 `%Y/%m/%d %H:%M`，因此优先解析它；
+ * 旧版记录仍是“刚刚”占位值时，退回从会话 ID 里提取创建毫秒时间戳，避免在派生字段全空时整体失序。
+ */
+fn session_updated_sort_key(session: &AgentSession) -> i64 {
+    if !is_created_at_placeholder(&session.updated_at) {
+        if let Some(updated_at_millis) = parse_local_datetime_millis(&session.updated_at) {
+            return updated_at_millis;
+        }
+    }
+
+    timestamp_millis_from_session_id(&session.id)
+        .or_else(|| parse_local_datetime_millis(&session.created_at))
         .unwrap_or(0)
 }
 
-/** 按创建时间倒序整理会话历史，避免 SQLite rowid 或数组插入顺序影响展示。 */
-fn sort_sessions_by_created_at_desc(sessions: &mut [AgentSession]) {
+/** 按“最后使用时间”倒序整理会话历史，相同时间再回落到创建时间，保持稳定。 */
+fn sort_sessions_by_updated_at_desc(sessions: &mut [AgentSession]) {
     sessions.sort_by(|left, right| {
-        session_created_sort_key(right)
-            .cmp(&session_created_sort_key(left))
+        session_updated_sort_key(right)
+            .cmp(&session_updated_sort_key(left))
+            .then_with(|| right.updated_at.cmp(&left.updated_at))
             .then_with(|| right.created_at.cmp(&left.created_at))
     });
 }
@@ -1086,7 +1100,7 @@ pub fn load_sessions_for_snapshot(
         }
     }
 
-    sort_sessions_by_created_at_desc(&mut sessions);
+    sort_sessions_by_updated_at_desc(&mut sessions);
 
     Ok(sessions)
 }
@@ -1288,7 +1302,7 @@ pub fn normalize_sessions_for_snapshot(snapshot: &mut WorkspaceSnapshot) {
     snapshot
         .sessions
         .retain_mut(|session| normalize_session_for_snapshot(session, &snapshot_view));
-    sort_sessions_by_created_at_desc(&mut snapshot.sessions);
+    sort_sessions_by_updated_at_desc(&mut snapshot.sessions);
 }
 
 /** 清理单个会话引用，返回 false 表示该会话已没有可访问知识库。 */
@@ -4800,7 +4814,7 @@ mod tests {
         read_document_history_snapshot, redact_memory_secrets, rename_markdown_file,
         rename_text_document_file, resolve_existing_file_inside_root, resolve_inside_root,
         save_note_image_attachments, scan_markdown_directory, scan_supported_documents_directory,
-        sort_sessions_by_created_at_desc, store_model_api_key_in_cache, trash_markdown_file,
+        sort_sessions_by_updated_at_desc, store_model_api_key_in_cache, trash_markdown_file,
         trash_text_document_file_with, validate_folder_name, validate_markdown_file_name,
         validate_new_markdown_file_name, validate_new_text_document_file_name,
         validate_text_document_file_name, write_document_history_snapshot, BASE64_STANDARD,
@@ -4839,6 +4853,13 @@ mod tests {
             model_provider_id: None,
             model_id: None,
         }
+    }
+
+    /** 构造测试用 Agent 会话并显式指定更新时间，便于排序测试覆盖 updated_at 路径。 */
+    fn test_agent_session_with_updated_at(id: &str, created_at: &str, updated_at: &str) -> AgentSession {
+        let mut session = test_agent_session(id, created_at);
+        session.updated_at = updated_at.to_owned();
+        session
     }
 
     /** 旧版 `{ feishu: ... }` IM 设置必须迁移为 providers，避免升级后丢失飞书配置。 */
@@ -5142,16 +5163,43 @@ mod tests {
         assert_eq!(session.created_at, expected_created_at);
     }
 
-    /** 会话历史必须按创建时间倒序展示，同一分钟内依赖 ID 毫秒时间戳保持稳定。 */
+    /** 会话历史按“最后使用时间”倒序排列，最近发过消息的会话排在前面。 */
     #[test]
-    fn sort_sessions_by_created_at_desc_uses_id_timestamp() {
+    fn sort_sessions_by_updated_at_desc_orders_by_updated_at() {
+        // 三个会话创建时间相同，仅 updated_at 不同：最新更新者应排到最前面。
         let mut sessions = vec![
-            test_agent_session("session-task-1700000000000-old", "2023/11/14 22:13"),
-            test_agent_session("session-task-1700000030000-new", "2023/11/14 22:13"),
-            test_agent_session("session-task-1699999940000-earliest", "2023/11/14 22:12"),
+            test_agent_session_with_updated_at("session-a-1700000000000", "2023/11/14 22:13", "2023/11/20 09:00"),
+            test_agent_session_with_updated_at("session-b-1700000030000", "2023/11/14 22:13", "2023/11/22 18:30"),
+            test_agent_session_with_updated_at("session-c-1699999940000", "2023/11/14 22:13", "2023/11/15 07:45"),
         ];
 
-        sort_sessions_by_created_at_desc(&mut sessions);
+        sort_sessions_by_updated_at_desc(&mut sessions);
+
+        let session_ids = sessions
+            .iter()
+            .map(|session| session.id.as_str())
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            session_ids,
+            vec![
+                "session-b-1700000030000",
+                "session-a-1700000000000",
+                "session-c-1699999940000",
+            ]
+        );
+    }
+
+    /** updated_at 仍是“刚刚”占位值时，应退回会话 ID 里的毫秒时间戳排序，保持稳定兜底。 */
+    #[test]
+    fn sort_sessions_by_updated_at_desc_falls_back_to_id_timestamp() {
+        let mut sessions = vec![
+            test_agent_session_with_updated_at("session-task-1700000000000-old", "2023/11/14 22:13", "刚刚"),
+            test_agent_session_with_updated_at("session-task-1700000030000-new", "2023/11/14 22:13", "刚刚"),
+            test_agent_session_with_updated_at("session-task-1699999940000-earliest", "2023/11/14 22:12", "刚刚"),
+        ];
+
+        sort_sessions_by_updated_at_desc(&mut sessions);
 
         let session_ids = sessions
             .iter()

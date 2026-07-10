@@ -98,6 +98,12 @@ export function AgentSessionHistoryPopover({
                   text={`创建：${session.createdAt}`}
                   logArea="agent_session_history_created_at"
                 />
+                <OverflowTooltipText
+                  as="time"
+                  dateTime={session.updatedAt}
+                  text={`最近：${session.updatedAt}`}
+                  logArea="agent_session_history_updated_at"
+                />
               </span>
               {session.pendingChange?.status === "pending" && <span className="session-pending">待确认 diff</span>}
             </button>
