@@ -171,6 +171,7 @@ pub async fn start_gateway(app: AppHandle) -> Result<FeishuGatewayStatus, String
             "knowledgeBaseCount": settings.default_knowledge_base_ids.len(),
             "allowedUserCount": settings.allowed_user_open_ids.len(),
             "allowedChatCount": settings.allowed_chat_ids.len(),
+            "discoveryOnly": settings.allowed_user_open_ids.is_empty(),
         })),
     );
 
@@ -252,7 +253,7 @@ fn lock_gateway_state() -> Result<std::sync::MutexGuard<'static, FeishuGatewaySt
         .map_err(|_| "飞书网关状态锁已损坏。".to_owned())
 }
 
-/** 校验启动所需的非敏感配置，避免 sidecar 启动后才失败。 */
+/** 校验建立长连接所需的非敏感配置；用户白名单可为空，以便首次启动后自动发现 open_id。 */
 fn validate_gateway_settings(settings: &FeishuIntegrationSettings) -> Result<(), String> {
     if !settings.enabled {
         return Err("请先启用飞书/Lark 集成。".to_owned());
@@ -263,10 +264,6 @@ fn validate_gateway_settings(settings: &FeishuIntegrationSettings) -> Result<(),
     if settings.default_knowledge_base_ids.is_empty() {
         return Err("请至少选择一个飞书默认知识库范围。".to_owned());
     }
-    if settings.allowed_user_open_ids.is_empty() {
-        return Err("请至少配置一个允许访问的飞书用户 open_id。".to_owned());
-    }
-
     Ok(())
 }
 
@@ -1149,6 +1146,59 @@ mod tests {
             validate_gateway_settings(&settings).unwrap_err(),
             "请先启用飞书/Lark 集成。"
         );
+    }
+
+    /** 首次配置没有用户白名单时仍应允许启动网关，以接收事件并自动发现 open_id。 */
+    #[test]
+    fn gateway_validation_allows_empty_user_allowlist_for_discovery() {
+        let settings = FeishuIntegrationSettings {
+            enabled: true,
+            domain: "feishu".to_owned(),
+            app_id: "cli_x".to_owned(),
+            secret_key_reference: "secret".to_owned(),
+            default_knowledge_base_ids: vec!["kb".to_owned()],
+            allowed_user_open_ids: Vec::new(),
+            allowed_chat_ids: Vec::new(),
+            discovered_user_open_ids: Vec::new(),
+            discovered_chat_ids: Vec::new(),
+            require_mention: true,
+            updated_at: "now".to_owned(),
+        };
+
+        assert!(validate_gateway_settings(&settings).is_ok());
+    }
+
+    /** 仅发现模式仍必须默认拒绝普通消息，避免空白名单被误解为允许所有用户。 */
+    #[test]
+    fn discovery_mode_blocks_messages_before_agent_execution() {
+        let settings = FeishuIntegrationSettings {
+            enabled: true,
+            domain: "feishu".to_owned(),
+            app_id: "cli_x".to_owned(),
+            secret_key_reference: "secret".to_owned(),
+            default_knowledge_base_ids: vec!["kb".to_owned()],
+            allowed_user_open_ids: Vec::new(),
+            allowed_chat_ids: Vec::new(),
+            discovered_user_open_ids: Vec::new(),
+            discovered_chat_ids: Vec::new(),
+            require_mention: true,
+            updated_at: "now".to_owned(),
+        };
+        let event = FeishuInboundEvent {
+            kind: "message".to_owned(),
+            event_id: "evt".to_owned(),
+            message_id: "msg".to_owned(),
+            chat_id: "oc_p2p_session".to_owned(),
+            chat_type: "p2p".to_owned(),
+            sender_open_id: "ou_candidate".to_owned(),
+            message_type: "text".to_owned(),
+            text: "hello".to_owned(),
+            mentions: Vec::new(),
+        };
+
+        let block = decide_event_handling(&settings, &event).unwrap_err();
+
+        assert_eq!(block.reason, "飞书发送人不在允许名单中。");
     }
 
     /** `/status` 和 `/reset` 使用纯文本命令，首版不依赖飞书 slash command 菜单。 */
