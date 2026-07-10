@@ -1943,8 +1943,15 @@ button.diff-line:not(:disabled):hover,
   flex: 0 0 auto;
 }
 
-.scope-selector > span {
+.scope-selector-copy {
+  flex: 1 1 auto;
   min-width: 0;
+}
+
+.scope-selector-edit {
+  flex: 0 0 auto;
+  width: 30px;
+  min-height: 30px;
 }
 
 .scope-selector strong {
@@ -1960,7 +1967,7 @@ button.diff-line:not(:disabled):hover,
   background: var(--accent-soft);
 }
 
-.scope-selector span span {
+.scope-selector-copy > span {
   display: block;
   margin-top: 3px;
   color: var(--text-muted);
@@ -4260,7 +4267,6 @@ select:focus-visible,
 .kb-row:hover,
 .file-tree-row.file:hover,
 .file-tree-row.folder:hover,
-.scope-selector:hover,
 .settings-nav-item:hover,
 .skill-row:hover {
   background: var(--surface-hover);
@@ -4772,7 +4778,7 @@ button.diff-line:not(:disabled):hover,
   color: var(--agent);
 }
 
-.scope-selector span span {
+.scope-selector-copy > span {
   color: var(--text-muted);
 }
 

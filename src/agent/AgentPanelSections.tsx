@@ -1,4 +1,4 @@
-import { Check, Database, Layers3, MessageSquareText, Sparkles, Trash2, X } from "lucide-react";
+import { Check, Database, Layers3, MessageSquareText, Pencil, Sparkles, Trash2, X } from "lucide-react";
 import ReactMarkdown from "react-markdown";
 import rehypeSanitize from "rehype-sanitize";
 import remarkGfm from "remark-gfm";
@@ -277,18 +277,26 @@ export function AgentScopeSelector({
 
   return (
     <>
-      <button
+      <div
         className={`scope-selector ${selectedKnowledgeBaseIds.length > 1 ? "active" : ""}`}
-        type="button"
-        aria-expanded={isScopeSelectorOpen}
-        onClick={onToggleScopeSelector}
+        aria-label="工具范围"
       >
         <Layers3 size={17} />
-        <span>
+        <span className="scope-selector-copy">
           <OverflowTooltipText as="strong" text={`工具范围：${selectedScopeLabel}`} logArea="agent_scope_selector_summary" />
           <span>当前知识库默认选中，Agent 不能越权检索未选目录</span>
         </span>
-      </button>
+        <button
+          className="icon-button scope-selector-edit"
+          type="button"
+          title="编辑工具范围"
+          aria-expanded={isScopeSelectorOpen}
+          aria-label="编辑工具范围"
+          onClick={onToggleScopeSelector}
+        >
+          <Pencil size={15} />
+        </button>
+      </div>
 
       {isScopeSelectorOpen && (
         <section className="scope-popover" aria-label="选择检索知识库">
