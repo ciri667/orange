@@ -23,6 +23,9 @@ const RECENT_EVENT_LIMIT: usize = 512;
 /** 飞书回复正文最大字符数，避免模型长回复超过纯文本消息的可读边界。 */
 const MAX_FEISHU_REPLY_CHARS: usize = 3500;
 
+/** 飞书卡片中默认展示的改动预览上限，避免在 IM 中泄露完整笔记正文。 */
+const MAX_FEISHU_CARD_PREVIEW_CHARS: usize = 480;
+
 /** 飞书长连接 sidecar 配置，通过 stdin JSON 注入，避免 appSecret 出现在进程命令行。 */
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -49,6 +52,26 @@ pub struct FeishuInboundEvent {
     pub text: String,
     #[serde(default)]
     pub mentions: Vec<FeishuMention>,
+    /** 仅 card_action 事件携带的卡片操作名称。 */
+    #[serde(default)]
+    pub action: String,
+    /** 仅 card_action 事件携带的待确认变更 ID；由 Rust 再次鉴权并查询。 */
+    #[serde(default)]
+    pub change_id: String,
+}
+
+/** 待确认笔记变更在飞书中展示所需的最小信息，不包含完整 diff 或外部身份。 */
+#[derive(Clone, Debug)]
+pub struct FeishuPendingChangeCard {
+    pub chat_id: String,
+    pub chat_type: String,
+    pub change_id: String,
+    pub short_code: String,
+    pub target_path: String,
+    pub operation_label: String,
+    pub added_lines: usize,
+    pub removed_lines: usize,
+    pub preview: String,
 }
 
 /** 飞书消息中的 @ 元数据；只用 open_id 判断是否直接 @ bot。 */
@@ -391,7 +414,7 @@ fn record_gateway_error(app: &AppHandle, message: &str) {
     );
 }
 
-/** 处理单条飞书消息事件：去重、鉴权、运行 Agent、回发文本。 */
+/** 处理单条飞书消息或卡片事件：去重、鉴权、运行 Agent/远程审批，并回发结果。 */
 async fn handle_inbound_event(app: AppHandle, event: FeishuInboundEvent) {
     let started_at = Instant::now();
     let event_hash = hash_identifier(&event.event_id);
@@ -460,12 +483,17 @@ async fn handle_inbound_event(app: AppHandle, event: FeishuInboundEvent) {
         return;
     }
 
-    let reply = if event.message_type != "text" {
+    let reply = if event.kind == "card_action" {
+        // 卡片回调没有 @ mention，但仍须经过同一发送人和群聊白名单校验。
+        handle_card_action_for_event(&app, &event).await
+    } else if event.message_type != "text" {
         "暂不支持该飞书消息类型；首版只处理文本消息。".to_owned()
     } else if event.text.trim() == "/status" {
         build_status_reply(&app, &settings)
     } else if event.text.trim() == "/reset" {
         reset_im_session(&app, &event, &settings)
+    } else if let Some((action, change_token)) = parse_pending_change_text_command(&event.text) {
+        handle_pending_change_command_for_event(&app, &event, action, change_token).await
     } else {
         run_agent_for_event(&app, &event, &settings).await
     };
@@ -608,12 +636,68 @@ fn decide_event_handling(
         {
             return Err(block_reason("飞书群聊不在允许名单中。"));
         }
-        if settings.require_mention && !is_direct_bot_mention(event) {
+        // 卡片 action 是用户主动点击已发送的机器人卡片，不携带消息 mention；不能因此误拦截。
+        if settings.require_mention && event.kind != "card_action" && !is_direct_bot_mention(event)
+        {
             return Err(block_reason("飞书群聊消息未直接 @ 机器人。"));
         }
     }
 
     Ok(())
+}
+
+/** 处理已由 sidecar 规范化的卡片 action，变更 ID 仍会在审批服务中二次校验。 */
+async fn handle_card_action_for_event(app: &AppHandle, event: &FeishuInboundEvent) -> String {
+    let action = normalize_pending_change_action(&event.action);
+    if action.is_none() || event.change_id.trim().is_empty() {
+        return "卡片操作无效或已过期，请使用“详情 <编号>”查看当前待确认改动。".to_owned();
+    }
+
+    handle_pending_change_command_for_event(
+        app,
+        event,
+        action.unwrap_or_default(),
+        &event.change_id,
+    )
+    .await
+}
+
+/** 将来自文字或卡片的审批操作统一委托给不依赖前端 WorkspaceSnapshot 的服务接口。 */
+async fn handle_pending_change_command_for_event(
+    app: &AppHandle,
+    event: &FeishuInboundEvent,
+    action: &str,
+    change_token: &str,
+) -> String {
+    crate::commands::handle_im_pending_change_command(
+        app.clone(),
+        IM_PROVIDER_FEISHU,
+        &build_channel_key(event),
+        action,
+        change_token,
+    )
+    .await
+}
+
+/** 解析 IM 文字兜底指令；只接受“详情/确认/取消 + 单个编号”，其他文本继续交给 Agent。 */
+fn parse_pending_change_text_command(text: &str) -> Option<(&str, &str)> {
+    let mut parts = text.split_whitespace();
+    let action = normalize_pending_change_action(parts.next()?);
+    let change_token = parts.next()?.trim();
+    if action.is_none() || change_token.is_empty() || parts.next().is_some() {
+        return None;
+    }
+    Some((action?, change_token))
+}
+
+/** 归一化卡片 name 与中文文字指令，避免审批服务暴露 provider 专属 action。 */
+fn normalize_pending_change_action(action: &str) -> Option<&str> {
+    match action.trim() {
+        "details" | "orange_pending_details" | "详情" => Some("details"),
+        "confirm" | "orange_pending_confirm" | "确认" => Some("confirm"),
+        "cancel" | "orange_pending_cancel" | "取消" => Some("cancel"),
+        _ => None,
+    }
 }
 
 /** 构造拦截原因，避免在调用处重复分配和拼接敏感上下文。 */
@@ -748,24 +832,112 @@ async fn run_agent_for_event(
     event: &FeishuInboundEvent,
     settings: &FeishuIntegrationSettings,
 ) -> String {
+    let channel_key = build_channel_key(event);
+    let conversation_kind = if is_group_chat_event(event) {
+        "group"
+    } else {
+        "direct"
+    };
+    // IM 身份只保存通道哈希和清洗后的摘要，避免原始 chat_id/open_id 进入持久化会话。
+    let im_identity = super::build_im_session_identity(
+        IM_PROVIDER_FEISHU,
+        &channel_key,
+        conversation_kind,
+        &event.text,
+    );
     let result = crate::commands::run_agent_turn_from_im(
         app.clone(),
         IM_PROVIDER_FEISHU.to_owned(),
         event.text.trim().to_owned(),
-        build_channel_key(event),
+        channel_key,
         settings.default_knowledge_base_ids.clone(),
-        "飞书会话".to_owned(),
+        im_identity,
     )
     .await;
 
     match result {
-        Ok(snapshot) => build_agent_reply_text(&snapshot),
+        Ok(snapshot) => {
+            // 卡片发送失败不能阻断 Agent 正文回复；回复文本必须据此切换到可执行的文字指令。
+            let card_sent = match send_pending_change_card_for_snapshot(
+                app, event, settings, &snapshot,
+            )
+            .await
+            {
+                Ok(()) => true,
+                Err(error) => {
+                    logging::write_app_event_best_effort(
+                        app,
+                        AppEventBuilder::new(
+                            AppLogLevel::Warn,
+                            AppLogCategory::Im,
+                            "im_pending_change_card_send",
+                            "failed",
+                            error,
+                        )
+                        .metadata(json!({
+                            "providerId": IM_PROVIDER_FEISHU,
+                            "chatHash": hash_identifier(&event.chat_id),
+                        })),
+                    );
+                    false
+                }
+            };
+            build_agent_reply_text(&snapshot, card_sent)
+        }
+        Err(error) if error.starts_with("当前有待确认变更") => error,
         Err(error) => format!("飞书消息处理失败：{}", logging::sanitize_log_text(&error)),
     }
 }
 
-/** 从最新 assistant 消息构造飞书回复；有待确认 diff 时提醒回到桌面端审阅。 */
-fn build_agent_reply_text(snapshot: &WorkspaceSnapshot) -> String {
+/** 从当前 IM 会话的 pending change 构造并发送远程审批卡片。 */
+async fn send_pending_change_card_for_snapshot(
+    app: &AppHandle,
+    event: &FeishuInboundEvent,
+    settings: &FeishuIntegrationSettings,
+    snapshot: &WorkspaceSnapshot,
+) -> Result<(), String> {
+    let session = snapshot
+        .sessions
+        .iter()
+        .find(|session| session.id == snapshot.active_session_id)
+        .or_else(|| snapshot.sessions.first());
+    let Some(change) = session.and_then(|session| {
+        session
+            .pending_change
+            .as_ref()
+            .filter(|change| change.status == "pending")
+    }) else {
+        return Ok(());
+    };
+    let stats = change.diff_stats.as_ref();
+    let card = FeishuPendingChangeCard {
+        chat_id: event.chat_id.clone(),
+        chat_type: event.chat_type.clone(),
+        change_id: change.id.clone(),
+        short_code: crate::commands::short_change_code(&change.id),
+        target_path: change.target_path.clone(),
+        operation_label: pending_change_operation_label(change),
+        added_lines: stats.map(|value| value.added_lines).unwrap_or(0),
+        removed_lines: stats.map(|value| value.removed_lines).unwrap_or(0),
+        // 仅发送变更后内容的短预览；完整 diff 必须通过“详情”操作按需获取。
+        preview: truncate_chars(change.next.trim(), MAX_FEISHU_CARD_PREVIEW_CHARS),
+    };
+    send_pending_change_card(app, settings, &card).await
+}
+
+/** 将变更 operation 归一为 IM 卡片可读标签，兼容旧数据仅含 type 的情况。 */
+fn pending_change_operation_label(change: &crate::domain::ProposedChange) -> String {
+    match change.operation.as_deref().unwrap_or(&change.r#type) {
+        "create" | "new" => "新建".to_owned(),
+        "append" => "追加".to_owned(),
+        "rewrite" | "update" | "edit" => "改写".to_owned(),
+        value if !value.trim().is_empty() => value.to_owned(),
+        _ => "更新".to_owned(),
+    }
+}
+
+/** 从最新 assistant 消息构造飞书回复；待确认 diff 改为在同一会话内审批。 */
+fn build_agent_reply_text(snapshot: &WorkspaceSnapshot, card_sent: bool) -> String {
     let session = snapshot
         .sessions
         .iter()
@@ -784,12 +956,21 @@ fn build_agent_reply_text(snapshot: &WorkspaceSnapshot) -> String {
         .unwrap_or("Agent 已完成处理。");
     let mut reply = truncate_chars(assistant_content, MAX_FEISHU_REPLY_CHARS).to_owned();
 
-    if session
+    if let Some(change) = session
         .pending_change
         .as_ref()
-        .is_some_and(|change| change.status == "pending")
+        .filter(|change| change.status == "pending")
     {
-        reply.push_str("\n\n已生成待确认改动，请回到橘记审阅后再写入本地文件。");
+        let short_code = crate::commands::short_change_code(&change.id);
+        let action_hint = if card_sent {
+            "已发送审批卡片，可点击查看详情、确认写入或取消。"
+        } else {
+            "审批卡片暂不可用，请使用下方文字指令。"
+        };
+        // 不依赖模型是否正确提及“待确认”，始终附加真实短码，使手机端可复制执行。
+        reply.push_str(&format!(
+            "\n\n{action_hint}\n变更编号：{short_code}\n详情：详情 {short_code}\n确认：确认 {short_code}\n取消：取消 {short_code}"
+        ));
     }
 
     reply
@@ -884,6 +1065,161 @@ async fn send_text_reply(
         })),
     );
 
+    Ok(())
+}
+
+/**
+ * 向飞书会话发送远程审批卡片。
+ *
+ * 审批服务在创建 pending change 后调用本函数；卡片 value 只带不可猜测的完整变更 ID，
+ * 实际鉴权、过期判断和文件写入始终由收到 action 后的 Rust 服务完成。
+ */
+pub async fn send_pending_change_card(
+    app: &AppHandle,
+    settings: &FeishuIntegrationSettings,
+    card: &FeishuPendingChangeCard,
+) -> Result<(), String> {
+    rate_limit_send_target(&card.chat_id).await?;
+
+    let app_secret = storage::load_im_provider_secret(IM_PROVIDER_FEISHU)?
+        .ok_or_else(|| "飞书 appSecret 未配置，无法发送审批卡片。".to_owned())?;
+    let token = fetch_tenant_access_token(&settings.domain, &settings.app_id, &app_secret).await?;
+    let base_url = feishu_base_url(&settings.domain);
+    let client = Client::builder()
+        .timeout(Duration::from_secs(20))
+        .build()
+        .map_err(|error| format!("无法创建飞书 HTTP client：{error}"))?;
+    let content = build_pending_change_card_content(card)?;
+    let response = client
+        .post(format!("{base_url}/open-apis/im/v1/messages"))
+        .bearer_auth(token)
+        .query(&[("receive_id_type", "chat_id")])
+        .json(&json!({
+            "receive_id": card.chat_id,
+            "msg_type": "interactive",
+            "content": content,
+        }))
+        .send()
+        .await
+        .map_err(|error| format!("无法发送飞书审批卡片：{error}"))?;
+    let status = response.status();
+    let body = response
+        .text()
+        .await
+        .map_err(|error| format!("无法读取飞书审批卡片响应：{error}"))?;
+
+    ensure_feishu_send_success(status, &body, "审批卡片")?;
+    logging::write_app_event_best_effort(
+        app,
+        AppEventBuilder::new(
+            AppLogLevel::Info,
+            AppLogCategory::Im,
+            "im_pending_change_card_sent",
+            "completed",
+            "飞书待确认变更卡片已发送。",
+        )
+        .metadata(json!({
+            "providerId": IM_PROVIDER_FEISHU,
+            "changeHash": hash_identifier(&card.change_id),
+            "chatHash": hash_identifier(&card.chat_id),
+            "operation": card.operation_label,
+            "addedLines": card.added_lines,
+            "removedLines": card.removed_lines,
+        })),
+    );
+    Ok(())
+}
+
+/** 构造飞书 Card 2.0 JSON；默认只显示摘要，详情操作由服务端再发送截断 diff。 */
+fn build_pending_change_card_content(card: &FeishuPendingChangeCard) -> Result<String, String> {
+    let preview = truncate_chars(card.preview.trim(), MAX_FEISHU_CARD_PREVIEW_CHARS);
+    serde_json::to_string(&json!({
+        "schema": "2.0",
+        "config": { "wide_screen_mode": true },
+        "header": {
+            "title": { "tag": "plain_text", "content": "橘记：待确认笔记改动" },
+            "template": "orange"
+        },
+        "body": {
+            "elements": [
+                {
+                    "tag": "markdown",
+                    "content": format!(
+                        "**操作**：{}\\n**目标**：`{}`\\n**变更编号**：`{}`\\n**行数**：+{} / -{}{}",
+                        card.operation_label,
+                        card.target_path,
+                        card.short_code,
+                        card.added_lines,
+                        card.removed_lines,
+                        if preview.is_empty() { String::new() } else { format!("\\n\\n**预览**\\n{}", preview) },
+                    )
+                },
+                {
+                    "tag": "action",
+                    "layout": "trisection",
+                    "actions": [
+                        card_action_button("详情", "orange_pending_details", "default", card),
+                        card_action_button("确认写入", "orange_pending_confirm", "primary", card),
+                        card_action_button("取消", "orange_pending_cancel", "danger", card)
+                    ]
+                },
+                {
+                    "tag": "note",
+                    "elements": [{ "tag": "plain_text", "content": format!("文字指令：详情 {} / 确认 {} / 取消 {}", card.short_code, card.short_code, card.short_code) }]
+                }
+            ]
+        }
+    }))
+    .map_err(|error| format!("无法序列化飞书审批卡片：{error}"))
+}
+
+/** 创建卡片按钮；完整 change_id 仅作为回调 value，短码只面向用户展示。 */
+fn card_action_button(
+    text: &str,
+    action: &str,
+    button_type: &str,
+    card: &FeishuPendingChangeCard,
+) -> Value {
+    json!({
+        "tag": "button",
+        "text": { "tag": "plain_text", "content": text },
+        "type": button_type,
+        "name": action,
+        "value": {
+            "action": action.trim_start_matches("orange_pending_"),
+            "changeId": card.change_id,
+            // 供 callback 在不读取原始 payload 的前提下保留私聊/群聊鉴权分支。
+            "chatType": card.chat_type
+        }
+    })
+}
+
+/** 统一校验飞书发送响应，确保卡片和文本使用一致的错误脱敏策略。 */
+fn ensure_feishu_send_success(
+    status: reqwest::StatusCode,
+    body: &str,
+    label: &str,
+) -> Result<(), String> {
+    if !status.is_success() {
+        return Err(format!(
+            "飞书{label}发送失败：HTTP {status} {}",
+            logging::sanitize_log_text(body)
+        ));
+    }
+    let value: Value = serde_json::from_str(body)
+        .map_err(|error| format!("无法解析飞书{label}发送响应：{error}"))?;
+    let code = value.get("code").and_then(Value::as_i64).unwrap_or(-1);
+    if code != 0 {
+        return Err(format!(
+            "飞书{label}发送失败：code={} msg={}",
+            code,
+            value
+                .get("msg")
+                .and_then(Value::as_str)
+                .map(logging::sanitize_log_text)
+                .unwrap_or_else(|| "unknown".to_owned())
+        ));
+    }
     Ok(())
 }
 
@@ -1011,6 +1347,43 @@ mod tests {
         assert_eq!(hashed.len(), 16);
     }
 
+    /** 文字兜底审批指令必须严格包含一个短码，避免普通自然语言被误认为写入操作。 */
+    #[test]
+    fn parses_pending_change_text_commands() {
+        assert_eq!(
+            parse_pending_change_text_command("确认 ab12cd"),
+            Some(("confirm", "ab12cd"))
+        );
+        assert_eq!(
+            parse_pending_change_text_command("详情 ab12cd"),
+            Some(("details", "ab12cd"))
+        );
+        assert!(parse_pending_change_text_command("确认").is_none());
+        assert!(parse_pending_change_text_command("确认 ab12cd 多余内容").is_none());
+    }
+
+    /** 卡片内容默认仅携带摘要与三种受控操作，完整变更 ID 只存在于按钮 value 中。 */
+    #[test]
+    fn pending_change_card_uses_summary_and_controlled_actions() {
+        let card = FeishuPendingChangeCard {
+            chat_id: "oc_private".to_owned(),
+            chat_type: "p2p".to_owned(),
+            change_id: "unguessable-change-id".to_owned(),
+            short_code: "ab12cd".to_owned(),
+            target_path: "notes/example.md".to_owned(),
+            operation_label: "追加".to_owned(),
+            added_lines: 2,
+            removed_lines: 1,
+            preview: "简短预览".to_owned(),
+        };
+        let content = build_pending_change_card_content(&card).expect("card JSON should serialize");
+
+        assert!(content.contains("确认写入"));
+        assert!(content.contains("orange_pending_details"));
+        assert!(content.contains("ab12cd"));
+        assert!(content.contains("unguessable-change-id"));
+    }
+
     /** 私聊和群聊会话 key 必须稳定且群聊按用户隔离。 */
     #[test]
     fn channel_key_is_stable_and_group_is_per_user() {
@@ -1024,6 +1397,8 @@ mod tests {
             message_type: "text".to_owned(),
             text: "hello".to_owned(),
             mentions: Vec::new(),
+            action: String::new(),
+            change_id: String::new(),
         };
 
         assert_eq!(build_channel_key(&event), build_channel_key(&event));
@@ -1056,6 +1431,8 @@ mod tests {
             message_type: "text".to_owned(),
             text: "hello".to_owned(),
             mentions: Vec::new(),
+            action: String::new(),
+            change_id: String::new(),
         };
 
         assert!(decide_event_handling(&settings, &event).is_ok());
@@ -1078,6 +1455,8 @@ mod tests {
                 open_id: "@_all".to_owned(),
                 name: "all".to_owned(),
             }],
+            action: String::new(),
+            change_id: String::new(),
         };
 
         assert!(!is_direct_bot_mention(&event));
@@ -1117,6 +1496,8 @@ mod tests {
                 open_id: "bot".to_owned(),
                 name: "bot".to_owned(),
             }],
+            action: String::new(),
+            change_id: String::new(),
         };
 
         assert!(decide_event_handling(&settings, &event).is_ok());
@@ -1194,6 +1575,8 @@ mod tests {
             message_type: "text".to_owned(),
             text: "hello".to_owned(),
             mentions: Vec::new(),
+            action: String::new(),
+            change_id: String::new(),
         };
 
         let block = decide_event_handling(&settings, &event).unwrap_err();

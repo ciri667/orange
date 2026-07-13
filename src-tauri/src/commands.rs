@@ -316,7 +316,22 @@ pub async fn load_sessions(
     payload: LoadSessionsPayload,
 ) -> Result<Vec<AgentSession>, String> {
     run_blocking("读取 Agent 会话", move || {
-        storage::load_sessions_for_snapshot(&app, &payload.snapshot)
+        let mut sessions = storage::load_sessions_for_snapshot(&app, &payload.snapshot)?;
+        let migrated_sessions = storage::migrate_legacy_im_session_identities(&app, &mut sessions)?;
+
+        if !migrated_sessions.is_empty() {
+            storage::save_session_records(&app, &migrated_sessions)?;
+            for session in migrated_sessions {
+                if let Some(identity) = session.im_identity {
+                    logging::write_app_event_best_effort(
+                        &app,
+                        build_im_identity_event(&session.id, &identity, "migrated"),
+                    );
+                }
+            }
+        }
+
+        Ok(sessions)
     })
     .await
 }
@@ -3343,7 +3358,7 @@ pub(crate) async fn run_agent_turn_from_im(
     prompt: String,
     channel_key: String,
     knowledge_base_ids: Vec<String>,
-    session_title: String,
+    im_identity: crate::domain::ImSessionIdentity,
 ) -> Result<WorkspaceSnapshot, String> {
     let started_at = Instant::now();
     let operation_id = storage::create_id("op");
@@ -3363,13 +3378,30 @@ pub(crate) async fn run_agent_turn_from_im(
         return Err("IM 默认知识库范围为空或已失效。".to_owned());
     }
 
-    let session_id = resolve_or_create_im_session(
+    let session_resolution = resolve_or_create_im_session(
         &app,
         &mut snapshot,
         &channel_key,
-        &session_title,
+        &im_identity,
         valid_scope_ids.clone(),
     )?;
+    let session_id = session_resolution.session_id;
+    if let Some(pending_change) = snapshot
+        .sessions
+        .iter()
+        .find(|session| session.id == session_id)
+        .and_then(|session| session.pending_change.as_ref())
+        .filter(|change| change.status == "pending")
+    {
+        // 一个 IM 会话只允许存在一个待确认变更，避免下一轮 Agent 覆盖远程用户尚未处理的 diff。
+        return Err(format!(
+            "当前有待确认变更 {}；请先发送“详情 {}”、“确认 {}”或“取消 {}”。",
+            short_change_code(&pending_change.id),
+            short_change_code(&pending_change.id),
+            short_change_code(&pending_change.id),
+            short_change_code(&pending_change.id),
+        ));
+    }
     let active_knowledge_base_id = valid_scope_ids.first().cloned().unwrap_or_default();
     let user_message = crate::im::build_im_user_message(&prompt);
     let user_message_id = user_message.id.clone();
@@ -3389,6 +3421,15 @@ pub(crate) async fn run_agent_turn_from_im(
     snapshot.active_document_id.clear();
 
     storage::save_sessions(&app, &snapshot)?;
+
+    logging::write_app_event_best_effort(
+        &app,
+        build_im_identity_event(
+            &session_id,
+            &im_identity,
+            session_resolution.identity_status,
+        ),
+    );
 
     logging::write_app_event_best_effort(
         &app,
@@ -3462,14 +3503,233 @@ pub(crate) async fn run_agent_turn_from_im(
     Ok(runtime_result.turn_result.snapshot)
 }
 
+/**
+ * 在 IM 会话内处理待确认变更；此入口只信任持久化的会话和 channel 映射，
+ * 不接受桌面前端传入的 WorkspaceSnapshot，避免远程确认覆盖本地最新状态。
+ */
+pub(crate) async fn handle_im_pending_change_command(
+    app: AppHandle,
+    provider_id: &str,
+    channel_key: &str,
+    action: &str,
+    change_code: &str,
+) -> String {
+    let started_at = Instant::now();
+    let channel_hash = storage::hash_content(channel_key)
+        .chars()
+        .take(16)
+        .collect::<String>();
+    let normalized_action = action.trim().to_ascii_lowercase();
+    let normalized_code = change_code.trim();
+
+    // 短编号至少六位，既方便手机端输入，也避免将空字符串或过短前缀匹配到其他变更。
+    if normalized_code.chars().count() < 6 {
+        return "变更编号至少需要 6 位，例如：确认 change-123456。".to_owned();
+    }
+    if !matches!(normalized_action.as_str(), "confirm" | "cancel" | "details") {
+        return "不支持的变更操作。请使用：确认 <编号>、取消 <编号> 或详情 <编号>。".to_owned();
+    }
+
+    let snapshot_app = app.clone();
+    let mut snapshot = match run_blocking("加载 IM 待确认变更", move || {
+        storage::load_workspace_snapshot(&snapshot_app)
+    })
+    .await
+    {
+        Ok(snapshot) => snapshot,
+        Err(error) => return format!("读取待确认变更失败：{}", logging::sanitize_log_text(&error)),
+    };
+    let session_id = match storage::load_im_session_mapping(&app, channel_key) {
+        Ok(Some(session_id)) => session_id,
+        Ok(None) => return "当前 IM 会话没有待确认变更。".to_owned(),
+        Err(error) => return format!("读取 IM 会话失败：{}", logging::sanitize_log_text(&error)),
+    };
+    let Some(session_index) = snapshot.sessions.iter().position(|session| {
+        session.id == session_id
+            // 群聊 channel key 已包含发送人 hash；再次匹配持久化身份，确保其他成员不能确认该变更。
+            && session.im_identity.as_ref().is_some_and(|identity| {
+                identity.provider_id == provider_id && identity.channel_hash == channel_hash
+            })
+    }) else {
+        log_im_change_approval(
+            &app,
+            "blocked",
+            &normalized_action,
+            None,
+            &channel_hash,
+            started_at,
+        );
+        return "当前身份无权处理该待确认变更。".to_owned();
+    };
+    let Some(change) = snapshot.sessions[session_index].pending_change.clone() else {
+        return "当前 IM 会话没有待确认变更。".to_owned();
+    };
+    if change.status != "pending" {
+        return format!(
+            "变更 {} 已处理（状态：{}），无需重复操作。",
+            short_change_code(&change.id),
+            change.status
+        );
+    }
+    if !change.id.eq_ignore_ascii_case(normalized_code)
+        && !change
+            .id
+            .to_ascii_lowercase()
+            .starts_with(&normalized_code.to_ascii_lowercase())
+    {
+        return "找不到该编号对应的待确认变更；请检查编号后重试。".to_owned();
+    }
+
+    if normalized_action == "details" {
+        log_im_change_approval(
+            &app,
+            "completed",
+            "details",
+            Some(&change.id),
+            &channel_hash,
+            started_at,
+        );
+        return build_im_change_details(&change);
+    }
+
+    snapshot.active_session_id = session_id.clone();
+    let mut snapshot_before_apply = snapshot.clone();
+    let result = if normalized_action == "cancel" {
+        reject_proposed_change(app.clone(), ChangePayload { snapshot }).await
+    } else {
+        apply_proposed_change(app.clone(), ChangePayload { snapshot }).await
+    };
+
+    match result {
+        Ok(updated_snapshot) => {
+            // IM 操作没有前端接收 snapshot，因此必须立即持久化会话状态，重复消息才不会二次写入。
+            if let Err(error) = storage::save_sessions(&app, &updated_snapshot) {
+                log_im_change_approval(
+                    &app,
+                    "failed",
+                    &normalized_action,
+                    Some(&change.id),
+                    &channel_hash,
+                    started_at,
+                );
+                return format!(
+                    "变更已处理，但保存会话状态失败：{}",
+                    logging::sanitize_log_text(&error)
+                );
+            }
+            log_im_change_approval(
+                &app,
+                "completed",
+                &normalized_action,
+                Some(&change.id),
+                &channel_hash,
+                started_at,
+            );
+            if normalized_action == "cancel" {
+                format!(
+                    "已取消变更 {}，本地文件未修改。",
+                    short_change_code(&change.id)
+                )
+            } else {
+                format!("已确认并写入变更 {}。", short_change_code(&change.id))
+            }
+        }
+        Err(error) => {
+            // 冲突不可重试且不能保留为可确认状态；写入失败则保留 pending，允许用户稍后处理。
+            if error.contains("已变化") || error.contains("未命中") || error.contains("出现多次")
+            {
+                if let Some(session) = snapshot_before_apply.sessions.get_mut(session_index) {
+                    if let Some(pending_change) = session.pending_change.as_mut() {
+                        pending_change.status = "expired".to_owned();
+                    }
+                    session.updated_at = storage::format_local_datetime();
+                }
+                let _ = storage::save_sessions(&app, &snapshot_before_apply);
+                log_im_change_approval(
+                    &app,
+                    "conflict",
+                    &normalized_action,
+                    Some(&change.id),
+                    &channel_hash,
+                    started_at,
+                );
+                return "变更已过期，请重新生成；本地文件未被覆盖。".to_owned();
+            }
+            log_im_change_approval(
+                &app,
+                "failed",
+                &normalized_action,
+                Some(&change.id),
+                &channel_hash,
+                started_at,
+            );
+            format!("处理变更失败：{}", logging::sanitize_log_text(&error))
+        }
+    }
+}
+
+/** 返回 IM 详情的截断 diff，正文只在用户显式请求时发送。 */
+fn build_im_change_details(change: &ProposedChange) -> String {
+    // 飞书按 UTF-8 字节计入消息体；这里同时控制中文场景的实际传输体积。
+    const MAX_DIFF_CHARS: usize = 700;
+    let original = change
+        .original
+        .chars()
+        .take(MAX_DIFF_CHARS / 2)
+        .collect::<String>();
+    let next = change
+        .next
+        .chars()
+        .take(MAX_DIFF_CHARS / 2)
+        .collect::<String>();
+    format!(
+        "变更 {} 详情\n目标：{}\n类型：{}\n\n--- 原内容 ---\n{}\n\n+++ 建议内容 +++\n{}\n\n回复“确认 {}”写入，或“取消 {}”放弃。",
+        short_change_code(&change.id), change.target_path, change.r#type, original, next,
+        short_change_code(&change.id), short_change_code(&change.id)
+    )
+}
+
+/** 生成稳定、可输入的变更短编号；完整 ID 仍只保存在本地会话中。 */
+pub(crate) fn short_change_code(change_id: &str) -> String {
+    change_id.chars().take(12).collect()
+}
+
+/** 记录 IM 审批审计，只写入变更 ID、通道 hash、动作和结果，不记录正文或外部原始身份。 */
+fn log_im_change_approval(
+    app: &AppHandle,
+    status: &str,
+    action: &str,
+    change_id: Option<&str>,
+    channel_hash: &str,
+    started_at: Instant,
+) {
+    logging::write_app_event_best_effort(
+        app,
+        AppEventBuilder::new(
+            if matches!(status, "failed" | "conflict") {
+                AppLogLevel::Warn
+            } else {
+                AppLogLevel::Info
+            },
+            AppLogCategory::Im,
+            "im_change_approval",
+            status,
+            "IM 待确认变更操作已处理。",
+        )
+        .entity("change", change_id.unwrap_or("unknown"))
+        .duration(started_at.elapsed())
+        .metadata(json!({ "action": action, "channelHash": channel_hash })),
+    );
+}
+
 /** 为 IM channel 找到已有会话；不存在或失效时创建一个新的 AgentSession 并保存映射。 */
 fn resolve_or_create_im_session(
     app: &AppHandle,
     snapshot: &mut WorkspaceSnapshot,
     channel_key: &str,
-    session_title: &str,
+    im_identity: &crate::domain::ImSessionIdentity,
     knowledge_base_ids: Vec<String>,
-) -> Result<String, String> {
+) -> Result<ImSessionResolution, String> {
     let mapped_session_id = storage::load_im_session_mapping(app, channel_key)?;
 
     if let Some(session_id) = mapped_session_id {
@@ -3480,18 +3740,67 @@ fn resolve_or_create_im_session(
         {
             session.knowledge_base_ids = knowledge_base_ids;
             session.updated_at = storage::format_local_datetime();
+            let identity_status = if session.im_identity.is_some() {
+                // 已有 IM 身份时只更新最近消息摘要，稳定标题不能被后续消息覆盖。
+                if let Some(existing_identity) = &mut session.im_identity {
+                    existing_identity.last_message_preview =
+                        im_identity.last_message_preview.clone();
+                }
+                "updated"
+            } else {
+                // 旧版映射会话首次再次收到 IM 消息时补齐完整身份和标题。
+                session.im_identity = Some(im_identity.clone());
+                session.title = crate::im::format_im_session_title(im_identity);
+                "migrated"
+            };
 
-            return Ok(session.id.clone());
+            return Ok(ImSessionResolution {
+                session_id: session.id.clone(),
+                identity_status,
+            });
         }
     }
 
-    let session = crate::im::build_im_agent_session(session_title.to_owned(), knowledge_base_ids);
+    let session = crate::im::build_im_agent_session(im_identity.clone(), knowledge_base_ids);
     let session_id = session.id.clone();
 
     snapshot.sessions.insert(0, session);
     storage::save_im_session_mapping(app, channel_key, &session_id)?;
 
-    Ok(session_id)
+    Ok(ImSessionResolution {
+        session_id,
+        identity_status: "created",
+    })
+}
+
+/** IM 会话创建、迁移和更新的结果；用于统一写入轻量脱敏身份审计。 */
+struct ImSessionResolution {
+    session_id: String,
+    identity_status: &'static str,
+}
+
+/** 构造可观测但不包含消息正文和外部原始 ID 的 IM 身份日志。 */
+fn build_im_identity_event(
+    session_id: &str,
+    identity: &crate::domain::ImSessionIdentity,
+    status: &str,
+) -> AppEventBuilder {
+    AppEventBuilder::new(
+        AppLogLevel::Info,
+        AppLogCategory::Im,
+        "im_session_identity",
+        status,
+        "IM 会话身份已同步。",
+    )
+    .session_id(session_id)
+    .metadata(json!({
+        "providerId": identity.provider_id,
+        "conversationKind": identity.conversation_kind,
+        "channelHash": identity.channel_hash,
+        "initialPreviewChars": identity.initial_message_preview.chars().count(),
+        "lastPreviewChars": identity.last_message_preview.chars().count(),
+        "isFallback": identity.conversation_kind == "unknown",
+    }))
 }
 
 /** 确认待写入 diff，校验知识库边界和内容 hash 后原子写回 Markdown。 */
@@ -4416,6 +4725,7 @@ mod tests {
         AgentSession {
             id: "session-a".to_owned(),
             title: "多知识库会话".to_owned(),
+            im_identity: None,
             r#type: "knowledge-base".to_owned(),
             knowledge_base_ids: vec!["kb-a".to_owned(), "kb-b".to_owned()],
             active_note_id: Some("note-b".to_owned()),
@@ -4468,6 +4778,20 @@ mod tests {
             review_state: None,
             diff_stats: None,
         }
+    }
+
+    /** IM 短编号必须稳定截断，详情只在显式请求时返回有限正文。 */
+    #[test]
+    fn im_change_details_uses_short_code_and_truncates_diff() {
+        let mut change = test_rewrite_change(&"旧内容".repeat(500), &"新内容".repeat(500), "hash");
+        change.id = "change-1234567890-long".to_owned();
+        change.target_path = "notes/remote.md".to_owned();
+
+        let details = build_im_change_details(&change);
+
+        assert_eq!(short_change_code(&change.id), "change-12345");
+        assert!(details.contains("目标：notes/remote.md"));
+        assert!(details.chars().count() < 1_500);
     }
 
     /** 重扫单个知识库不能误删多知识库会话中仍然有效的其他知识库笔记引用。 */

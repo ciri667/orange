@@ -11,6 +11,12 @@ mod skills;
 mod storage;
 mod text_edit;
 
+use tauri::{Manager, WindowEvent};
+
+/** 托盘菜单 ID：显式退出才会停止本机 IM 网关，关闭窗口只隐藏到后台。 */
+const TRAY_MENU_SHOW: &str = "orange-show-window";
+const TRAY_MENU_QUIT: &str = "orange-quit-app";
+
 /** 桌面端应用入口，注册本地文件、索引、Agent loop 和写入确认命令。 */
 pub fn run() {
     tauri::Builder::default()
@@ -26,6 +32,42 @@ pub fn run() {
         .plugin(tauri_plugin_fs::init())
         .plugin(tauri_plugin_opener::init())
         .setup(|app| {
+            let show_item = tauri::menu::MenuItem::with_id(
+                app,
+                TRAY_MENU_SHOW,
+                "显示橘记",
+                true,
+                None::<&str>,
+            )?;
+            let quit_item = tauri::menu::MenuItem::with_id(
+                app,
+                TRAY_MENU_QUIT,
+                "退出橘记",
+                true,
+                None::<&str>,
+            )?;
+            let tray_menu = tauri::menu::Menu::with_items(app, &[&show_item, &quit_item])?;
+            let mut tray_builder = tauri::tray::TrayIconBuilder::with_id("orange-im-gateway")
+                .menu(&tray_menu)
+                .tooltip("橘记正在后台运行，飞书远程服务可用")
+                .on_menu_event(|app, event| match event.id.as_ref() {
+                    TRAY_MENU_SHOW => {
+                        // 从托盘恢复窗口时同时请求焦点，避免窗口被其他应用遮挡后像是未响应。
+                        if let Some(window) = app.get_webview_window("main") {
+                            let _ = window.show();
+                            let _ = window.set_focus();
+                        }
+                    }
+                    TRAY_MENU_QUIT => app.exit(0),
+                    _ => {}
+                });
+
+            // 复用应用默认图标；开发环境没有默认图标时仍保留菜单和后台能力。
+            if let Some(icon) = app.default_window_icon().cloned() {
+                tray_builder = tray_builder.icon(icon);
+            }
+            tray_builder.build(app)?;
+
             let handle = app.handle().clone();
 
             logging::write_app_event_best_effort(
@@ -109,6 +151,24 @@ pub fn run() {
             });
 
             Ok(())
+        })
+        .on_window_event(|window, event| {
+            if let WindowEvent::CloseRequested { api, .. } = event {
+                // 关闭主窗口不退出进程，使已启动的 IM sidecar 能持续接收远程确认操作。
+                api.prevent_close();
+                if let Err(error) = window.hide() {
+                    logging::write_app_event_best_effort(
+                        &window.app_handle(),
+                        logging::AppEventBuilder::new(
+                            logging::AppLogLevel::Warn,
+                            logging::AppLogCategory::App,
+                            "app_window_hide",
+                            "failed",
+                            error.to_string(),
+                        ),
+                    );
+                }
+            }
         })
         .invoke_handler(tauri::generate_handler![
             commands::load_workspace_state,

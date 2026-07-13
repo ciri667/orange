@@ -378,6 +378,9 @@ pub struct AgentContextSummary {
 pub struct AgentSession {
     pub id: String,
     pub title: String,
+    /** IM 来源身份；普通本地会话保持为空，避免将 provider 细节散落到 UI。 */
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub im_identity: Option<ImSessionIdentity>,
     pub r#type: String,
     pub knowledge_base_ids: Vec<String>,
     pub active_note_id: Option<String>,
@@ -397,6 +400,17 @@ pub struct AgentSession {
     /** 会话默认使用的模型 ID；和 model_provider_id 配套决定具体模型。 */
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model_id: Option<String>,
+}
+
+/** IM 会话的可展示身份；只保留脱敏后的通道指纹，不保存外部平台原始 ID。 */
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ImSessionIdentity {
+    pub provider_id: String,
+    pub conversation_kind: String,
+    pub channel_hash: String,
+    pub initial_message_preview: String,
+    pub last_message_preview: String,
 }
 
 /** 跨会话记忆的分类枚举，覆盖计划文档列举的长期偏好类型。 */

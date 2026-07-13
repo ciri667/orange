@@ -1114,6 +1114,68 @@ pub fn load_sessions_for_snapshot(
     Ok(sessions)
 }
 
+/** 懒迁移旧版“飞书会话”，从映射表恢复来源和聊天类型，并从历史消息补齐展示摘要。 */
+pub fn migrate_legacy_im_session_identities(
+    app: &AppHandle,
+    sessions: &mut [AgentSession],
+) -> Result<Vec<AgentSession>, String> {
+    let connection = open_database(app)?;
+    let mut migrated_sessions = Vec::new();
+
+    for session in sessions.iter_mut().filter(|session| {
+        session.im_identity.is_none() && session.title == "飞书会话" && session.deleted_at.is_none()
+    }) {
+        let channel_key = connection
+            .query_row(
+                "SELECT channel_key FROM im_session_mappings WHERE session_id = ?1 LIMIT 1",
+                params![session.id],
+                |row| row.get::<_, String>(0),
+            )
+            .ok();
+        let user_messages = session
+            .messages
+            .iter()
+            .filter(|message| message.role == "user")
+            .map(|message| message.content.as_str())
+            .filter(|content| !content.trim().is_empty())
+            .collect::<Vec<_>>();
+        let initial_message = user_messages.first().copied().unwrap_or_default();
+        let last_message = user_messages.last().copied().unwrap_or(initial_message);
+        let identity = crate::im::build_im_session_identity_from_channel_key(
+            channel_key.as_deref(),
+            initial_message,
+            last_message,
+        );
+
+        session.title = crate::im::format_im_session_title(&identity);
+        session.im_identity = Some(identity);
+        migrated_sessions.push(session.clone());
+    }
+
+    Ok(migrated_sessions)
+}
+
+/** 单独回写被懒迁移的会话，避免一次读取覆盖并发更新的其他会话记录。 */
+pub fn save_session_records(app: &AppHandle, sessions: &[AgentSession]) -> Result<(), String> {
+    if sessions.is_empty() {
+        return Ok(());
+    }
+
+    let mut connection = open_database(app)?;
+    let _write_guard = lock_database_writer()?;
+    let transaction = connection
+        .transaction_with_behavior(TransactionBehavior::Immediate)
+        .map_err(|error| format!("无法启动 IM 会话迁移事务：{error}"))?;
+
+    for session in sessions {
+        persist_session_in_transaction(&transaction, session)?;
+    }
+
+    transaction
+        .commit()
+        .map_err(|error| format!("无法提交 IM 会话迁移事务：{error}"))
+}
+
 /** 更新会话知识库范围，当前激活知识库由后端强制保留。 */
 pub fn update_session_scope(
     app: &AppHandle,
@@ -4894,6 +4956,7 @@ mod tests {
         AgentSession {
             id: id.to_owned(),
             title: "测试会话".to_owned(),
+            im_identity: None,
             r#type: "task".to_owned(),
             knowledge_base_ids: vec!["kb-a".to_owned()],
             active_note_id: None,
@@ -4910,7 +4973,11 @@ mod tests {
     }
 
     /** 构造测试用 Agent 会话并显式指定更新时间，便于排序测试覆盖 updated_at 路径。 */
-    fn test_agent_session_with_updated_at(id: &str, created_at: &str, updated_at: &str) -> AgentSession {
+    fn test_agent_session_with_updated_at(
+        id: &str,
+        created_at: &str,
+        updated_at: &str,
+    ) -> AgentSession {
         let mut session = test_agent_session(id, created_at);
         session.updated_at = updated_at.to_owned();
         session
@@ -5230,9 +5297,21 @@ mod tests {
     fn sort_sessions_by_updated_at_desc_orders_by_updated_at() {
         // 三个会话创建时间相同，仅 updated_at 不同：最新更新者应排到最前面。
         let mut sessions = vec![
-            test_agent_session_with_updated_at("session-a-1700000000000", "2023/11/14 22:13", "2023/11/20 09:00"),
-            test_agent_session_with_updated_at("session-b-1700000030000", "2023/11/14 22:13", "2023/11/22 18:30"),
-            test_agent_session_with_updated_at("session-c-1699999940000", "2023/11/14 22:13", "2023/11/15 07:45"),
+            test_agent_session_with_updated_at(
+                "session-a-1700000000000",
+                "2023/11/14 22:13",
+                "2023/11/20 09:00",
+            ),
+            test_agent_session_with_updated_at(
+                "session-b-1700000030000",
+                "2023/11/14 22:13",
+                "2023/11/22 18:30",
+            ),
+            test_agent_session_with_updated_at(
+                "session-c-1699999940000",
+                "2023/11/14 22:13",
+                "2023/11/15 07:45",
+            ),
         ];
 
         sort_sessions_by_updated_at_desc(&mut sessions);
@@ -5256,9 +5335,21 @@ mod tests {
     #[test]
     fn sort_sessions_by_updated_at_desc_falls_back_to_id_timestamp() {
         let mut sessions = vec![
-            test_agent_session_with_updated_at("session-task-1700000000000-old", "2023/11/14 22:13", "刚刚"),
-            test_agent_session_with_updated_at("session-task-1700000030000-new", "2023/11/14 22:13", "刚刚"),
-            test_agent_session_with_updated_at("session-task-1699999940000-earliest", "2023/11/14 22:12", "刚刚"),
+            test_agent_session_with_updated_at(
+                "session-task-1700000000000-old",
+                "2023/11/14 22:13",
+                "刚刚",
+            ),
+            test_agent_session_with_updated_at(
+                "session-task-1700000030000-new",
+                "2023/11/14 22:13",
+                "刚刚",
+            ),
+            test_agent_session_with_updated_at(
+                "session-task-1699999940000-earliest",
+                "2023/11/14 22:12",
+                "刚刚",
+            ),
         ];
 
         sort_sessions_by_updated_at_desc(&mut sessions);

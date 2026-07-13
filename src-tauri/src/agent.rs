@@ -298,6 +298,7 @@ mod tests {
         let mut session = crate::domain::AgentSession {
             id: "session-a".to_owned(),
             title: "测试会话".to_owned(),
+            im_identity: None,
             r#type: "knowledge-base".to_owned(),
             knowledge_base_ids: vec!["kb-a".to_owned()],
             active_note_id: None,

@@ -11,6 +11,7 @@ import (
 	lark "github.com/larksuite/oapi-sdk-go/v3"
 	larkcore "github.com/larksuite/oapi-sdk-go/v3/core"
 	larkdispatcher "github.com/larksuite/oapi-sdk-go/v3/event/dispatcher"
+	larkcallback "github.com/larksuite/oapi-sdk-go/v3/event/dispatcher/callback"
 	larkim "github.com/larksuite/oapi-sdk-go/v3/service/im/v1"
 	larkws "github.com/larksuite/oapi-sdk-go/v3/ws"
 )
@@ -41,6 +42,20 @@ type outboundEvent struct {
 	Mentions     []outboundMention `json:"mentions,omitempty"`
 }
 
+// cardActionValue is the JSONL payload Rust receives when a user presses an Orange review card.
+// It deliberately contains only the identifiers required to find the pending change; raw card
+// payloads, message bodies, and SDK diagnostics must never be written to stdout.
+type cardActionValue struct {
+	Kind         string `json:"kind"`
+	EventID      string `json:"eventId"`
+	ChatID       string `json:"chatId"`
+	ChatType     string `json:"chatType"`
+	SenderOpenID string `json:"senderOpenId"`
+	MessageType  string `json:"messageType"`
+	Action       string `json:"action"`
+	ChangeID     string `json:"changeId"`
+}
+
 // textContent mirrors Feishu text message content JSON.
 type textContent struct {
 	Text string `json:"text"`
@@ -59,6 +74,9 @@ func main() {
 		}).
 		OnP2ChatAccessEventBotP2pChatEnteredV1(func(ctx context.Context, event *larkim.P2ChatAccessEventBotP2pChatEnteredV1) error {
 			return emitP2pEnteredEvent(event)
+		}).
+		OnP2CardActionTrigger(func(ctx context.Context, event *larkcallback.CardActionTriggerEvent) (*larkcallback.CardActionTriggerResponse, error) {
+			return emitCardActionEvent(event)
 		})
 	client := larkws.NewClient(
 		config.AppID,
@@ -72,6 +90,93 @@ func main() {
 	if err := client.Start(context.Background()); err != nil {
 		fmt.Fprintf(os.Stderr, "websocket error: %v\n", err)
 		os.Exit(1)
+	}
+}
+
+// emitCardActionEvent converts an interactive-card callback to the same constrained JSONL channel
+// as normal messages. Rust remains the source of truth and validates both identity and change state.
+func emitCardActionEvent(event *larkcallback.CardActionTriggerEvent) (*larkcallback.CardActionTriggerResponse, error) {
+	if event == nil || event.Event == nil || event.Event.Operator == nil || event.Event.Action == nil || event.Event.Context == nil {
+		return cardActionToast("卡片操作无效，请使用文字指令重试。"), nil
+	}
+
+	// action 和 changeId 都优先从卡片 value 读取；name 仅兼容早期已发出的卡片。
+	action := actionValue(event.Event.Action.Value, "action")
+	if action == "" {
+		action = strings.TrimSpace(event.Event.Action.Name)
+	}
+	changeID := actionValue(event.Event.Action.Value, "changeId", "change_id")
+	chatType := actionValue(event.Event.Action.Value, "chatType")
+	if !isOrangeCardAction(action) || changeID == "" || !isSupportedChatType(chatType) {
+		return cardActionToast("卡片缺少待确认变更，请重新生成。"), nil
+	}
+
+	out := cardActionValue{
+		Kind:         "card_action",
+		EventID:      cardActionEventID(event),
+		ChatID:       event.Event.Context.OpenChatID,
+		ChatType:     chatType,
+		SenderOpenID: event.Event.Operator.OpenID,
+		MessageType:  "card_action",
+		Action:       action,
+		ChangeID:     changeID,
+	}
+	encoded, err := json.Marshal(out)
+	if err != nil {
+		return nil, err
+	}
+	fmt.Println(string(encoded))
+
+	// Acknowledge delivery only. The Rust process performs the action asynchronously and posts
+	// the final result to the conversation, so the websocket callback is never held by file IO.
+	return cardActionToast("已收到操作，橘记正在处理。"), nil
+}
+
+// isSupportedChatType rejects cards without the original conversation type so Rust cannot
+// accidentally skip group allowlist and @ policy branches for a malformed callback.
+func isSupportedChatType(chatType string) bool {
+	switch chatType {
+	case "p2p", "group", "topic_group":
+		return true
+	default:
+		return false
+	}
+}
+
+// isOrangeCardAction limits callbacks to the three buttons produced by Orange cards.
+func isOrangeCardAction(action string) bool {
+	switch action {
+	case "details", "confirm", "cancel", "orange_pending_details", "orange_pending_confirm", "orange_pending_cancel":
+		return true
+	default:
+		return false
+	}
+}
+
+// actionValue accepts the two spellings used by older cards while retaining only a scalar change ID.
+func actionValue(values map[string]interface{}, keys ...string) string {
+	for _, key := range keys {
+		if value, ok := values[key]; ok {
+			if text, ok := value.(string); ok {
+				return strings.TrimSpace(text)
+			}
+		}
+	}
+	return ""
+}
+
+// cardActionEventID gets the callback header ID without serializing the SDK's raw request object.
+func cardActionEventID(event *larkcallback.CardActionTriggerEvent) string {
+	if event == nil || event.EventV2Base == nil || event.EventV2Base.Header == nil {
+		return ""
+	}
+	return event.EventV2Base.Header.EventID
+}
+
+// cardActionToast keeps UI feedback short while the final result is sent by Rust as a new message.
+func cardActionToast(content string) *larkcallback.CardActionTriggerResponse {
+	return &larkcallback.CardActionTriggerResponse{
+		Toast: &larkcallback.Toast{Type: "info", Content: content},
 	}
 }
 
