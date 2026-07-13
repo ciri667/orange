@@ -1,6 +1,7 @@
 import { History, Book, PanelRightClose, Plus } from "lucide-react";
 import { useRef } from "react";
 import { OverflowTooltipText } from "../shared/OverflowTooltipText";
+import { getImSessionSourceLabel } from "../shared/selectors";
 import { useDismissable } from "../shared/useDismissable";
 import type { AgentSession, AgentSkill, KnowledgeBase, ModelConfig, Note } from "../shared/types";
 import { AgentInput } from "./AgentInput";
@@ -74,6 +75,8 @@ export function AgentPanel({
   onSetSessionModelSelection: (selection: string) => void;
   onCompactAgentContext: () => void;
 }) {
+  /** 当前 IM 来源标签仅用于补充标题，不替代稳定会话名称。 */
+  const activeImSourceLabel = getImSessionSourceLabel(activeSession);
   // AgentPanel 三个 popover 共用同一个外层 aside 作为 ref 容器：
   // 点击 Agent 面板以外的区域才关闭浮层；面板内切入别的功能按钮时由各按钮的 toggle 自行处理。
   const panelRef = useRef<HTMLElement | null>(null);
@@ -86,7 +89,10 @@ export function AgentPanel({
       <header className="agent-header">
         <div>
           <p className="section-label">Agent</p>
-          <OverflowTooltipText as="h2" text={activeSession.title} logArea="agent_session_title" />
+          <div className="agent-session-title">
+            <OverflowTooltipText as="h2" text={activeSession.title} logArea="agent_session_title" />
+            {activeImSourceLabel && <span className="im-session-badge">{activeImSourceLabel}</span>}
+          </div>
         </div>
         <div className="agent-header-actions">
           <button className="icon-button" type="button" title="收起 Agent 协作区" onClick={onCollapsePanel}>

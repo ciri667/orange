@@ -6,6 +6,8 @@ import { MarkdownLink } from "../shared/MarkdownLink";
 import { OverflowTooltipText } from "../shared/OverflowTooltipText";
 import {
   getScopeSummaryLabel,
+  getImSessionRecentMessageLabel,
+  getImSessionSourceLabel,
   getSessionKnowledgeBaseLabel,
   getSessionNoteLabel,
   getSessionTypeLabel,
@@ -90,8 +92,19 @@ export function AgentSessionHistoryPopover({
                 <OverflowTooltipText as="strong" text={session.title} logArea="agent_session_history_title" />
               </span>
               <span className="session-row-meta">
-                <OverflowTooltipText text={getSessionTypeLabel(session.type)} logArea="agent_session_history_type" />
+                {session.imIdentity ? (
+                  <span className="im-session-badge">{getImSessionSourceLabel(session)}</span>
+                ) : (
+                  <OverflowTooltipText text={getSessionTypeLabel(session.type)} logArea="agent_session_history_type" />
+                )}
                 <OverflowTooltipText text={getSessionKnowledgeBaseLabel(session, knowledgeBases)} logArea="agent_session_history_scope" />
+                {getImSessionRecentMessageLabel(session) && (
+                  <OverflowTooltipText
+                    className="session-row-recent-message"
+                    text={getImSessionRecentMessageLabel(session)}
+                    logArea="agent_session_history_recent_message"
+                  />
+                )}
                 <OverflowTooltipText
                   as="time"
                   dateTime={session.createdAt}

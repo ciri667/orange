@@ -92,3 +92,29 @@ export function getSessionTypeLabel(type: AgentSession["type"]) {
 
   return labels[type];
 }
+
+/** 返回 IM 会话来源和聊天类型标签；普通本地会话返回空，保持既有列表布局。 */
+export function getImSessionSourceLabel(session: AgentSession) {
+  const identity = session.imIdentity;
+
+  if (!identity) {
+    return "";
+  }
+
+  const providerLabels: Record<string, string> = {
+    feishu: "飞书",
+  };
+  const kindLabels: Record<"direct" | "group" | "unknown", string> = {
+    direct: "私聊",
+    group: "群聊",
+    unknown: "对话",
+  };
+  const providerLabel = providerLabels[identity.providerId] ?? identity.providerId;
+
+  return `${providerLabel} · ${kindLabels[identity.conversationKind] ?? "对话"}`;
+}
+
+/** 返回 IM 会话的最近消息摘要；元数据缺失时不影响普通本地会话的历史列表。 */
+export function getImSessionRecentMessageLabel(session: AgentSession) {
+  return session.imIdentity?.lastMessagePreview ? `最近消息：${session.imIdentity.lastMessagePreview}` : "";
+}

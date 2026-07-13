@@ -349,6 +349,8 @@ export interface ProposedChange {
 export interface AgentSession {
   id: string;
   title: string;
+  /** IM 会话身份；本地创建的 Agent 会话不携带该字段。 */
+  imIdentity?: ImSessionIdentity;
   type: AgentSessionType;
   knowledgeBaseIds: string[];
   activeNoteId?: string;
@@ -365,6 +367,15 @@ export interface AgentSession {
   modelProviderId?: string;
   /** 会话默认使用的模型 ID；必须和 modelProviderId 指向的 provider 配套使用。 */
   modelId?: string;
+}
+
+/** IM 会话的展示身份；通道仅保留不可逆的脱敏指纹。 */
+export interface ImSessionIdentity {
+  providerId: string;
+  conversationKind: "direct" | "group" | "unknown";
+  channelHash: string;
+  initialMessagePreview: string;
+  lastMessagePreview: string;
 }
 
 /** 单个 provider 下可供用户启用和选择的模型条目。 */
