@@ -8,8 +8,9 @@
     "build": "tsc --noEmit && vite build",
     "preview": "vite preview --host 0.0.0.0",
     "tauri": "tauri",
-    "desktop:dev": "tauri dev",
-    "desktop:build": "tauri build",
+    "dev:signing:init": "node scripts/macos-dev-signing-init.mjs",
+    "desktop:dev": "node scripts/desktop-dev.mjs",
+    "desktop:build": "node scripts/desktop-build.mjs",
     "sidecar:im:build": "node scripts/build-im-sidecars.mjs",
     "sidecar:feishu:build": "npm run sidecar:im:build -- --provider feishu",
     "rust:test": "cargo test --manifest-path src-tauri/Cargo.toml"

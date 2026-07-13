@@ -78,6 +78,12 @@ pub const MODEL_KEY_REFERENCE: &str = "orange-openai-compatible-api-key";
 /** 系统安全存储中的飞书 appSecret 引用，SQLite 永远不保存明文 secret。 */
 pub const FEISHU_SECRET_KEY_REFERENCE: &str = "orange-feishu-app-secret";
 
+/** 正式构建使用的 Keychain service；生产用户保存的凭据只能由正式应用访问。 */
+const PRODUCTION_KEYRING_SERVICE: &str = "Orange";
+
+/** macOS debug 构建使用的独立 Keychain service，避免调试签名访问生产凭据。 */
+const DEVELOPMENT_KEYRING_SERVICE: &str = "Orange Dev";
+
 /** 单张粘贴图片最大字节数，避免超大剪贴板内容阻塞 UI 或撑爆本地目录。 */
 const MAX_SINGLE_PASTE_IMAGE_BYTES: usize = 20 * 1024 * 1024;
 
@@ -92,6 +98,9 @@ const DEFAULT_ATTACHMENT_NOTE_FOLDER_NAME: &str = "note";
 
 /** 当前桌面进程内的模型密钥缓存，按 key 引用隔离，用于减少同一会话内反复访问系统安全存储。 */
 static MODEL_API_KEY_CACHE: OnceLock<Mutex<HashMap<String, String>>> = OnceLock::new();
+
+/** Keychain 命名空间只在进程首个访问时记录一次，避免高频读取产生重复日志。 */
+static KEYRING_SERVICE_OBSERVABILITY: OnceLock<()> = OnceLock::new();
 
 /** 当前桌面进程内的 SQLite 写锁，串行化索引刷新、会话保存和轻量迁移。 */
 static DATABASE_WRITE_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
@@ -2068,12 +2077,51 @@ fn normalize_identifier_list(values: &[String]) -> Vec<String> {
     normalized
 }
 
+/**
+ * 根据构建目标选择 Keychain service；仅 macOS debug 构建隔离到开发命名空间，
+ * 使稳定的本机开发签名永远不会读取正式应用保存的凭据。
+ */
+fn keyring_service() -> &'static str {
+    let service = keyring_service_for_build(cfg!(target_os = "macos"), cfg!(debug_assertions));
+
+    // 只记录 service 名和构建模式；两者均不包含用户密钥或账户标识。
+    KEYRING_SERVICE_OBSERVABILITY.get_or_init(|| {
+        log::info!(
+            target: "orange::keyring",
+            "keyring_service_selected service={} development_namespace={}",
+            service,
+            uses_development_keyring_namespace_without_logging(service),
+        );
+    });
+
+    service
+}
+
+/** 供运行时和测试共用的 service 选择规则，避免 debug/release 行为发生漂移。 */
+fn keyring_service_for_build(is_macos: bool, is_debug_build: bool) -> &'static str {
+    if is_macos && is_debug_build {
+        DEVELOPMENT_KEYRING_SERVICE
+    } else {
+        PRODUCTION_KEYRING_SERVICE
+    }
+}
+
+/** 判断当前构建是否使用开发凭据命名空间，开发态不得执行生产凭据迁移。 */
+fn uses_development_keyring_namespace() -> bool {
+    uses_development_keyring_namespace_without_logging(keyring_service())
+}
+
+/** 无日志辅助函数，避免 service 选择日志初始化时发生递归调用。 */
+fn uses_development_keyring_namespace_without_logging(service: &str) -> bool {
+    service == DEVELOPMENT_KEYRING_SERVICE
+}
+
 /** 把 BYOK 模型密钥保存到系统安全存储，按 providerId 隔离 key 引用，避免明文进入 SQLite。 */
 pub fn save_model_api_key(provider_id: &str, api_key: &str) -> Result<ModelApiKeyStatus, String> {
     ensure_persistent_model_keyring()?;
 
     let key_reference = model_provider::key_reference_for_provider(provider_id);
-    let entry = keyring::Entry::new("Orange", &key_reference)
+    let entry = keyring::Entry::new(keyring_service(), &key_reference)
         .map_err(|error| format!("无法打开系统安全存储：{error}"))?;
 
     entry
@@ -2107,11 +2155,16 @@ pub fn load_model_api_key(key_reference: &str) -> Result<Option<String>, String>
         return Ok(Some(api_key));
     }
 
+    // 开发凭据与生产凭据隔离：调试构建不能迁移或读取生产 service 中的任何密钥。
+    if uses_development_keyring_namespace() {
+        return Ok(None);
+    }
+
     // 品牌升级（cici-note → orange）后，老用户的密钥仍存在旧 keyring service "Cici Note"
     // 下、且 account 可能是旧前缀 "cici-note-*"。这里在新 service 下查不到时回退读旧
     // service 并落到规范位置（新 service "Orange" + 规范化后的 key_reference），保证透明迁移。
     let normalized_key_reference = normalize_key_reference(key_reference);
-    if let Some(api_key) = read_keyring_password("Orange", &normalized_key_reference)? {
+    if let Some(api_key) = read_keyring_password(keyring_service(), &normalized_key_reference)? {
         store_model_api_key_in_cache(&normalized_key_reference, &api_key)?;
         return Ok(Some(api_key));
     }
@@ -2168,7 +2221,7 @@ fn persist_migrated_keyring_password(
     normalized_key_reference: &str,
     api_key: &str,
 ) -> Result<(), String> {
-    let entry = keyring::Entry::new("Orange", normalized_key_reference)
+    let entry = keyring::Entry::new(keyring_service(), normalized_key_reference)
         .map_err(|error| format!("无法打开系统安全存储：{error}"))?;
     entry
         .set_password(api_key)
@@ -2214,7 +2267,7 @@ pub fn save_feishu_app_secret(app_secret: &str) -> Result<FeishuCredentialStatus
         return Err("飞书 appSecret 不能为空。".to_owned());
     }
 
-    let entry = keyring::Entry::new("Orange", FEISHU_SECRET_KEY_REFERENCE)
+    let entry = keyring::Entry::new(keyring_service(), FEISHU_SECRET_KEY_REFERENCE)
         .map_err(|error| format!("无法打开系统安全存储：{error}"))?;
 
     entry
@@ -4806,8 +4859,9 @@ mod tests {
         ensure_database_schema, ensure_persistent_model_keyring, extract_docx_preview_blocks,
         file_modified_local_datetime, format_local_datetime, format_local_datetime_from_millis,
         hash_bytes, hash_content, insert_app_event_log, insert_document_history_entry,
-        is_missing_keyring_entry_error, load_document_history_ids_for_target,
-        load_document_preview, load_latest_document_history_hash, load_model_api_key_from_cache,
+        is_missing_keyring_entry_error, keyring_service_for_build,
+        load_document_history_ids_for_target, load_document_preview,
+        load_latest_document_history_hash, load_model_api_key_from_cache,
         model_keyring_persists_until_delete, normalize_audit_log_created_at, normalize_im_settings,
         normalize_knowledge_base_memory, normalize_session_created_at, parse_im_settings_payload,
         prune_app_event_logs, prune_document_history_entries, query_app_event_logs,
@@ -5130,6 +5184,14 @@ mod tests {
         assert!(!is_missing_keyring_entry_error(
             "User interaction is not allowed"
         ));
+    }
+
+    /** macOS 调试构建必须使用开发 service，其他构建保持正式 service，防止凭据串用。 */
+    #[test]
+    fn keyring_service_isolated_between_development_and_production_builds() {
+        assert_eq!(keyring_service_for_build(true, true), "Orange Dev");
+        assert_eq!(keyring_service_for_build(true, false), "Orange");
+        assert_eq!(keyring_service_for_build(false, true), "Orange");
     }
 
     /** keyring 默认后端必须是系统级持久化存储，防止 API key 重启后丢失。 */
