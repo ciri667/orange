@@ -14,6 +14,40 @@ pub mod feishu;
 /** 会话摘要最大字符数，兼顾历史列表扫描效率和本地消息内容最小暴露。 */
 const IM_MESSAGE_PREVIEW_MAX_CHARS: usize = 28;
 
+/** IM 内置指令；provider 在完成鉴权、去重和群聊门禁后据此分派，不会把命令发送给模型。 */
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum ImBuiltinCommand {
+    Help,
+    New,
+    Compact,
+}
+
+/** 精确识别首版 IM 内置指令；仅允许首尾空白，未知斜杠文本仍作为普通 Agent 提问。 */
+pub(crate) fn parse_builtin_command(text: &str) -> Option<ImBuiltinCommand> {
+    match text.trim() {
+        "/help" => Some(ImBuiltinCommand::Help),
+        "/new" | "/reset" => Some(ImBuiltinCommand::New),
+        "/compact" => Some(ImBuiltinCommand::Compact),
+        _ => None,
+    }
+}
+
+/** 返回内置指令说明；审批指令同时列出，降低移动端发现成本。 */
+pub(crate) fn builtin_command_help_text() -> &'static str {
+    "内置指令：\n/help：查看指令说明\n/new：开启新的 Agent 会话（/reset 仍可用）\n/compact：整理当前会话上下文\n/status：查看连接状态\n\n待确认变更：发送“详情 <编号>”、“确认 <编号>”或“取消 <编号>”。"
+}
+
+/** 生成新 IM 会话的固定身份摘要，避免把 `/new` 或旧消息误作为会话主题。 */
+pub(crate) fn build_im_new_session_identity(identity: &ImSessionIdentity) -> ImSessionIdentity {
+    ImSessionIdentity {
+        provider_id: identity.provider_id.clone(),
+        conversation_kind: identity.conversation_kind.clone(),
+        channel_hash: identity.channel_hash.clone(),
+        initial_message_preview: "新会话".to_owned(),
+        last_message_preview: "新会话".to_owned(),
+    }
+}
+
 /** 按 provider、会话类型和用户消息生成通用 IM 身份，供后续任意 IM 接入复用。 */
 pub(crate) fn build_im_session_identity(
     provider_id: &str,
@@ -273,7 +307,10 @@ pub(crate) fn build_im_turn_request(
 
 #[cfg(test)]
 mod tests {
-    use super::{build_im_message_preview, build_im_session_identity, format_im_session_title};
+    use super::{
+        build_im_message_preview, build_im_new_session_identity, build_im_session_identity,
+        format_im_session_title, parse_builtin_command, ImBuiltinCommand,
+    };
 
     /** 标题摘要需折叠空白、剔除机器人占位提及，并按字符而不是字节截断。 */
     #[test]
@@ -309,5 +346,36 @@ mod tests {
             "feishu:group:secret-chat:secret-user"
         );
         assert_eq!(identity.channel_hash.len(), 16);
+    }
+
+    /** 指令必须精确匹配，旧 `/reset` 兼容新会话语义。 */
+    #[test]
+    fn parses_builtin_commands_without_capturing_normal_prompts() {
+        assert_eq!(
+            parse_builtin_command(" /help "),
+            Some(ImBuiltinCommand::Help)
+        );
+        assert_eq!(parse_builtin_command("/new"), Some(ImBuiltinCommand::New));
+        assert_eq!(parse_builtin_command("/reset"), Some(ImBuiltinCommand::New));
+        assert_eq!(
+            parse_builtin_command("/compact"),
+            Some(ImBuiltinCommand::Compact)
+        );
+        assert_eq!(parse_builtin_command("/help more"), None);
+        assert_eq!(parse_builtin_command("/unknown"), None);
+    }
+
+    /** 新会话的标题不得泄露命令文本或继承上一轮主题。 */
+    #[test]
+    fn new_session_identity_uses_fixed_safe_preview() {
+        let identity =
+            build_im_session_identity("feishu", "feishu:dm:chat:user", "direct", "机密事项");
+        let new_identity = build_im_new_session_identity(&identity);
+
+        assert_eq!(
+            format_im_session_title(&new_identity),
+            "飞书 · 私聊 · 新会话"
+        );
+        assert_eq!(new_identity.channel_hash, identity.channel_hash);
     }
 }

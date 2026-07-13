@@ -3504,6 +3504,257 @@ pub(crate) async fn run_agent_turn_from_im(
 }
 
 /**
+ * 处理 provider 无关的 IM 内置指令。调用方必须先完成鉴权、去重与群聊 @ 门禁；
+ * 本入口仅从持久化状态读取会话，避免远端事件携带过期的工作台快照覆盖本地数据。
+ */
+pub(crate) async fn handle_im_builtin_command(
+    app: AppHandle,
+    provider_id: &str,
+    command: crate::im::ImBuiltinCommand,
+    channel_key: &str,
+    knowledge_base_ids: Vec<String>,
+    im_identity: crate::domain::ImSessionIdentity,
+) -> String {
+    let started_at = Instant::now();
+    let channel_hash = storage::hash_content(channel_key)
+        .chars()
+        .take(16)
+        .collect::<String>();
+    let command_name = match command {
+        crate::im::ImBuiltinCommand::Help => "help",
+        crate::im::ImBuiltinCommand::New => "new",
+        crate::im::ImBuiltinCommand::Compact => "compact",
+    };
+
+    let result = match command {
+        crate::im::ImBuiltinCommand::Help => Ok(ImBuiltinCommandResult {
+            reply: crate::im::builtin_command_help_text().to_owned(),
+            session_id: None,
+            message_count: None,
+            summary_chars: None,
+        }),
+        crate::im::ImBuiltinCommand::New => {
+            create_im_session_from_command(
+                &app,
+                provider_id,
+                channel_key,
+                knowledge_base_ids,
+                im_identity,
+            )
+            .await
+        }
+        crate::im::ImBuiltinCommand::Compact => {
+            compact_im_session_from_command(&app, provider_id, channel_key).await
+        }
+    };
+
+    let (status, reply, session_id, message_count, summary_chars) = match result {
+        Ok(result) => (
+            "completed",
+            result.reply,
+            result.session_id,
+            result.message_count,
+            result.summary_chars,
+        ),
+        Err(error) => (
+            "failed",
+            format!("操作失败：{}", logging::sanitize_log_text(&error)),
+            None,
+            None,
+            None,
+        ),
+    };
+    logging::write_app_event_best_effort(
+        &app,
+        AppEventBuilder::new(
+            if status == "failed" {
+                AppLogLevel::Warn
+            } else {
+                AppLogLevel::Info
+            },
+            AppLogCategory::Im,
+            "im_builtin_command",
+            status,
+            "IM 内置指令已处理。",
+        )
+        .session_id(session_id.unwrap_or_default())
+        .duration(started_at.elapsed())
+        .metadata(json!({
+            "command": command_name,
+            "providerId": provider_id,
+            "channelHash": channel_hash,
+            "messageCount": message_count,
+            "summaryChars": summary_chars,
+        })),
+    );
+    reply
+}
+
+/** 内置指令的用户可见结果和可观测性指标；不包含消息正文或摘要内容。 */
+struct ImBuiltinCommandResult {
+    reply: String,
+    session_id: Option<String>,
+    message_count: Option<usize>,
+    summary_chars: Option<usize>,
+}
+
+/** 创建并立即映射空 IM 会话；有待确认文件变更时拒绝切换，保留远程审批入口。 */
+async fn create_im_session_from_command(
+    app: &AppHandle,
+    _provider_id: &str,
+    channel_key: &str,
+    knowledge_base_ids: Vec<String>,
+    im_identity: crate::domain::ImSessionIdentity,
+) -> Result<ImBuiltinCommandResult, String> {
+    let snapshot_app = app.clone();
+    let mut snapshot = run_blocking("加载 IM 新会话状态", move || {
+        storage::load_workspace_snapshot(&snapshot_app)
+    })
+    .await?;
+    let valid_scope_ids = snapshot
+        .knowledge_bases
+        .iter()
+        .filter(|knowledge_base| knowledge_base_ids.iter().any(|id| id == &knowledge_base.id))
+        .map(|knowledge_base| knowledge_base.id.clone())
+        .collect::<Vec<_>>();
+    if valid_scope_ids.is_empty() {
+        return Err("IM 默认知识库范围为空或已失效。".to_owned());
+    }
+
+    if let Some(mapped_id) = storage::load_im_session_mapping(app, channel_key)? {
+        if snapshot.sessions.iter().any(|session| {
+            session.id == mapped_id
+                && session
+                    .pending_change
+                    .as_ref()
+                    .is_some_and(|change| change.status == "pending")
+        }) {
+            return Ok(ImBuiltinCommandResult {
+                reply:
+                    "当前会话有待确认变更；请先发送“详情 <编号>”、“确认 <编号>”或“取消 <编号>”。"
+                        .to_owned(),
+                session_id: Some(mapped_id),
+                message_count: None,
+                summary_chars: None,
+            });
+        }
+    }
+
+    let new_identity = crate::im::build_im_new_session_identity(&im_identity);
+    // 明确使用固定摘要，保证命令本身不会成为新会话的标题或可见主题。
+    let session = crate::im::build_im_agent_session(new_identity, valid_scope_ids);
+    let session_id = session.id.clone();
+    snapshot.sessions.insert(0, session);
+    storage::save_sessions(app, &snapshot)?;
+    storage::save_im_session_mapping(app, channel_key, &session_id)?;
+
+    Ok(ImBuiltinCommandResult {
+        reply: "已开启新会话，下一条消息将从新的上下文开始。".to_owned(),
+        session_id: Some(session_id),
+        message_count: Some(0),
+        summary_chars: Some(0),
+    })
+}
+
+/** 压缩当前 channel 的持久化会话；空会话直接提示，绝不为此调用模型。 */
+async fn compact_im_session_from_command(
+    app: &AppHandle,
+    provider_id: &str,
+    channel_key: &str,
+) -> Result<ImBuiltinCommandResult, String> {
+    let Some(session_id) = storage::load_im_session_mapping(app, channel_key)? else {
+        return Ok(ImBuiltinCommandResult {
+            reply: "当前还没有可整理的会话；请先发送一条普通消息。".to_owned(),
+            session_id: None,
+            message_count: Some(0),
+            summary_chars: Some(0),
+        });
+    };
+    let snapshot_app = app.clone();
+    let mut snapshot = run_blocking("加载 IM 上下文", move || {
+        storage::load_workspace_snapshot(&snapshot_app)
+    })
+    .await?;
+    let channel_hash = storage::hash_content(channel_key)
+        .chars()
+        .take(16)
+        .collect::<String>();
+    let Some(session_index) = snapshot.sessions.iter().position(|session| {
+        session.id == session_id
+            && session.im_identity.as_ref().is_some_and(|identity| {
+                identity.provider_id == provider_id && identity.channel_hash == channel_hash
+            })
+    }) else {
+        return Ok(ImBuiltinCommandResult {
+            reply: "当前 IM 会话不可用，请发送 /new 开启新会话。".to_owned(),
+            session_id: Some(session_id),
+            message_count: None,
+            summary_chars: None,
+        });
+    };
+    let message_count = snapshot.sessions[session_index].messages.len();
+    if message_count == 0 {
+        return Ok(ImBuiltinCommandResult {
+            reply: "当前会话没有可整理的对话消息。".to_owned(),
+            session_id: Some(session_id),
+            message_count: Some(0),
+            summary_chars: Some(0),
+        });
+    }
+
+    let settings_app = app.clone();
+    let settings = run_blocking("读取模型设置", move || {
+        storage::load_user_settings(&settings_app)
+    })
+    .await?;
+    // 模型调用不可用时压缩为确定性工作记忆，确保移动端命令始终能完成并被持久化。
+    snapshot = match runtime::compact_agent_context_summary(snapshot.clone(), &session_id, settings)
+        .await
+    {
+        Ok(snapshot) => snapshot,
+        Err(error) => {
+            log::warn!(target: "im", "IM 上下文压缩降级为确定性摘要：session={} reason={}", session_id, logging::sanitize_log_text(&error));
+            runtime::update_agent_context_summary_deterministic(
+                &mut snapshot,
+                session_index,
+                Some(&error),
+                true,
+            );
+            snapshot
+        }
+    };
+    let summary = snapshot.sessions[session_index].context_summary.as_ref();
+    let summary_chars = summary
+        .map(|item| {
+            serde_json::to_string(item)
+                .unwrap_or_default()
+                .chars()
+                .count()
+        })
+        .unwrap_or(0);
+    let goal = summary
+        .and_then(|item| item.current_goal.as_deref())
+        .unwrap_or("未识别当前目标");
+    // 压缩摘要可能复述用户输入；回传到群聊前沿用日志脱敏规则，避免意外暴露密钥或本地绝对路径。
+    let short_goal = logging::sanitize_log_text(goal)
+        .chars()
+        .take(48)
+        .collect::<String>();
+    storage::save_sessions(app, &snapshot)?;
+    index_snapshot_in_background(app.clone(), &snapshot).await?;
+
+    Ok(ImBuiltinCommandResult {
+        reply: format!(
+            "已整理当前会话上下文（{} 条消息）。当前目标：{}",
+            message_count, short_goal
+        ),
+        session_id: Some(session_id),
+        message_count: Some(message_count),
+        summary_chars: Some(summary_chars),
+    })
+}
+
+/**
  * 在 IM 会话内处理待确认变更；此入口只信任持久化的会话和 channel 映射，
  * 不接受桌面前端传入的 WorkspaceSnapshot，避免远程确认覆盖本地最新状态。
  */

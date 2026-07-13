@@ -1304,21 +1304,6 @@ pub fn save_im_session_mapping(
     Ok(())
 }
 
-/** 删除 IM 对话映射，供 /reset 强制创建新会话。 */
-pub fn delete_im_session_mapping(app: &AppHandle, channel_key: &str) -> Result<(), String> {
-    let connection = open_database(app)?;
-    let _write_guard = lock_database_writer()?;
-
-    connection
-        .execute(
-            "DELETE FROM im_session_mappings WHERE channel_key = ?1",
-            params![channel_key],
-        )
-        .map_err(|error| format!("无法删除 IM 会话映射：{error}"))?;
-
-    Ok(())
-}
-
 /** 根据会话里的 note 引用恢复同知识库 Markdown；无有效引用时不再默认绑定第一篇文档。 */
 fn resolve_session_note_id(
     snapshot: &WorkspaceSnapshot,
