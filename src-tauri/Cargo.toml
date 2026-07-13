@@ -40,3 +40,5 @@ zip = { version = "2", default-features = false, features = ["deflate"] }
 tauri-plugin-log = "2.8.0"
 log = "0.4"
 tauri-plugin-opener = "2"
+# IM 网关需要按通道异步串行化会话读写，避免并发事件覆盖持久化快照。
+tokio = { version = "1", features = ["sync"] }

@@ -7,10 +7,10 @@ use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
-use std::collections::{HashSet, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::io::{BufRead, BufReader, Write};
 use std::process::{Child, Command, Stdio};
-use std::sync::{Mutex, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 use tauri::AppHandle;
 
@@ -121,6 +121,14 @@ impl Default for FeishuGatewayState {
 
 /** 全局飞书网关状态，Tauri commands 和 sidecar reader 线程共享。 */
 static FEISHU_GATEWAY_STATE: OnceLock<Mutex<FeishuGatewayState>> = OnceLock::new();
+
+/**
+ * 每个 IM channel 的异步互斥锁。它只保留脱敏前的 key 于进程内内存，
+ * 用来串行化 Agent turn、/new 与 /compact，防止旧快照覆盖最新会话状态。
+ */
+static FEISHU_CHANNEL_OPERATION_LOCKS: OnceLock<
+    Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
+> = OnceLock::new();
 
 /** 启动飞书长连接网关；只负责拉起 sidecar，消息处理在后台任务中完成。 */
 pub async fn start_gateway(app: AppHandle) -> Result<FeishuGatewayStatus, String> {
@@ -485,17 +493,17 @@ async fn handle_inbound_event(app: AppHandle, event: FeishuInboundEvent) {
 
     let reply = if event.kind == "card_action" {
         // 卡片回调没有 @ mention，但仍须经过同一发送人和群聊白名单校验。
+        // 审批也会写入会话状态，必须与同一通道的 Agent turn 共享串行队列。
+        let channel_key = build_channel_key(&event);
+        let _operation_guard = acquire_channel_operation_lock(&channel_key).await;
         handle_card_action_for_event(&app, &event).await
     } else if event.message_type != "text" {
         "暂不支持该飞书消息类型；首版只处理文本消息。".to_owned()
-    } else if event.text.trim() == "/status" {
-        build_status_reply(&app, &settings)
-    } else if event.text.trim() == "/reset" {
-        reset_im_session(&app, &event, &settings)
-    } else if let Some((action, change_token)) = parse_pending_change_text_command(&event.text) {
-        handle_pending_change_command_for_event(&app, &event, action, change_token).await
     } else {
-        run_agent_for_event(&app, &event, &settings).await
+        // 同一 channel 的所有文本事件都按顺序执行；命令与普通消息不会并发读取后覆盖彼此的会话快照。
+        let channel_key = build_channel_key(&event);
+        let _operation_guard = acquire_channel_operation_lock(&channel_key).await;
+        dispatch_authorized_text_event(&app, &event, &settings, &channel_key).await
     };
 
     match send_text_reply(&app, &settings, &event, &reply).await {
@@ -528,6 +536,66 @@ async fn handle_inbound_event(app: AppHandle, event: FeishuInboundEvent) {
             .metadata(json!({ "providerId": IM_PROVIDER_FEISHU, "eventHash": event_hash })),
         ),
     }
+}
+
+/** 返回 channel 专属的异步锁；锁表仅进程内使用，不写入原始外部 ID 到磁盘或日志。 */
+async fn acquire_channel_operation_lock(channel_key: &str) -> tokio::sync::OwnedMutexGuard<()> {
+    let lock = {
+        let lock_table = FEISHU_CHANNEL_OPERATION_LOCKS.get_or_init(|| Mutex::new(HashMap::new()));
+        let mut lock_table = lock_table
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        lock_table
+            .entry(channel_key.to_owned())
+            .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
+            .clone()
+    };
+    lock.lock_owned().await
+}
+
+/**
+ * 分派已经完成飞书鉴权与群聊门禁的文本事件。内置指令优先于审批文本和 Agent，
+ * 因此 `/new`、`/compact` 与 `/help` 绝不会进入模型上下文。
+ */
+async fn dispatch_authorized_text_event(
+    app: &AppHandle,
+    event: &FeishuInboundEvent,
+    settings: &FeishuIntegrationSettings,
+    channel_key: &str,
+) -> String {
+    if event.text.trim() == "/status" {
+        return build_status_reply(app, settings);
+    }
+
+    if let Some(command) = super::parse_builtin_command(&event.text) {
+        let conversation_kind = if is_group_chat_event(event) {
+            "group"
+        } else {
+            "direct"
+        };
+        // 仅传递已脱敏的身份摘要给通用命令服务，命令正文不进入会话主题。
+        let im_identity = super::build_im_session_identity(
+            IM_PROVIDER_FEISHU,
+            channel_key,
+            conversation_kind,
+            "新会话",
+        );
+        return crate::commands::handle_im_builtin_command(
+            app.clone(),
+            IM_PROVIDER_FEISHU,
+            command,
+            channel_key,
+            settings.default_knowledge_base_ids.clone(),
+            im_identity,
+        )
+        .await;
+    }
+
+    if let Some((action, change_token)) = parse_pending_change_text_command(&event.text) {
+        return handle_pending_change_command_for_event(app, event, action, change_token).await;
+    }
+
+    run_agent_for_event(app, event, settings).await
 }
 
 /** 从消息或会话进入事件中保存可授权候选，返回是否完成保存尝试。 */
@@ -779,51 +847,6 @@ fn build_status_reply(app: &AppHandle, settings: &FeishuIntegrationSettings) -> 
             "不需要"
         }
     )
-}
-
-/** 处理 `/reset`，删除当前飞书对话映射，下次普通消息会创建新 AgentSession。 */
-fn reset_im_session(
-    app: &AppHandle,
-    event: &FeishuInboundEvent,
-    settings: &FeishuIntegrationSettings,
-) -> String {
-    let channel_key = build_channel_key(event);
-
-    if let Err(error) = storage::delete_im_session_mapping(app, &channel_key) {
-        logging::write_app_event_best_effort(
-            app,
-            AppEventBuilder::new(
-                AppLogLevel::Warn,
-                AppLogCategory::Im,
-                "im_session_reset",
-                "failed",
-                error,
-            )
-            .metadata(json!({
-                "providerId": IM_PROVIDER_FEISHU,
-                "channelHash": hash_identifier(&channel_key)
-            })),
-        );
-        return "重置飞书会话失败，请稍后重试。".to_owned();
-    }
-
-    logging::write_app_event_best_effort(
-        app,
-        AppEventBuilder::new(
-            AppLogLevel::Info,
-            AppLogCategory::Im,
-            "im_session_reset",
-            "completed",
-            "飞书会话映射已重置。",
-        )
-        .metadata(json!({
-            "providerId": IM_PROVIDER_FEISHU,
-            "channelHash": hash_identifier(&channel_key),
-            "scopeCount": settings.default_knowledge_base_ids.len(),
-        })),
-    );
-
-    "已重置当前飞书会话。".to_owned()
 }
 
 /** 为飞书消息运行橘记 Agent，并返回可发送回飞书的短文本。 */
@@ -1584,10 +1607,18 @@ mod tests {
         assert_eq!(block.reason, "飞书发送人不在允许名单中。");
     }
 
-    /** `/status` 和 `/reset` 使用纯文本命令，首版不依赖飞书 slash command 菜单。 */
+    /** 飞书通过通用解析器精确识别内置指令，未知斜杠文本仍交由 Agent。 */
     #[test]
-    fn plain_text_commands_are_detected_by_exact_trimmed_text() {
-        assert_eq!("/status".trim(), "/status");
-        assert_eq!(" /reset ".trim(), "/reset");
+    fn builtin_commands_use_common_exact_parser() {
+        assert_eq!(
+            super::super::parse_builtin_command(" /new "),
+            Some(super::super::ImBuiltinCommand::New)
+        );
+        assert_eq!(
+            super::super::parse_builtin_command("/reset"),
+            Some(super::super::ImBuiltinCommand::New)
+        );
+        assert_eq!(super::super::parse_builtin_command("/compact now"), None);
+        assert_eq!(super::super::parse_builtin_command("/unknown"), None);
     }
 }
