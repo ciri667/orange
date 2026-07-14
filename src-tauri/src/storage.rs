@@ -2153,14 +2153,76 @@ fn keyring_service_for_build(is_macos: bool, is_debug_build: bool) -> &'static s
     }
 }
 
-/** 判断当前构建是否使用开发凭据命名空间，开发态不得执行生产凭据迁移。 */
-fn uses_development_keyring_namespace() -> bool {
-    uses_development_keyring_namespace_without_logging(keyring_service())
-}
-
 /** 无日志辅助函数，避免 service 选择日志初始化时发生递归调用。 */
 fn uses_development_keyring_namespace_without_logging(service: &str) -> bool {
     service == DEVELOPMENT_KEYRING_SERVICE
+}
+
+/**
+ * 缓存未命中时的 Keychain 查询结果；`requires_migration` 表示命中的是历史命名空间。
+ *
+ * 该结构只在内存中短暂保存密钥，以便调用方完成迁移与缓存，不会进入日志或 SQLite。
+ */
+struct KeyringPasswordLookup {
+    api_key: Option<String>,
+    requires_migration: bool,
+}
+
+/**
+ * 在当前 Keychain service 中优先查询密钥，并仅允许正式构建回退到历史命名空间。
+ *
+ * 开发构建保存和读取都使用 `Orange Dev`。因此即使要隔离生产凭据，也必须在禁止
+ * 回退之前读取 `Orange Dev`；否则密钥只在进程缓存存活，重启后会被错误判定为丢失。
+ */
+fn load_keyring_password_after_cache_miss_with<F>(
+    current_service: &str,
+    key_reference: &str,
+    mut read_password: F,
+) -> Result<KeyringPasswordLookup, String>
+where
+    F: FnMut(&str, &str) -> Result<Option<String>, String>,
+{
+    let normalized_key_reference = normalize_key_reference(key_reference);
+
+    // 所有构建都先读取自身命名空间；这是重启后恢复开发态密钥的关键路径。
+    if let Some(api_key) = read_password(current_service, &normalized_key_reference)? {
+        return Ok(KeyringPasswordLookup {
+            api_key: Some(api_key),
+            requires_migration: false,
+        });
+    }
+
+    // 调试签名只能读取 Orange Dev，不能回退访问正式或品牌升级前的凭据。
+    if uses_development_keyring_namespace_without_logging(current_service) {
+        return Ok(KeyringPasswordLookup {
+            api_key: None,
+            requires_migration: false,
+        });
+    }
+
+    let legacy_key_reference = key_reference
+        .strip_prefix("orange-")
+        .map(|rest| format!("cici-note-{rest}"))
+        .unwrap_or_else(|| key_reference.to_owned());
+
+    // 正式构建兼容品牌升级前的 service 和 account；命中后由调用方回写到当前 service。
+    for (service, account) in [
+        ("Cici Note", key_reference),
+        ("Cici Note", legacy_key_reference.as_str()),
+        (PRODUCTION_KEYRING_SERVICE, legacy_key_reference.as_str()),
+    ] {
+        if let Some(api_key) = read_password(service, account)? {
+            return Ok(KeyringPasswordLookup {
+                api_key: Some(api_key),
+                requires_migration: true,
+            });
+        }
+    }
+
+    Ok(KeyringPasswordLookup {
+        api_key: None,
+        requires_migration: false,
+    })
 }
 
 /** 把 BYOK 模型密钥保存到系统安全存储，按 providerId 隔离 key 引用，避免明文进入 SQLite。 */
@@ -2202,39 +2264,23 @@ pub fn load_model_api_key(key_reference: &str) -> Result<Option<String>, String>
         return Ok(Some(api_key));
     }
 
-    // 开发凭据与生产凭据隔离：调试构建不能迁移或读取生产 service 中的任何密钥。
-    if uses_development_keyring_namespace() {
+    let lookup = load_keyring_password_after_cache_miss_with(
+        keyring_service(),
+        key_reference,
+        read_keyring_password,
+    )?;
+    let Some(api_key) = lookup.api_key else {
         return Ok(None);
-    }
+    };
 
-    // 品牌升级（cici-note → orange）后，老用户的密钥仍存在旧 keyring service "Cici Note"
-    // 下、且 account 可能是旧前缀 "cici-note-*"。这里在新 service 下查不到时回退读旧
-    // service 并落到规范位置（新 service "Orange" + 规范化后的 key_reference），保证透明迁移。
     let normalized_key_reference = normalize_key_reference(key_reference);
-    if let Some(api_key) = read_keyring_password(keyring_service(), &normalized_key_reference)? {
-        store_model_api_key_in_cache(&normalized_key_reference, &api_key)?;
-        return Ok(Some(api_key));
+    if lookup.requires_migration {
+        // 命中旧条目：迁移写入规范位置，并缓存。
+        persist_migrated_keyring_password(&normalized_key_reference, &api_key)?;
     }
 
-    // 兼容回退：依次尝试旧 service 名与旧前缀的 account 四种组合。
-    let legacy_key_reference = key_reference
-        .strip_prefix("orange-")
-        .map(|rest| format!("cici-note-{rest}"))
-        .unwrap_or_else(|| key_reference.to_owned());
-    for (service, account) in [
-        ("Cici Note", key_reference),
-        ("Cici Note", &legacy_key_reference),
-        ("Orange", &legacy_key_reference),
-    ] {
-        if let Some(api_key) = read_keyring_password(service, account)? {
-            // 命中旧条目：迁移写入规范位置，并缓存。
-            persist_migrated_keyring_password(&normalized_key_reference, &api_key)?;
-            store_model_api_key_in_cache(&normalized_key_reference, &api_key)?;
-            return Ok(Some(api_key));
-        }
-    }
-
-    Ok(None)
+    store_model_api_key_in_cache(&normalized_key_reference, &api_key)?;
+    Ok(Some(api_key))
 }
 
 /** 把传入的 key_reference 规范化为新前缀 orange-，兼容 sqlite 里仍存的 cici-note-* 历史 account。 */
@@ -4908,18 +4954,20 @@ mod tests {
         hash_bytes, hash_content, insert_app_event_log, insert_document_history_entry,
         is_missing_keyring_entry_error, keyring_service_for_build,
         load_document_history_ids_for_target, load_document_preview,
-        load_latest_document_history_hash, load_model_api_key_from_cache,
-        model_keyring_persists_until_delete, normalize_audit_log_created_at, normalize_im_settings,
-        normalize_knowledge_base_memory, normalize_session_created_at, parse_im_settings_payload,
-        prune_app_event_logs, prune_document_history_entries, query_app_event_logs,
-        read_document_history_snapshot, redact_memory_secrets, rename_markdown_file,
-        rename_text_document_file, resolve_existing_file_inside_root, resolve_inside_root,
-        save_note_image_attachments, scan_markdown_directory, scan_supported_documents_directory,
+        load_keyring_password_after_cache_miss_with, load_latest_document_history_hash,
+        load_model_api_key_from_cache, model_keyring_persists_until_delete,
+        normalize_audit_log_created_at, normalize_im_settings, normalize_knowledge_base_memory,
+        normalize_session_created_at, parse_im_settings_payload, prune_app_event_logs,
+        prune_document_history_entries, query_app_event_logs, read_document_history_snapshot,
+        redact_memory_secrets, rename_markdown_file, rename_text_document_file,
+        resolve_existing_file_inside_root, resolve_inside_root, save_note_image_attachments,
+        scan_markdown_directory, scan_supported_documents_directory,
         sort_sessions_by_updated_at_desc, store_model_api_key_in_cache, trash_markdown_file,
         trash_text_document_file_with, validate_folder_name, validate_markdown_file_name,
         validate_new_markdown_file_name, validate_new_text_document_file_name,
         validate_text_document_file_name, write_document_history_snapshot, BASE64_STANDARD,
-        MAX_DOCUMENT_HISTORY_ENTRIES_PER_FILE,
+        DEVELOPMENT_KEYRING_SERVICE, MAX_DOCUMENT_HISTORY_ENTRIES_PER_FILE,
+        PRODUCTION_KEYRING_SERVICE,
     };
     use crate::domain::{
         AgentMemoryEntry, AgentSession, AppEventLog, DocumentHistoryEntry,
@@ -5244,6 +5292,103 @@ mod tests {
         assert_eq!(keyring_service_for_build(true, true), "Orange Dev");
         assert_eq!(keyring_service_for_build(true, false), "Orange");
         assert_eq!(keyring_service_for_build(false, true), "Orange");
+    }
+
+    /**
+     * 回归测试：重启会清空进程缓存，开发态必须先读取 Orange Dev，而不是提前返回未配置。
+     *
+     * 使用注入 reader 记录查询顺序，不访问真实 Keychain，也不使用任何用户凭据。
+     */
+    #[test]
+    fn development_cache_miss_reads_current_keychain_service_before_isolation() {
+        let key_reference = "orange-test-provider-api-key";
+        let mut attempts = Vec::new();
+        let lookup = load_keyring_password_after_cache_miss_with(
+            DEVELOPMENT_KEYRING_SERVICE,
+            key_reference,
+            |service, account| {
+                attempts.push((service.to_owned(), account.to_owned()));
+
+                if service == DEVELOPMENT_KEYRING_SERVICE && account == key_reference {
+                    return Ok(Some("test-only-key".to_owned()));
+                }
+
+                Ok(None)
+            },
+        )
+        .unwrap();
+
+        assert_eq!(lookup.api_key, Some("test-only-key".to_owned()));
+        assert!(!lookup.requires_migration);
+        assert_eq!(
+            attempts,
+            vec![(
+                DEVELOPMENT_KEYRING_SERVICE.to_owned(),
+                key_reference.to_owned(),
+            ),]
+        );
+    }
+
+    /** 开发态自身 service 未命中时不得读取 Orange 或 Cici Note，防止调试签名接触生产凭据。 */
+    #[test]
+    fn development_cache_miss_does_not_fallback_to_production_or_legacy_keychain() {
+        let key_reference = "orange-test-provider-api-key";
+        let mut attempts = Vec::new();
+        let lookup = load_keyring_password_after_cache_miss_with(
+            DEVELOPMENT_KEYRING_SERVICE,
+            key_reference,
+            |service, account| {
+                attempts.push((service.to_owned(), account.to_owned()));
+                Ok(None)
+            },
+        )
+        .unwrap();
+
+        assert_eq!(lookup.api_key, None);
+        assert!(!lookup.requires_migration);
+        assert_eq!(
+            attempts,
+            vec![(
+                DEVELOPMENT_KEYRING_SERVICE.to_owned(),
+                key_reference.to_owned(),
+            ),]
+        );
+    }
+
+    /** 正式构建读取自身 service 失败后仍需保留历史 Cici Note 凭据迁移能力。 */
+    #[test]
+    fn production_cache_miss_falls_back_to_legacy_keychain_for_migration() {
+        let key_reference = "orange-test-provider-api-key";
+        let legacy_key_reference = "cici-note-test-provider-api-key";
+        let mut attempts = Vec::new();
+        let lookup = load_keyring_password_after_cache_miss_with(
+            PRODUCTION_KEYRING_SERVICE,
+            key_reference,
+            |service, account| {
+                attempts.push((service.to_owned(), account.to_owned()));
+
+                if service == "Cici Note" && account == legacy_key_reference {
+                    return Ok(Some("test-only-legacy-key".to_owned()));
+                }
+
+                Ok(None)
+            },
+        )
+        .unwrap();
+
+        assert_eq!(lookup.api_key, Some("test-only-legacy-key".to_owned()));
+        assert!(lookup.requires_migration);
+        assert_eq!(
+            attempts,
+            vec![
+                (
+                    PRODUCTION_KEYRING_SERVICE.to_owned(),
+                    key_reference.to_owned()
+                ),
+                ("Cici Note".to_owned(), key_reference.to_owned()),
+                ("Cici Note".to_owned(), legacy_key_reference.to_owned()),
+            ]
+        );
     }
 
     /** keyring 默认后端必须是系统级持久化存储，防止 API key 重启后丢失。 */
