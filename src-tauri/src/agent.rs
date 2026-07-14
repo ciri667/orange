@@ -55,8 +55,8 @@ pub fn run_agent_turn(
                 &mut snapshot,
                 session_index,
                 &request,
-                "read_note",
-                json!({ "noteId": note_id }),
+                "read_file",
+                json!({ "fileId": note_id }),
             );
 
             citations.extend(read_outcome.citations);
@@ -142,7 +142,7 @@ fn build_local_response(
         .any(|tool_call| tool_call.name == "search_notes" && tool_call.status == "failed");
 
     if matches!(request.action.as_str(), "rewrite" | "create") {
-        return "当前运行在本地规则兜底模式，我不会根据固定 action 自动生成写入 diff。需要写入时请启用模型，让 Agent 显式调用 propose_note_change 或 create_note_draft 工具；确认前不会修改 Markdown 文件。"
+        return "当前运行在本地规则兜底模式，我不会根据固定 action 自动生成写入 diff。需要写入时请启用模型，让 Agent 显式调用 propose_file_change 或 create_file_draft 工具；确认前不会修改本地文件。"
             .to_owned();
     }
 

@@ -61,7 +61,7 @@ pub fn built_in_skills() -> Vec<AgentSkill> {
             "note-research",
             "知识库研究",
             "基于已选知识库发现支持文档、检索和阅读 Markdown 笔记，并给出带引用的回答。",
-            "当用户要求查找、总结、对比或引用本地知识库时，先调用 list_tree、search_notes 或 read_note 获取依据。list_tree 可发现目录、Markdown 笔记和已支持普通文档元数据；search_notes/read_note 只覆盖 Markdown 笔记。回答中只引用工具返回的材料；如果工具没有结果，明确说明未找到依据，不要编造来源。",
+            "当用户要求查找、总结、对比或引用本地知识库时，先调用 list_tree、search_notes 或 read_file 获取依据。search_notes 只覆盖 Markdown；read_file 可读取授权范围内的 Markdown/TXT，TXT 不产生知识库引用。",
             &["研究", "检索", "引用"],
         ),
         built_in_skill(
@@ -69,7 +69,7 @@ pub fn built_in_skills() -> Vec<AgentSkill> {
             "note-rewrite",
             "笔记改写",
             "改写当前笔记内容，并通过待确认 diff 交给用户决定是否写入。",
-            "当用户要求润色、改写、压缩、扩写、多处编辑或文末追加当前笔记时，先读取当前笔记或目标笔记。只能调用 propose_note_change 生成待确认 diff；不能声称已经修改文件，也不能绕过 original 唯一命中校验。局部改写使用 operation=replace，next 只能是 original 的替换内容；文末追加必须使用 operation=append，next 只能包含要追加的增量内容，不能传整篇文档；同一文件多处编辑使用 operation=multi_replace 并提供 edits 数组。",
+            "当用户要求润色、改写、压缩、扩写、多处编辑或文末追加 Markdown/TXT 时，先用 read_file 或 get_current_file 读取目标。只能调用 propose_file_change 生成待确认 diff；TXT 必须保持纯文本。局部改写用 replace，追加用 append，多处编辑用 multi_replace 和 edits。",
             &["写作", "改写", "diff"],
         ),
         built_in_skill(
@@ -77,7 +77,7 @@ pub fn built_in_skills() -> Vec<AgentSkill> {
             "draft-from-context",
             "上下文草稿",
             "基于已选 scope 创建新的 Markdown 草稿，写入前仍需用户确认。",
-            "当用户要求生成新笔记、清单、总结稿或草稿时，可以先检索或读取相关笔记，再调用 create_note_draft。目标路径必须在当前会话允许的知识库内，正文应是完整 Markdown。",
+            "当用户要求生成新笔记、TXT、清单、总结稿或草稿时，可以先检索或读取相关文件，再调用 create_file_draft。目标路径必须在当前会话允许的知识库内，fileType 必须为 markdown 或 txt 且扩展名匹配；TXT 正文是纯文本。",
             &["草稿", "生成", "Markdown"],
         ),
         built_in_skill(

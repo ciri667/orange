@@ -116,15 +116,15 @@ impl Default for ToolRegistry {
         Self {
             tools: vec![
                 Box::new(SearchNotesTool),
-                Box::new(ReadNoteTool),
+                Box::new(ReadFileTool),
                 Box::new(ListTreeTool),
-                Box::new(GetCurrentNoteTool),
+                Box::new(GetCurrentFileTool),
                 Box::new(GetSessionSummaryTool),
                 Box::new(SearchSessionMessagesTool),
                 Box::new(ReadSessionContextTool),
                 Box::new(GetKnowledgeBaseMemoryTool),
-                Box::new(ProposeNoteChangeTool),
-                Box::new(CreateNoteDraftTool),
+                Box::new(ProposeFileChangeTool),
+                Box::new(CreateFileDraftTool),
                 Box::new(SuggestOrganizationTool),
             ],
         }
@@ -155,14 +155,21 @@ impl ToolRegistry {
         name: &str,
         args: Value,
     ) -> ToolOutcome {
+        // 兼容已经持久化的旧模型调用；schema 只暴露统一新名称，不再引导模型使用别名。
+        let (canonical_name, canonical_args) = match name {
+            "read_note" => ("read_file", remap_legacy_file_id(args)),
+            "propose_note_change" => ("propose_file_change", remap_legacy_file_id(args)),
+            "create_note_draft" => ("create_file_draft", remap_legacy_markdown_draft(args)),
+            _ => (name, args),
+        };
         let result = self
             .tools
             .iter()
-            .find(|tool| tool.name() == name)
-            .map(|tool| tool.execute(context, &args))
+            .find(|tool| tool.name() == canonical_name)
+            .map(|tool| tool.execute(context, &canonical_args))
             .unwrap_or_else(|| ToolExecutionResult::failed("未知工具，已拒绝执行。"));
 
-        tool_outcome(name, args, result)
+        tool_outcome(canonical_name, canonical_args, result)
     }
 
     /** 执行模型返回的 tool_call，负责解析 arguments 并复用命名工具分发。 */
@@ -180,6 +187,22 @@ impl ToolRegistry {
 
         self.execute_named(context, name, args)
     }
+}
+
+/** 把历史 noteId 参数转换为统一 fileId，避免旧会话重试失效。 */
+fn remap_legacy_file_id(mut args: Value) -> Value {
+    if let Some(object) = args.as_object_mut() {
+        if !object.contains_key("fileId") {
+            if let Some(note_id) = object.get("noteId").cloned() { object.insert("fileId".to_owned(), note_id); }
+        }
+    }
+    args
+}
+
+/** 为历史新建 Markdown 草稿补齐统一工具所需的类型字段。 */
+fn remap_legacy_markdown_draft(mut args: Value) -> Value {
+    if let Some(object) = args.as_object_mut() { object.entry("fileType").or_insert_with(|| Value::String("markdown".to_owned())); }
+    args
 }
 
 /** search_notes 工具，在当前会话授权知识库内执行 SQLite/FTS 检索。 */
@@ -207,28 +230,28 @@ impl AgentTool for SearchNotesTool {
     }
 }
 
-/** read_note 工具，读取当前 scope 内的一篇笔记并返回受预算限制的正文。 */
-struct ReadNoteTool;
+/** read_file 工具，读取当前 scope 内 Markdown 或 TXT 的受预算限制正文。 */
+struct ReadFileTool;
 
-impl AgentTool for ReadNoteTool {
+impl AgentTool for ReadFileTool {
     fn name(&self) -> &'static str {
-        "read_note"
+        "read_file"
     }
 
     fn description(&self) -> &'static str {
-        "Read one note by id if it is inside the selected scope."
+        "Read one editable Markdown or TXT file by id if it is inside the selected scope."
     }
 
     fn parameters(&self) -> Value {
         json!({
             "type": "object",
-            "properties": { "noteId": { "type": "string" } },
-            "required": ["noteId"]
+            "properties": { "fileId": { "type": "string" } },
+            "required": ["fileId"]
         })
     }
 
     fn execute(&self, context: &mut AgentToolContext<'_>, args: &Value) -> ToolExecutionResult {
-        execute_read_note(context.snapshot, context.session_index, args)
+        execute_read_file(context.snapshot, context.session_index, args)
     }
 }
 
@@ -256,16 +279,16 @@ impl AgentTool for ListTreeTool {
     }
 }
 
-/** get_current_note 工具，读取 UI 当前激活笔记但仍执行 scope 校验。 */
-struct GetCurrentNoteTool;
+/** get_current_file 工具，读取 UI 当前激活 Markdown/TXT，但仍执行 scope 校验。 */
+struct GetCurrentFileTool;
 
-impl AgentTool for GetCurrentNoteTool {
+impl AgentTool for GetCurrentFileTool {
     fn name(&self) -> &'static str {
-        "get_current_note"
+        "get_current_file"
     }
 
     fn description(&self) -> &'static str {
-        "Read the current active note if it is inside the selected scope."
+        "Read the current active editable Markdown or TXT file if it is inside the selected scope."
     }
 
     fn parameters(&self) -> Value {
@@ -276,29 +299,32 @@ impl AgentTool for GetCurrentNoteTool {
     }
 
     fn execute(&self, context: &mut AgentToolContext<'_>, _args: &Value) -> ToolExecutionResult {
-        let args = json!({ "noteId": context.request.active_note_id });
-
-        execute_read_note(context.snapshot, context.session_index, &args)
+        let file_id = if !context.snapshot.active_note_id.is_empty() {
+            context.snapshot.active_note_id.clone()
+        } else {
+            context.snapshot.active_document_id.clone()
+        };
+        execute_read_file(context.snapshot, context.session_index, &json!({ "fileId": file_id }))
     }
 }
 
-/** propose_note_change 工具，只创建待确认 diff，不直接写 Markdown 文件。 */
-struct ProposeNoteChangeTool;
+/** propose_file_change 工具，只创建待确认 diff，不直接写 Markdown/TXT 文件。 */
+struct ProposeFileChangeTool;
 
-impl AgentTool for ProposeNoteChangeTool {
+impl AgentTool for ProposeFileChangeTool {
     fn name(&self) -> &'static str {
-        "propose_note_change"
+        "propose_file_change"
     }
 
     fn description(&self) -> &'static str {
-        "Create a pending rewrite diff for an existing note."
+        "Create a pending rewrite diff for an existing editable Markdown or TXT file."
     }
 
     fn parameters(&self) -> Value {
         json!({
             "type": "object",
             "properties": {
-                "noteId": { "type": "string" },
+                "fileId": { "type": "string" },
                 "title": { "type": "string" },
                 "operation": {
                     "type": "string",
@@ -325,12 +351,12 @@ impl AgentTool for ProposeNoteChangeTool {
                     }
                 }
             },
-            "required": ["noteId"]
+            "required": ["fileId"]
         })
     }
 
     fn execute(&self, context: &mut AgentToolContext<'_>, args: &Value) -> ToolExecutionResult {
-        execute_propose_note_change(context.snapshot, context.session_index, args)
+        execute_propose_file_change(context.snapshot, context.session_index, args)
     }
 }
 
@@ -429,16 +455,16 @@ impl AgentTool for GetKnowledgeBaseMemoryTool {
     }
 }
 
-/** create_note_draft 工具，只创建待确认新建 diff，不直接落盘。 */
-struct CreateNoteDraftTool;
+/** create_file_draft 工具，只创建待确认新建 Markdown/TXT diff，不直接落盘。 */
+struct CreateFileDraftTool;
 
-impl AgentTool for CreateNoteDraftTool {
+impl AgentTool for CreateFileDraftTool {
     fn name(&self) -> &'static str {
-        "create_note_draft"
+        "create_file_draft"
     }
 
     fn description(&self) -> &'static str {
-        "Create a pending new Markdown draft diff."
+        "Create a pending new Markdown or TXT draft diff. TXT content is stored as strict plain text."
     }
 
     fn parameters(&self) -> Value {
@@ -447,15 +473,16 @@ impl AgentTool for CreateNoteDraftTool {
             "properties": {
                 "knowledgeBaseId": { "type": "string" },
                 "targetPath": { "type": "string" },
+                "fileType": { "type": "string", "enum": ["markdown", "txt"] },
                 "title": { "type": "string" },
                 "content": { "type": "string" }
             },
-            "required": ["targetPath", "content"]
+            "required": ["targetPath", "fileType", "content"]
         })
     }
 
     fn execute(&self, context: &mut AgentToolContext<'_>, args: &Value) -> ToolExecutionResult {
-        execute_create_note_draft(
+        execute_create_file_draft(
             context.snapshot,
             context.session_index,
             context.request,
@@ -589,20 +616,18 @@ fn execute_search_notes(context: &mut AgentToolContext<'_>, args: &Value) -> Too
     }
 }
 
-/** 执行 read_note，后端校验目标笔记必须属于会话 scope。 */
-fn execute_read_note(
+/** 执行 read_file；TXT 不生成知识库引用，避免扩大 Markdown 检索引用语义。 */
+fn execute_read_file(
     snapshot: &WorkspaceSnapshot,
     session_index: usize,
     args: &Value,
 ) -> ToolExecutionResult {
-    let note_id = args
-        .get("noteId")
-        .or_else(|| args.get("note_id"))
+    let file_id = args
+        .get("fileId")
+        .or_else(|| args.get("file_id"))
         .and_then(Value::as_str)
         .unwrap_or_default();
-    let Some(note) = scoped_note(snapshot, session_index, note_id) else {
-        return ToolExecutionResult::failed("目标笔记不在当前会话允许范围内。");
-    };
+    if let Some(note) = scoped_note(snapshot, session_index, file_id) {
     let knowledge_base = snapshot
         .knowledge_bases
         .iter()
@@ -627,7 +652,7 @@ fn execute_read_note(
     let note_content_chars = note.content.chars().count();
     let bounded_content = truncate_chars(&note.content, MAX_READ_NOTE_CHARS);
 
-    ToolExecutionResult {
+    return ToolExecutionResult {
         success: true,
         summary: format!("已读取笔记《{}》", note.title),
         payload: json!({
@@ -646,8 +671,7 @@ fn execute_read_note(
         }),
         citations: vec![citation],
         audit_fragment: Some(format!(
-            "read_note 发送《{}》{}，{} 字符{}",
-            note.title,
+            "read_file type=markdown path={} chars={}{}",
             note.path,
             note_content_chars.min(MAX_READ_NOTE_CHARS),
             if note_content_chars > MAX_READ_NOTE_CHARS {
@@ -656,6 +680,28 @@ fn execute_read_note(
                 ""
             }
         )),
+    };
+    }
+
+    let Some(document) = scoped_text_document(snapshot, session_index, file_id) else {
+        return ToolExecutionResult::failed("目标文件不在当前会话允许范围内，或不是可编辑的 Markdown/TXT 文件。");
+    };
+    let content = document.content.as_deref().unwrap_or_default();
+    let content_chars = content.chars().count();
+    let bounded_content = truncate_chars(content, MAX_READ_NOTE_CHARS);
+
+    ToolExecutionResult {
+        success: true,
+        summary: format!("已读取 TXT 文件《{}》", document.title),
+        payload: json!({ "file": {
+            "id": &document.id, "knowledgeBaseId": &document.knowledge_base_id,
+            "title": &document.title, "path": &document.path, "fileType": "txt",
+            "updatedAt": &document.updated_at, "contentHash": &document.content_hash,
+            "content": bounded_content, "contentChars": content_chars,
+            "contentTruncated": content_chars > MAX_READ_NOTE_CHARS
+        }}),
+        citations: Vec::new(),
+        audit_fragment: Some(format!("read_file type=txt path={} chars={}{}", document.path, content_chars.min(MAX_READ_NOTE_CHARS), if content_chars > MAX_READ_NOTE_CHARS { "（已截断）" } else { "" })),
     }
 }
 
@@ -700,7 +746,7 @@ fn execute_list_tree(snapshot: &WorkspaceSnapshot, session_index: usize) -> Tool
                 "knowledgeBaseId": &document.knowledge_base_id,
                 "fileType": &document.file_type,
                 "previewAvailable": document.preview_available,
-                "agentReadable": false
+                "agentReadable": document.file_type == "txt"
             })
         })
         .collect();
@@ -1044,19 +1090,23 @@ fn build_list_tree_file_type_counts(
     counts
 }
 
-/** 执行 propose_note_change，只创建待确认 diff，不直接写文件。 */
-fn execute_propose_note_change(
+/** 执行 propose_file_change，只创建待确认 diff，不直接写 Markdown/TXT 文件。 */
+fn execute_propose_file_change(
     snapshot: &mut WorkspaceSnapshot,
     session_index: usize,
     args: &Value,
 ) -> ToolExecutionResult {
-    let note_id = args
-        .get("noteId")
-        .or_else(|| args.get("note_id"))
+    let file_id = args
+        .get("fileId")
+        .or_else(|| args.get("file_id"))
         .and_then(Value::as_str)
         .unwrap_or_default();
-    let Some(note) = scoped_note(snapshot, session_index, note_id).cloned() else {
-        return ToolExecutionResult::failed("目标笔记不在当前会话允许范围内。");
+    let target = if let Some(note) = scoped_note(snapshot, session_index, file_id) {
+        (note.id.clone(), note.knowledge_base_id.clone(), note.title.clone(), note.path.clone(), note.content.clone(), note.content_hash.clone(), "note", "markdown")
+    } else if let Some(document) = scoped_text_document(snapshot, session_index, file_id) {
+        (document.id.clone(), document.knowledge_base_id.clone(), document.title.clone(), document.path.clone(), document.content.clone().unwrap_or_default(), document.content_hash.clone(), "document", "txt")
+    } else {
+        return ToolExecutionResult::failed("目标文件不在当前会话允许范围内，或不是可编辑的 Markdown/TXT 文件。");
     };
     let operation = args
         .get("operation")
@@ -1064,26 +1114,29 @@ fn execute_propose_note_change(
         .and_then(Value::as_str)
         .filter(|value| matches!(*value, "append" | "replace" | "multi_replace"))
         .unwrap_or("replace");
-    let (original, next) = match prepare_rewrite_content(&note.content, operation, args) {
+    let (original, next) = match prepare_rewrite_content(&target.4, operation, args, target.7 == "markdown") {
         Ok(prepared_change) => prepared_change,
         Err(message) => return ToolExecutionResult::failed(&message),
     };
 
     let change = ProposedChange {
         id: create_id("change"),
-        knowledge_base_id: note.knowledge_base_id.clone(),
-        note_id: Some(note.id.clone()),
+        knowledge_base_id: target.1.clone(),
+        note_id: (target.6 == "note").then(|| target.0.clone()),
+        target_id: Some(target.0.clone()),
+        target_kind: Some(target.6.to_owned()),
+        file_type: Some(target.7.to_owned()),
         r#type: "rewrite".to_owned(),
         operation: Some(operation.to_owned()),
         title: args
             .get("title")
             .and_then(Value::as_str)
             .map(str::to_owned)
-            .unwrap_or_else(|| format!("改写《{}》", note.title)),
-        target_path: note.path.clone(),
+            .unwrap_or_else(|| format!("改写《{}》", target.2)),
+        target_path: target.3.clone(),
         original,
         next,
-        original_hash: note.content_hash.clone(),
+        original_hash: target.5.clone(),
         status: "pending".to_owned(),
         review_comments: None,
         review_state: None,
@@ -1092,8 +1145,8 @@ fn execute_propose_note_change(
 
     snapshot.sessions[session_index].pending_change = Some(change.clone());
     let audit_fragment = Some(format!(
-        "propose_note_change 为《{}》生成 {} diff，原文 {} 字符，建议 {} 字符",
-        note.title,
+        "propose_file_change type={} path={} operation={} original_chars={} next_chars={}",
+        target.7, target.3,
         operation,
         change.original.chars().count(),
         change.next.chars().count()
@@ -1101,7 +1154,7 @@ fn execute_propose_note_change(
 
     ToolExecutionResult {
         success: true,
-        summary: format!("已为《{}》生成待确认改写 diff", note.title),
+        summary: format!("已为《{}》生成待确认改写 diff", target.2),
         payload: json!({ "change": &change }),
         citations: Vec::new(),
         audit_fragment,
@@ -1113,9 +1166,10 @@ fn prepare_rewrite_content(
     content: &str,
     operation: &str,
     args: &Value,
+    is_markdown: bool,
 ) -> Result<(String, String), String> {
     match operation {
-        "append" => prepare_append_rewrite(content, args),
+        "append" => prepare_append_rewrite(content, args, is_markdown),
         "multi_replace" => prepare_multi_replace_rewrite(content, args),
         _ => prepare_single_replace_rewrite(content, args),
     }
@@ -1150,19 +1204,20 @@ fn prepare_single_replace_rewrite(content: &str, args: &Value) -> Result<(String
 }
 
 /** 准备文末追加，工具层合成整篇 diff，避免模型把整篇正文塞进局部替换。 */
-fn prepare_append_rewrite(content: &str, args: &Value) -> Result<(String, String), String> {
+fn prepare_append_rewrite(content: &str, args: &Value, is_markdown: bool) -> Result<(String, String), String> {
     let addition = args
         .get("next")
         .and_then(Value::as_str)
         .unwrap_or_default()
-        .trim()
         .to_owned();
 
-    if addition.is_empty() {
+    if addition.trim().is_empty() {
         return Err("文末追加工具缺少增量内容。".to_owned());
     }
 
-    Ok((content.to_owned(), append_note_content(content, &addition)))
+    // TXT 不修剪或注入 Markdown 分隔空行，确保 Agent 纯文本写入保持原始语义。
+    let next = if is_markdown { append_note_content(content, &addition) } else { format!("{content}{addition}") };
+    Ok((content.to_owned(), next))
 }
 
 /** 准备同一文件内多处替换，先按唯一片段顺序应用到内存，再生成整篇待确认 diff。 */
@@ -1336,8 +1391,8 @@ fn append_note_content(content: &str, addition: &str) -> String {
     format!("{}\n\n{}", content.trim_end(), trimmed_addition)
 }
 
-/** 执行 create_note_draft，只创建待确认新建 diff。 */
-fn execute_create_note_draft(
+/** 执行 create_file_draft，只创建待确认新建 Markdown/TXT diff。 */
+fn execute_create_file_draft(
     snapshot: &mut WorkspaceSnapshot,
     session_index: usize,
     request: &AgentTurnRequest,
@@ -1373,6 +1428,7 @@ fn execute_create_note_draft(
         .unwrap_or("00-Inbox/Agent 草稿.md")
         .trim()
         .to_owned();
+    let file_type = args.get("fileType").or_else(|| args.get("file_type")).and_then(Value::as_str).unwrap_or_default();
     let content = args
         .get("content")
         .and_then(Value::as_str)
@@ -1380,8 +1436,17 @@ fn execute_create_note_draft(
         .trim()
         .to_owned();
 
-    if knowledge_base_id.is_empty() || content.is_empty() {
-        return ToolExecutionResult::failed("新建草稿工具缺少目标知识库或正文内容。");
+    if knowledge_base_id.is_empty() || content.is_empty() || !matches!(file_type, "markdown" | "txt") {
+        return ToolExecutionResult::failed("新建草稿工具缺少目标知识库、正文或有效 fileType（markdown/txt）。");
+    }
+
+    let valid_extension = match file_type {
+        "markdown" => matches!(std::path::Path::new(&target_path).extension().and_then(|value| value.to_str()), Some("md") | Some("markdown")),
+        "txt" => std::path::Path::new(&target_path).extension().and_then(|value| value.to_str()) == Some("txt"),
+        _ => false,
+    };
+    if !valid_extension {
+        return ToolExecutionResult::failed("目标路径扩展名必须与 fileType 匹配。" );
     }
 
     if !snapshot
@@ -1396,6 +1461,9 @@ fn execute_create_note_draft(
         id: create_id("change"),
         knowledge_base_id,
         note_id: None,
+        target_id: None,
+        target_kind: Some(if file_type == "markdown" { "note".to_owned() } else { "document".to_owned() }),
+        file_type: Some(file_type.to_owned()),
         r#type: "create".to_owned(),
         operation: None,
         title: args
@@ -1415,8 +1483,8 @@ fn execute_create_note_draft(
 
     snapshot.sessions[session_index].pending_change = Some(change.clone());
     let audit_fragment = Some(format!(
-        "create_note_draft 生成 {}，正文 {} 字符",
-        change.target_path,
+        "create_file_draft type={} path={} chars={}",
+        file_type, change.target_path,
         change.next.chars().count()
     ));
 
@@ -1457,6 +1525,21 @@ fn scoped_note<'a>(
         .notes
         .iter()
         .find(|note| note.id == note_id && scope_ids.contains(note.knowledge_base_id.as_str()))
+}
+
+/** 返回会话授权范围内可被 Agent 读取和改写的 TXT；其它普通文档始终拒绝。 */
+fn scoped_text_document<'a>(
+    snapshot: &'a WorkspaceSnapshot,
+    session_index: usize,
+    file_id: &str,
+) -> Option<&'a WorkspaceDocument> {
+    let scope_ids = scope_id_set(&snapshot.sessions[session_index]);
+
+    snapshot.documents.iter().find(|document| {
+        document.id == file_id
+            && document.file_type == "txt"
+            && scope_ids.contains(document.knowledge_base_id.as_str())
+    })
 }
 
 /** 把会话知识库范围转成 HashSet，统一工具权限校验。 */
@@ -1650,9 +1733,9 @@ mod tests {
 
         assert!(schemas.is_array());
         assert!(tool_names.contains(&"search_notes"));
-        assert!(tool_names.contains(&"read_note"));
-        assert!(tool_names.contains(&"propose_note_change"));
-        assert!(tool_names.contains(&"create_note_draft"));
+        assert!(tool_names.contains(&"read_file"));
+        assert!(tool_names.contains(&"propose_file_change"));
+        assert!(tool_names.contains(&"create_file_draft"));
     }
 
     /** 未知工具调用必须失败且不能修改 pending_change。 */
@@ -1704,9 +1787,36 @@ mod tests {
         assert_eq!(documents.len(), 2);
         assert_eq!(txt_document["fileType"].as_str(), Some("txt"));
         assert_eq!(txt_document["previewAvailable"].as_bool(), Some(false));
-        assert_eq!(txt_document["agentReadable"].as_bool(), Some(false));
+        assert_eq!(txt_document["agentReadable"].as_bool(), Some(true));
         assert!(txt_document.get("content").is_none());
         assert!(txt_document.get("contentHash").is_none());
+    }
+
+    /** 统一读取和改写工具必须允许 scope 内 TXT，并保留纯文本正文。 */
+    #[test]
+    fn unified_tools_read_and_propose_txt_change() {
+        let registry = ToolRegistry::default();
+        let mut snapshot = tool_test_snapshot("Markdown 正文".to_owned());
+        let mut document = tool_test_document("document-txt", "kb-a", "Docs/brief.txt", "txt", false);
+        document.content = Some("旧纯文本".to_owned());
+        document.content_hash = hash_content("旧纯文本");
+        snapshot.documents = vec![document];
+        let request = tool_test_request("rewrite", "改写 TXT");
+        let mut context = tool_test_context(&mut snapshot, &request);
+
+        let read = registry.execute_named(&mut context, "read_file", json!({ "fileId": "document-txt" }));
+        assert_eq!(read.call.status, "completed");
+        assert_eq!(read.payload["file"]["fileType"].as_str(), Some("txt"));
+        assert_eq!(read.payload["file"]["content"].as_str(), Some("旧纯文本"));
+
+        let change = registry.execute_named(&mut context, "propose_file_change", json!({
+            "fileId": "document-txt", "operation": "replace", "original": "旧纯文本", "next": "新纯文本"
+        }));
+        assert_eq!(change.call.status, "completed");
+        let pending = context.snapshot.sessions[0].pending_change.as_ref().unwrap();
+        assert_eq!(pending.file_type.as_deref(), Some("txt"));
+        assert_eq!(pending.target_kind.as_deref(), Some("document"));
+        assert_eq!(pending.next, "新纯文本");
     }
 
     /** list_tree 必须按会话 scope 过滤普通文档，避免暴露未授权知识库结构。 */

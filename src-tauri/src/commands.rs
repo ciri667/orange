@@ -46,10 +46,11 @@ pub async fn load_workspace_state(app: AppHandle) -> Result<WorkspaceSnapshot, S
     let index_app = app.clone();
     let started_at = Instant::now();
 
-    let snapshot = run_blocking("加载工作台状态", move || {
+    let mut snapshot = run_blocking("加载工作台状态", move || {
         storage::load_workspace_snapshot(&load_app)
     })
     .await?;
+    migrate_legacy_pending_changes(&mut snapshot);
     let index_snapshot = snapshot.clone();
 
     allow_asset_protocol_for_knowledge_bases(&app, &snapshot)?;
@@ -4083,6 +4084,11 @@ pub async fn apply_proposed_change(
         &change.target_path,
     )?;
 
+    let change_file_type = change.file_type.as_deref().unwrap_or("markdown");
+    if !matches!(change_file_type, "markdown" | "txt") {
+        return Err("待确认变更的文件类型不受支持。".to_owned());
+    }
+
     if change.r#type == "create" {
         // 新建草稿不能覆盖用户已有文件；如路径已存在，应重新生成不同目标路径的 diff。
         if target_path.exists() {
@@ -4093,7 +4099,7 @@ pub async fn apply_proposed_change(
                     AppLogCategory::Agent,
                     "apply_proposed_change",
                     "blocked",
-                    "目标 Markdown 已存在，已阻止覆盖。",
+                    "目标文件已存在，已阻止覆盖。",
                 )
                 .operation_id(operation_id)
                 .session_id(session_id)
@@ -4103,17 +4109,32 @@ pub async fn apply_proposed_change(
                 .duration(started_at.elapsed()),
             );
 
-            return Err("目标 Markdown 已存在，已阻止覆盖。请重新生成草稿路径。".to_owned());
+            return Err("目标文件已存在，已阻止覆盖。请重新生成草稿路径。".to_owned());
         }
 
         let write_path = target_path.clone();
         let next_content = change.next.clone();
 
-        run_blocking("写入新 Markdown 文件", move || {
-            storage::atomic_write_markdown(&write_path, &next_content)
+        let create_file_type = change_file_type.to_owned();
+        run_blocking("写入新的 Agent 文件", move || {
+            if create_file_type == "txt" {
+                storage::atomic_write_text_document(&write_path, &next_content)
+            } else {
+                storage::atomic_write_markdown(&write_path, &next_content)
+            }
         })
         .await?;
-        snapshot.notes.insert(
+        if change_file_type == "txt" {
+            let document_id = storage::create_stable_note_id(&change.knowledge_base_id, &change.target_path);
+            let title = Path::new(&change.target_path).file_stem().and_then(|value| value.to_str()).unwrap_or("Agent 草稿").to_owned();
+            snapshot.documents.insert(0, crate::domain::WorkspaceDocument {
+                id: document_id.clone(), knowledge_base_id: change.knowledge_base_id.clone(), title,
+                path: change.target_path.clone(), file_type: "txt".to_owned(), updated_at: "刚刚".to_owned(),
+                content_hash: storage::hash_content(&change.next), content: Some(change.next.clone()), preview_available: false,
+            });
+            snapshot.active_note_id.clear();
+            snapshot.active_document_id = document_id;
+        } else { snapshot.notes.insert(
             0,
             crate::domain::Note {
                 id: storage::create_stable_note_id(&change.knowledge_base_id, &change.target_path),
@@ -4126,8 +4147,30 @@ pub async fn apply_proposed_change(
                 backlinks: Vec::new(),
                 content_hash: storage::hash_content(&change.next),
             },
-        );
-    } else if let Some(note_id) = &change.note_id {
+        ); }
+    } else if change_file_type == "txt" {
+        let document_id = change.target_id.as_ref().ok_or_else(|| "待写入 TXT 缺少目标 ID。".to_owned())?;
+        let document_index = snapshot.documents.iter().position(|document| document.id == *document_id && document.file_type == "txt").ok_or_else(|| "找不到待写入 TXT 文件。".to_owned())?;
+        let read_path = target_path.clone();
+        let fallback_content = snapshot.documents[document_index].content.clone().unwrap_or_default();
+        let current_content = run_blocking("读取待写入 TXT 文件", move || Ok(fs::read_to_string(&read_path).unwrap_or(fallback_content))).await?;
+        let current_hash = storage::hash_content(&current_content);
+        let next_content = apply_rewrite_change(&current_content, &current_hash, &snapshot.documents[document_index].content_hash, &change)?;
+        capture_document_history_before_write(&app, storage::DocumentHistoryCapture {
+            target_kind: "document".to_owned(), knowledge_base_id: knowledge_base_id.clone(), target_id: document_id.clone(),
+            relative_path: snapshot.documents[document_index].path.clone(), title: snapshot.documents[document_index].title.clone(),
+            file_type: "txt".to_owned(), content: current_content, source: "agent-change".to_owned(),
+            session_id: Some(session_id.clone()), change_id: Some(change.id.clone()), operation_id: Some(operation_id.clone()),
+        }, AppLogCategory::Agent, "apply_proposed_change", started_at).await?;
+        let write_path = target_path.clone();
+        let write_content = next_content.clone();
+        run_blocking("写回 TXT 文件", move || storage::atomic_write_text_document(&write_path, &write_content)).await?;
+        snapshot.documents[document_index].content = Some(next_content.clone());
+        snapshot.documents[document_index].content_hash = storage::hash_content(&next_content);
+        snapshot.documents[document_index].updated_at = "刚刚".to_owned();
+        snapshot.active_note_id.clear();
+        snapshot.active_document_id = document_id.clone();
+    } else if let Some(note_id) = change.target_id.as_ref().or(change.note_id.as_ref()) {
         let note_index = snapshot
             .notes
             .iter()
@@ -4773,8 +4816,25 @@ fn replace_note_reference_after_rename(
         if let Some(change) = &mut session.pending_change {
             if change.note_id.as_deref() == Some(previous_note_id) {
                 change.note_id = Some(next_note_id.to_owned());
+                change.target_id = Some(next_note_id.to_owned());
                 change.target_path = next_relative_path.to_owned();
             }
+        }
+    }
+}
+
+/** 将旧会话的 Markdown 专用 pending change 补齐统一目标字段，保持既有审阅可继续确认。 */
+fn migrate_legacy_pending_changes(snapshot: &mut WorkspaceSnapshot) {
+    for session in &mut snapshot.sessions {
+        let Some(change) = session.pending_change.as_mut() else { continue; };
+        if change.target_id.is_none() {
+            change.target_id = change.note_id.clone();
+        }
+        if change.target_kind.is_none() {
+            change.target_kind = Some(if change.file_type.as_deref() == Some("txt") { "document".to_owned() } else { "note".to_owned() });
+        }
+        if change.file_type.is_none() {
+            change.file_type = Some(if change.target_kind.as_deref() == Some("document") { "txt".to_owned() } else { "markdown".to_owned() });
         }
     }
 }
@@ -4795,7 +4855,7 @@ fn remove_note_references_after_delete(snapshot: &mut WorkspaceSnapshot, note_id
         if session
             .pending_change
             .as_ref()
-            .is_some_and(|change| change.note_id.as_deref() == Some(note_id))
+            .is_some_and(|change| change.note_id.as_deref() == Some(note_id) || (change.target_kind.as_deref() == Some("note") && change.target_id.as_deref() == Some(note_id)))
         {
             session.pending_change = None;
         }
@@ -4990,6 +5050,9 @@ mod tests {
                 id: "change-a".to_owned(),
                 knowledge_base_id: "kb-b".to_owned(),
                 note_id: Some("note-b".to_owned()),
+                target_id: Some("note-b".to_owned()),
+                target_kind: Some("note".to_owned()),
+                file_type: Some("markdown".to_owned()),
                 r#type: "rewrite".to_owned(),
                 operation: Some("replace".to_owned()),
                 title: "改写 note-b".to_owned(),
@@ -5017,6 +5080,9 @@ mod tests {
             id: "change-test".to_owned(),
             knowledge_base_id: "kb-a".to_owned(),
             note_id: Some("note-a".to_owned()),
+            target_id: Some("note-a".to_owned()),
+            target_kind: Some("note".to_owned()),
+            file_type: Some("markdown".to_owned()),
             r#type: "rewrite".to_owned(),
             operation: Some("replace".to_owned()),
             title: "改写 note-a".to_owned(),

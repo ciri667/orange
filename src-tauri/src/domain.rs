@@ -268,13 +268,21 @@ pub struct AgentMessage {
     pub tool_calls: Option<Vec<AgentToolCall>>,
 }
 
-/** Agent 对笔记提出的待确认变更。 */
+/** Agent 对可编辑文本文件提出的待确认变更；正文始终留在 diff 中，不进入日志。 */
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ProposedChange {
     pub id: String,
     pub knowledge_base_id: String,
+    /** 兼容历史会话的 Markdown ID；加载后由迁移逻辑补齐 target_id。 */
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub note_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target_kind: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub file_type: Option<String>,
     pub r#type: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub operation: Option<String>,
