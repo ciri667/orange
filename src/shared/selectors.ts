@@ -13,17 +13,14 @@ export function getActiveNote(snapshot: WorkspaceSnapshot): Note | undefined {
   const activeKnowledgeBase = getActiveKnowledgeBase(snapshot);
   const activeDocument = getActiveDocument(snapshot);
 
-  if (activeDocument) {
+  // 两个焦点都为空时表示用户关闭了最后一个标签，编辑区应保持空白而不是隐式重新打开首篇笔记。
+  if (activeDocument || !snapshot.activeNoteId) {
     return undefined;
   }
 
   const activeKnowledgeBaseNotes = snapshot.notes.filter((note) => note.knowledgeBaseId === activeKnowledgeBase.id);
 
-  return (
-    activeKnowledgeBaseNotes.find((note) => note.id === snapshot.activeNoteId) ??
-    activeKnowledgeBaseNotes[0] ??
-    undefined
-  );
+  return activeKnowledgeBaseNotes.find((note) => note.id === snapshot.activeNoteId);
 }
 
 /** 获取当前激活普通文档；普通文档不会被映射到 Agent note 上下文。 */

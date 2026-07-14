@@ -591,6 +591,12 @@ export interface FileTreeNode {
   children: FileTreeNode[];
 }
 
+/** 编辑区临时打开的文件标签；只在当前前端运行期间存在，不写入工作区快照。 */
+export interface EditorFileTab {
+  kind: "note" | "document";
+  id: string;
+}
+
 /** 工作台快照，是前端和 Tauri command 之间的首版数据传输对象。 */
 export interface WorkspaceSnapshot {
   knowledgeBases: KnowledgeBase[];
