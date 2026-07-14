@@ -39,6 +39,7 @@ import {
   restoreSessionContext,
   runAgentTurn,
   saveDocumentContent,
+  saveWorkspaceEditorState,
   saveNoteContent,
   saveNoteImageAttachments,
   saveSession,
@@ -57,6 +58,7 @@ import type {
   NoteImageAttachmentInput,
   ProposedChange,
   ReviewComment,
+  WorkspaceEditorState,
   WorkspaceSnapshot,
 } from "../shared/types";
 import { DocumentHistoryDialog } from "./DocumentHistoryDialog";
@@ -375,8 +377,10 @@ export function WorkspaceShell() {
   } = useWorkspaceDrafts();
   /** Markdown 编辑区视图模式，保持编辑/预览切换不影响文件内容。 */
   const [markdownViewMode, setMarkdownViewMode] = useState<MarkdownViewMode>("edit");
-  /** 编辑区已打开文件的临时顺序；不写入 Tauri 快照，因此应用重启后会自动重置。 */
+  /** 编辑区已打开文件的展示顺序；通过独立编辑器会话恢复，不混入领域快照。 */
   const [openFileTabs, setOpenFileTabs] = useState<EditorFileTab[]>([]);
+  /** 启动恢复完成后才允许写回，避免首帧空标签覆盖已持久化的编辑器会话。 */
+  const [isEditorSessionInitialized, setIsEditorSessionInitialized] = useState(false);
   /** 当前打开的文档历史弹窗目标；只允许 Markdown 和 TXT。 */
   const [historyDialog, setHistoryDialog] = useState<{ targetKind: DocumentHistoryTargetKind; targetId: string } | null>(null);
   /** 文件重命名弹窗草稿，同时支持 Markdown 和可编辑 TXT。 */
@@ -421,11 +425,48 @@ export function WorkspaceShell() {
     loadInitialDiagnosticLogs,
   } = useWorkspaceBootData({
     onSnapshotInitialized: initializeDraftBaselines,
+    onEditorStateInitialized: (editorState: WorkspaceEditorState) => {
+      setOpenFileTabs(editorState.openTabs);
+      setIsEditorSessionInitialized(true);
+    },
     onNoticeChange: setNotice,
   });
   useReviewChangeLogger(snapshot);
   /** 只读文档预览 hook 负责异步加载和错误状态，TXT 仍由可编辑正文面板处理。 */
   const { documentPreview, documentPreviewError, isDocumentPreviewLoading } = useDocumentPreview(snapshot);
+
+  useEffect(() => {
+    if (!snapshot || !isEditorSessionInitialized) {
+      return;
+    }
+
+    const activeTab = snapshot.activeDocumentId
+      ? { kind: "document" as const, id: snapshot.activeDocumentId }
+      : snapshot.activeNoteId
+        ? { kind: "note" as const, id: snapshot.activeNoteId }
+        : undefined;
+    const editorState: WorkspaceEditorState = {
+      activeKnowledgeBaseId: snapshot.activeKnowledgeBaseId,
+      openTabs: openFileTabs,
+      activeTab,
+      // 后端会覆盖该字段为可信的本地时间，前端只提供完整传输形状。
+      updatedAt: "",
+    };
+    // 标签点击和内容编辑可能连续触发快照更新；防抖降低 SQLite 写入频率且不影响交互。
+    const timer = window.setTimeout(() => {
+      void saveWorkspaceEditorState(editorState).catch((error) => {
+        logWarn("保存编辑器会话失败，当前会话不受影响。", {
+          category: "frontend",
+          event: "workspace_editor_session_save",
+          status: "failed",
+          metadata: { openTabCount: editorState.openTabs.length, hasActiveTab: Boolean(editorState.activeTab) },
+          error,
+        });
+      });
+    }, 500);
+
+    return () => window.clearTimeout(timer);
+  }, [isEditorSessionInitialized, openFileTabs, snapshot?.activeDocumentId, snapshot?.activeKnowledgeBaseId, snapshot?.activeNoteId]);
 
   useEffect(() => {
     if (!snapshot || openFileTabs.length) {

@@ -24,6 +24,7 @@ import type {
   ProviderTemplate,
   RequestAuditLog,
   UserSettings,
+  WorkspaceEditorState,
   WorkspaceSnapshot,
 } from "../shared/types";
 
@@ -32,14 +33,38 @@ function formatBootErrorMessage(error: unknown) {
   return error instanceof Error ? error.message : String(error);
 }
 
+/** 将已由后端校验的编辑器会话投射到领域快照；无有效焦点时显式保持编辑区空白。 */
+function applyEditorStateToSnapshot(snapshot: WorkspaceSnapshot, editorState: WorkspaceEditorState): WorkspaceSnapshot {
+  const activeNote = editorState.activeTab?.kind === "note"
+    ? snapshot.notes.find((note) => note.id === editorState.activeTab?.id)
+    : undefined;
+  const activeDocument = editorState.activeTab?.kind === "document"
+    ? snapshot.documents.find((document) => document.id === editorState.activeTab?.id)
+    : undefined;
+  const activeKnowledgeBaseId = activeNote?.knowledgeBaseId ?? activeDocument?.knowledgeBaseId ??
+    (snapshot.knowledgeBases.some((knowledgeBase) => knowledgeBase.id === editorState.activeKnowledgeBaseId)
+      ? editorState.activeKnowledgeBaseId
+      : snapshot.activeKnowledgeBaseId);
+  const activeSessionId = snapshot.sessions.find((session) => session.knowledgeBaseIds.includes(activeKnowledgeBaseId))?.id ?? "";
+
+  return {
+    ...snapshot,
+    activeKnowledgeBaseId,
+    activeNoteId: activeNote?.id ?? "",
+    activeDocumentId: activeDocument?.id ?? "",
+    activeSessionId,
+  };
+}
+
 /** 启动数据 hook 的外部回调，只传递脱敏 notice 和快照初始化信号。 */
 interface WorkspaceBootDataOptions {
   onSnapshotInitialized: (snapshot: WorkspaceSnapshot) => void;
+  onEditorStateInitialized: (editorState: WorkspaceEditorState) => void;
   onNoticeChange: (notice: string) => void;
 }
 
 /** 集中加载工作台启动数据和诊断日志，保持根组件只负责业务编排和 UI 分发。 */
-export function useWorkspaceBootData({ onSnapshotInitialized, onNoticeChange }: WorkspaceBootDataOptions) {
+export function useWorkspaceBootData({ onSnapshotInitialized, onEditorStateInitialized, onNoticeChange }: WorkspaceBootDataOptions) {
   /** 工作台完整快照，是知识库、文件树、会话和 diff 状态的单一前端来源。 */
   const [snapshot, setSnapshot] = useState<WorkspaceSnapshot | null>(null);
   /** 用户模型和隐私设置；启动失败时保持 null 进入错误页。 */
@@ -143,7 +168,9 @@ export function useWorkspaceBootData({ onSnapshotInitialized, onNoticeChange }: 
         return;
       }
 
-      setSnapshot(nextSnapshot);
+      const restoredSnapshot = applyEditorStateToSnapshot(nextSnapshot.snapshot, nextSnapshot.editorState);
+
+      setSnapshot(restoredSnapshot);
       setUserSettings(nextUserSettings);
       setImSettings(nextImSettings);
       setAgentSkills(nextAgentSkills);
@@ -152,7 +179,8 @@ export function useWorkspaceBootData({ onSnapshotInitialized, onNoticeChange }: 
       setFeishuCredentialStatus(nextFeishuCredentialStatus);
       setFeishuGatewayStatus(nextFeishuGatewayStatus);
       setKnowledgeBaseMemories(nextKnowledgeBaseMemories);
-      onSnapshotInitialized(nextSnapshot);
+      onSnapshotInitialized(restoredSnapshot);
+      onEditorStateInitialized(nextSnapshot.editorState);
       setIsBooting(false);
 
       void loadInitialDiagnosticLogs(shouldCommit);

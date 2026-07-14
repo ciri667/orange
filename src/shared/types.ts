@@ -591,10 +591,24 @@ export interface FileTreeNode {
   children: FileTreeNode[];
 }
 
-/** 编辑区临时打开的文件标签；只在当前前端运行期间存在，不写入工作区快照。 */
+/** 编辑区打开文件的稳定引用；持久化在独立编辑器会话中，不写入工作区快照。 */
 export interface EditorFileTab {
   kind: "note" | "document";
   id: string;
+}
+
+/** 编辑器会话状态；只保存稳定 ID 和标签顺序，不保存文件标题、路径或正文。 */
+export interface WorkspaceEditorState {
+  activeKnowledgeBaseId: string;
+  openTabs: EditorFileTab[];
+  activeTab?: EditorFileTab;
+  updatedAt: string;
+}
+
+/** 工作台启动结果，分离领域快照和仅属于编辑器的本机会话状态。 */
+export interface WorkspaceBootstrapState {
+  snapshot: WorkspaceSnapshot;
+  editorState: WorkspaceEditorState;
 }
 
 /** 工作台快照，是前端和 Tauri command 之间的首版数据传输对象。 */
