@@ -6415,3 +6415,227 @@ button.diff-line:not(:disabled):hover,
   background: var(--danger-soft);
   color: var(--danger);
 }
+
+/* 编辑工作台：标签栏与内容区共享可收缩的纵向布局。 */
+.editor-workbench {
+  display: grid;
+  min-width: 0;
+  min-height: 0;
+  grid-template-rows: auto minmax(0, 1fr);
+  gap: 10px;
+}
+
+/* IDE 风格标签栏：两侧按钮固定，中部标签列表可横向滚动。 */
+.editor-tab-bar {
+  display: grid;
+  min-width: 0;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 6px;
+  border: 1px solid var(--color-border-soft);
+  border-radius: var(--radius-control);
+  padding: 4px;
+  background: var(--surface-muted);
+}
+
+.editor-tab-list {
+  display: flex;
+  min-width: 0;
+  gap: 3px;
+  overflow-x: auto;
+  overflow-y: hidden;
+  scroll-behavior: smooth;
+  scrollbar-width: none;
+}
+
+.editor-tab-list::-webkit-scrollbar {
+  display: none;
+}
+
+/* 每个标签保持单行，并允许文件名在可用空间不足时截断。 */
+.editor-tab {
+  display: inline-flex;
+  min-width: 0;
+  max-width: 210px;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 6px;
+  min-height: 30px;
+  border: 1px solid transparent;
+  border-radius: var(--radius-small);
+  padding: 0 5px 0 8px;
+  background: transparent;
+  color: var(--text-muted);
+  font-size: 12px;
+  text-align: left;
+  transition:
+    border-color 160ms ease,
+    background 160ms ease,
+    color 160ms ease;
+}
+
+.editor-tab:hover {
+  background: var(--surface-hover);
+  color: var(--text);
+}
+
+.editor-tab.active,
+.editor-tab[aria-selected="true"] {
+  border-color: var(--color-primary-border);
+  background: var(--surface);
+  color: var(--agent-strong);
+  box-shadow: 0 1px 2px rgba(var(--primary-rgb), 0.08);
+}
+
+.editor-tab:focus-visible,
+.editor-tab-close:focus-visible,
+.editor-tab-scroll-button:focus-visible {
+  outline: 2px solid var(--control-ring);
+  outline-offset: 1px;
+}
+
+/* 文件类型图标不参与压缩，名称承担横向空间收缩。 */
+.editor-tab-icon,
+.editor-tab-type-icon {
+  display: inline-flex;
+  flex: 0 0 auto;
+  align-items: center;
+  justify-content: center;
+  color: var(--text-soft);
+}
+
+.editor-tab.active .editor-tab-icon,
+.editor-tab.active .editor-tab-type-icon,
+.editor-tab[aria-selected="true"] .editor-tab-icon,
+.editor-tab[aria-selected="true"] .editor-tab-type-icon {
+  color: var(--agent);
+}
+
+.editor-tab-label {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* 未保存状态仅用色点提示，避免在狭窄标签中重复显示文本。 */
+.editor-tab-dirty-dot {
+  width: 6px;
+  height: 6px;
+  flex: 0 0 auto;
+  border-radius: 50%;
+  background: var(--warning);
+  box-shadow: 0 0 0 2px var(--warning-soft);
+}
+
+.editor-tab-close,
+.editor-tab-scroll-button {
+  display: inline-flex;
+  flex: 0 0 auto;
+  align-items: center;
+  justify-content: center;
+  border: 0;
+  border-radius: var(--radius-small);
+  padding: 0;
+  background: transparent;
+  color: var(--text-soft);
+}
+
+.editor-tab-close {
+  width: 22px;
+  height: 22px;
+}
+
+.editor-tab-close:hover {
+  background: var(--surface-hover);
+  color: var(--text);
+}
+
+.editor-tab-scroll-button {
+  width: 26px;
+  height: 26px;
+}
+
+.editor-tab-scroll-button:not(:disabled):hover {
+  background: var(--surface-hover);
+  color: var(--agent-strong);
+}
+
+.editor-tab-scroll-button:disabled {
+  cursor: default;
+  opacity: 0.38;
+}
+
+/* 窄中栏时优先压缩标签名，保留文件类型、脏状态和关闭入口。 */
+@media (max-width: 900px) {
+  .editor-workbench {
+    gap: 8px;
+  }
+
+  .editor-tab {
+    max-width: 156px;
+  }
+
+  .editor-tab-bar {
+    gap: 3px;
+    padding: 3px;
+  }
+}
+
+/* 标签组件把选择与关闭拆成独立按钮，避免关闭操作冒泡为文件切换。 */
+.editor-file-panel {
+  min-width: 0;
+  min-height: 0;
+}
+
+.editor-file-panel > .editor-pane {
+  height: 100%;
+}
+
+.editor-tab {
+  min-width: 0;
+  max-width: 210px;
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  border: 1px solid transparent;
+  border-radius: var(--radius-small);
+  background: transparent;
+  color: var(--text-muted);
+}
+
+.editor-tab-select {
+  display: inline-flex;
+  min-width: 0;
+  flex: 1;
+  align-items: center;
+  gap: 6px;
+  min-height: 30px;
+  border: 0;
+  padding: 0 3px 0 8px;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+}
+
+.editor-tab-title {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.editor-tab-dirty {
+  width: 6px;
+  height: 6px;
+  flex: 0 0 auto;
+  border-radius: 50%;
+  background: var(--warning);
+  box-shadow: 0 0 0 2px var(--warning-soft);
+}
+
+.editor-tab.active .editor-tab-select:focus-visible {
+  outline: 2px solid var(--control-ring);
+  outline-offset: -2px;
+}

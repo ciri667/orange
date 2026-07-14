@@ -1,8 +1,9 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { PanelRightOpen } from "lucide-react";
 import { AgentPanel } from "../agent/AgentPanel";
 import type { AgentMentionFile } from "../agent/AgentInput";
 import { DocumentPane } from "../editor/DocumentPane";
+import { EditorTabBar, type EditorTabBarItem } from "../editor/EditorTabBar";
 import { EditorPane } from "../editor/EditorPane";
 import { buildFileTree } from "../knowledge-base/treeUtils";
 import { KnowledgeBaseSidebar } from "../knowledge-base/KnowledgeBaseSidebar";
@@ -49,6 +50,7 @@ import type {
   AgentMessage,
   AgentSession,
   DocumentHistoryTargetKind,
+  EditorFileTab,
   ExportFormat,
   KnowledgeBase,
   MarkdownViewMode,
@@ -76,6 +78,8 @@ function formatErrorMessage(error: unknown) {
 /** 等待用户确认的工作台操作，确认后才执行真实文件或会话变更。 */
 interface PendingConfirmation extends ConfirmDialogConfig {
   onConfirm: () => Promise<void> | void;
+  /** 第三动作用于放弃草稿等有意但非主确认的操作。 */
+  onThirdAction?: () => Promise<void> | void;
 }
 
 /** 前端单张图片预检查上限，和 Rust 存储层限制保持一致。 */
@@ -371,6 +375,8 @@ export function WorkspaceShell() {
   } = useWorkspaceDrafts();
   /** Markdown 编辑区视图模式，保持编辑/预览切换不影响文件内容。 */
   const [markdownViewMode, setMarkdownViewMode] = useState<MarkdownViewMode>("edit");
+  /** 编辑区已打开文件的临时顺序；不写入 Tauri 快照，因此应用重启后会自动重置。 */
+  const [openFileTabs, setOpenFileTabs] = useState<EditorFileTab[]>([]);
   /** 当前打开的文档历史弹窗目标；只允许 Markdown 和 TXT。 */
   const [historyDialog, setHistoryDialog] = useState<{ targetKind: DocumentHistoryTargetKind; targetId: string } | null>(null);
   /** 文件重命名弹窗草稿，同时支持 Markdown 和可编辑 TXT。 */
@@ -420,6 +426,23 @@ export function WorkspaceShell() {
   useReviewChangeLogger(snapshot);
   /** 只读文档预览 hook 负责异步加载和错误状态，TXT 仍由可编辑正文面板处理。 */
   const { documentPreview, documentPreviewError, isDocumentPreviewLoading } = useDocumentPreview(snapshot);
+
+  useEffect(() => {
+    if (!snapshot || openFileTabs.length) {
+      return;
+    }
+
+    // 首次加载沿用后端给出的当前焦点，避免启动后出现与旧版不一致的空编辑区。
+    const initialTab = snapshot.activeDocumentId
+      ? { kind: "document" as const, id: snapshot.activeDocumentId }
+      : snapshot.activeNoteId
+        ? { kind: "note" as const, id: snapshot.activeNoteId }
+        : null;
+
+    if (initialTab) {
+      setOpenFileTabs([initialTab]);
+    }
+  }, [snapshot, openFileTabs.length]);
   /** 设置动作 hook 统一处理保存、凭证、Skills 和诊断日志刷新，复用原有 Tauri API。 */
   const {
     handleSaveSettings,
@@ -519,6 +542,26 @@ export function WorkspaceShell() {
   const mentionableFiles = buildMentionableFiles(currentSnapshot, activeSession);
   const isActiveNoteDirty = activeNote ? dirtyNoteIds.has(activeNote.id) : false;
   const isActiveDocumentDirty = activeDocument ? dirtyDocumentIds.has(activeDocument.id) : false;
+  /** 从快照派生标签展示信息，避免在临时标签状态中缓存可能过期的标题或文件类型。 */
+  const editorTabs = openFileTabs.flatMap<EditorTabBarItem>((tab) => {
+    if (tab.kind === "note") {
+      const note = currentSnapshot.notes.find((item) => item.id === tab.id);
+
+      return note ? [{ ...tab, title: note.title, isDirty: dirtyNoteIds.has(note.id) }] : [];
+    }
+
+    const document = currentSnapshot.documents.find((item) => item.id === tab.id);
+
+    return document
+      ? [{ ...tab, title: document.title, fileType: document.fileType, isDirty: document.fileType === "txt" && dirtyDocumentIds.has(document.id) }]
+      : [];
+  });
+  /** 当前激活 ID 仍是后端预览与既有编辑器的唯一来源，标签栏只负责呈现和切换。 */
+  const activeEditorTab: EditorFileTab | null = activeDocument
+    ? { kind: "document", id: activeDocument.id }
+    : activeNote
+      ? { kind: "note", id: activeNote.id }
+      : null;
   const fileTree = buildFileTree({
     knowledgeBase: activeKnowledgeBase,
     folders: currentSnapshot.folders,
@@ -566,12 +609,17 @@ export function WorkspaceShell() {
   }
 
   /** 打开应用内确认弹窗，调用方只在用户确认后执行真实副作用。 */
-  function requestConfirmation(config: ConfirmDialogConfig, onConfirm: () => Promise<void> | void) {
+  function requestConfirmation(
+    config: ConfirmDialogConfig,
+    onConfirm: () => Promise<void> | void,
+    onThirdAction?: () => Promise<void> | void,
+  ) {
     setPendingConfirmation({
       cancelLabel: "取消",
       tone: "danger",
       ...config,
       onConfirm,
+      onThirdAction,
     });
   }
 
@@ -595,6 +643,54 @@ export function WorkspaceShell() {
   ) {
     setSnapshot(nextSnapshot);
     commitDraftSnapshot(nextSnapshot, dirtyNotesToKeep, dirtyDocumentsToKeep);
+    // 外部删除、重扫或移除知识库后，不能保留已经无法解析的标签引用。
+    setOpenFileTabs((currentTabs) =>
+      currentTabs.filter((tab) =>
+        tab.kind === "note"
+          ? nextSnapshot.notes.some((note) => note.id === tab.id)
+          : nextSnapshot.documents.some((document) => document.id === tab.id),
+      ),
+    );
+  }
+
+  /** 把指定文件加入临时标签并激活，同时保持原有知识库与 Agent 会话选择语义。 */
+  function activateEditorTab(tab: EditorFileTab, source: "tree" | "tab" | "create" | "keyboard") {
+    const target =
+      tab.kind === "note"
+        ? currentSnapshot.notes.find((note) => note.id === tab.id)
+        : currentSnapshot.documents.find((document) => document.id === tab.id);
+
+    if (!target) {
+      return;
+    }
+
+    const nextKnowledgeBase =
+      currentSnapshot.knowledgeBases.find((knowledgeBase) => knowledgeBase.id === target.knowledgeBaseId) ?? activeKnowledgeBase;
+    const activatedSnapshot = {
+      ...currentSnapshot,
+      activeKnowledgeBaseId: nextKnowledgeBase.id,
+      activeNoteId: tab.kind === "note" ? tab.id : "",
+      activeDocumentId: tab.kind === "document" ? tab.id : "",
+      activeSessionId: resolveKnowledgeBaseSessionId(currentSnapshot, nextKnowledgeBase.id),
+    };
+
+    setOpenFileTabs((currentTabs) =>
+      currentTabs.some((item) => item.kind === tab.kind && item.id === tab.id) ? currentTabs : [...currentTabs, tab],
+    );
+    logInfo("切换编辑器文件标签。", {
+      category: "frontend",
+      event: source === "tree" || source === "create" ? "editor_tab_open" : "editor_tab_select",
+      status: "completed",
+      metadata: { fileKind: tab.kind, source, openTabCount: openFileTabs.length + 1 },
+    });
+    commitSnapshot(activatedSnapshot);
+  }
+
+  /** 重命名会生成新的稳定文件 ID，需要保留原标签的位置而非把它当作失效标签移除。 */
+  function replaceEditorTabId(kind: EditorFileTab["kind"], previousId: string, nextId: string) {
+    setOpenFileTabs((currentTabs) =>
+      currentTabs.map((tab) => (tab.kind === kind && tab.id === previousId ? { ...tab, id: nextId } : tab)),
+    );
   }
 
   /** 选择知识库时只切换浏览焦点；会话最多切到该知识库已有会话，不再隐式创建。 */
@@ -627,6 +723,19 @@ export function WorkspaceShell() {
       },
     });
     commitSnapshot(activatedSnapshot);
+    const activatedTab = activatedSnapshot.activeDocumentId
+      ? { kind: "document" as const, id: activatedSnapshot.activeDocumentId }
+      : activatedSnapshot.activeNoteId
+        ? { kind: "note" as const, id: activatedSnapshot.activeNoteId }
+        : null;
+
+    if (activatedTab) {
+      setOpenFileTabs((currentTabs) =>
+        currentTabs.some((tab) => tab.kind === activatedTab.kind && tab.id === activatedTab.id)
+          ? currentTabs
+          : [...currentTabs, activatedTab],
+      );
+    }
     setSearchTerm("");
     setCollapsedFolderPaths(new Set());
   }
@@ -687,24 +796,7 @@ export function WorkspaceShell() {
       return;
     }
 
-    const nextKnowledgeBase =
-      currentSnapshot.knowledgeBases.find((knowledgeBase) => knowledgeBase.id === nextNote.knowledgeBaseId) ?? activeKnowledgeBase;
-    const nextActiveSessionId = resolveKnowledgeBaseSessionId(currentSnapshot, nextKnowledgeBase.id);
-    const activatedSnapshot = {
-      ...currentSnapshot,
-      activeKnowledgeBaseId: nextKnowledgeBase.id,
-      activeNoteId: noteId,
-      activeDocumentId: "",
-      activeSessionId: nextActiveSessionId,
-    };
-
-    logInfo("切换 Markdown 浏览焦点。", {
-      category: "frontend",
-      event: "select_note",
-      status: "completed",
-      metadata: { hasExistingSession: Boolean(nextActiveSessionId) },
-    });
-    commitSnapshot(activatedSnapshot);
+    activateEditorTab({ kind: "note", id: noteId }, "tree");
   }
 
   /** 打开普通文档只切换编辑器焦点；没有同库会话时也不创建默认会话。 */
@@ -715,25 +807,7 @@ export function WorkspaceShell() {
       return;
     }
 
-    const nextKnowledgeBase =
-      currentSnapshot.knowledgeBases.find((knowledgeBase) => knowledgeBase.id === nextDocument.knowledgeBaseId) ??
-      activeKnowledgeBase;
-    const nextActiveSessionId = resolveKnowledgeBaseSessionId(currentSnapshot, nextKnowledgeBase.id);
-    const activatedSnapshot = {
-      ...currentSnapshot,
-      activeKnowledgeBaseId: nextKnowledgeBase.id,
-      activeNoteId: "",
-      activeDocumentId: documentId,
-      activeSessionId: nextActiveSessionId,
-    };
-
-    logInfo("切换普通文档浏览焦点。", {
-      category: "frontend",
-      event: "select_document",
-      status: "completed",
-      metadata: { hasExistingSession: Boolean(nextActiveSessionId) },
-    });
-    commitSnapshot(activatedSnapshot);
+    activateEditorTab({ kind: "document", id: documentId }, "tree");
   }
 
   /** 更新当前笔记正文，只修改内存草稿；保存时才写回本地 Markdown 文件。 */
@@ -957,6 +1031,9 @@ export function WorkspaceShell() {
           : nextSnapshot;
 
         commitSnapshot(activatedSnapshot);
+        if (nextNote) {
+          setOpenFileTabs((currentTabs) => [...currentTabs.filter((tab) => tab.kind !== "note" || tab.id !== nextNote.id), { kind: "note", id: nextNote.id }]);
+        }
         setSearchTerm("");
         expandFolderPaths([createDialog.parentPath]);
         setMarkdownViewMode("edit");
@@ -975,6 +1052,12 @@ export function WorkspaceShell() {
         const nextDocument = getActiveDocument(nextSnapshot);
 
         commitSnapshot(nextSnapshot);
+        if (nextDocument) {
+          setOpenFileTabs((currentTabs) => [
+            ...currentTabs.filter((tab) => tab.kind !== "document" || tab.id !== nextDocument.id),
+            { kind: "document", id: nextDocument.id },
+          ]);
+        }
         setSearchTerm("");
         expandFolderPaths([createDialog.parentPath]);
         setCreateDialog(null);
@@ -1002,57 +1085,144 @@ export function WorkspaceShell() {
     }
   }
 
-  /** 保存当前笔记草稿，后端会用开始编辑时的 hash 检测外部编辑器冲突。 */
-  async function handleSaveActiveNote() {
-    if (!activeNote || !isActiveNoteDirty) {
-      return;
+  /** 保存指定标签的草稿；返回 false 表示保存失败或目标已不存在，调用方不得继续关闭。 */
+  async function saveDirtyEditorTab(tab: EditorFileTab) {
+    if (tab.kind === "note") {
+      const note = currentSnapshot.notes.find((item) => item.id === tab.id);
+
+      if (!note || !dirtyNoteIds.has(tab.id)) {
+        return Boolean(note);
+      }
+
+      beginBusy("正在保存 Markdown...");
+      try {
+        const expectedHash = editingBaseHashes[note.id] ?? note.contentHash;
+        const nextSnapshot = await saveNoteContent(currentSnapshot, note.id, note.content, expectedHash);
+        const nextDirtyNoteIds = new Set(dirtyNoteIds);
+
+        nextDirtyNoteIds.delete(note.id);
+        commitSnapshot(nextSnapshot, nextDirtyNoteIds);
+        setNotice(`已保存「${note.title}」。`);
+        return true;
+      } catch (error) {
+        setNotice(error instanceof Error ? error.message : String(error));
+        return false;
+      } finally {
+        endBusy();
+      }
     }
 
-    const expectedHash = editingBaseHashes[activeNote.id] ?? activeNote.contentHash;
+    const document = currentSnapshot.documents.find((item) => item.id === tab.id);
 
-    beginBusy("正在保存当前 Markdown...");
+    if (!document || document.fileType !== "txt" || !dirtyDocumentIds.has(tab.id)) {
+      return Boolean(document);
+    }
 
+    beginBusy("正在保存 TXT...");
     try {
-      const nextSnapshot = await saveNoteContent(currentSnapshot, activeNote.id, activeNote.content, expectedHash);
-      const nextDirtyNoteIds = new Set(dirtyNoteIds);
+      const expectedHash = editingBaseDocumentHashes[document.id] ?? document.contentHash;
+      const nextSnapshot = await saveDocumentContent(currentSnapshot, document.id, document.content ?? "", expectedHash);
+      const nextDirtyDocumentIds = new Set(dirtyDocumentIds);
 
-      nextDirtyNoteIds.delete(activeNote.id);
-      commitSnapshot(nextSnapshot, nextDirtyNoteIds);
-      setNotice(`已保存「${activeNote.title}」。`);
+      nextDirtyDocumentIds.delete(document.id);
+      commitSnapshot(nextSnapshot, dirtyNoteIds, nextDirtyDocumentIds);
+      setNotice(`已保存「${document.title}」。`);
+      return true;
     } catch (error) {
       setNotice(error instanceof Error ? error.message : String(error));
+      return false;
     } finally {
       endBusy();
     }
   }
 
+  /** 保存当前笔记草稿，后端会用开始编辑时的 hash 检测外部编辑器冲突。 */
+  async function handleSaveActiveNote() {
+    if (activeNote) {
+      await saveDirtyEditorTab({ kind: "note", id: activeNote.id });
+    }
+  }
+
   /** 保存当前 txt 草稿，后端会用开始编辑时的 hash 检测外部编辑器冲突。 */
   async function handleSaveActiveDocument() {
-    if (!activeDocument || activeDocument.fileType !== "txt" || !isActiveDocumentDirty) {
+    if (activeDocument) {
+      await saveDirtyEditorTab({ kind: "document", id: activeDocument.id });
+    }
+  }
+
+  /** 从标签栏移除文件；当前标签关闭时优先选择右侧标签。 */
+  function closeEditorTab(tab: EditorFileTab, discardDraft = false) {
+    const tabIndex = openFileTabs.findIndex((item) => item.kind === tab.kind && item.id === tab.id);
+
+    if (tabIndex < 0) {
       return;
     }
 
-    const expectedHash = editingBaseDocumentHashes[activeDocument.id] ?? activeDocument.contentHash;
+    const isDirty = tab.kind === "note" ? dirtyNoteIds.has(tab.id) : dirtyDocumentIds.has(tab.id);
 
-    beginBusy("正在保存当前 TXT...");
-
-    try {
-      const nextSnapshot = await saveDocumentContent(
-        currentSnapshot,
-        activeDocument.id,
-        activeDocument.content ?? "",
-        expectedHash,
+    if (isDirty && !discardDraft) {
+      requestConfirmation(
+        {
+          title: "关闭未保存的文件",
+          message: "此文件包含未保存的更改。保存后关闭，或放弃本次更改。",
+          confirmLabel: "保存并关闭",
+          cancelLabel: "取消",
+          tone: "default",
+          thirdAction: { label: "放弃更改", tone: "danger" },
+        },
+        async () => {
+          if (await saveDirtyEditorTab(tab)) {
+            closeEditorTab(tab, true);
+          }
+        },
+        () => closeEditorTab(tab, true),
       );
-      const nextDirtyDocumentIds = new Set(dirtyDocumentIds);
-
-      nextDirtyDocumentIds.delete(activeDocument.id);
-      commitSnapshot(nextSnapshot, dirtyNoteIds, nextDirtyDocumentIds);
-      setNotice(`已保存「${activeDocument.title}」。`);
-    } catch (error) {
-      setNotice(error instanceof Error ? error.message : String(error));
-    } finally {
-      endBusy();
+      return;
     }
+
+    const nextTabs = openFileTabs.filter((item) => item.kind !== tab.kind || item.id !== tab.id);
+    const isActive = (tab.kind === "note" && currentSnapshot.activeNoteId === tab.id) ||
+      (tab.kind === "document" && currentSnapshot.activeDocumentId === tab.id);
+
+    // “放弃更改”关闭后必须清理 dirty 集合，否则后续删除/重命名会被不可见草稿错误阻止。
+    if (isDirty) {
+      if (tab.kind === "note") {
+        setDirtyNoteIds((currentIds) => {
+          const nextIds = new Set(currentIds);
+
+          nextIds.delete(tab.id);
+          return nextIds;
+        });
+      } else {
+        setDirtyDocumentIds((currentIds) => {
+          const nextIds = new Set(currentIds);
+
+          nextIds.delete(tab.id);
+          return nextIds;
+        });
+      }
+    }
+    setOpenFileTabs(nextTabs);
+    logInfo("关闭编辑器文件标签。", {
+      category: "frontend",
+      event: "editor_tab_close",
+      status: "completed",
+      metadata: { fileKind: tab.kind, openTabCount: nextTabs.length, hasUnsavedDraft: isDirty },
+    });
+
+    if (!isActive) {
+      return;
+    }
+
+    const nextActiveTab = nextTabs[tabIndex] ?? nextTabs[tabIndex - 1];
+
+    if (nextActiveTab) {
+      activateEditorTab(nextActiveTab, "tab");
+      return;
+    }
+
+    // 关闭最后一个标签后显式清空焦点，selectors 不会再自动回退到首个文件。
+    commitSnapshot({ ...currentSnapshot, activeNoteId: "", activeDocumentId: "" });
   }
 
   /** 导出前保存当前脏草稿；保存冲突会抛出错误并阻止后续导出。 */
@@ -1235,6 +1405,9 @@ export function WorkspaceShell() {
     try {
       const nextSnapshot = await renameNote(currentSnapshot, note.id, nextFileName);
 
+      if (nextSnapshot.activeNoteId) {
+        replaceEditorTabId("note", note.id, nextSnapshot.activeNoteId);
+      }
       commitSnapshot(nextSnapshot, new Set());
       setCollapsedFolderPaths(new Set());
       setRenameDialog(null);
@@ -1272,6 +1445,9 @@ export function WorkspaceShell() {
     try {
       const nextSnapshot = await renameDocument(currentSnapshot, document.id, nextFileName);
 
+      if (nextSnapshot.activeDocumentId) {
+        replaceEditorTabId("document", document.id, nextSnapshot.activeDocumentId);
+      }
       commitSnapshot(nextSnapshot, dirtyNoteIds, new Set());
       setCollapsedFolderPaths(new Set());
       setRenameDialog(null);
@@ -2110,8 +2286,16 @@ export function WorkspaceShell() {
           className={`workspace-resizer ${resizingPane === "sidebar" ? "active" : ""}`}
           {...getSeparatorProps("sidebar")}
         />
-        {activeDocument ? (
-          <DocumentPane
+        <div className="editor-workbench">
+          <EditorTabBar
+            tabs={editorTabs}
+            activeTab={activeEditorTab}
+            onSelect={(tab) => activateEditorTab(tab, "tab")}
+            onClose={closeEditorTab}
+          />
+          <div className="editor-file-panel" id="editor-file-panel" role="tabpanel" aria-label="当前文件内容">
+            {activeDocument ? (
+              <DocumentPane
             document={activeDocument}
             knowledgeBase={activeKnowledgeBase}
             preview={documentPreview ?? undefined}
@@ -2125,9 +2309,9 @@ export function WorkspaceShell() {
             onOpenHistory={() => openDocumentHistory()}
             onRenameDocument={() => openRenameDocumentDialog()}
             onDeleteDocument={() => handleDeleteDocument()}
-          />
-        ) : (
-          <EditorPane
+              />
+            ) : (
+              <EditorPane
             note={activeNote}
             knowledgeBase={activeKnowledgeBase}
             proposedChange={activeSession.pendingChange?.status === "pending" ? activeSession.pendingChange : undefined}
@@ -2146,8 +2330,10 @@ export function WorkspaceShell() {
             onRejectChange={handleRejectChange}
             onAddReviewComment={handleAddReviewComment}
             onSubmitReviewComments={handleSubmitReviewComments}
-          />
-        )}
+              />
+            )}
+          </div>
+        </div>
         {!isAgentPanelCollapsed && (
           <div
             className={`workspace-resizer ${resizingPane === "agent" ? "active" : ""}`}
@@ -2341,6 +2527,16 @@ export function WorkspaceShell() {
           isBusy={isBusy}
           onCancel={() => setPendingConfirmation(null)}
           onConfirm={() => void handleConfirmDialogConfirm()}
+          onThirdAction={
+            pendingConfirmation.onThirdAction
+              ? () => {
+                  const action = pendingConfirmation.onThirdAction;
+
+                  setPendingConfirmation(null);
+                  void action?.();
+                }
+              : undefined
+          }
         />
       )}
     </div>
