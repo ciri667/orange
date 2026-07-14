@@ -172,6 +172,7 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             commands::load_workspace_state,
+            commands::save_workspace_editor_state,
             commands::select_knowledge_base,
             commands::load_sessions,
             commands::save_session,

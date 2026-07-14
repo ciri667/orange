@@ -4,10 +4,10 @@ use crate::domain::{
     ImIntegrationSettings, ImProviderConfig, ImProviderCredentialStatus, ImProviderSettings,
     KnowledgeBase, KnowledgeBaseMemory, KnowledgeBaseSelection, LlmProviderConfig,
     ModelApiKeyStatus, ModelConfig, Note, NoteImageAttachmentInput, RequestAuditLog,
-    SavedNoteImageAttachment, ScanReport, UserSettings, WorkspaceDocument, WorkspaceSnapshot,
-    IM_PROVIDER_FEISHU, MEMORY_CATEGORY_CONVENTION, MEMORY_CATEGORY_NOTE_STRUCTURE,
-    MEMORY_CATEGORY_ORGANIZATION, MEMORY_CATEGORY_OTHER, MEMORY_CATEGORY_TAG_CONVENTION,
-    MEMORY_SOURCE_AUTO, MEMORY_SOURCE_USER,
+    SavedNoteImageAttachment, ScanReport, UserSettings, WorkspaceBootstrapState, WorkspaceDocument,
+    WorkspaceEditorState, WorkspaceEditorTab, WorkspaceSnapshot, IM_PROVIDER_FEISHU,
+    MEMORY_CATEGORY_CONVENTION, MEMORY_CATEGORY_NOTE_STRUCTURE, MEMORY_CATEGORY_ORGANIZATION,
+    MEMORY_CATEGORY_OTHER, MEMORY_CATEGORY_TAG_CONVENTION, MEMORY_SOURCE_AUTO, MEMORY_SOURCE_USER,
 };
 use crate::model_provider;
 use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
@@ -732,6 +732,12 @@ fn ensure_database_schema(connection: &Connection, database_path: &Path) -> Resu
             CREATE TABLE IF NOT EXISTS im_session_mappings (
               channel_key TEXT PRIMARY KEY,
               session_id TEXT NOT NULL,
+              updated_at TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS workspace_editor_state (
+              singleton_id INTEGER PRIMARY KEY CHECK (singleton_id = 1),
+              payload_json TEXT NOT NULL,
               updated_at TEXT NOT NULL
             );
             "#,
@@ -3396,22 +3402,10 @@ pub fn load_workspace_snapshot(app: &AppHandle) -> Result<WorkspaceSnapshot, Str
         .first()
         .map(|knowledge_base| knowledge_base.id.clone())
         .unwrap_or_default();
-    let active_note_id = notes
-        .iter()
-        .find(|note| note.knowledge_base_id == active_knowledge_base_id)
-        .or_else(|| notes.first())
-        .map(|note| note.id.clone())
-        .unwrap_or_default();
-    let active_document_id = if active_note_id.is_empty() {
-        documents
-            .iter()
-            .find(|document| document.knowledge_base_id == active_knowledge_base_id)
-            .or_else(|| documents.first())
-            .map(|document| document.id.clone())
-            .unwrap_or_default()
-    } else {
-        String::new()
-    };
+    // 冷启动只定位默认知识库，不再把排序后的首个文件当作用户正在编辑的文件。
+    // 真实编辑器焦点由 load_workspace_bootstrap_state 恢复的会话状态决定。
+    let active_note_id = String::new();
+    let active_document_id = String::new();
     let mut snapshot = WorkspaceSnapshot {
         knowledge_bases,
         folders,
@@ -3438,6 +3432,146 @@ pub fn load_workspace_snapshot(app: &AppHandle) -> Result<WorkspaceSnapshot, Str
         .unwrap_or_default();
 
     Ok(snapshot)
+}
+
+/** 构造空编辑器会话，用于首次启动或历史记录不可用时保持编辑区空白。 */
+fn empty_workspace_editor_state(active_knowledge_base_id: String) -> WorkspaceEditorState {
+    WorkspaceEditorState {
+        active_knowledge_base_id,
+        open_tabs: Vec::new(),
+        active_tab: None,
+        updated_at: format_local_datetime(),
+    }
+}
+
+/** 判断标签是否引用当前扫描快照中仍可访问的同类型文件。 */
+fn workspace_editor_tab_exists(snapshot: &WorkspaceSnapshot, tab: &WorkspaceEditorTab) -> bool {
+    match tab.kind.as_str() {
+        "note" => snapshot.notes.iter().any(|note| note.id == tab.id),
+        "document" => snapshot
+            .documents
+            .iter()
+            .any(|document| document.id == tab.id),
+        _ => false,
+    }
+}
+
+/** 过滤失效、重复或类型非法的编辑器标签，并修正活动知识库与焦点。 */
+pub fn normalize_workspace_editor_state(
+    snapshot: &WorkspaceSnapshot,
+    mut state: WorkspaceEditorState,
+) -> WorkspaceEditorState {
+    let mut seen_tabs = HashSet::new();
+
+    // 保留原始标签顺序，IDE 式恢复依赖该顺序；重复项只保留首次打开的位置。
+    state.open_tabs.retain(|tab| {
+        workspace_editor_tab_exists(snapshot, tab)
+            && seen_tabs.insert((tab.kind.clone(), tab.id.clone()))
+    });
+
+    if !snapshot
+        .knowledge_bases
+        .iter()
+        .any(|knowledge_base| knowledge_base.id == state.active_knowledge_base_id)
+    {
+        state.active_knowledge_base_id = snapshot.active_knowledge_base_id.clone();
+    }
+
+    // 活动项必须同时有效且已经在打开标签中；否则保持编辑区空白，而非回退到首文件。
+    state.active_tab = state
+        .active_tab
+        .filter(|active_tab| state.open_tabs.iter().any(|tab| tab == active_tab));
+    state
+}
+
+/** 读取 SQLite 中的原始编辑器会话；损坏的历史 JSON 不应阻断应用启动。 */
+pub fn load_workspace_editor_state(
+    app: &AppHandle,
+) -> Result<Option<WorkspaceEditorState>, String> {
+    let connection = open_database(app)?;
+    let payload_json = connection
+        .query_row(
+            "SELECT payload_json FROM workspace_editor_state WHERE singleton_id = 1",
+            [],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()
+        .map_err(|error| format!("无法读取编辑器会话状态：{error}"))?;
+
+    let Some(payload_json) = payload_json else {
+        return Ok(None);
+    };
+
+    match serde_json::from_str::<WorkspaceEditorState>(&payload_json) {
+        Ok(state) => Ok(Some(state)),
+        Err(error) => {
+            // 不记录 JSON 内容、路径或标题，避免损坏数据泄露本地文件信息。
+            log::warn!(
+                target: "workspace_session",
+                "忽略无法解析的编辑器会话状态：error_kind=json_deserialize"
+            );
+            let _ = error;
+            Ok(None)
+        }
+    }
+}
+
+/** 扫描完成后组装启动状态，并按当前文件系统过滤编辑器会话中的失效引用。 */
+pub fn load_workspace_bootstrap_state(app: &AppHandle) -> Result<WorkspaceBootstrapState, String> {
+    let snapshot = load_workspace_snapshot(app)?;
+    let editor_state = load_workspace_editor_state(app)?
+        .map(|state| normalize_workspace_editor_state(&snapshot, state))
+        .unwrap_or_else(|| empty_workspace_editor_state(snapshot.active_knowledge_base_id.clone()));
+
+    log::info!(
+        target: "workspace_session",
+        "恢复编辑器会话：open_tab_count={} has_active_tab={} restored={}",
+        editor_state.open_tabs.len(),
+        editor_state.active_tab.is_some(),
+        !editor_state.open_tabs.is_empty() || editor_state.active_tab.is_some()
+    );
+
+    Ok(WorkspaceBootstrapState {
+        snapshot,
+        editor_state,
+    })
+}
+
+/** 保存编辑器会话到 SQLite 单例记录；时间戳由后端统一生成，避免客户端伪造。 */
+pub fn save_workspace_editor_state(
+    app: &AppHandle,
+    mut state: WorkspaceEditorState,
+) -> Result<WorkspaceEditorState, String> {
+    let mut seen_tabs = HashSet::new();
+    state.open_tabs.retain(|tab| {
+        matches!(tab.kind.as_str(), "note" | "document")
+            && !tab.id.trim().is_empty()
+            && seen_tabs.insert((tab.kind.clone(), tab.id.clone()))
+    });
+    state.active_tab = state
+        .active_tab
+        .filter(|active_tab| state.open_tabs.iter().any(|tab| tab == active_tab));
+    state.updated_at = format_local_datetime();
+
+    let payload_json = serde_json::to_string(&state)
+        .map_err(|error| format!("无法序列化编辑器会话状态：{error}"))?;
+    let connection = open_database(app)?;
+    let _write_guard = lock_database_writer()?;
+    connection
+        .execute(
+            "INSERT INTO workspace_editor_state (singleton_id, payload_json, updated_at) VALUES (1, ?1, ?2) \
+             ON CONFLICT(singleton_id) DO UPDATE SET payload_json = excluded.payload_json, updated_at = excluded.updated_at",
+            params![payload_json, state.updated_at],
+        )
+        .map_err(|error| format!("无法保存编辑器会话状态：{error}"))?;
+
+    log::debug!(
+        target: "workspace_session",
+        "已保存编辑器会话：open_tab_count={} has_active_tab={}",
+        state.open_tabs.len(),
+        state.active_tab.is_some()
+    );
+    Ok(state)
 }
 
 /** 使用 SQLite/FTS5 索引检索会话允许范围内的笔记，失败时由 Agent 层决定是否降级。 */
@@ -4957,11 +5091,11 @@ mod tests {
         load_keyring_password_after_cache_miss_with, load_latest_document_history_hash,
         load_model_api_key_from_cache, model_keyring_persists_until_delete,
         normalize_audit_log_created_at, normalize_im_settings, normalize_knowledge_base_memory,
-        normalize_session_created_at, parse_im_settings_payload, prune_app_event_logs,
-        prune_document_history_entries, query_app_event_logs, read_document_history_snapshot,
-        redact_memory_secrets, rename_markdown_file, rename_text_document_file,
-        resolve_existing_file_inside_root, resolve_inside_root, save_note_image_attachments,
-        scan_markdown_directory, scan_supported_documents_directory,
+        normalize_session_created_at, normalize_workspace_editor_state, parse_im_settings_payload,
+        prune_app_event_logs, prune_document_history_entries, query_app_event_logs,
+        read_document_history_snapshot, redact_memory_secrets, rename_markdown_file,
+        rename_text_document_file, resolve_existing_file_inside_root, resolve_inside_root,
+        save_note_image_attachments, scan_markdown_directory, scan_supported_documents_directory,
         sort_sessions_by_updated_at_desc, store_model_api_key_in_cache, trash_markdown_file,
         trash_text_document_file_with, validate_folder_name, validate_markdown_file_name,
         validate_new_markdown_file_name, validate_new_text_document_file_name,
@@ -4971,9 +5105,10 @@ mod tests {
     };
     use crate::domain::{
         AgentMemoryEntry, AgentSession, AppEventLog, DocumentHistoryEntry,
-        FeishuIntegrationSettings, ImIntegrationSettings, ImProviderSettings, KnowledgeBaseMemory,
-        KnowledgeBaseSelection, NoteImageAttachmentInput, RequestAuditLog, WorkspaceDocument,
-        IM_PROVIDER_FEISHU, MEMORY_CATEGORY_OTHER, MEMORY_SOURCE_USER,
+        FeishuIntegrationSettings, ImIntegrationSettings, ImProviderSettings, KnowledgeBase,
+        KnowledgeBaseMemory, KnowledgeBaseSelection, Note, NoteImageAttachmentInput,
+        RequestAuditLog, WorkspaceDocument, WorkspaceEditorState, WorkspaceEditorTab,
+        WorkspaceSnapshot, IM_PROVIDER_FEISHU, MEMORY_CATEGORY_OTHER, MEMORY_SOURCE_USER,
     };
     use base64::Engine as _;
     use rusqlite::Connection;
@@ -5003,6 +5138,92 @@ mod tests {
             model_provider_id: None,
             model_id: None,
         }
+    }
+
+    /** 构造最小工作区快照，供编辑器会话过滤规则测试复用。 */
+    fn test_workspace_snapshot() -> WorkspaceSnapshot {
+        WorkspaceSnapshot {
+            knowledge_bases: vec![KnowledgeBase {
+                id: "kb-a".to_owned(),
+                name: "测试知识库".to_owned(),
+                path: "/redacted".to_owned(),
+                description: String::new(),
+                status: "ready".to_owned(),
+                note_count: 1,
+                document_count: 1,
+                updated_at: "2026/01/01 00:00".to_owned(),
+                is_default: true,
+                semantic_index_enabled: false,
+                scan_report: None,
+            }],
+            folders: Vec::new(),
+            notes: vec![Note {
+                id: "note-a".to_owned(),
+                knowledge_base_id: "kb-a".to_owned(),
+                title: "笔记".to_owned(),
+                path: "note.md".to_owned(),
+                content: String::new(),
+                tags: Vec::new(),
+                updated_at: "2026/01/01 00:00".to_owned(),
+                backlinks: Vec::new(),
+                content_hash: String::new(),
+            }],
+            documents: vec![WorkspaceDocument {
+                id: "document-a".to_owned(),
+                knowledge_base_id: "kb-a".to_owned(),
+                title: "文档".to_owned(),
+                path: "document.txt".to_owned(),
+                file_type: "txt".to_owned(),
+                updated_at: "2026/01/01 00:00".to_owned(),
+                content_hash: String::new(),
+                content: Some(String::new()),
+                preview_available: true,
+            }],
+            sessions: Vec::new(),
+            active_knowledge_base_id: "kb-a".to_owned(),
+            active_note_id: String::new(),
+            active_document_id: String::new(),
+            active_session_id: String::new(),
+        }
+    }
+
+    #[test]
+    fn normalize_workspace_editor_state_filters_invalid_tabs_without_first_file_fallback() {
+        let snapshot = test_workspace_snapshot();
+        let state = WorkspaceEditorState {
+            active_knowledge_base_id: "removed-kb".to_owned(),
+            open_tabs: vec![
+                WorkspaceEditorTab {
+                    kind: "note".to_owned(),
+                    id: "note-a".to_owned(),
+                },
+                WorkspaceEditorTab {
+                    kind: "document".to_owned(),
+                    id: "missing".to_owned(),
+                },
+                WorkspaceEditorTab {
+                    kind: "unknown".to_owned(),
+                    id: "note-a".to_owned(),
+                },
+            ],
+            active_tab: Some(WorkspaceEditorTab {
+                kind: "document".to_owned(),
+                id: "missing".to_owned(),
+            }),
+            updated_at: "2026/01/01 00:00".to_owned(),
+        };
+
+        let normalized = normalize_workspace_editor_state(&snapshot, state);
+
+        assert_eq!(normalized.active_knowledge_base_id, "kb-a");
+        assert_eq!(
+            normalized.open_tabs,
+            vec![WorkspaceEditorTab {
+                kind: "note".to_owned(),
+                id: "note-a".to_owned()
+            }]
+        );
+        assert_eq!(normalized.active_tab, None);
     }
 
     /** 构造测试用 Agent 会话并显式指定更新时间，便于排序测试覆盖 updated_at 路径。 */
