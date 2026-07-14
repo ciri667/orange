@@ -9,7 +9,7 @@ import {
   getImSessionRecentMessageLabel,
   getImSessionSourceLabel,
   getSessionKnowledgeBaseLabel,
-  getSessionNoteLabel,
+  getSessionRecoveryNoteLabel,
   getSessionTypeLabel,
 } from "../shared/selectors";
 import {
@@ -19,20 +19,21 @@ import {
   getSessionModelLabel,
 } from "../shared/modelSelection";
 import { ModelCascadeSelector } from "../shared/ModelCascadeSelector";
-import type { AgentSession, KnowledgeBase, ModelConfig, Note } from "../shared/types";
+import type { AgentSession, KnowledgeBase, ModelConfig, Note, WorkspaceDocument } from "../shared/types";
 import { CitationList } from "./CitationList";
 import { ToolCallList } from "./ToolCallList";
 
-/** 会话摘要条，展示工具范围、当前文件、模型和写入状态。 */
+/** 会话摘要条，展示工具范围、工作台当前文件、模型和写入状态。 */
 export function AgentSessionSummary({
   activeSession,
   knowledgeBases,
-  notes,
+  currentFileLabel,
   modelConfig,
 }: {
   activeSession: AgentSession;
   knowledgeBases: KnowledgeBase[];
-  notes: Note[];
+  /** 工作台当前焦点文件；它是本轮默认编辑目标，独立于会话恢复锚点。 */
+  currentFileLabel: string;
   modelConfig: ModelConfig;
 }) {
   /** 当前会话范围摘要，展示 Agent 可调用检索工具的权限边界。 */
@@ -43,7 +44,7 @@ export function AgentSessionSummary({
   return (
     <div className="session-summary" aria-label="当前会话摘要">
       <OverflowTooltipText text={selectedScopeLabel} logArea="agent_session_scope_summary" />
-      <OverflowTooltipText text={getSessionNoteLabel(activeSession, notes)} logArea="agent_session_note_summary" />
+      <OverflowTooltipText text={currentFileLabel} logArea="agent_session_current_file_summary" />
       {modelConfig.enabled && (
         <OverflowTooltipText text={getSessionModelLabel(activeSession, modelConfig)} logArea="agent_session_provider" />
       )}
@@ -135,11 +136,12 @@ export function AgentSessionHistoryPopover({
   );
 }
 
-/** 会话上下文浮层，集中展示工具范围、当前文件和会话默认模型。 */
+/** 会话上下文浮层，集中展示工具范围、工作台文件、恢复锚点和会话默认模型。 */
 export function AgentSessionContextPopover({
   activeSession,
   knowledgeBases,
   notes,
+  currentFileLabel,
   modelConfig,
   isBusy,
   onToggleSessionContext,
@@ -149,6 +151,8 @@ export function AgentSessionContextPopover({
   activeSession: AgentSession;
   knowledgeBases: KnowledgeBase[];
   notes: Note[];
+  /** 工作台当前焦点文件；本轮 Agent 默认以它作为编辑目标。 */
+  currentFileLabel: string;
   modelConfig: ModelConfig;
   isBusy: boolean;
   onToggleSessionContext: () => void;
@@ -202,7 +206,15 @@ export function AgentSessionContextPopover({
           </div>
           <div>
             <span>当前文件</span>
-            <OverflowTooltipText as="strong" text={getSessionNoteLabel(activeSession, notes)} logArea="agent_context_note" />
+            <OverflowTooltipText as="strong" text={currentFileLabel} logArea="agent_context_current_file" />
+          </div>
+          <div>
+            <span>会话恢复笔记</span>
+            <OverflowTooltipText
+              as="strong"
+              text={getSessionRecoveryNoteLabel(activeSession, notes)}
+              logArea="agent_context_session_recovery_note"
+            />
           </div>
           <div>
             <span>消息</span>
@@ -232,7 +244,7 @@ export function AgentSessionContextPopover({
           </label>
         )}
         <p className="context-note">
-          Agent 只有调用 `search_notes` 或 `read_note` 工具后，才会展示知识库引用。
+          当前文件是本轮默认编辑目标；会话恢复笔记只用于恢复旧会话位置。Agent 可在已授权范围内按需检索其他文件。
         </p>
       </div>
     </section>
@@ -361,7 +373,15 @@ export function AgentScopeSelector({
 }
 
 /** Agent 消息列表，安全渲染 Markdown、工具调用和知识库引用。 */
-export function AgentMessageList({ activeSession }: { activeSession: AgentSession }) {
+export function AgentMessageList({
+  activeSession,
+  notes,
+  documents,
+}: {
+  activeSession: AgentSession;
+  notes: Note[];
+  documents: WorkspaceDocument[];
+}) {
   return (
     <div className="message-list" aria-live="polite">
       {activeSession.messages.map((message) => (
@@ -370,6 +390,13 @@ export function AgentMessageList({ activeSession }: { activeSession: AgentSessio
             {message.role === "assistant" ? <Sparkles size={14} /> : <MessageSquareText size={14} />}
             <span>{message.role === "assistant" ? "橘记 Agent" : "你"}</span>
           </div>
+          {message.mentionedFileIds?.length ? (
+            <div className="message-mentioned-files" aria-label="本轮 @ 文件">
+              {message.mentionedFileIds.map((fileId) => (
+                <span key={fileId}>{getMentionedFileLabel(fileId, notes, documents)}</span>
+              ))}
+            </div>
+          ) : null}
           <MessageMarkdown content={message.content} />
           <ToolCallList toolCalls={message.toolCalls} />
           <CitationList citations={message.citations} />
@@ -377,6 +404,11 @@ export function AgentMessageList({ activeSession }: { activeSession: AgentSessio
       ))}
     </div>
   );
+}
+
+/** 将历史消息中的 @ 文件 ID 转成安全展示名称；文件被删除后保留可解释的占位。 */
+function getMentionedFileLabel(fileId: string, notes: Note[], documents: WorkspaceDocument[]) {
+  return notes.find((note) => note.id === fileId)?.title ?? documents.find((document) => document.id === fileId)?.title ?? "已失效文件";
 }
 
 /** 安全渲染 Agent 对话中的 GFM Markdown，避免模型内容中的 HTML 被直接执行。 */

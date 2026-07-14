@@ -2071,6 +2071,28 @@ button.diff-line:not(:disabled):hover,
   font-weight: 700;
 }
 
+/* 历史消息仅回显 @ 文件名称，避免把本地路径或正文暴露到会话气泡。 */
+.message-mentioned-files {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+  margin: 8px 0;
+}
+
+.message-mentioned-files span {
+  max-width: 180px;
+  overflow: hidden;
+  padding: 3px 7px;
+  border: 1px solid rgba(var(--primary-rgb), 0.2);
+  border-radius: 999px;
+  color: var(--primary);
+  background: rgba(var(--primary-rgb), 0.07);
+  font-size: 11px;
+  font-weight: 700;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .message-markdown {
   margin-top: 8px;
   color: #24323c;
@@ -2611,6 +2633,61 @@ button.diff-line:not(:disabled):hover,
   color: var(--warning);
 }
 
+/* 本轮 @ 文件与 Skill chip 使用同一紧凑布局，避免较长文件名挤压模型选择器。 */
+.selected-mention-file-chips {
+  display: inline-flex;
+  align-items: center;
+  min-width: 0;
+  max-width: 100%;
+  gap: 6px;
+  overflow: hidden;
+}
+
+.selected-mention-file-chip {
+  display: inline-flex;
+  align-items: center;
+  min-width: 0;
+  max-width: 170px;
+  gap: 5px;
+  border: 1px solid rgba(var(--primary-rgb), 0.32);
+  border-radius: 7px;
+  padding: 4px 5px 4px 7px;
+  background: rgba(var(--primary-rgb), 0.08);
+  color: var(--agent-strong);
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.selected-mention-file-chip span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.selected-mention-file-chip button {
+  display: inline-grid;
+  flex: 0 0 auto;
+  width: 18px;
+  height: 18px;
+  place-items: center;
+  border: 0;
+  border-radius: 5px;
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+}
+
+.selected-mention-file-chip button:hover {
+  background: rgba(var(--primary-rgb), 0.14);
+}
+
+.selected-mention-file-chip.missing {
+  border-color: rgba(var(--warning-rgb), 0.34);
+  background: rgba(var(--warning-rgb), 0.1);
+  color: var(--warning);
+}
+
 .agent-input-main {
   position: relative;
   min-width: 0;
@@ -2631,6 +2708,80 @@ button.diff-line:not(:disabled):hover,
   padding: 6px;
   background: var(--surface);
   box-shadow: 0 18px 40px rgba(var(--ink-rgb), 0.16);
+}
+
+/* @ 文件候选浮层位于输入框上方，并复用 Skill picker 的尺寸与层级。 */
+.mention-file-picker-popover {
+  position: absolute;
+  right: 0;
+  bottom: calc(100% + 8px);
+  left: 0;
+  z-index: 6;
+  display: grid;
+  gap: 4px;
+  max-height: 252px;
+  overflow: auto;
+  border: 1px solid var(--color-primary-border-strong);
+  border-radius: 8px;
+  padding: 6px;
+  background: var(--surface);
+  box-shadow: 0 18px 40px rgba(var(--ink-rgb), 0.16);
+}
+
+.mention-file-picker-option {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center;
+  min-width: 0;
+  gap: 9px;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  padding: 8px;
+  background: transparent;
+  color: var(--text);
+  text-align: left;
+  cursor: pointer;
+}
+
+.mention-file-picker-option:hover,
+.mention-file-picker-option.active {
+  border-color: var(--color-primary-border);
+  background: var(--color-primary-wash);
+}
+
+.mention-file-picker-option > svg {
+  color: var(--text-muted);
+}
+
+.mention-file-picker-option span {
+  display: grid;
+  min-width: 0;
+  gap: 2px;
+}
+
+.mention-file-picker-option strong,
+.mention-file-picker-option small {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.mention-file-picker-option small,
+.mention-file-picker-option em,
+.mention-file-picker-empty {
+  color: var(--text-muted);
+  font-size: 12px;
+}
+
+.mention-file-picker-option em {
+  font-style: normal;
+  font-weight: 700;
+}
+
+.mention-file-picker-empty {
+  padding: 10px;
+  text-align: center;
 }
 
 .skill-picker-option {

@@ -1,4 +1,4 @@
-import { ArrowRight, BrainCircuit, Sparkles, X } from "lucide-react";
+import { ArrowRight, BrainCircuit, FileText, Image, Sparkles, X } from "lucide-react";
 import {
   useMemo,
   useRef,
@@ -22,6 +22,8 @@ export const FOLLOW_DEFAULT_VALUE = FOLLOW_DEFAULT_MODEL_SELECTION;
 const PROMPT_IME_ENTER_GUARD_MS = 150;
 /** v1 每轮最多显式激活 3 个 Skill，避免用户误选过多 instructions 挤占上下文。 */
 const MAX_EXPLICIT_SKILLS = 3;
+/** v1 单轮最多引用 8 个文件，和后端上下文预算上限保持一致。 */
+const MAX_MENTIONED_FILES = 8;
 
 /** 当前光标所在行的 slash skill 查询状态，只接受行首 `/query`，避免普通正文中的斜杠误触发。 */
 interface SlashSkillQuery {
@@ -35,6 +37,27 @@ interface SelectedSkillChip {
   id: string;
   displayName: string;
   source: AgentSkill["source"] | "unknown";
+}
+
+/**
+ * 可 @ 文件的公开展示信息。
+ *
+ * 候选由工作台依据会话知识库 scope 提供；输入组件不读取文件内容，也不自行访问本机路径。
+ */
+export interface AgentMentionFile {
+  id: string;
+  displayName: string;
+  /** 相对知识库的路径，用于同名文件消歧。 */
+  relativePath: string;
+  /** 可选的文件类型标签，例如 markdown、image、pdf。 */
+  kind?: "markdown" | "text" | "pdf" | "docx" | "image" | string;
+}
+
+/** 当前光标所在行的 @ 文件查询状态，只接受连续的 `@query` token。 */
+interface MentionFileQuery {
+  tokenStart: number;
+  cursorIndex: number;
+  query: string;
 }
 
 /** 从输入框内容和光标位置解析 slash skill 查询，不返回用户 prompt 正文给日志。 */
@@ -57,9 +80,35 @@ function resolveSlashSkillQuery(value: string, cursorIndex: number): SlashSkillQ
   return { lineStart, cursorIndex: safeCursorIndex, query };
 }
 
+/** 解析光标前的 @ 文件 token；空查询 `@` 也会打开选择器。 */
+function resolveMentionFileQuery(value: string, cursorIndex: number): MentionFileQuery | null {
+  const safeCursorIndex = Math.max(0, Math.min(cursorIndex, value.length));
+  const prefix = value.slice(0, safeCursorIndex);
+  const tokenStart = prefix.lastIndexOf("@");
+
+  if (tokenStart < 0) {
+    return null;
+  }
+
+  // @ 前只能是行首或空白，避免邮件地址和普通单词中的 @ 误触发。
+  const precedingCharacter = value[tokenStart - 1];
+  const query = value.slice(tokenStart + 1, safeCursorIndex);
+
+  if ((precedingCharacter && !/\s/.test(precedingCharacter)) || /\s/.test(query)) {
+    return null;
+  }
+
+  return { tokenStart, cursorIndex: safeCursorIndex, query };
+}
+
 /** 为前端 picker 构造只含公开元数据的匹配文本，避免读取或记录 skill instructions。 */
 function getSkillPickerSearchText(skill: AgentSkill) {
   return [skill.displayName, skill.name, skill.description, ...skill.tags].join(" ").toLowerCase();
+}
+
+/** 候选搜索只使用已授权文件的公开元数据，禁止将内容写入前端日志。 */
+function getMentionFileSearchText(file: AgentMentionFile) {
+  return [file.displayName, file.relativePath, file.kind].filter(Boolean).join(" ").toLowerCase();
 }
 
 /** Agent 底部输入区，封装输入法保护、本轮模型选择和 slash Skill picker。 */
@@ -68,11 +117,14 @@ export function AgentInput({
   prompt,
   skills,
   selectedSkillIds,
+  mentionedFiles = [],
+  selectedMentionedFileIds = [],
   modelConfig,
   turnModelSelection,
   isBusy,
   onPromptChange,
   onSelectedSkillIdsChange,
+  onSelectedMentionedFileIdsChange,
   onSubmitPrompt,
   onTurnModelSelectionChange,
 }: {
@@ -80,12 +132,17 @@ export function AgentInput({
   prompt: string;
   skills: AgentSkill[];
   selectedSkillIds: string[];
+  /** 当前会话 scope 内可被显式引用的已索引文件。 */
+  mentionedFiles?: AgentMentionFile[];
+  /** 本轮临时选择的 @ 文件 ID；发送成功后由父组件清空。 */
+  selectedMentionedFileIds?: string[];
   modelConfig: ModelConfig;
   /** 本轮显式选择的 provider/model，空字符串表示跟随会话/全局默认。 */
   turnModelSelection: string;
   isBusy: boolean;
   onPromptChange: (value: string) => void;
   onSelectedSkillIdsChange: (skillIds: string[]) => void;
+  onSelectedMentionedFileIdsChange?: (fileIds: string[]) => void;
   onSubmitPrompt: () => void;
   onTurnModelSelectionChange: (selection: string) => void;
 }) {
@@ -117,6 +174,10 @@ export function AgentInput({
   const [isSkillPickerOpen, setIsSkillPickerOpen] = useState(false);
   /** slash picker 当前键盘高亮项索引，用于上下键选择。 */
   const [activeSkillPickerIndex, setActiveSkillPickerIndex] = useState(0);
+  /** @ 文件 picker 是否打开。 */
+  const [isMentionFilePickerOpen, setIsMentionFilePickerOpen] = useState(false);
+  /** @ 文件 picker 的键盘高亮项。 */
+  const [activeMentionFilePickerIndex, setActiveMentionFilePickerIndex] = useState(0);
   /** 已选显式 skill 的 chip 数据；缺失项不隐藏，避免用户无法移除已经失效的选择。 */
   const selectedExplicitSkillChips = useMemo(
     () =>
@@ -130,6 +191,15 @@ export function AgentInput({
         };
       }),
     [selectedSkillIds, skills],
+  );
+  /** 已选 @ 文件保留缺失 ID，方便用户移除并让后端作最终授权校验。 */
+  const selectedMentionFileChips = useMemo(
+    () => selectedMentionedFileIds.map((fileId) => mentionedFiles.find((file) => file.id === fileId) ?? {
+      id: fileId,
+      displayName: "已失效文件",
+      relativePath: "",
+    }),
+    [mentionedFiles, selectedMentionedFileIds],
   );
   /** 当前光标所在行的 slash 查询，只有 `/query` 这种行首模式才会触发 picker。 */
   const slashSkillQuery = resolveSlashSkillQuery(prompt, promptTextareaRef.current?.selectionStart ?? prompt.length);
@@ -145,6 +215,25 @@ export function AgentInput({
   }, [selectedSkillIds, skills, slashSkillQuery?.query]);
   /** picker 最终展示条件，达到上限或当前行不再是 slash 查询时立即隐藏。 */
   const shouldShowSkillPicker = isSkillPickerOpen && selectedSkillIds.length < MAX_EXPLICIT_SKILLS && Boolean(slashSkillQuery);
+  /** 当前 @ token 的检索词。 */
+  const mentionFileQuery = resolveMentionFileQuery(prompt, promptTextareaRef.current?.selectionStart ?? prompt.length);
+  /** @ 候选仅过滤父组件提供的已授权文件，不在输入组件扩大会话 scope。 */
+  const selectableMentionFiles = useMemo(() => {
+    const selectedFileIdSet = new Set(selectedMentionedFileIds);
+    const query = mentionFileQuery?.query.trim().toLowerCase() ?? "";
+
+    return mentionedFiles
+      .filter((file) => !selectedFileIdSet.has(file.id))
+      // 单轮“已选”数量受 MAX_MENTIONED_FILES 约束，但候选必须完整展示；
+      // 否则按路径排序后，排在后面的根目录文件会永远无法被 @ 到。
+      .filter((file) => !query || getMentionFileSearchText(file).includes(query));
+  }, [mentionedFiles, mentionFileQuery?.query, selectedMentionedFileIds]);
+  /** 文件 picker 不和 slash picker 同时展示，避免键盘焦点语义冲突。 */
+  const shouldShowMentionFilePicker =
+    isMentionFilePickerOpen &&
+    selectedMentionedFileIds.length < MAX_MENTIONED_FILES &&
+    Boolean(mentionFileQuery) &&
+    !shouldShowSkillPicker;
 
   /** 打开或关闭 slash picker，并记录不含 prompt/instructions 的可观测日志。 */
   function updateSkillPickerOpen(nextOpen: boolean, source: string, matchCount = selectableSkills.length) {
@@ -183,10 +272,44 @@ export function AgentInput({
     }
   }
 
+  /** 切换 @ 文件 picker；日志只保留数量和触发来源，避免暴露文件名与用户输入。 */
+  function updateMentionFilePickerOpen(nextOpen: boolean, source: string, matchCount = selectableMentionFiles.length) {
+    setIsMentionFilePickerOpen(nextOpen);
+    setActiveMentionFilePickerIndex(0);
+    logDebug("切换 @ 文件 picker。", {
+      category: "frontend",
+      event: "agent_mentioned_file_picker_toggle",
+      status: nextOpen ? "opened" : "closed",
+      metadata: { source, selectedFileCount: selectedMentionedFileIds.length, matchCount },
+    });
+  }
+
+  /** 随输入与光标同步 @ picker；slash Skill 和 @ 文件只能有一个处于打开状态。 */
+  function syncMentionFilePickerFromPrompt(value: string, cursorIndex: number, source: string) {
+    const nextQuery = resolveMentionFileQuery(value, cursorIndex);
+    const canOpen = Boolean(nextQuery) && selectedMentionedFileIds.length < MAX_MENTIONED_FILES;
+
+    if (canOpen && !isMentionFilePickerOpen) {
+      setIsSkillPickerOpen(false);
+      updateMentionFilePickerOpen(true, source);
+      return;
+    }
+
+    if (!canOpen && isMentionFilePickerOpen) {
+      updateMentionFilePickerOpen(false, source);
+      return;
+    }
+
+    if (canOpen) {
+      setActiveMentionFilePickerIndex(0);
+    }
+  }
+
   /** Agent 输入框变更处理；只根据光标行的 slash token 打开 picker，不记录正文。 */
   const handlePromptChange: ChangeEventHandler<HTMLTextAreaElement> = (event) => {
     onPromptChange(event.target.value);
     syncSkillPickerFromPrompt(event.target.value, event.target.selectionStart, "input");
+    syncMentionFilePickerFromPrompt(event.target.value, event.target.selectionStart, "input");
   };
 
   /** 通过鼠标或键盘选中一个显式 Skill，并从输入框移除当前 `/query` token。 */
@@ -245,12 +368,60 @@ export function AgentInput({
     });
   }
 
+  /** 选中一个 @ 文件并移除输入框内的查询 token；实际文件内容由后端在 scope 校验后读取。 */
+  function handleSelectMentionFile(file: AgentMentionFile) {
+    if (!onSelectedMentionedFileIdsChange || selectedMentionedFileIds.includes(file.id) || selectedMentionedFileIds.length >= MAX_MENTIONED_FILES) {
+      return;
+    }
+
+    const textarea = promptTextareaRef.current;
+    const queryState = resolveMentionFileQuery(prompt, textarea?.selectionStart ?? prompt.length);
+    const nextFileIds = [...selectedMentionedFileIds, file.id].slice(0, MAX_MENTIONED_FILES);
+
+    if (queryState) {
+      const beforeToken = prompt.slice(0, queryState.tokenStart);
+      const afterToken = prompt.slice(queryState.cursorIndex);
+
+      onPromptChange(`${beforeToken}${afterToken}`);
+      requestAnimationFrame(() => {
+        const nextCursorIndex = beforeToken.length;
+
+        promptTextareaRef.current?.focus();
+        promptTextareaRef.current?.setSelectionRange(nextCursorIndex, nextCursorIndex);
+      });
+    }
+
+    onSelectedMentionedFileIdsChange(nextFileIds);
+    updateMentionFilePickerOpen(false, "select", selectableMentionFiles.length);
+    logDebug("选择 @ 文件。", {
+      category: "frontend",
+      event: "agent_mentioned_file_select",
+      status: "completed",
+      metadata: { selectedFileCount: nextFileIds.length, fileKind: file.kind ?? "unknown" },
+    });
+  }
+
+  /** 移除本轮 @ 文件；仅记录数量与类型，不记录文件名和路径。 */
+  function handleRemoveMentionFile(fileId: string) {
+    const removedFile = mentionedFiles.find((file) => file.id === fileId);
+    const nextFileIds = selectedMentionedFileIds.filter((selectedFileId) => selectedFileId !== fileId);
+
+    onSelectedMentionedFileIdsChange?.(nextFileIds);
+    logDebug("移除 @ 文件。", {
+      category: "frontend",
+      event: "agent_mentioned_file_remove",
+      status: "completed",
+      metadata: { selectedFileCount: nextFileIds.length, fileKind: removedFile?.kind ?? "unknown" },
+    });
+  }
+
   /** 鼠标或光标移动后重新判断 slash picker 是否仍应展示。 */
   function handlePromptCaretChange() {
     const textarea = promptTextareaRef.current;
 
     if (textarea) {
       syncSkillPickerFromPrompt(prompt, textarea.selectionStart, "caret");
+      syncMentionFilePickerFromPrompt(prompt, textarea.selectionStart, "caret");
     }
   }
 
@@ -270,6 +441,22 @@ export function AgentInput({
 
   /** Agent 输入框快捷键处理器；Enter 提交，Shift+Enter 继续使用 textarea 原生换行。 */
   const handlePromptKeyDown: KeyboardEventHandler<HTMLTextAreaElement> = (event) => {
+    if (shouldShowMentionFilePicker && event.key === "ArrowDown") {
+      event.preventDefault();
+      setActiveMentionFilePickerIndex((currentIndex) =>
+        selectableMentionFiles.length ? (currentIndex + 1) % selectableMentionFiles.length : 0,
+      );
+      return;
+    }
+
+    if (shouldShowMentionFilePicker && event.key === "ArrowUp") {
+      event.preventDefault();
+      setActiveMentionFilePickerIndex((currentIndex) =>
+        selectableMentionFiles.length ? (currentIndex - 1 + selectableMentionFiles.length) % selectableMentionFiles.length : 0,
+      );
+      return;
+    }
+
     if (shouldShowSkillPicker && event.key === "ArrowDown") {
       event.preventDefault();
       setActiveSkillPickerIndex((currentIndex) => (selectableSkills.length ? (currentIndex + 1) % selectableSkills.length : 0));
@@ -284,9 +471,10 @@ export function AgentInput({
       return;
     }
 
-    if (isSkillPickerOpen && event.key === "Escape") {
+    if ((isSkillPickerOpen || isMentionFilePickerOpen) && event.key === "Escape") {
       event.preventDefault();
       updateSkillPickerOpen(false, "escape");
+      updateMentionFilePickerOpen(false, "escape");
       return;
     }
 
@@ -335,6 +523,18 @@ export function AgentInput({
       return;
     }
 
+    if (shouldShowMentionFilePicker) {
+      event.preventDefault();
+
+      if (selectableMentionFiles.length) {
+        handleSelectMentionFile(selectableMentionFiles[Math.min(activeMentionFilePickerIndex, selectableMentionFiles.length - 1)]);
+      } else {
+        updateMentionFilePickerOpen(false, "empty_enter", 0);
+      }
+
+      return;
+    }
+
     event.preventDefault();
     logDebug("通过回车快捷键提交 Agent 输入。", {
       category: "frontend",
@@ -345,6 +545,7 @@ export function AgentInput({
         messageCount: activeSession.messages.length,
         promptLength,
         explicitSkillCount: selectedSkillIds.length,
+        mentionedFileCount: selectedMentionedFileIds.length,
       },
     });
 
@@ -378,6 +579,19 @@ export function AgentInput({
               ))}
             </div>
           )}
+          {selectedMentionFileChips.length > 0 && (
+            <div className="selected-mention-file-chips" aria-label="本轮 @ 文件">
+              {selectedMentionFileChips.map((file) => (
+                <span className={`selected-mention-file-chip ${file.relativePath ? "" : "missing"}`} key={file.id}>
+                  {file.kind === "image" ? <Image size={12} /> : <FileText size={12} />}
+                  <OverflowTooltipText text={file.displayName} logArea="agent_mentioned_file_chip" />
+                  <button type="button" aria-label={`移除 ${file.displayName}`} onClick={() => handleRemoveMentionFile(file.id)}>
+                    <X size={12} />
+                  </button>
+                </span>
+              ))}
+            </div>
+          )}
         </div>
         {modelConfig.enabled && enabledProviders.length > 0 && (
           <div className="turn-model-select" aria-label="本轮使用的模型">
@@ -395,6 +609,32 @@ export function AgentInput({
         )}
       </div>
       <div className="agent-input-main">
+        {shouldShowMentionFilePicker && (
+          <div className="mention-file-picker-popover" role="listbox" aria-label="选择本轮 @ 文件">
+            {selectableMentionFiles.length ? (
+              selectableMentionFiles.map((file, index) => (
+                <button
+                  className={`mention-file-picker-option ${index === activeMentionFilePickerIndex ? "active" : ""}`}
+                  key={file.id}
+                  type="button"
+                  role="option"
+                  aria-selected={index === activeMentionFilePickerIndex}
+                  onMouseDown={(event) => event.preventDefault()}
+                  onClick={() => handleSelectMentionFile(file)}
+                >
+                  {file.kind === "image" ? <Image size={15} /> : <FileText size={15} />}
+                  <span>
+                    <OverflowTooltipText as="strong" text={file.displayName} logArea="agent_mentioned_file_picker_name" />
+                    <OverflowTooltipText as="small" text={file.relativePath} logArea="agent_mentioned_file_picker_path" />
+                  </span>
+                  {file.kind && <em>{file.kind}</em>}
+                </button>
+              ))
+            ) : (
+              <div className="mention-file-picker-empty">没有匹配的已授权文件</div>
+            )}
+          </div>
+        )}
         {shouldShowSkillPicker && (
           <div className="skill-picker-popover" role="listbox" aria-label="选择本轮显式 Skill">
             {selectableSkills.length ? (
@@ -430,7 +670,7 @@ export function AgentInput({
           onCompositionStart={handlePromptCompositionStart}
           onCompositionEnd={handlePromptCompositionEnd}
           onKeyDown={handlePromptKeyDown}
-          placeholder="输入 / 选择本轮 Skill；需要依据本地笔记时，Agent 会自行调用工具"
+          placeholder="输入 @ 引用文件，/ 选择本轮 Skill；Agent 仍可按需检索知识库"
           aria-label="Agent 输入"
           disabled={isBusy}
         />

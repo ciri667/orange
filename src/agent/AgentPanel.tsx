@@ -3,8 +3,8 @@ import { useRef } from "react";
 import { OverflowTooltipText } from "../shared/OverflowTooltipText";
 import { getImSessionSourceLabel } from "../shared/selectors";
 import { useDismissable } from "../shared/useDismissable";
-import type { AgentSession, AgentSkill, KnowledgeBase, ModelConfig, Note } from "../shared/types";
-import { AgentInput } from "./AgentInput";
+import type { AgentSession, AgentSkill, KnowledgeBase, ModelConfig, Note, WorkspaceDocument } from "../shared/types";
+import { AgentInput, type AgentMentionFile } from "./AgentInput";
 import {
   AgentMessageList,
   AgentScopeSelector,
@@ -20,9 +20,13 @@ export function AgentPanel({
   activeKnowledgeBase,
   knowledgeBases,
   notes,
+  documents,
+  currentFileLabel,
   prompt,
   skills,
   selectedSkillIds,
+  mentionedFiles,
+  selectedMentionedFileIds,
   modelConfig,
   turnModelSelection,
   isBusy,
@@ -39,6 +43,7 @@ export function AgentPanel({
   onToggleScopeKnowledgeBase,
   onPromptChange,
   onSelectedSkillIdsChange,
+  onSelectedMentionedFileIdsChange,
   onSubmitPrompt,
   onTurnModelSelectionChange,
   onSetSessionModelSelection,
@@ -49,10 +54,18 @@ export function AgentPanel({
   activeKnowledgeBase: KnowledgeBase;
   knowledgeBases: KnowledgeBase[];
   notes: Note[];
+  /** 所有已索引普通文档，用于历史 @ 文件名称回显。 */
+  documents: WorkspaceDocument[];
+  /** 工作台焦点的展示标签；由 WorkspaceShell 计算，避免读取会话恢复锚点。 */
+  currentFileLabel: string;
   prompt: string;
   skills: AgentSkill[];
   /** 本轮 slash picker 显式选择的 Skill ID，只作用于下一次用户提交。 */
   selectedSkillIds: string[];
+  /** 当前会话 scope 内可显式 @ 的公开文件元数据。 */
+  mentionedFiles: AgentMentionFile[];
+  /** 本轮临时选择的 @ 文件 ID。 */
+  selectedMentionedFileIds: string[];
   modelConfig: ModelConfig;
   /** 本轮显式选择的 provider/model，空字符串表示跟随会话/全局默认。 */
   turnModelSelection: string;
@@ -70,6 +83,7 @@ export function AgentPanel({
   onToggleScopeKnowledgeBase: (knowledgeBaseId: string) => void;
   onPromptChange: (value: string) => void;
   onSelectedSkillIdsChange: (skillIds: string[]) => void;
+  onSelectedMentionedFileIdsChange: (fileIds: string[]) => void;
   onSubmitPrompt: () => void;
   onTurnModelSelectionChange: (selection: string) => void;
   onSetSessionModelSelection: (selection: string) => void;
@@ -113,7 +127,7 @@ export function AgentPanel({
       <AgentSessionSummary
         activeSession={activeSession}
         knowledgeBases={knowledgeBases}
-        notes={notes}
+        currentFileLabel={currentFileLabel}
         modelConfig={modelConfig}
       />
 
@@ -133,6 +147,7 @@ export function AgentPanel({
           activeSession={activeSession}
           knowledgeBases={knowledgeBases}
           notes={notes}
+          currentFileLabel={currentFileLabel}
           modelConfig={modelConfig}
           isBusy={isBusy}
           onToggleSessionContext={onToggleSessionContext}
@@ -150,18 +165,21 @@ export function AgentPanel({
         onToggleScopeKnowledgeBase={onToggleScopeKnowledgeBase}
       />
 
-      <AgentMessageList activeSession={activeSession} />
+      <AgentMessageList activeSession={activeSession} notes={notes} documents={documents} />
 
       <AgentInput
         activeSession={activeSession}
         prompt={prompt}
         skills={skills}
         selectedSkillIds={selectedSkillIds}
+        mentionedFiles={mentionedFiles}
+        selectedMentionedFileIds={selectedMentionedFileIds}
         modelConfig={modelConfig}
         turnModelSelection={turnModelSelection}
         isBusy={isBusy}
         onPromptChange={onPromptChange}
         onSelectedSkillIdsChange={onSelectedSkillIdsChange}
+        onSelectedMentionedFileIdsChange={onSelectedMentionedFileIdsChange}
         onSubmitPrompt={onSubmitPrompt}
         onTurnModelSelectionChange={onTurnModelSelectionChange}
       />

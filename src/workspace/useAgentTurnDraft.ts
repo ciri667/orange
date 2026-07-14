@@ -6,6 +6,8 @@ export function useAgentTurnDraft() {
   const [turnModelSelection, setTurnModelSelection] = useState("");
   /** 本轮通过 slash picker 显式激活的 Skill ID；发送成功后清空，失败时保留便于重试。 */
   const [explicitSkillIds, setExplicitSkillIds] = useState<string[]>([]);
+  /** 本轮通过 @ picker 显式提供给 Agent 的文件 ID；只作用于当前 turn，不改变会话工具范围。 */
+  const [mentionedFileIds, setMentionedFileIds] = useState<string[]>([]);
   /** Agent 输入框草稿，发送成功后清空，失败时恢复原输入便于重试。 */
   const [agentPrompt, setAgentPrompt] = useState("");
 
@@ -13,6 +15,7 @@ export function useAgentTurnDraft() {
   function resetTurnSelection() {
     setTurnModelSelection("");
     setExplicitSkillIds([]);
+    setMentionedFileIds([]);
   }
 
   return {
@@ -22,6 +25,8 @@ export function useAgentTurnDraft() {
     setTurnModelSelection,
     explicitSkillIds,
     setExplicitSkillIds,
+    mentionedFileIds,
+    setMentionedFileIds,
     resetTurnSelection,
   };
 }

@@ -1987,6 +1987,7 @@ export async function runAgentTurn(
   modelProviderId?: string,
   modelId?: string,
   explicitSkillIds: string[] = [],
+  mentionedFileIds: string[] = [],
 ): Promise<AgentTurnResult> {
   const request: AgentTurnRequest = {
     prompt,
@@ -1998,11 +1999,12 @@ export async function runAgentTurn(
     modelProviderId,
     modelId,
     explicitSkillIds,
+    mentionedFileIds,
   };
 
   if (!isTauriRuntime()) {
     logBrowserSkillContext(browserAgentSkills, request);
-    const nextSnapshot = runMockAgentTurn(snapshot, prompt, action, clientMessageId, explicitSkillIds);
+    const nextSnapshot = runMockAgentTurn(snapshot, prompt, action, clientMessageId, explicitSkillIds, mentionedFileIds);
 
     browserAuditLogs = [createBrowserAuditLog(nextSnapshot, prompt), ...browserAuditLogs].slice(0, 20);
 

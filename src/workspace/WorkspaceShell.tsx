@@ -1,6 +1,7 @@
 import { useState } from "react";
 import { PanelRightOpen } from "lucide-react";
 import { AgentPanel } from "../agent/AgentPanel";
+import type { AgentMentionFile } from "../agent/AgentInput";
 import { DocumentPane } from "../editor/DocumentPane";
 import { EditorPane } from "../editor/EditorPane";
 import { buildFileTree } from "../knowledge-base/treeUtils";
@@ -170,6 +171,30 @@ function buildDraftAgentSession(knowledgeBase: KnowledgeBase): AgentSession {
   };
 }
 
+/** 根据会话授权范围构造 @ picker 的公开文件清单；不携带正文或绝对路径。 */
+function buildMentionableFiles(snapshot: WorkspaceSnapshot, session: AgentSession): AgentMentionFile[] {
+  const scopeIds = new Set(session.knowledgeBaseIds);
+  const notes = snapshot.notes
+    .filter((note) => scopeIds.has(note.knowledgeBaseId))
+    .map<AgentMentionFile>((note) => ({
+      id: note.id,
+      displayName: note.title,
+      relativePath: note.path,
+      kind: "markdown",
+    }));
+  const documents = snapshot.documents
+    .filter((document) => scopeIds.has(document.knowledgeBaseId))
+    .map<AgentMentionFile>((document) => ({
+      id: document.id,
+      displayName: document.title,
+      relativePath: document.path,
+      kind: document.fileType === "txt" ? "text" : document.fileType,
+    }));
+
+  // 按路径排序让同名文件的 picker 顺序稳定，避免每次渲染跳动。
+  return [...notes, ...documents].sort((left, right) => left.relativePath.localeCompare(right.relativePath));
+}
+
 /** 从当前知识库解析应展示的会话；只复用已有会话，不创建新的历史记录。 */
 function resolveKnowledgeBaseSessionId(snapshot: WorkspaceSnapshot, knowledgeBaseId: string) {
   const activeSession = snapshot.sessions.find((session) => session.id === snapshot.activeSessionId);
@@ -222,12 +247,13 @@ function applyFirstPromptTitle(snapshot: WorkspaceSnapshot, session: AgentSessio
 }
 
 /** 构造发送后立即展示的用户消息，后端会通过同一 ID 复用并持久化本轮记录。 */
-function buildOptimisticUserMessage(prompt: string, action: AgentActionType): AgentMessage {
+function buildOptimisticUserMessage(prompt: string, action: AgentActionType, mentionedFileIds: string[]): AgentMessage {
   return {
     id: createLocalId("user"),
     role: "user",
     content: prompt,
     action,
+    mentionedFileIds: mentionedFileIds.length ? mentionedFileIds : undefined,
   };
 }
 
@@ -308,6 +334,8 @@ export function WorkspaceShell() {
     setTurnModelSelection,
     explicitSkillIds,
     setExplicitSkillIds,
+    mentionedFileIds,
+    setMentionedFileIds,
     resetTurnSelection,
   } = useAgentTurnDraft();
   /** 左侧目录搜索词，只影响当前前端文件树过滤，不写入持久化。 */
@@ -487,6 +515,8 @@ export function WorkspaceShell() {
   const activeSession = persistedActiveSession ?? buildDraftAgentSession(activeKnowledgeBase);
   const activeDocument = getActiveDocument(currentSnapshot);
   const activeNote = getActiveNote(currentSnapshot);
+  /** 当前会话可 @ 的文件仅来自既有工具授权范围，不因显式材料扩大权限。 */
+  const mentionableFiles = buildMentionableFiles(currentSnapshot, activeSession);
   const isActiveNoteDirty = activeNote ? dirtyNoteIds.has(activeNote.id) : false;
   const isActiveDocumentDirty = activeDocument ? dirtyDocumentIds.has(activeDocument.id) : false;
   const fileTree = buildFileTree({
@@ -1615,6 +1645,8 @@ export function WorkspaceShell() {
   async function handleSubmitPrompt(action: AgentActionType = "ask", presetPrompt?: string, sourceSnapshot = currentSnapshot) {
     const prompt = (presetPrompt ?? agentPrompt).trim();
     const turnExplicitSkillIds = presetPrompt ? [] : explicitSkillIds;
+    // 预设操作不继承输入框里的 @ 文件，避免审阅等系统操作意外携带上一轮材料。
+    const turnMentionedFileIds = presetPrompt ? [] : mentionedFileIds;
     const sourceActiveSession = sourceSnapshot.sessions.find((session) => session.id === sourceSnapshot.activeSessionId) ?? activeSession;
     const sourceActiveKnowledgeBase =
       sourceSnapshot.knowledgeBases.find((knowledgeBase) => knowledgeBase.id === sourceSnapshot.activeKnowledgeBaseId) ?? activeKnowledgeBase;
@@ -1627,7 +1659,7 @@ export function WorkspaceShell() {
       return;
     }
 
-    const optimisticMessage = buildOptimisticUserMessage(prompt, action);
+    const optimisticMessage = buildOptimisticUserMessage(prompt, action, turnMentionedFileIds);
     const promptBeforeSubmit = agentPrompt;
     let didPersistOptimisticMessage = false;
 
@@ -1681,6 +1713,8 @@ export function WorkspaceShell() {
       // 先提交本地快照，让用户发送的消息立即出现在对话框中，再等待 Agent 慢任务。
       commitSnapshot(snapshotForTurn);
       setAgentPrompt("");
+      // 消息已携带引用 ID，发送后清空输入态；请求失败时会在 catch 中恢复，方便重试。
+      setMentionedFileIds([]);
       snapshotForTurn = await saveSession(snapshotForTurn, sessionForTurn);
       didPersistOptimisticMessage = true;
       logInfo("用户消息已乐观落库。", {
@@ -1711,6 +1745,7 @@ export function WorkspaceShell() {
         decodedTurnModelSelection.providerId || undefined,
         decodedTurnModelSelection.modelId || undefined,
         turnExplicitSkillIds,
+        turnMentionedFileIds,
       );
 
       commitSnapshot(result.snapshot);
@@ -1722,6 +1757,9 @@ export function WorkspaceShell() {
       setAuditLogs(nextAuditLogs);
       setAppEventLogs(nextAppEventLogs);
     } catch (error) {
+      if (!presetPrompt) {
+        setMentionedFileIds(turnMentionedFileIds);
+      }
       if (!didPersistOptimisticMessage) {
         commitSnapshot(sourceSnapshot);
         setAgentPrompt(promptBeforeSubmit);
@@ -2133,9 +2171,16 @@ export function WorkspaceShell() {
             activeKnowledgeBase={activeKnowledgeBase}
             knowledgeBases={currentSnapshot.knowledgeBases}
             notes={currentSnapshot.notes}
+            documents={currentSnapshot.documents}
+            currentFileLabel={
+              activeNote?.title ??
+              (activeDocument?.fileType === "txt" ? activeDocument.title : "当前打开文件不可作为编辑目标")
+            }
             prompt={agentPrompt}
             skills={agentSkills}
             selectedSkillIds={explicitSkillIds}
+            mentionedFiles={mentionableFiles}
+            selectedMentionedFileIds={mentionedFileIds}
             modelConfig={userSettings.modelConfig}
             turnModelSelection={turnModelSelection}
             isBusy={isBusy}
@@ -2152,6 +2197,7 @@ export function WorkspaceShell() {
             onToggleScopeKnowledgeBase={handleToggleScopeKnowledgeBase}
             onPromptChange={setAgentPrompt}
             onSelectedSkillIdsChange={setExplicitSkillIds}
+            onSelectedMentionedFileIdsChange={setMentionedFileIds}
             onSubmitPrompt={() => handleSubmitPrompt("ask")}
             onTurnModelSelectionChange={setTurnModelSelection}
             onSetSessionModelSelection={handleSetSessionModelSelection}

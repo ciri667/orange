@@ -60,10 +60,15 @@ export function getSessionKnowledgeBaseLabel(session: AgentSession, knowledgeBas
   return names.length ? names.join(" / ") : "未绑定知识库";
 }
 
-/** 返回会话绑定的笔记名称摘要。 */
-export function getSessionNoteLabel(session: AgentSession, notes: Note[]) {
+/**
+ * 返回会话恢复时尝试重新打开的笔记名称。
+ *
+ * `activeNoteId` 是历史会话的恢复锚点，不代表工作台当前正在编辑的文件；
+ * 调用方展示当前文件时必须使用工作台焦点而不是这个值。
+ */
+export function getSessionRecoveryNoteLabel(session: AgentSession, notes: Note[]) {
   if (!session.activeNoteId) {
-    return "未绑定具体笔记";
+    return "未设置";
   }
 
   return notes.find((note) => note.id === session.activeNoteId)?.title ?? "笔记已移动";

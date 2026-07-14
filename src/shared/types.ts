@@ -248,6 +248,8 @@ export interface AgentMessage {
   role: "user" | "assistant";
   content: string;
   action?: AgentActionType;
+  /** 本条用户消息显式 @ 的文件 ID；仅记录本轮材料，不作为后续会话自动上下文。 */
+  mentionedFileIds?: string[];
   citations?: Citation[];
   toolCalls?: AgentToolCall[];
 }
@@ -609,6 +611,8 @@ export interface AgentTurnRequest {
   sessionId: string;
   activeKnowledgeBaseId: string;
   activeNoteId: string;
+  /** 本轮由用户显式 @ 的文件 ID；后端会再次进行 scope 与存在性校验。 */
+  mentionedFileIds?: string[];
   /** 前端已乐观渲染并持久化的用户消息 ID，运行时复用它避免重复追加。 */
   clientMessageId?: string;
   /** 本轮显式选择的 Provider；优先级高于会话默认和全局默认。 */

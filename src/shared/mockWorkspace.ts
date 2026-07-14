@@ -555,6 +555,7 @@ export function runMockAgentTurn(
   action: AgentActionType,
   clientMessageId?: string,
   explicitSkillIds: string[] = [],
+  mentionedFileIds: string[] = [],
 ): WorkspaceSnapshot {
   const nextSnapshot = cloneWorkspaceSnapshot(snapshot);
   const session = nextSnapshot.sessions.find((item) => item.id === nextSnapshot.activeSessionId) ?? nextSnapshot.sessions[0];
@@ -578,6 +579,7 @@ export function runMockAgentTurn(
     role: "user",
     content: prompt,
     action,
+    mentionedFileIds: mentionedFileIds.length ? mentionedFileIds : undefined,
   };
   /** 去重后的显式 Skill ID；mock 环境只有 ID，不读取或保存 Skill 正文。 */
   const explicitSkillIdList = Array.from(new Set(explicitSkillIds.map((skillId) => skillId.trim()).filter(Boolean))).slice(0, 3);
