@@ -121,10 +121,10 @@ export function DiffPanel({
       </div>
 
       <div className="review-body">
-        <div className="unified-diff" aria-label="Markdown 行级 diff">
+        <div className="unified-diff" aria-label="文本文件行级 diff">
           <div className="unified-diff-file">
             <OverflowTooltipText text={change.targetPath} logArea="diff_file_path" />
-            <span>{change.type === "create" ? "new file" : "pending"}</span>
+            <span>{change.fileType === "txt" ? "TXT" : "Markdown"} · {change.type === "create" ? "new file" : "pending"}</span>
           </div>
           {diff.hunks.map((hunk) => (
             <DiffHunkView

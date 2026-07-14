@@ -18,14 +18,14 @@ export type AgentToolName =
   | "local_rule_agent"
   | "review_change"
   | "search_notes"
-  | "read_note"
+  | "read_file"
   | "list_tree"
-  | "get_current_note"
+  | "get_current_file"
   | "get_session_summary"
   | "search_session_messages"
   | "read_session_context"
-  | "propose_note_change"
-  | "create_note_draft"
+  | "propose_file_change"
+  | "create_file_draft"
   | "suggest_organization";
 
 /** Agent 工具调用状态，用于前端展示本轮 loop 的执行轨迹。 */
@@ -327,11 +327,15 @@ export interface KnowledgeBaseMemory {
   updatedAt: string;
 }
 
-/** Agent 对笔记提出的待确认变更，确认前不能修改本地 Markdown。 */
+/** Agent 对可编辑 Markdown/TXT 文件提出的待确认变更，确认前不能修改本地文件。 */
 export interface ProposedChange {
   id: string;
   knowledgeBaseId: string;
   noteId?: string;
+  /** 可编辑目标的统一 ID；旧会话的 noteId 会被迁移为该字段。 */
+  targetId?: string;
+  targetKind?: "note" | "document";
+  fileType?: "markdown" | "txt";
   type: "rewrite" | "create" | "organize";
   operation?: "replace" | "append" | "multi_replace";
   title: string;

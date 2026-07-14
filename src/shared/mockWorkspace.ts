@@ -561,6 +561,10 @@ export function runMockAgentTurn(
   const activeNote = nextSnapshot.activeNoteId
     ? nextSnapshot.notes.find((note) => note.id === nextSnapshot.activeNoteId)
     : undefined;
+  /** 浏览器开发态也允许 Agent 对当前 TXT 生成待确认纯文本 diff。 */
+  const activeTextDocument = nextSnapshot.activeDocumentId
+    ? nextSnapshot.documents.find((document) => document.id === nextSnapshot.activeDocumentId && document.fileType === "txt")
+    : undefined;
   const activeKnowledgeBase =
     nextSnapshot.knowledgeBases.find((knowledgeBase) => knowledgeBase.id === nextSnapshot.activeKnowledgeBaseId) ??
     nextSnapshot.knowledgeBases[0];
@@ -612,7 +616,20 @@ export function runMockAgentTurn(
     session.messages.push(userMessage);
   }
 
-  if (action === "rewrite") {
+  if (action === "rewrite" && activeTextDocument) {
+    const original = activeTextDocument.content ?? "";
+    const next = shouldAppendToNote(prompt) ? `${original}${buildAppendText(prompt)}` : buildRewriteText(original);
+    const nextChange: ProposedChange = {
+      id: createLocalId("change"), knowledgeBaseId: activeTextDocument.knowledgeBaseId,
+      targetId: activeTextDocument.id, targetKind: "document", fileType: "txt", type: "rewrite",
+      operation: shouldAppendToNote(prompt) ? "append" : "replace", title: `改写《${activeTextDocument.title}》`,
+      targetPath: activeTextDocument.path, original, next, originalHash: activeTextDocument.contentHash, status: "pending",
+    };
+    nextChange.diffStats = buildMarkdownDiff(original, next).stats;
+    toolCalls.push(createToolCall("propose_file_change", `已为 TXT《${activeTextDocument.title}》生成待确认改写 diff`, { fileId: activeTextDocument.id }));
+    session.pendingChange = nextChange;
+    content = "我已经生成 TXT 纯文本改写建议；确认前不会写入本地文件。";
+  } else if (action === "rewrite") {
     if (!activeNote) {
       content = "当前没有可改写的 Markdown 笔记。";
     } else {
@@ -633,6 +650,9 @@ export function runMockAgentTurn(
           id: createLocalId("change"),
           knowledgeBaseId: activeKnowledgeBase.id,
           noteId: activeNote.id,
+          targetId: activeNote.id,
+          targetKind: "note",
+          fileType: "markdown",
           type: "rewrite",
           operation: isAppend ? "append" : isMultiEdit ? "multi_replace" : "replace",
           title: isAppend ? `追加到《${activeNote.title}》文末` : isMultiEdit ? `多处编辑《${activeNote.title}》` : `改写《${activeNote.title}》的核心段落`,
@@ -644,8 +664,8 @@ export function runMockAgentTurn(
         };
         nextChange.diffStats = buildMarkdownDiff(nextChange.original, nextChange.next).stats;
         toolCalls.push(
-          createToolCall("propose_note_change", `已为《${activeNote.title}》生成待确认改写 diff`, {
-            noteId: activeNote.id,
+          createToolCall("propose_file_change", `已为《${activeNote.title}》生成待确认改写 diff`, {
+            fileId: activeNote.id,
             targetPath: activeNote.path,
             operation: nextChange.operation,
           }),
@@ -657,16 +677,19 @@ export function runMockAgentTurn(
       }
     }
   } else if (action === "create") {
-    const targetPath = activeKnowledgeBase.id === "kb-work" ? "Release/上线检查清单.md" : "00-Inbox/上线检查清单.md";
+    const wantsTxt = /(?:\.txt|TXT|纯文本)/.test(prompt);
+    const targetPath = wantsTxt ? "00-Inbox/上线检查清单.txt" : activeKnowledgeBase.id === "kb-work" ? "Release/上线检查清单.md" : "00-Inbox/上线检查清单.md";
     const nextChange: ProposedChange = {
       id: createLocalId("change"),
       knowledgeBaseId: activeKnowledgeBase.id,
+      targetKind: wantsTxt ? "document" : "note",
+      fileType: wantsTxt ? "txt" : "markdown",
       type: "create",
       operation: undefined,
       title: "创建《上线检查清单》草稿",
       targetPath,
       original: "",
-      next: `# 上线检查清单
+      next: wantsTxt ? "上线检查清单\n- 首次启动完成默认知识库目录选择\n- 所有 Agent 写入先展示 diff\n- 用户确认后才写入本地文件" : `# 上线检查清单
 
 ## 产品体验
 - 首次启动可以完成默认知识库目录选择。
@@ -681,7 +704,7 @@ export function runMockAgentTurn(
       status: "pending",
     };
     nextChange.diffStats = buildMarkdownDiff(nextChange.original, nextChange.next).stats;
-    toolCalls.push(createToolCall("create_note_draft", `已生成 ${targetPath} 的待确认新建 diff`, { targetPath }));
+    toolCalls.push(createToolCall("create_file_draft", `已生成 ${targetPath} 的待确认新建 diff`, { targetPath, fileType: wantsTxt ? "txt" : "markdown" }));
     session.pendingChange = nextChange;
     content = "我已经生成新笔记草稿，但它还没有写入本地目录。确认 diff 后才会创建 Markdown 文件。";
   } else if (action === "organize") {
@@ -707,8 +730,8 @@ export function runMockAgentTurn(
 
     if (citations[0]) {
       toolCalls.push(
-        createToolCall("read_note", `已读取最相关笔记《${citations[0].title}》用于组织回答`, {
-          noteId: citations[0].noteId,
+        createToolCall("read_file", `已读取最相关笔记《${citations[0].title}》用于组织回答`, {
+          fileId: citations[0].noteId,
         }),
       );
     }
@@ -746,6 +769,17 @@ export function acceptMockProposedChange(snapshot: WorkspaceSnapshot): Workspace
   }
 
   if (pendingChange.type === "create") {
+    if (pendingChange.fileType === "txt") {
+      const newDocument: WorkspaceDocument = {
+        id: createLocalId("document"), knowledgeBaseId: pendingChange.knowledgeBaseId,
+        title: pendingChange.targetPath.split("/").at(-1)?.replace(/\.txt$/i, "") || "Agent 草稿",
+        path: pendingChange.targetPath, fileType: "txt", updatedAt: "刚刚",
+        contentHash: createContentHash(pendingChange.next), content: pendingChange.next, previewAvailable: false,
+      };
+      nextSnapshot.documents = [newDocument, ...nextSnapshot.documents];
+      nextSnapshot.activeNoteId = "";
+      nextSnapshot.activeDocumentId = newDocument.id;
+    } else {
     const newNote: Note = {
       id: createLocalId("note"),
       knowledgeBaseId: pendingChange.knowledgeBaseId,
@@ -762,6 +796,15 @@ export function acceptMockProposedChange(snapshot: WorkspaceSnapshot): Workspace
     nextSnapshot.activeDocumentId = "";
     session.activeNoteId = newNote.id;
     session.pinnedNoteIds = Array.from(new Set([...session.pinnedNoteIds, newNote.id]));
+    }
+  } else if (pendingChange.fileType === "txt" && pendingChange.targetId) {
+    nextSnapshot.documents = nextSnapshot.documents.map((document) =>
+      document.id === pendingChange.targetId
+        ? { ...document, content: pendingChange.next, contentHash: createContentHash(pendingChange.next), updatedAt: "刚刚" }
+        : document,
+    );
+    nextSnapshot.activeNoteId = "";
+    nextSnapshot.activeDocumentId = pendingChange.targetId;
   } else if (pendingChange.noteId) {
     nextSnapshot.notes = nextSnapshot.notes.map((note) => {
       // 只更新 diff 指向的笔记，避免用户切换后误写其他文件。
