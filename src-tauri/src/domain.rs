@@ -266,6 +266,9 @@ pub struct AgentMessage {
     pub action: Option<String>,
     pub citations: Option<Vec<Citation>>,
     pub tool_calls: Option<Vec<AgentToolCall>>,
+    /** 本条用户消息在发送时显式 @ 的文件 ID；仅用于历史回显，不会成为长期上下文。 */
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub mentioned_file_ids: Vec<String>,
 }
 
 /** Agent 对可编辑文本文件提出的待确认变更；正文始终留在 diff 中，不进入日志。 */
@@ -814,6 +817,9 @@ pub struct AgentTurnRequest {
     /** 本轮通过 slash picker 显式激活的 Skill ID；默认空数组兼容历史请求。 */
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub explicit_skill_ids: Vec<String>,
+    /** 本轮用户显式 @ 的文件 ID；Runtime 会在会话 scope 内重新校验。 */
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub mentioned_file_ids: Vec<String>,
 }
 
 /** Agent 单轮返回结果。 */

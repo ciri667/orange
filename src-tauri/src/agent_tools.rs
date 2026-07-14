@@ -1682,6 +1682,7 @@ mod tests {
             model_provider_id: None,
             model_id: None,
             explicit_skill_ids: Vec::new(),
+            mentioned_file_ids: Vec::new(),
         }
     }
 

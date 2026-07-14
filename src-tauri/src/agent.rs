@@ -100,6 +100,7 @@ pub fn run_agent_turn(
             action: Some(request.action),
             citations: Some(deduplicate_citations(citations)),
             tool_calls: Some(tool_calls),
+            mentioned_file_ids: Vec::new(),
         });
     snapshot.sessions[session_index].updated_at = "刚刚".to_owned();
 
@@ -203,8 +204,13 @@ fn ensure_user_message_for_turn(
 
     if session
         .messages
-        .iter()
-        .any(|message| message.id == user_message_id && message.role == "user")
+        .iter_mut()
+        .find(|message| message.id == user_message_id && message.role == "user")
+        .map(|message| {
+            // 乐观插入的用户消息以本轮请求为准补齐 @ 文件，保证历史回显一致。
+            message.mentioned_file_ids = request.mentioned_file_ids.clone();
+        })
+        .is_some()
     {
         return;
     }
@@ -216,6 +222,7 @@ fn ensure_user_message_for_turn(
         action: Some(request.action.clone()),
         citations: None,
         tool_calls: None,
+        mentioned_file_ids: request.mentioned_file_ids.clone(),
     });
 }
 
@@ -266,6 +273,7 @@ mod tests {
             model_provider_id: None,
             model_id: None,
             explicit_skill_ids: Vec::new(),
+            mentioned_file_ids: Vec::new(),
         };
         let response = build_local_response(&request, &[], &[]);
 
@@ -285,6 +293,7 @@ mod tests {
             model_provider_id: None,
             model_id: None,
             explicit_skill_ids: Vec::new(),
+            mentioned_file_ids: Vec::new(),
         };
         let response = build_local_response(&request, &[], &[]);
 
@@ -310,6 +319,7 @@ mod tests {
                 action: Some("ask".to_owned()),
                 citations: None,
                 tool_calls: None,
+                mentioned_file_ids: Vec::new(),
             }],
             pending_change: None,
             context_summary: None,
@@ -329,6 +339,7 @@ mod tests {
             model_provider_id: None,
             model_id: None,
             explicit_skill_ids: Vec::new(),
+            mentioned_file_ids: Vec::new(),
         };
 
         ensure_user_message_for_turn(&mut session, &request);

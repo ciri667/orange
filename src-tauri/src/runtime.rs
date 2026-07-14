@@ -14,7 +14,7 @@ use reqwest::Client;
 use serde_json::{json, Value};
 use std::collections::HashSet;
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Component, Path, PathBuf};
 use std::time::{Duration, Instant};
 use tauri::AppHandle;
 
@@ -63,6 +63,12 @@ const MAX_AUDIT_FRAGMENTS: usize = 8;
 /** 后端再次限制每轮显式 Skill 数量，避免绕过 UI 传入过多 instructions。 */
 const MAX_EXPLICIT_SKILLS_PER_TURN: usize = 3;
 
+/** 单轮最多接受的显式 @ 文件数量，避免客户端绕过输入框造成上下文膨胀。 */
+const MAX_MENTIONED_FILES_PER_TURN: usize = 8;
+
+/** 单个显式文本材料的正文上限；正文不会写入日志。 */
+const MAX_MENTIONED_TEXT_CHARS: usize = 12_000;
+
 /** 云端模型请求超时时间，避免网络卡住后阻塞 Agent turn。 */
 const MODEL_HTTP_TIMEOUT_SECONDS: u64 = 60;
 
@@ -85,6 +91,17 @@ struct ExplicitSkillSelection {
     skills: Vec<AgentSkill>,
     requested_count: usize,
     truncated: bool,
+}
+
+/** 已通过 scope 校验的本轮显式材料，内容仅在构造模型消息时使用。 */
+struct MentionedFileMaterial {
+    id: String,
+    knowledge_base_id: String,
+    title: String,
+    path: String,
+    file_type: String,
+    content: Option<String>,
+    image_markdown_path: Option<String>,
 }
 
 /** 真实 Agent Runtime 的调度结果，包含可持久化快照和本轮请求审计摘要。 */
@@ -231,6 +248,180 @@ fn resolve_explicit_skills(
         requested_count: requested_skill_ids.len(),
         truncated,
     })
+}
+
+/**
+ * 解析本轮 @ 文件。客户端传入的 ID 不可信，必须重新按会话授权 scope、文件类型和数量限制过滤。
+ * Markdown/TXT 使用已索引的文本正文；二进制和 Office 文档只向模型提供元数据。
+ */
+fn resolve_mentioned_files(
+    snapshot: &WorkspaceSnapshot,
+    session: &AgentSession,
+    request: &AgentTurnRequest,
+) -> Vec<MentionedFileMaterial> {
+    let allowed_kb_ids: HashSet<&str> = session
+        .knowledge_base_ids
+        .iter()
+        .map(String::as_str)
+        .collect();
+    let mut seen_ids = HashSet::new();
+    let mut materials = Vec::new();
+    let mut rejected_count = 0usize;
+
+    // 图片链接只在当前编辑目标为同一知识库 Markdown 时生成，避免跨根目录产生失效引用。
+    let active_markdown = snapshot
+        .notes
+        .iter()
+        .find(|note| note.id == request.active_note_id)
+        .filter(|note| allowed_kb_ids.contains(note.knowledge_base_id.as_str()));
+
+    for raw_id in &request.mentioned_file_ids {
+        let file_id = raw_id.trim();
+        if file_id.is_empty() || !seen_ids.insert(file_id.to_owned()) {
+            continue;
+        }
+        if materials.len() >= MAX_MENTIONED_FILES_PER_TURN {
+            rejected_count += 1;
+            continue;
+        }
+
+        if let Some(note) = snapshot.notes.iter().find(|note| note.id == file_id) {
+            if !allowed_kb_ids.contains(note.knowledge_base_id.as_str()) {
+                rejected_count += 1;
+                continue;
+            }
+            materials.push(MentionedFileMaterial {
+                id: note.id.clone(),
+                knowledge_base_id: note.knowledge_base_id.clone(),
+                title: note.title.clone(),
+                path: note.path.clone(),
+                file_type: "markdown".to_owned(),
+                content: Some(truncate_chars(&note.content, MAX_MENTIONED_TEXT_CHARS)),
+                image_markdown_path: None,
+            });
+            continue;
+        }
+
+        let Some(document) = snapshot
+            .documents
+            .iter()
+            .find(|document| document.id == file_id)
+        else {
+            rejected_count += 1;
+            continue;
+        };
+        if !allowed_kb_ids.contains(document.knowledge_base_id.as_str())
+            || !matches!(
+                document.file_type.as_str(),
+                "txt" | "docx" | "pdf" | "image"
+            )
+        {
+            rejected_count += 1;
+            continue;
+        }
+
+        let image_markdown_path = (document.file_type == "image")
+            .then(|| {
+                active_markdown.and_then(|markdown| {
+                    (markdown.knowledge_base_id == document.knowledge_base_id)
+                        .then(|| relative_markdown_path(&markdown.path, &document.path))
+                        .flatten()
+                })
+            })
+            .flatten();
+        materials.push(MentionedFileMaterial {
+            id: document.id.clone(),
+            knowledge_base_id: document.knowledge_base_id.clone(),
+            title: document.title.clone(),
+            path: document.path.clone(),
+            file_type: document.file_type.clone(),
+            content: (document.file_type == "txt")
+                .then(|| {
+                    document
+                        .content
+                        .as_deref()
+                        .map(|content| truncate_chars(content, MAX_MENTIONED_TEXT_CHARS))
+                })
+                .flatten(),
+            image_markdown_path,
+        });
+    }
+
+    if rejected_count > 0 {
+        log::warn!(
+            target: "agent_runtime",
+            "显式 @ 文件已过滤：requested_count={} accepted_count={} rejected_count={}",
+            request.mentioned_file_ids.len(), materials.len(), rejected_count
+        );
+    }
+    log::debug!(
+        target: "agent_runtime",
+        "显式 @ 文件解析完成：requested_count={} accepted_count={} text_count={} metadata_count={}",
+        request.mentioned_file_ids.len(),
+        materials.len(),
+        materials.iter().filter(|material| material.content.is_some()).count(),
+        materials.iter().filter(|material| material.content.is_none()).count()
+    );
+    materials
+}
+
+/** 为同一知识库中的图片计算相对当前 Markdown 的安全引用路径，不访问本机绝对路径。 */
+fn relative_markdown_path(markdown_path: &str, asset_path: &str) -> Option<String> {
+    let markdown_directory = Path::new(markdown_path).parent()?;
+    let source = normalized_path_components(markdown_directory)?;
+    let target = normalized_path_components(Path::new(asset_path))?;
+    let shared_length = source
+        .iter()
+        .zip(&target)
+        .take_while(|(left, right)| left == right)
+        .count();
+    let mut result = vec!["..".to_owned(); source.len().saturating_sub(shared_length)];
+    result.extend(target.into_iter().skip(shared_length));
+    (!result.is_empty()).then(|| result.join("/"))
+}
+
+/** 将知识库扫描得到的相对路径规范化为普通组件，拒绝上级目录和绝对路径。 */
+fn normalized_path_components(path: &Path) -> Option<Vec<String>> {
+    let mut result = Vec::new();
+    for component in path.components() {
+        match component {
+            Component::Normal(value) => result.push(value.to_string_lossy().to_string()),
+            Component::CurDir => {}
+            Component::ParentDir | Component::RootDir | Component::Prefix(_) => return None,
+        }
+    }
+    Some(result)
+}
+
+/** 将已校验的显式材料渲染给模型，并强调它们不缩小既有工具 scope。 */
+fn render_mentioned_files_prompt(materials: &[MentionedFileMaterial]) -> Option<String> {
+    if materials.is_empty() {
+        return None;
+    }
+    let entries = materials
+        .iter()
+        .map(|material| {
+            let metadata = format!(
+                "- 文件：{}（id={}，类型={}，知识库={}，相对路径={}）",
+                material.title,
+                material.id,
+                material.file_type,
+                material.knowledge_base_id,
+                material.path
+            );
+            if let Some(content) = &material.content {
+                format!("{metadata}\n正文：\n{content}")
+            } else if let Some(markdown_path) = &material.image_markdown_path {
+                format!("{metadata}\n可插入当前 Markdown 的安全引用：![]({markdown_path})")
+            } else {
+                format!("{metadata}\n仅提供元数据；不要读取或上传二进制内容。")
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n\n");
+    Some(format!(
+        "【本轮用户显式 @ 的文件】\n这些是本轮高优先级材料，请优先参考。它们不会缩小允许 scope：你仍可按需发现、读取或在待确认 diff 中修改 scope 内其他文件。当前编辑目标仍由界面当前文件决定。\n{entries}"
+    ))
 }
 
 /** 统计显式 Skill 来源分布，供运行日志观测，不包含路径或 instructions 正文。 */
@@ -1190,6 +1381,9 @@ fn build_model_messages(
         render_knowledge_base_memory_prompt(knowledge_base_memories, &snapshot.knowledge_bases);
     let context_summary_prompt = render_context_summary_prompt(session.context_summary.as_ref());
     let pending_change_prompt = render_pending_change_prompt(session.pending_change.as_ref());
+    // @ 材料独立于会话历史：只为本轮请求构造，绝不自动带入下一轮。
+    let mentioned_files_prompt =
+        render_mentioned_files_prompt(&resolve_mentioned_files(snapshot, session, request));
     let context_summary_prompt_chars = context_summary_prompt
         .as_ref()
         .map(|prompt| prompt.chars().count())
@@ -1242,6 +1436,13 @@ fn build_model_messages(
         messages.push(json!({
             "role": "system",
             "content": pending_change_prompt
+        }));
+    }
+
+    if let Some(mentioned_files_prompt) = mentioned_files_prompt {
+        messages.push(json!({
+            "role": "system",
+            "content": mentioned_files_prompt
         }));
     }
 
@@ -2357,8 +2558,13 @@ fn ensure_user_message_for_turn(session: &mut AgentSession, request: &AgentTurnR
 
     if session
         .messages
-        .iter()
-        .any(|message| message.id == user_message_id && message.role == "user")
+        .iter_mut()
+        .find(|message| message.id == user_message_id && message.role == "user")
+        .map(|message| {
+            // 前端乐观消息可能尚未带该字段；后端以本轮已提交请求为准补齐历史回显数据。
+            message.mentioned_file_ids = request.mentioned_file_ids.clone();
+        })
+        .is_some()
     {
         return user_message_id;
     }
@@ -2378,6 +2584,7 @@ fn build_user_message(request: &AgentTurnRequest, id: String) -> AgentMessage {
         action: Some(request.action.clone()),
         citations: None,
         tool_calls: None,
+        mentioned_file_ids: request.mentioned_file_ids.clone(),
     }
 }
 
@@ -2575,6 +2782,7 @@ fn model_error_turn(
             action: Some(request.action.clone()),
             citations: Some(Vec::new()),
             tool_calls: Some(tool_calls),
+            mentioned_file_ids: Vec::new(),
         });
     snapshot.sessions[session_index].updated_at = "刚刚".to_owned();
     update_agent_context_summary_deterministic(
@@ -2645,6 +2853,7 @@ fn skill_activation_error_turn(
             action: Some(request.action.clone()),
             citations: Some(Vec::new()),
             tool_calls: Some(tool_calls),
+            mentioned_file_ids: Vec::new(),
         });
     snapshot.sessions[session_index].updated_at = "刚刚".to_owned();
     update_agent_context_summary_deterministic(
@@ -2747,6 +2956,7 @@ fn push_assistant_message(
             action: Some(action.to_owned()),
             citations: Some(deduplicate_citations(citations)),
             tool_calls: Some(tool_calls),
+            mentioned_file_ids: Vec::new(),
         });
     snapshot.sessions[session_index].updated_at = "刚刚".to_owned();
 }
@@ -2940,7 +3150,69 @@ mod tests {
             model_provider_id: None,
             model_id: None,
             explicit_skill_ids: Vec::new(),
+            mentioned_file_ids: Vec::new(),
         }
+    }
+
+    /** @ 文件必须重新受会话 scope 约束，重复项去重且文本正文仅注入允许的 Markdown/TXT。 */
+    #[test]
+    fn mentioned_files_filter_scope_duplicates_and_inject_text() {
+        let mut snapshot = runtime_test_snapshot("授权 Markdown 正文".to_owned());
+        snapshot.documents.push(crate::domain::WorkspaceDocument {
+            id: "text-a".to_owned(),
+            knowledge_base_id: "kb-a".to_owned(),
+            title: "授权文本".to_owned(),
+            path: "Materials/a.txt".to_owned(),
+            file_type: "txt".to_owned(),
+            updated_at: "刚刚".to_owned(),
+            content_hash: "hash".to_owned(),
+            content: Some("TXT 显式材料正文".to_owned()),
+            preview_available: true,
+        });
+        let mut request = runtime_test_request("ask", "参考材料");
+        request.mentioned_file_ids = vec![
+            "note-a".to_owned(),
+            "note-a".to_owned(),
+            "note-b".to_owned(),
+            "text-a".to_owned(),
+            "missing".to_owned(),
+        ];
+        let materials = resolve_mentioned_files(&snapshot, &snapshot.sessions[0], &request);
+        let prompt = render_mentioned_files_prompt(&materials).unwrap();
+
+        assert_eq!(materials.len(), 2);
+        assert!(prompt.contains("授权 Markdown 正文"));
+        assert!(prompt.contains("TXT 显式材料正文"));
+        assert!(!prompt.contains("private"));
+    }
+
+    /** 同知识库图片仅生成相对当前 Markdown 的引用，跨库或非 Markdown 当前文件不生成。 */
+    #[test]
+    fn mentioned_image_exposes_safe_relative_markdown_path() {
+        let mut snapshot = runtime_test_snapshot("正文".to_owned());
+        snapshot.notes[0].path = "Notes/目标.md".to_owned();
+        snapshot.documents.push(crate::domain::WorkspaceDocument {
+            id: "image-a".to_owned(),
+            knowledge_base_id: "kb-a".to_owned(),
+            title: "图示".to_owned(),
+            path: "assets/diagram.png".to_owned(),
+            file_type: "image".to_owned(),
+            updated_at: "刚刚".to_owned(),
+            content_hash: "hash".to_owned(),
+            content: None,
+            preview_available: true,
+        });
+        let mut request = runtime_test_request("ask", "插入图片");
+        request.mentioned_file_ids = vec!["image-a".to_owned()];
+        let materials = resolve_mentioned_files(&snapshot, &snapshot.sessions[0], &request);
+
+        assert_eq!(
+            materials[0].image_markdown_path.as_deref(),
+            Some("../assets/diagram.png")
+        );
+        assert!(render_mentioned_files_prompt(&materials)
+            .unwrap()
+            .contains("![](../assets/diagram.png)"));
     }
 
     /** 构造已启用云端模型的测试设置，默认 provider 指向测试 endpoint 和模型。 */
@@ -3052,6 +3324,7 @@ mod tests {
             action: Some("ask".to_owned()),
             citations: None,
             tool_calls: None,
+            mentioned_file_ids: Vec::new(),
         });
 
         let messages = build_model_messages(
@@ -3315,6 +3588,7 @@ mod tests {
                 action: Some("ask".to_owned()),
                 citations: None,
                 tool_calls: None,
+                mentioned_file_ids: Vec::new(),
             })
             .collect();
         snapshot.sessions[0].context_summary = Some(AgentContextSummary {
@@ -3364,6 +3638,7 @@ mod tests {
                 action: Some("ask".to_owned()),
                 citations: None,
                 tool_calls: None,
+                mentioned_file_ids: Vec::new(),
             })
             .collect();
         snapshot.sessions[0].context_summary = Some(AgentContextSummary {
@@ -3508,6 +3783,7 @@ mod tests {
             action: Some("rewrite".to_owned()),
             citations: None,
             tool_calls: None,
+            mentioned_file_ids: Vec::new(),
         });
         snapshot.sessions[0].pending_change = Some(runtime_test_pending_change("pending"));
 

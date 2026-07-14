@@ -282,6 +282,7 @@ pub(crate) fn build_im_user_message(prompt: &str) -> AgentMessage {
         action: Some("ask".to_owned()),
         citations: None,
         tool_calls: None,
+        mentioned_file_ids: Vec::new(),
     }
 }
 
@@ -302,6 +303,7 @@ pub(crate) fn build_im_turn_request(
         model_provider_id: None,
         model_id: None,
         explicit_skill_ids: Vec::new(),
+        mentioned_file_ids: Vec::new(),
     }
 }
 
