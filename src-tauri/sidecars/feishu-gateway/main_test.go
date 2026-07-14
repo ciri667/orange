@@ -26,6 +26,73 @@ func TestIsOrangeCardAction(t *testing.T) {
 	}
 }
 
+// 新版 Card 2.0 callback 必须携带严格的协议标记和三个 provider-neutral 动作。
+func TestParsePendingChangeCardActionAcceptsVersionedPayload(t *testing.T) {
+	action, changeID, chatType, ok := parsePendingChangeCardAction(map[string]interface{}{
+		"orange":   pendingChangeCardProtocol,
+		"action":   "confirm",
+		"changeId": "change-123",
+		"chatType": "group",
+	}, "")
+
+	if !ok || action != "confirm" || changeID != "change-123" || chatType != "group" {
+		t.Fatalf("expected versioned callback to be accepted, got action=%q changeID=%q chatType=%q ok=%t", action, changeID, chatType, ok)
+	}
+}
+
+// 协议字段出现后不能回退到历史格式，避免损坏或伪造的新卡片被误当成可写入审批。
+func TestParsePendingChangeCardActionRejectsInvalidVersionedPayload(t *testing.T) {
+	tests := []struct {
+		name   string
+		values map[string]interface{}
+	}{
+		{
+			name: "unknown protocol",
+			values: map[string]interface{}{
+				"orange": "pending_change.v2", "action": "confirm", "changeId": "change-123", "chatType": "p2p",
+			},
+		},
+		{
+			name: "non string protocol",
+			values: map[string]interface{}{
+				"orange": 1, "action": "confirm", "changeId": "change-123", "chatType": "p2p",
+			},
+		},
+		{
+			name: "legacy action inside versioned payload",
+			values: map[string]interface{}{
+				"orange": pendingChangeCardProtocol, "action": "orange_pending_confirm", "changeId": "change-123", "chatType": "p2p",
+			},
+		},
+		{
+			name: "non string change id",
+			values: map[string]interface{}{
+				"orange": pendingChangeCardProtocol, "action": "confirm", "changeId": 123, "chatType": "p2p",
+			},
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if _, _, _, ok := parsePendingChangeCardAction(test.values, "orange_pending_confirm"); ok {
+				t.Fatal("expected invalid versioned callback to be rejected")
+			}
+		})
+	}
+}
+
+// 已经发出的旧卡片没有协议字段，仍需要让用户完成详情、确认或取消操作。
+func TestParsePendingChangeCardActionSupportsLegacyPayload(t *testing.T) {
+	action, changeID, chatType, ok := parsePendingChangeCardAction(map[string]interface{}{
+		"change_id": "change-legacy",
+		"chatType":  "p2p",
+	}, "orange_pending_cancel")
+
+	if !ok || action != "orange_pending_cancel" || changeID != "change-legacy" || chatType != "p2p" {
+		t.Fatalf("expected legacy callback to be accepted, got action=%q changeID=%q chatType=%q ok=%t", action, changeID, chatType, ok)
+	}
+}
+
 // 卡片回调必须携带原始会话类型，避免群聊审批被错误按私聊放行。
 func TestIsSupportedChatType(t *testing.T) {
 	if !isSupportedChatType("group") || !isSupportedChatType("p2p") {

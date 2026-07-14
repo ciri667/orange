@@ -56,6 +56,19 @@ type cardActionValue struct {
 	ChangeID     string `json:"changeId"`
 }
 
+// pendingChangeCardProtocol identifies the Card 2.0 callback contract emitted by Orange.
+// Versioning prevents arbitrary card values from being interpreted as write approvals.
+const pendingChangeCardProtocol = "pending_change.v1"
+
+// pendingChangeCardActionPayload is the only Card 2.0 callback value accepted for a new
+// pending-change approval card. It intentionally excludes note content and external identities.
+type pendingChangeCardActionPayload struct {
+	Orange   string `json:"orange"`
+	Action   string `json:"action"`
+	ChangeID string `json:"changeId"`
+	ChatType string `json:"chatType"`
+}
+
 // textContent mirrors Feishu text message content JSON.
 type textContent struct {
 	Text string `json:"text"`
@@ -100,14 +113,9 @@ func emitCardActionEvent(event *larkcallback.CardActionTriggerEvent) (*larkcallb
 		return cardActionToast("卡片操作无效，请使用文字指令重试。"), nil
 	}
 
-	// action 和 changeId 都优先从卡片 value 读取；name 仅兼容早期已发出的卡片。
-	action := actionValue(event.Event.Action.Value, "action")
-	if action == "" {
-		action = strings.TrimSpace(event.Event.Action.Name)
-	}
-	changeID := actionValue(event.Event.Action.Value, "changeId", "change_id")
-	chatType := actionValue(event.Event.Action.Value, "chatType")
-	if !isOrangeCardAction(action) || changeID == "" || !isSupportedChatType(chatType) {
+	// Card 2.0 必须使用带版本号的 callback value；没有版本标记时才兼容历史卡片的 name/value。
+	action, changeID, chatType, valid := parsePendingChangeCardAction(event.Event.Action.Value, event.Event.Action.Name)
+	if !valid {
 		return cardActionToast("卡片缺少待确认变更，请重新生成。"), nil
 	}
 
@@ -143,7 +151,50 @@ func isSupportedChatType(chatType string) bool {
 	}
 }
 
-// isOrangeCardAction limits callbacks to the three buttons produced by Orange cards.
+// parsePendingChangeCardAction decodes the current Card 2.0 callback contract and keeps the
+// old name/value shape available only for cards sent before the protocol migration.
+func parsePendingChangeCardAction(values map[string]interface{}, legacyName string) (string, string, string, bool) {
+	if _, isVersionedPayload := values["orange"]; isVersionedPayload {
+		payload := pendingChangeCardActionPayload{
+			Orange:   actionValue(values, "orange"),
+			Action:   actionValue(values, "action"),
+			ChangeID: actionValue(values, "changeId"),
+			ChatType: actionValue(values, "chatType"),
+		}
+		if payload.Orange != pendingChangeCardProtocol {
+			return "", "", "", false
+		}
+
+		if !isCurrentPendingChangeAction(payload.Action) || payload.ChangeID == "" || !isSupportedChatType(payload.ChatType) {
+			return "", "", "", false
+		}
+		return payload.Action, payload.ChangeID, payload.ChatType, true
+	}
+
+	// 兼容已发送的旧卡片：它们没有 orange 协议标记，且可能仅通过 name 传递 action。
+	action := actionValue(values, "action")
+	if action == "" {
+		action = strings.TrimSpace(legacyName)
+	}
+	changeID := actionValue(values, "changeId", "change_id")
+	chatType := actionValue(values, "chatType")
+	if !isOrangeCardAction(action) || changeID == "" || !isSupportedChatType(chatType) {
+		return "", "", "", false
+	}
+	return action, changeID, chatType, true
+}
+
+// isCurrentPendingChangeAction limits versioned payloads to the current, provider-neutral actions.
+func isCurrentPendingChangeAction(action string) bool {
+	switch action {
+	case "details", "confirm", "cancel":
+		return true
+	default:
+		return false
+	}
+}
+
+// isOrangeCardAction limits callbacks to the three pending-change actions supported by Rust.
 func isOrangeCardAction(action string) bool {
 	switch action {
 	case "details", "confirm", "cancel", "orange_pending_details", "orange_pending_confirm", "orange_pending_cancel":

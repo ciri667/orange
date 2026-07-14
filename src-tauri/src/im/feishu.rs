@@ -984,19 +984,30 @@ fn build_agent_reply_text(snapshot: &WorkspaceSnapshot, card_sent: bool) -> Stri
         .as_ref()
         .filter(|change| change.status == "pending")
     {
-        let short_code = crate::commands::short_change_code(&change.id);
-        let action_hint = if card_sent {
-            "已发送审批卡片，可点击查看详情、确认写入或取消。"
-        } else {
-            "审批卡片暂不可用，请使用下方文字指令。"
-        };
-        // 不依赖模型是否正确提及“待确认”，始终附加真实短码，使手机端可复制执行。
-        reply.push_str(&format!(
-            "\n\n{action_hint}\n变更编号：{short_code}\n详情：详情 {short_code}\n确认：确认 {short_code}\n取消：取消 {short_code}"
-        ));
+        append_pending_change_reply_hint(&mut reply, change, card_sent);
     }
 
     reply
+}
+
+/**
+ * 补充 IM 审批提示：卡片成功时只引导点击按钮；发送失败时才暴露可复制的文字降级指令。
+ * 变更短码仅用于人工降级，真实授权始终由 Rust 审批服务按会话身份和 pending 状态判断。
+ */
+fn append_pending_change_reply_hint(
+    reply: &mut String,
+    change: &crate::domain::ProposedChange,
+    card_sent: bool,
+) {
+    if card_sent {
+        reply.push_str("\n\n已发送审批卡片，可点击查看详情、确认写入或取消。");
+        return;
+    }
+
+    let short_code = crate::commands::short_change_code(&change.id);
+    reply.push_str(&format!(
+        "\n\n审批卡片暂不可用，请使用下方文字指令。\n变更编号：{short_code}\n详情：详情 {short_code}\n确认：确认 {short_code}\n取消：取消 {short_code}"
+    ));
 }
 
 /** 构造稳定 IM 会话 key；群聊按用户隔离，私聊按 sender 隔离。 */
@@ -1158,7 +1169,7 @@ fn build_pending_change_card_content(card: &FeishuPendingChangeCard) -> Result<S
     let preview = truncate_chars(card.preview.trim(), MAX_FEISHU_CARD_PREVIEW_CHARS);
     serde_json::to_string(&json!({
         "schema": "2.0",
-        "config": { "wide_screen_mode": true },
+        "config": { "width_mode": "fill" },
         "header": {
             "title": { "tag": "plain_text", "content": "橘记：待确认笔记改动" },
             "template": "orange"
@@ -1178,17 +1189,15 @@ fn build_pending_change_card_content(card: &FeishuPendingChangeCard) -> Result<S
                     )
                 },
                 {
-                    "tag": "action",
-                    "layout": "trisection",
-                    "actions": [
-                        card_action_button("详情", "orange_pending_details", "default", card),
-                        card_action_button("确认写入", "orange_pending_confirm", "primary", card),
-                        card_action_button("取消", "orange_pending_cancel", "danger", card)
+                    // Card 2.0 不支持 action 容器；三个按钮必须放入 column_set -> column。
+                    "tag": "column_set",
+                    "flex_mode": "none",
+                    "horizontal_spacing": "8px",
+                    "columns": [
+                        pending_change_card_column(card_action_button("详情", "details", "default", card)),
+                        pending_change_card_column(card_action_button("确认写入", "confirm", "primary", card)),
+                        pending_change_card_column(card_action_button("取消", "cancel", "danger", card))
                     ]
-                },
-                {
-                    "tag": "note",
-                    "elements": [{ "tag": "plain_text", "content": format!("文字指令：详情 {} / 确认 {} / 取消 {}", card.short_code, card.short_code, card.short_code) }]
                 }
             ]
         }
@@ -1196,7 +1205,21 @@ fn build_pending_change_card_content(card: &FeishuPendingChangeCard) -> Result<S
     .map_err(|error| format!("无法序列化飞书审批卡片：{error}"))
 }
 
-/** 创建卡片按钮；完整 change_id 仅作为回调 value，短码只面向用户展示。 */
+/** 包装审批按钮为 Card 2.0 列；三个等权列在手机和桌面端均保持稳定布局。 */
+fn pending_change_card_column(button: Value) -> Value {
+    json!({
+        "tag": "column",
+        "width": "weighted",
+        "weight": 1,
+        "vertical_align": "top",
+        "elements": [button]
+    })
+}
+
+/**
+ * 创建 Card 2.0 callback 按钮；完整 change_id 仅存在于版本化回调 value，短码只面向用户展示。
+ * Rust 在收到 callback 后仍会按发送人、会话和 pending 状态重新鉴权，不信任卡片值本身。
+ */
 fn card_action_button(
     text: &str,
     action: &str,
@@ -1207,13 +1230,17 @@ fn card_action_button(
         "tag": "button",
         "text": { "tag": "plain_text", "content": text },
         "type": button_type,
-        "name": action,
-        "value": {
-            "action": action.trim_start_matches("orange_pending_"),
-            "changeId": card.change_id,
-            // 供 callback 在不读取原始 payload 的前提下保留私聊/群聊鉴权分支。
-            "chatType": card.chat_type
-        }
+        "behaviors": [{
+            "type": "callback",
+            "value": {
+                // Card 2.0 callback 协议版本；sidecar 只接受该精确标记。
+                "orange": "pending_change.v1",
+                "action": action,
+                "changeId": card.change_id,
+                // 供 callback 在不读取原始 payload 的前提下保留私聊/群聊鉴权分支。
+                "chatType": card.chat_type
+            }
+        }]
     })
 }
 
@@ -1385,9 +1412,43 @@ mod tests {
         assert!(parse_pending_change_text_command("确认 ab12cd 多余内容").is_none());
     }
 
-    /** 卡片内容默认仅携带摘要与三种受控操作，完整变更 ID 只存在于按钮 value 中。 */
+    /** 卡片发送成功后不应再要求用户手动输入编号；失败时必须保留文字降级入口。 */
     #[test]
-    fn pending_change_card_uses_summary_and_controlled_actions() {
+    fn pending_change_reply_prefers_card_and_keeps_text_fallback() {
+        let change = crate::domain::ProposedChange {
+            id: "change-1234567890".to_owned(),
+            knowledge_base_id: "kb-a".to_owned(),
+            note_id: Some("note-a".to_owned()),
+            target_id: Some("note-a".to_owned()),
+            target_kind: Some("note".to_owned()),
+            file_type: Some("markdown".to_owned()),
+            r#type: "rewrite".to_owned(),
+            operation: Some("replace".to_owned()),
+            title: "改写测试笔记".to_owned(),
+            target_path: "notes/example.md".to_owned(),
+            original: "旧内容".to_owned(),
+            next: "新内容".to_owned(),
+            original_hash: "hash".to_owned(),
+            status: "pending".to_owned(),
+            review_comments: None,
+            review_state: None,
+            diff_stats: None,
+        };
+        let mut card_reply = "Agent 已生成改动。".to_owned();
+        let mut fallback_reply = card_reply.clone();
+
+        append_pending_change_reply_hint(&mut card_reply, &change, true);
+        append_pending_change_reply_hint(&mut fallback_reply, &change, false);
+
+        assert!(card_reply.contains("已发送审批卡片"));
+        assert!(!card_reply.contains("确认：确认"));
+        assert!(fallback_reply.contains("审批卡片暂不可用"));
+        assert!(fallback_reply.contains("确认：确认 change-12345"));
+    }
+
+    /** Card 2.0 按钮必须通过版本化 callback behavior 传递受控变更操作。 */
+    #[test]
+    fn pending_change_card_uses_versioned_callback_actions() {
         let card = FeishuPendingChangeCard {
             chat_id: "oc_private".to_owned(),
             chat_type: "p2p".to_owned(),
@@ -1400,11 +1461,73 @@ mod tests {
             preview: "简短预览".to_owned(),
         };
         let content = build_pending_change_card_content(&card).expect("card JSON should serialize");
+        let value: Value = serde_json::from_str(&content).expect("card JSON should parse");
+        let elements = value
+            .pointer("/body/elements")
+            .and_then(Value::as_array)
+            .expect("card should contain body elements");
+        let actions = elements
+            .iter()
+            .find(|element| element.get("tag").and_then(Value::as_str) == Some("column_set"))
+            .and_then(|element| element.get("columns"))
+            .and_then(Value::as_array)
+            .expect("card should contain approval button columns");
 
         assert!(content.contains("确认写入"));
-        assert!(content.contains("orange_pending_details"));
         assert!(content.contains("ab12cd"));
-        assert!(content.contains("unguessable-change-id"));
+        assert!(!content.contains("\"tag\":\"action\""));
+        // 飞书 Card 2.0 同样不支持旧版 note；文字降级由独立文本消息承载。
+        assert!(!content.contains("\"tag\":\"note\""));
+        assert_eq!(elements.len(), 2);
+        assert_eq!(
+            value.pointer("/schema").and_then(Value::as_str),
+            Some("2.0")
+        );
+        assert_eq!(
+            value.pointer("/config/width_mode").and_then(Value::as_str),
+            Some("fill")
+        );
+
+        let expected_actions = ["details", "confirm", "cancel"];
+        assert_eq!(actions.len(), expected_actions.len());
+        for (column, expected_action) in actions.iter().zip(expected_actions) {
+            assert_eq!(column.get("tag").and_then(Value::as_str), Some("column"));
+            assert_eq!(
+                column.get("width").and_then(Value::as_str),
+                Some("weighted")
+            );
+            assert_eq!(column.get("weight").and_then(Value::as_u64), Some(1));
+            let button = column
+                .pointer("/elements/0")
+                .expect("approval column should contain a button");
+            let callback_value = button
+                .pointer("/behaviors/0/value")
+                .expect("button should use a callback behavior");
+            assert_eq!(
+                button.pointer("/behaviors/0/type").and_then(Value::as_str),
+                Some("callback")
+            );
+            assert_eq!(
+                callback_value.get("orange").and_then(Value::as_str),
+                Some("pending_change.v1")
+            );
+            assert_eq!(
+                callback_value.get("action").and_then(Value::as_str),
+                Some(expected_action)
+            );
+            assert_eq!(
+                callback_value.get("changeId").and_then(Value::as_str),
+                Some("unguessable-change-id")
+            );
+            assert_eq!(
+                callback_value.get("chatType").and_then(Value::as_str),
+                Some("p2p")
+            );
+            assert!(callback_value.get("targetPath").is_none());
+            assert!(callback_value.get("preview").is_none());
+            assert!(button.get("name").is_none());
+            assert!(button.get("value").is_none());
+        }
     }
 
     /** 私聊和群聊会话 key 必须稳定且群聊按用户隔离。 */
