@@ -712,6 +712,9 @@ export function ImSettingsSection({
           {feishuGatewayStatus?.connected ? "已收到事件" : "未确认"} / 平台：{feishuGatewayStatus?.domain ?? feishu.config.domain}
         </span>
       </div>
+      <p className="settings-empty">
+        待确认改动使用飞书审批卡片。请在飞书开发者后台启用长连接，并订阅 <code>im.message.receive_v1</code> 和 <code>card.action.trigger</code>，完成消息相关权限授权后再启动网关。
+      </p>
       {feishuGatewayStatus?.lastError ? <p className="settings-empty">{feishuGatewayStatus.lastError}</p> : null}
     </section>
   );
