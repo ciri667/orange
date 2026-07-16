@@ -240,8 +240,8 @@ export function SettingsDrawer({
       {
         id: "model",
         group: "配置",
-        label: "模型与隐私",
-        description: "BYOK、模型端点和发送边界",
+        label: "模型设置",
+        description: "模型配置和行为边界",
         meta: settingsDraft.modelConfig.enabled ? "已启用" : "未启用",
         icon: Settings2,
         tone: settingsDraft.modelConfig.enabled ? "success" : "neutral",

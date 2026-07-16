@@ -155,7 +155,7 @@ export function ModelSettingsSection({
         <div>
           <p className="section-label">Configuration</p>
           <h3 id="model-settings-title">模型与隐私</h3>
-          <p>管理多个 OpenAI-compatible Provider，选择默认 Provider 和发送边界。</p>
+          <p>多服务商管理（兼容 OpenAI 协议），支持指定默认服务商。</p>
         </div>
         <button className="primary-button compact" type="button" onClick={onSaveSettings} disabled={isBusy}>
           <Save size={14} />
