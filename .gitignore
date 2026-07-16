@@ -8,3 +8,5 @@ docs/
 .idea/
 .zcode/
 .DS_Store
+
+.worktrees/
