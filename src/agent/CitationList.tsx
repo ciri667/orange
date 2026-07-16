@@ -22,7 +22,7 @@ export function CitationList({ citations }: { citations?: Citation[] }) {
         {citations.map((citation) => (
           <article className="citation" key={`${citation.noteId}-${citation.path}`}>
             <OverflowTooltipText as="strong" text={citation.title} logArea="agent_citation_title" />
-            <OverflowTooltipText text={`${citation.knowledgeBaseName} · ${citation.path}`} logArea="agent_citation_path" />
+            <OverflowTooltipText text={`${citation.knowledgeBaseName} · ${citation.path}${citation.location ? ` · ${citation.location}` : ""}`} logArea="agent_citation_path" />
             <p>{citation.snippet}</p>
           </article>
         ))}

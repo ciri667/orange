@@ -19,6 +19,7 @@ export type AgentToolName =
   | "review_change"
   | "search_notes"
   | "read_file"
+  | "read_document"
   | "list_tree"
   | "get_current_file"
   | "get_session_summary"
@@ -59,7 +60,7 @@ export type DocumentHistorySource = "manual-save" | "agent-change" | "restore";
 export type DocumentHistoryFileType = "markdown" | "txt";
 
 /** 可预览文档的正文块类型，首版 docx 只抽取段落级文本。 */
-export type DocumentPreviewBlockType = "heading" | "paragraph";
+export type DocumentPreviewBlockType = "heading" | "paragraph" | "table";
 
 /** 用户选择的本地知识库元信息。 */
 export interface KnowledgeBase {
@@ -167,6 +168,7 @@ export interface WorkspaceDocument {
 export interface DocumentPreviewBlock {
   type: DocumentPreviewBlockType;
   text: string;
+  page?: number;
 }
 
 /** 非 Markdown 文档预览命令返回值，pdf/图片返回 asset 路径，docx 返回结构化文本。 */
@@ -231,6 +233,7 @@ export interface Citation {
   path: string;
   snippet: string;
   score: number;
+  location?: string;
 }
 
 /** Agent loop 中的一次工具调用记录。 */

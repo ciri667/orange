@@ -1057,6 +1057,27 @@ textarea:disabled {
   background: #ffffff;
 }
 
+/* PDF 原始版式与本地抽取文本分层展示，长文本默认折叠避免挤占工作区。 */
+.document-pdf-preview-stack {
+  display: grid;
+  gap: 12px;
+  min-height: 0;
+}
+
+.document-extracted-text {
+  max-height: 280px;
+  overflow: auto;
+  padding: 12px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface-muted);
+}
+
+.document-extracted-text summary { cursor: pointer; font-weight: 600; }
+.document-extracted-text section { margin-top: 12px; }
+.document-extracted-text p { white-space: pre-wrap; }
+.document-docx-table { white-space: pre-wrap; font: inherit; }
+
 .document-image-preview {
   display: grid;
   min-width: 0;

@@ -205,10 +205,21 @@ function DocumentPreviewView({
   if (document.fileType === "pdf") {
     const assetUrl = createDocumentAssetUrl(preview?.assetPath);
 
-    return assetUrl ? (
-      <iframe className="document-pdf-preview" title={document.title} src={assetUrl} />
-    ) : (
-      <div className="document-preview-state">当前环境无法内嵌 PDF 预览。</div>
+    return (
+      <div className="document-pdf-preview-stack" aria-label="PDF 预览">
+        {assetUrl ? <iframe className="document-pdf-preview" title={document.title} src={assetUrl} /> : <div className="document-preview-state">当前环境无法内嵌 PDF 预览。</div>}
+        {!!preview?.blocks?.length && (
+          <details className="document-extracted-text">
+            <summary>查看可提取文本（{preview.blocks.length} 页）</summary>
+            {preview.blocks.map((block, index) => (
+              <section key={`pdf-${index}`}>
+                <strong>{block.page ? `第 ${block.page} 页` : `片段 ${index + 1}`}</strong>
+                <p>{block.text}</p>
+              </section>
+            ))}
+          </details>
+        )}
+      </div>
     );
   }
 
@@ -260,6 +271,8 @@ function DocumentPreviewView({
         {blocks.map((block, index) =>
           block.type === "heading" ? (
             <h3 key={`${block.type}-${index}`}>{block.text}</h3>
+          ) : block.type === "table" ? (
+            <pre key={`${block.type}-${index}`} className="document-docx-table">{block.text}</pre>
           ) : (
             <p key={`${block.type}-${index}`}>{block.text}</p>
           ),
