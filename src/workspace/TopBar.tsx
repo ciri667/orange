@@ -2,15 +2,21 @@ import { Database, Settings } from "lucide-react";
 import { OverflowTooltipText } from "../shared/OverflowTooltipText";
 import type { KnowledgeBase } from "../shared/types";
 
-/** 顶部应用栏，承载产品状态、激活知识库同步状态和设置入口。 */
+/** 顶部应用栏，承载产品状态、激活知识库同步状态、Agent 浮窗开关和设置入口。 */
 export function TopBar({
   activeKnowledgeBase,
   knowledgeBaseCount,
   onOpenSettings,
+  agentOpen,
+  onToggleAgent,
 }: {
   activeKnowledgeBase: KnowledgeBase;
   knowledgeBaseCount: number;
   onOpenSettings: () => void;
+  /** Agent 浮窗是否打开；仅在提供 onToggleAgent 时参与渲染。 */
+  agentOpen?: boolean;
+  /** 切换 Agent 协作浮窗显隐；未提供时不渲染顶部 Agent 按钮。 */
+  onToggleAgent?: () => void;
 }) {
   return (
     <header className="topbar">
@@ -38,6 +44,17 @@ export function TopBar({
           <i aria-hidden="true" />
           写入需确认
         </span>
+        {onToggleAgent && (
+          <button
+            type="button"
+            className={`topbar-agent-toggle ${agentOpen ? "is-open" : ""}`}
+            title={agentOpen ? "收起 Agent 协作区" : "打开 Agent 协作区"}
+            aria-expanded={Boolean(agentOpen)}
+            onClick={onToggleAgent}
+          >
+            Agent
+          </button>
+        )}
         <button className="icon-button" type="button" title="打开设置" onClick={onOpenSettings}>
           <Settings size={18} />
         </button>

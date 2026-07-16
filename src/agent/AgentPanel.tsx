@@ -1,5 +1,6 @@
 import { History, Book, PanelRightClose, Plus } from "lucide-react";
 import { useRef } from "react";
+import type { PointerEvent as ReactPointerEvent } from "react";
 import { OverflowTooltipText } from "../shared/OverflowTooltipText";
 import { getImSessionSourceLabel } from "../shared/selectors";
 import { useDismissable } from "../shared/useDismissable";
@@ -13,7 +14,7 @@ import {
   AgentSessionSummary,
 } from "./AgentPanelSections";
 
-/** 右侧 Agent 侧栏，承载会话、工具调用、检索范围、引用和输入框。 */
+/** Agent 协作区内容：承载会话、工具调用、检索范围、引用和输入框；可由浮窗外壳承载。 */
 export function AgentPanel({
   sessions,
   activeSession,
@@ -37,6 +38,7 @@ export function AgentPanel({
   onToggleSessionContext,
   onToggleScopeSelector,
   onCollapsePanel,
+  onHeaderDragStart,
   onCreateSession,
   onSelectSession,
   onDeleteSession,
@@ -77,6 +79,8 @@ export function AgentPanel({
   onToggleSessionContext: () => void;
   onToggleScopeSelector: () => void;
   onCollapsePanel: () => void;
+  /** 浮窗模式下在 header 空白处开始拖动；交互控件上不触发。 */
+  onHeaderDragStart?: (event: ReactPointerEvent) => void;
   onCreateSession: () => void;
   onSelectSession: (sessionId: string) => void;
   onDeleteSession: (sessionId: string) => void;
@@ -99,8 +103,18 @@ export function AgentPanel({
   useDismissable(isScopeSelectorOpen, onToggleScopeSelector, { externalRef: panelRef });
 
   return (
-    <aside ref={panelRef} className="agent-panel" aria-label="AI 侧栏">
-      <header className="agent-header">
+    <aside ref={panelRef} className="agent-panel" aria-label="AI 协作区">
+      <header
+        className="agent-header"
+        onPointerDown={(event) => {
+          // 按钮/链接/表单控件上不启动拖动，避免与 header 操作冲突。
+          const target = event.target as HTMLElement;
+          if (target.closest("button, a, input, textarea, select")) {
+            return;
+          }
+          onHeaderDragStart?.(event);
+        }}
+      >
         <div>
           <p className="section-label">Agent</p>
           <div className="agent-session-title">
