@@ -1,16 +1,15 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { KeyboardEvent as ReactKeyboardEvent, PointerEvent as ReactPointerEvent } from "react";
 
-/** 可调整的主工作台侧栏类型，用于区分左侧知识库和右侧 Agent 面板。 */
-type ResizablePane = "sidebar" | "agent";
+/** 可调整的主工作台侧栏类型；Agent 已改为浮窗，仅保留左侧知识库侧栏。 */
+type ResizablePane = "sidebar";
 
-/** 主工作台可持久化的布局尺寸，只保存两侧固定栏宽度，中间编辑器使用剩余空间。 */
+/** 主工作台可持久化的布局尺寸，只保存知识库侧栏宽度，编辑器使用剩余空间。 */
 interface WorkspaceLayoutSizes {
   sidebarWidth: number;
-  agentWidth: number;
 }
 
-/** 指针拖拽过程中的起始状态，用于把鼠标位移稳定换算成目标栏宽。 */
+/** 指针拖拽过程中的起始状态，用于把鼠标位移稳定换算成侧栏宽度。 */
 interface ResizeDragState {
   pane: ResizablePane;
   startX: number;
@@ -22,10 +21,9 @@ const WORKSPACE_LAYOUT_STORAGE_KEY = "orange.workspace-layout.v1";
 /** 旧版本品牌命名遗留的存储键，用于一次性迁移到新键，迁移后旧的保留作回滚保险。 */
 const LEGACY_WORKSPACE_LAYOUT_STORAGE_KEY = "cici-note.workspace-layout.v1";
 
-/** 默认布局沿用原始三栏宽度，避免首次进入时视觉比例突变。 */
+/** 默认侧栏宽度，沿用历史默认值，避免首次进入时视觉比例突变。 */
 const DEFAULT_WORKSPACE_LAYOUT: WorkspaceLayoutSizes = {
   sidebarWidth: 285,
-  agentWidth: 380,
 };
 
 /** 知识库侧栏宽度边界，保证目录树可读且不会挤压编辑器。 */
@@ -34,13 +32,7 @@ const SIDEBAR_WIDTH_LIMIT = {
   max: 420,
 };
 
-/** Agent 侧栏宽度边界，保证输入框和消息卡片可读。 */
-const AGENT_WIDTH_LIMIT = {
-  min: 300,
-  max: 560,
-};
-
-/** 编辑器最小宽度，拖拽两侧栏时始终给正文编辑区保留主要空间。 */
+/** 编辑器最小宽度，拖拽侧栏时始终给正文编辑区保留主要空间。 */
 const EDITOR_MIN_WIDTH = 500;
 
 /** 分隔条轨道宽度，参与动态最大宽度计算，避免编辑器被实际轨道挤窄。 */
@@ -94,103 +86,67 @@ function readStoredWorkspaceLayout(): WorkspaceLayoutSizes {
 /** 解析已读取的布局 JSON 字符串，损坏或越界时回退默认布局。 */
 function parseStoredWorkspaceLayout(rawLayout: string): WorkspaceLayoutSizes {
   try {
-    const parsedLayout = JSON.parse(rawLayout) as Partial<WorkspaceLayoutSizes>;
+    // 旧版可能含 agentWidth；Agent 已改为浮窗，这里只读取 sidebarWidth 并忽略 agentWidth。
+    const parsedLayout = JSON.parse(rawLayout) as Partial<WorkspaceLayoutSizes> & { agentWidth?: unknown };
 
-    // 只接受完整且有限的数字宽度，避免旧版本或手动编辑的缓存破坏布局。
-    if (!isFiniteNumber(parsedLayout.sidebarWidth) || !isFiniteNumber(parsedLayout.agentWidth)) {
+    if (!isFiniteNumber(parsedLayout.sidebarWidth)) {
       return DEFAULT_WORKSPACE_LAYOUT;
     }
 
     return {
       sidebarWidth: clampNumber(parsedLayout.sidebarWidth, SIDEBAR_WIDTH_LIMIT.min, SIDEBAR_WIDTH_LIMIT.max),
-      agentWidth: clampNumber(parsedLayout.agentWidth, AGENT_WIDTH_LIMIT.min, AGENT_WIDTH_LIMIT.max),
     };
   } catch {
     return DEFAULT_WORKSPACE_LAYOUT;
   }
 }
 
-/** 保存本机工作台布局偏好；存储不可用时静默降级，不影响编辑器使用。 */
+/** 保存本机工作台布局偏好；只写入 sidebarWidth，存储不可用时静默降级。 */
 function saveWorkspaceLayout(sizes: WorkspaceLayoutSizes) {
   if (typeof window === "undefined") {
     return;
   }
 
   try {
-    window.localStorage.setItem(WORKSPACE_LAYOUT_STORAGE_KEY, JSON.stringify(sizes));
+    window.localStorage.setItem(
+      WORKSPACE_LAYOUT_STORAGE_KEY,
+      JSON.stringify({ sidebarWidth: sizes.sidebarWidth }),
+    );
   } catch {
     // localStorage 可能被隐私模式或 WebView 策略禁用，布局拖拽仍应继续可用。
   }
 }
 
-/** 计算两侧固定栏在当前容器中最多能占用的总宽度。 */
+/** 计算侧栏在当前容器中最多能占用的宽度（保留一个分隔条与编辑器最小宽度）。 */
 function getAvailableSidePanelWidth(containerWidth: number) {
-  return Math.max(0, containerWidth - RESIZER_TRACK_WIDTH * 2 - EDITOR_MIN_WIDTH);
+  return Math.max(0, containerWidth - RESIZER_TRACK_WIDTH - EDITOR_MIN_WIDTH);
 }
 
-/** 根据当前容器宽度和正在调整的面板，把布局尺寸限制在安全范围内。 */
+/** 根据当前容器宽度把侧栏尺寸限制在安全范围内。 */
 function clampWorkspaceLayoutSizes(
   nextSizes: WorkspaceLayoutSizes,
   containerWidth: number,
-  activePane?: ResizablePane,
 ): WorkspaceLayoutSizes {
   const availableSidePanelWidth = getAvailableSidePanelWidth(containerWidth);
-  let sidebarWidth = clampNumber(nextSizes.sidebarWidth, SIDEBAR_WIDTH_LIMIT.min, SIDEBAR_WIDTH_LIMIT.max);
-  let agentWidth = clampNumber(nextSizes.agentWidth, AGENT_WIDTH_LIMIT.min, AGENT_WIDTH_LIMIT.max);
-
-  if (activePane === "sidebar") {
-    const maxSidebarWidth = Math.min(SIDEBAR_WIDTH_LIMIT.max, availableSidePanelWidth - agentWidth);
-
-    return {
-      sidebarWidth: clampNumber(sidebarWidth, SIDEBAR_WIDTH_LIMIT.min, maxSidebarWidth),
-      agentWidth,
-    };
-  }
-
-  if (activePane === "agent") {
-    const maxAgentWidth = Math.min(AGENT_WIDTH_LIMIT.max, availableSidePanelWidth - sidebarWidth);
-
-    return {
-      sidebarWidth,
-      agentWidth: clampNumber(agentWidth, AGENT_WIDTH_LIMIT.min, maxAgentWidth),
-    };
-  }
-
-  if (sidebarWidth + agentWidth > availableSidePanelWidth) {
-    // 容器变窄或缓存尺寸过大时，优先压缩右侧 Agent，保留左侧目录树的可读宽度。
-    agentWidth = clampNumber(availableSidePanelWidth - sidebarWidth, AGENT_WIDTH_LIMIT.min, AGENT_WIDTH_LIMIT.max);
-  }
-
-  if (sidebarWidth + agentWidth > availableSidePanelWidth) {
-    // 如果右侧已经压到下限仍不够，再压缩左侧，尽量避免编辑器低于最小宽度。
-    sidebarWidth = clampNumber(availableSidePanelWidth - agentWidth, SIDEBAR_WIDTH_LIMIT.min, SIDEBAR_WIDTH_LIMIT.max);
-  }
-
-  return { sidebarWidth, agentWidth };
-}
-
-/** 计算某个分隔条当前可表达的 aria 最小值和最大值。 */
-function getPaneBounds(pane: ResizablePane, sizes: WorkspaceLayoutSizes, containerWidth: number) {
-  const availableSidePanelWidth = getAvailableSidePanelWidth(containerWidth);
-
-  if (pane === "sidebar") {
-    const dynamicMax = Math.min(SIDEBAR_WIDTH_LIMIT.max, availableSidePanelWidth - sizes.agentWidth);
-
-    return {
-      min: SIDEBAR_WIDTH_LIMIT.min,
-      max: Math.max(SIDEBAR_WIDTH_LIMIT.min, dynamicMax),
-    };
-  }
-
-  const dynamicMax = Math.min(AGENT_WIDTH_LIMIT.max, availableSidePanelWidth - sizes.sidebarWidth);
+  const maxSidebarWidth = Math.min(SIDEBAR_WIDTH_LIMIT.max, availableSidePanelWidth);
 
   return {
-    min: AGENT_WIDTH_LIMIT.min,
-    max: Math.max(AGENT_WIDTH_LIMIT.min, dynamicMax),
+    sidebarWidth: clampNumber(nextSizes.sidebarWidth, SIDEBAR_WIDTH_LIMIT.min, maxSidebarWidth),
   };
 }
 
-/** 管理工作台三栏布局拖拽、键盘调整和本机持久化。 */
+/** 计算侧栏分隔条当前可表达的 aria 最小值和最大值。 */
+function getPaneBounds(containerWidth: number) {
+  const availableSidePanelWidth = getAvailableSidePanelWidth(containerWidth);
+  const dynamicMax = Math.min(SIDEBAR_WIDTH_LIMIT.max, availableSidePanelWidth);
+
+  return {
+    min: SIDEBAR_WIDTH_LIMIT.min,
+    max: Math.max(SIDEBAR_WIDTH_LIMIT.min, dynamicMax),
+  };
+}
+
+/** 管理工作台侧栏拖拽、键盘调整和本机持久化；Agent 以浮窗形式独立布局。 */
 export function useResizableWorkspaceLayout() {
   const [workspaceElement, setWorkspaceElement] = useState<HTMLElement | null>(null);
   const [workspaceWidth, setWorkspaceWidth] = useState(DEFAULT_WORKSPACE_WIDTH);
@@ -269,7 +225,7 @@ export function useResizableWorkspaceLayout() {
       document.body.classList.add("workspace-resize-active");
     }
 
-    /** 根据指针横向位移实时换算相邻面板宽度。 */
+    /** 根据指针横向位移实时换算侧栏宽度。 */
     function handlePointerMove(event: PointerEvent) {
       const dragState = dragStateRef.current;
 
@@ -278,13 +234,12 @@ export function useResizableWorkspaceLayout() {
       }
 
       const pointerDelta = event.clientX - dragState.startX;
-      const nextSizes =
-        dragState.pane === "sidebar"
-          ? { ...dragState.startSizes, sidebarWidth: dragState.startSizes.sidebarWidth + pointerDelta }
-          : { ...dragState.startSizes, agentWidth: dragState.startSizes.agentWidth - pointerDelta };
+      const nextSizes = {
+        sidebarWidth: dragState.startSizes.sidebarWidth + pointerDelta,
+      };
 
       event.preventDefault();
-      setSizes(clampWorkspaceLayoutSizes(nextSizes, getWorkspaceWidth(), dragState.pane));
+      setSizes(clampWorkspaceLayoutSizes(nextSizes, getWorkspaceWidth()));
     }
 
     /** 结束拖拽并恢复全局选择、光标状态。 */
@@ -330,8 +285,8 @@ export function useResizableWorkspaceLayout() {
   /** 通过键盘调整分隔条，满足无鼠标场景下的基础可访问性。 */
   const handleSeparatorKeyDown = useCallback(
     (pane: ResizablePane, event: ReactKeyboardEvent<HTMLDivElement>) => {
-      const paneBounds = getPaneBounds(pane, sizesRef.current, getWorkspaceWidth());
-      const currentValue = pane === "sidebar" ? sizesRef.current.sidebarWidth : sizesRef.current.agentWidth;
+      const paneBounds = getPaneBounds(getWorkspaceWidth());
+      const currentValue = sizesRef.current.sidebarWidth;
       const step = event.shiftKey ? KEYBOARD_RESIZE_STEP * 3 : KEYBOARD_RESIZE_STEP;
       let nextValue: number | null = null;
 
@@ -340,9 +295,9 @@ export function useResizableWorkspaceLayout() {
       } else if (event.key === "End") {
         nextValue = paneBounds.max;
       } else if (event.key === "ArrowLeft") {
-        nextValue = pane === "sidebar" ? currentValue - step : currentValue + step;
+        nextValue = currentValue - step;
       } else if (event.key === "ArrowRight") {
-        nextValue = pane === "sidebar" ? currentValue + step : currentValue - step;
+        nextValue = currentValue + step;
       }
 
       if (nextValue === null) {
@@ -350,44 +305,38 @@ export function useResizableWorkspaceLayout() {
       }
 
       event.preventDefault();
-      setSizes((currentSizes) => {
-        const nextSizes =
-          pane === "sidebar"
-            ? { ...currentSizes, sidebarWidth: nextValue }
-            : { ...currentSizes, agentWidth: nextValue };
-
-        return clampWorkspaceLayoutSizes(nextSizes, getWorkspaceWidth(), pane);
-      });
+      setSizes((currentSizes) =>
+        clampWorkspaceLayoutSizes({ ...currentSizes, sidebarWidth: nextValue }, getWorkspaceWidth()),
+      );
     },
     [getWorkspaceWidth],
   );
 
-  /** 双击任一分隔条恢复默认三栏宽度。 */
+  /** 双击分隔条恢复默认侧栏宽度。 */
   const handleSeparatorDoubleClick = useCallback(() => {
     setSizes(clampWorkspaceLayoutSizes(DEFAULT_WORKSPACE_LAYOUT, getWorkspaceWidth()));
   }, [getWorkspaceWidth]);
 
-  /** 主 grid 的列定义由 hook 统一生成，组件层只负责渲染顺序。 */
+  /** 主 grid 的列定义由 hook 统一生成：侧栏 + 分隔条 + 弹性编辑区。 */
   const gridTemplateColumns = useMemo(
     () =>
-      `${sizes.sidebarWidth}px ${RESIZER_TRACK_WIDTH}px minmax(${EDITOR_MIN_WIDTH}px, 1fr) ${RESIZER_TRACK_WIDTH}px ${sizes.agentWidth}px`,
-    [sizes.agentWidth, sizes.sidebarWidth],
+      `${sizes.sidebarWidth}px ${RESIZER_TRACK_WIDTH}px minmax(${EDITOR_MIN_WIDTH}px, 1fr)`,
+    [sizes.sidebarWidth],
   );
 
-  /** 生成分隔条需要的交互和 aria 属性，保持两个把手行为一致。 */
+  /** 生成侧栏分隔条需要的交互和 aria 属性。 */
   const getSeparatorProps = useCallback(
     (pane: ResizablePane) => {
-      const paneBounds = getPaneBounds(pane, sizes, workspaceWidth);
-      const currentValue = pane === "sidebar" ? sizes.sidebarWidth : sizes.agentWidth;
+      const paneBounds = getPaneBounds(workspaceWidth);
 
       return {
         role: "separator",
         tabIndex: 0,
-        "aria-label": pane === "sidebar" ? "调整知识库侧栏宽度" : "调整 Agent 侧栏宽度",
+        "aria-label": "调整知识库侧栏宽度",
         "aria-orientation": "vertical" as const,
         "aria-valuemin": paneBounds.min,
         "aria-valuemax": paneBounds.max,
-        "aria-valuenow": Math.round(currentValue),
+        "aria-valuenow": Math.round(sizes.sidebarWidth),
         onDoubleClick: handleSeparatorDoubleClick,
         onKeyDown: (event: ReactKeyboardEvent<HTMLDivElement>) => handleSeparatorKeyDown(pane, event),
         onPointerDown: (event: ReactPointerEvent<HTMLDivElement>) => handleSeparatorPointerDown(pane, event),
