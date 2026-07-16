@@ -24,6 +24,7 @@ keyring = { version = "3", features = ["apple-native", "windows-native", "linux-
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 rusqlite = { version = "0.32", features = ["bundled"] }
 quick-xml = "0.36"
+pdf-extract = "0.12"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 serde_yaml = "0.9"

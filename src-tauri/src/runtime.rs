@@ -1367,7 +1367,7 @@ fn build_model_messages(
 ) -> Vec<Value> {
     let session = &snapshot.sessions[session_index];
     // Agent 的工具选择策略只作为模型指令，不再由宿主预判用户意图。
-    let autonomous_tool_policy = "你需要根据用户输入和上下文自主判断是否调用工具：需要 Markdown 引用时使用 search_notes；需要当前 scope 内 Markdown/TXT 正文或写入建议时使用 read_file、get_current_file、propose_file_change。list_tree 可发现所有文件，其中仅 TXT 可被 Agent 读取和编辑；DOCX/PDF/图片只返回元数据。TXT 必须按纯文本原样处理。无关的通用问题可以直接回答。界面 action 只是 UI 分类，不能替代你的判断。";
+    let autonomous_tool_policy = "你需要根据用户输入和上下文自主判断是否调用工具：需要 Markdown 引用时使用 search_notes；需要当前 scope 内 Markdown/TXT 正文或写入建议时使用 read_file、get_current_file、propose_file_change；需要 DOCX/PDF 正文时，先用 list_tree 发现文件，再调用只读 read_document。DOCX/PDF 不可编辑，且不会自动进入全文搜索。TXT 必须按纯文本原样处理。无关的通用问题可以直接回答。界面 action 只是 UI 分类，不能替代你的判断。";
     let scope_summary = build_scope_summary(snapshot, session);
     let active_note_summary = request
         .active_note_id
@@ -1406,7 +1406,7 @@ fn build_model_messages(
     let mut messages = vec![json!({
         "role": "system",
         "content": format!(
-            "你是橘记的本地优先知识库 Agent。search_notes 只检索和引用 Markdown；read_file、get_current_file、propose_file_change 可作用于当前 scope 内的 Markdown/TXT，TXT 必须原样按纯文本处理。所有写入只能调用 propose_file_change 或 create_file_draft 生成待确认 diff，不能声称已经写入文件。create_file_draft 的 fileType 只能是 markdown 或 txt，路径扩展名必须匹配。局部替换使用 operation=replace，文末追加使用 operation=append 且 next 只含增量；同一文件多处编辑使用 operation=multi_replace 和 edits。必须使用服务端标准 tool_calls 字段调用工具，不要在普通回复中输出 DSML、XML 或伪工具调用标签。引用只允许来自 Markdown 工具结果。{}\n{}\n允许 scope：{}\n{}\n{}\n{}",
+            "你是橘记的本地优先知识库 Agent。search_notes 只检索 Markdown；read_file、get_current_file、propose_file_change 可作用于当前 scope 内的 Markdown/TXT，TXT 必须原样按纯文本处理；read_document 可只读 DOCX/PDF 并返回可信的页码或结构块引用。所有写入只能调用 propose_file_change 或 create_file_draft 生成待确认 diff，不能声称已经写入文件。create_file_draft 的 fileType 只能是 markdown 或 txt，路径扩展名必须匹配。局部替换使用 operation=replace，文末追加使用 operation=append 且 next 只含增量；同一文件多处编辑使用 operation=multi_replace 和 edits。必须使用服务端标准 tool_calls 字段调用工具，不要在普通回复中输出 DSML、XML 或伪工具调用标签。引用只允许来自已执行工具结果。{}\n{}\n允许 scope：{}\n{}\n{}\n{}",
             skill_policy, autonomous_tool_policy, scope_summary, active_note_summary, skill_catalog, explicit_skill_prompt
         )
     })];

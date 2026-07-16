@@ -170,6 +170,31 @@ pub struct WorkspaceDocument {
 pub struct DocumentPreviewBlock {
     pub r#type: String,
     pub text: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub page: Option<usize>,
+}
+
+/** 只读文档抽取的单个结构块；DOCX 使用块序号，PDF 使用页码。 */
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DocumentTextBlock {
+    pub index: usize,
+    pub r#type: String,
+    pub text: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub page: Option<usize>,
+}
+
+/** 本地解析后的只读文档正文；不进入 WorkspaceSnapshot，避免把二进制文档正文长期驻留内存。 */
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DocumentTextExtraction {
+    pub document_id: String,
+    pub file_type: String,
+    pub content_hash: String,
+    pub blocks: Vec<DocumentTextBlock>,
+    pub content_chars: usize,
+    pub warnings: Vec<String>,
 }
 
 /** 非 Markdown 文档预览返回值，pdf/图片使用 assetPath，docx 使用 blocks。 */
@@ -243,6 +268,9 @@ pub struct Citation {
     pub path: String,
     pub snippet: String,
     pub score: f64,
+    /** DOCX/PDF 等只读文档的块或页码定位；Markdown 引用保持为空。 */
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub location: Option<String>,
 }
 
 /** Agent loop 中的一次工具调用记录。 */

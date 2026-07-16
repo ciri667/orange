@@ -830,10 +830,12 @@ mod tests {
             DocumentPreviewBlock {
                 r#type: "heading".to_owned(),
                 text: "标题".to_owned(),
+                page: None,
             },
             DocumentPreviewBlock {
                 r#type: "paragraph".to_owned(),
                 text: "正文".to_owned(),
+                page: None,
             },
         ];
 

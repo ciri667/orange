@@ -117,6 +117,7 @@ impl Default for ToolRegistry {
             tools: vec![
                 Box::new(SearchNotesTool),
                 Box::new(ReadFileTool),
+                Box::new(ReadDocumentTool),
                 Box::new(ListTreeTool),
                 Box::new(GetCurrentFileTool),
                 Box::new(GetSessionSummaryTool),
@@ -252,6 +253,29 @@ impl AgentTool for ReadFileTool {
 
     fn execute(&self, context: &mut AgentToolContext<'_>, args: &Value) -> ToolExecutionResult {
         execute_read_file(context.snapshot, context.session_index, args)
+    }
+}
+
+/** read_document 工具，按需读取当前 scope 内只读 DOCX/PDF 的本地抽取文本。 */
+struct ReadDocumentTool;
+
+impl AgentTool for ReadDocumentTool {
+    fn name(&self) -> &'static str { "read_document" }
+
+    fn description(&self) -> &'static str {
+        "Read extracted text from one read-only DOCX or PDF in the selected scope. It never edits the source file. PDF blocks include page numbers; DOCX blocks include structural indexes."
+    }
+
+    fn parameters(&self) -> Value {
+        json!({
+            "type": "object",
+            "properties": { "documentId": { "type": "string" } },
+            "required": ["documentId"]
+        })
+    }
+
+    fn execute(&self, context: &mut AgentToolContext<'_>, args: &Value) -> ToolExecutionResult {
+        execute_read_document(context.snapshot, context.session_index, args)
     }
 }
 
@@ -648,6 +672,7 @@ fn execute_read_file(
             .unwrap_or("已读取该笔记。")
             .to_owned(),
         score: 1.0,
+        location: None,
     };
     let note_content_chars = note.content.chars().count();
     let bounded_content = truncate_chars(&note.content, MAX_READ_NOTE_CHARS);
@@ -705,6 +730,75 @@ fn execute_read_file(
     }
 }
 
+/** 执行只读文档读取；正文仅在本次工具结果中传给模型，不写入工作台快照或审计日志。 */
+fn execute_read_document(
+    snapshot: &WorkspaceSnapshot,
+    session_index: usize,
+    args: &Value,
+) -> ToolExecutionResult {
+    let document_id = args
+        .get("documentId")
+        .or_else(|| args.get("document_id"))
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    let Some(document) = scoped_readonly_document(snapshot, session_index, document_id) else {
+        return ToolExecutionResult::failed("目标文档不在当前会话允许范围内，或不是可读取的 DOCX/PDF 文件。");
+    };
+    let Some(knowledge_base) = snapshot
+        .knowledge_bases
+        .iter()
+        .find(|item| item.id == document.knowledge_base_id)
+    else {
+        return ToolExecutionResult::failed("找不到文档所属知识库。");
+    };
+
+    let extraction = match crate::storage::extract_document_text(
+        std::path::Path::new(&knowledge_base.path),
+        document,
+    ) {
+        Ok(extraction) => extraction,
+        Err(error) => return ToolExecutionResult::failed(&format!("文档读取失败：{error}")),
+    };
+    let mut remaining = MAX_READ_NOTE_CHARS;
+    let mut truncated = false;
+    let blocks = extraction.blocks.iter().filter_map(|block| {
+        if remaining == 0 {
+            truncated = true;
+            return None;
+        }
+        let original_chars = block.text.chars().count();
+        let text = truncate_chars(&block.text, remaining);
+        remaining = remaining.saturating_sub(original_chars.min(remaining));
+        if original_chars > text.chars().count() { truncated = true; }
+        Some(json!({ "index": block.index, "type": &block.r#type, "text": text, "page": block.page }))
+    }).collect::<Vec<_>>();
+    truncated |= extraction.content_chars > MAX_READ_NOTE_CHARS;
+    let first_block = extraction.blocks.first();
+    let citation = Citation {
+        knowledge_base_id: document.knowledge_base_id.clone(),
+        knowledge_base_name: knowledge_base.name.clone(),
+        note_id: document.id.clone(),
+        title: document.title.clone(),
+        path: document.path.clone(),
+        snippet: first_block.map(|block| truncate_chars(&block.text, 500)).unwrap_or_else(|| "未提取到文本。".to_owned()),
+        score: 1.0,
+        location: first_block.map(|block| block.page.map(|page| format!("第 {page} 页")).unwrap_or_else(|| format!("结构块 {}", block.index))),
+    };
+    ToolExecutionResult {
+        success: true,
+        summary: format!("已读取 {} 文档《{}》{}", document.file_type.to_ascii_uppercase(), document.title, if truncated { "（已按上下文预算截断）" } else { "" }),
+        payload: json!({ "document": {
+            "id": &document.id, "knowledgeBaseId": &document.knowledge_base_id,
+            "title": &document.title, "path": &document.path, "fileType": &document.file_type,
+            "contentHash": extraction.content_hash, "blocks": blocks,
+            "contentChars": extraction.content_chars, "contentTruncated": truncated,
+            "warnings": extraction.warnings
+        }}),
+        citations: vec![citation],
+        audit_fragment: Some(format!("read_document type={} path={} blocks={} chars={} truncated={} warnings={}", document.file_type, document.path, extraction.blocks.len(), extraction.content_chars.min(MAX_READ_NOTE_CHARS), truncated, extraction.warnings.len())),
+    }
+}
+
 /** 执行 list_tree，只返回当前 scope 内的目录、Markdown 笔记和普通文档元数据。 */
 fn execute_list_tree(snapshot: &WorkspaceSnapshot, session_index: usize) -> ToolExecutionResult {
     let scope_ids = scope_id_set(&snapshot.sessions[session_index]);
@@ -746,7 +840,8 @@ fn execute_list_tree(snapshot: &WorkspaceSnapshot, session_index: usize) -> Tool
                 "knowledgeBaseId": &document.knowledge_base_id,
                 "fileType": &document.file_type,
                 "previewAvailable": document.preview_available,
-                "agentReadable": document.file_type == "txt"
+                "agentReadable": matches!(document.file_type.as_str(), "txt" | "docx" | "pdf"),
+                "readOnly": matches!(document.file_type.as_str(), "docx" | "pdf")
             })
         })
         .collect();
@@ -1542,6 +1637,20 @@ fn scoped_text_document<'a>(
     })
 }
 
+/** 返回当前 scope 内可由 Agent 按需读取、但绝不可写入的 DOCX/PDF。 */
+fn scoped_readonly_document<'a>(
+    snapshot: &'a WorkspaceSnapshot,
+    session_index: usize,
+    document_id: &str,
+) -> Option<&'a WorkspaceDocument> {
+    let scope_ids = scope_id_set(&snapshot.sessions[session_index]);
+    snapshot.documents.iter().find(|document| {
+        document.id == document_id
+            && matches!(document.file_type.as_str(), "docx" | "pdf")
+            && scope_ids.contains(document.knowledge_base_id.as_str())
+    })
+}
+
 /** 把会话知识库范围转成 HashSet，统一工具权限校验。 */
 fn scope_id_set(session: &AgentSession) -> HashSet<&str> {
     session
@@ -1735,6 +1844,7 @@ mod tests {
         assert!(schemas.is_array());
         assert!(tool_names.contains(&"search_notes"));
         assert!(tool_names.contains(&"read_file"));
+        assert!(tool_names.contains(&"read_document"));
         assert!(tool_names.contains(&"propose_file_change"));
         assert!(tool_names.contains(&"create_file_draft"));
     }

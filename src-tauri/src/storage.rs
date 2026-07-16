@@ -1,6 +1,6 @@
 use crate::domain::{
     AgentSession, AppEventLog, DocumentHistoryEntry, DocumentHistoryEntryDetail, DocumentPreview,
-    DocumentPreviewBlock, FeishuCredentialStatus, FeishuIntegrationSettings, FolderEntry,
+    DocumentPreviewBlock, DocumentTextBlock, DocumentTextExtraction, FeishuCredentialStatus, FeishuIntegrationSettings, FolderEntry,
     ImIntegrationSettings, ImProviderConfig, ImProviderCredentialStatus, ImProviderSettings,
     KnowledgeBase, KnowledgeBaseMemory, KnowledgeBaseSelection, LlmProviderConfig,
     ModelApiKeyStatus, ModelConfig, Note, NoteImageAttachmentInput, RequestAuditLog,
@@ -3675,6 +3675,7 @@ fn search_note_fts(
                 path,
                 snippet,
                 score: 1.0 / (1.0 + rank.abs()),
+                location: None,
             });
         }
     }
@@ -3749,6 +3750,7 @@ fn search_snapshot_notes(
                 path: note.path.clone(),
                 snippet: extract_snippet(&note.content, prompt),
                 score,
+                location: None,
             })
         })
         .collect();
@@ -4874,6 +4876,21 @@ pub fn load_document_preview(
 
             let bytes = fs::read(&target_path)
                 .map_err(|error| format!("无法读取 PDF 文件 {}：{error}", target_path.display()))?;
+            // 预览同步返回本地文本层；iframe 继续负责保留 PDF 的原始版式。
+            // 文本层解析失败不应阻断原始 PDF iframe 预览；Agent 读取时才返回明确失败原因。
+            let blocks = extract_document_text(root, document)
+                .map(|extraction| {
+                    extraction
+                        .blocks
+                        .into_iter()
+                        .map(|block| DocumentPreviewBlock {
+                            r#type: "paragraph".to_owned(),
+                            text: block.text,
+                            page: block.page,
+                        })
+                        .collect()
+                })
+                .unwrap_or_default();
 
             Ok(DocumentPreview {
                 document_id: document.id.clone(),
@@ -4883,7 +4900,7 @@ pub fn load_document_preview(
                 updated_at: "刚刚".to_owned(),
                 content_hash: hash_bytes(&bytes),
                 asset_path: Some(target_path.to_string_lossy().to_string()),
-                blocks: None,
+                blocks: Some(blocks),
             })
         }
         "docx" => {
@@ -4952,6 +4969,8 @@ fn parse_docx_document_xml(document_xml: &str) -> Result<Vec<DocumentPreviewBloc
     let mut blocks = Vec::new();
     let mut buffer = Vec::new();
     let mut in_paragraph = false;
+    // 表格单元格内的段落仍按顺序保留，但以 table 类型交给预览和 Agent 说明其来源。
+    let mut table_depth = 0usize;
     let mut in_text = false;
     let mut paragraph_text = String::new();
     let mut paragraph_style = String::new();
@@ -4968,6 +4987,8 @@ fn parse_docx_document_xml(document_xml: &str) -> Result<Vec<DocumentPreviewBloc
                     in_paragraph = true;
                     paragraph_text.clear();
                     paragraph_style.clear();
+                } else if xml_name_matches(name_bytes, b"tbl") {
+                    table_depth = table_depth.saturating_add(1);
                 } else if in_paragraph && xml_name_matches(name_bytes, b"t") {
                     in_text = true;
                 } else if in_paragraph && xml_name_matches(name_bytes, b"pStyle") {
@@ -5011,12 +5032,15 @@ fn parse_docx_document_xml(document_xml: &str) -> Result<Vec<DocumentPreviewBloc
 
                     if !trimmed_text.is_empty() {
                         blocks.push(DocumentPreviewBlock {
-                            r#type: if is_docx_heading_style(&paragraph_style) {
+                            r#type: if table_depth > 0 {
+                                "table".to_owned()
+                            } else if is_docx_heading_style(&paragraph_style) {
                                 "heading".to_owned()
                             } else {
                                 "paragraph".to_owned()
                             },
                             text: trimmed_text.to_owned(),
+                            page: None,
                         });
                     }
 
@@ -5024,6 +5048,8 @@ fn parse_docx_document_xml(document_xml: &str) -> Result<Vec<DocumentPreviewBloc
                     in_text = false;
                     paragraph_text.clear();
                     paragraph_style.clear();
+                } else if xml_name_matches(name_bytes, b"tbl") {
+                    table_depth = table_depth.saturating_sub(1);
                 }
             }
             Ok(Event::Eof) => break,
@@ -5038,10 +5064,104 @@ fn parse_docx_document_xml(document_xml: &str) -> Result<Vec<DocumentPreviewBloc
         blocks.push(DocumentPreviewBlock {
             r#type: "paragraph".to_owned(),
             text: "该 DOCX 暂无可预览正文。".to_owned(),
+            page: None,
         });
     }
 
     Ok(blocks)
+}
+
+/**
+ * 按需抽取已授权 DOCX/PDF 的结构化文本，供预览与 Agent 读取复用。
+ *
+ * 解析只读取知识库内已校验路径，不将正文写回原文件或 WorkspaceSnapshot。
+ */
+pub fn extract_document_text(
+    root: &Path,
+    document: &WorkspaceDocument,
+) -> Result<DocumentTextExtraction, String> {
+    let target_path = resolve_existing_file_inside_root(root, &document.path)?;
+    let bytes = fs::read(&target_path)
+        .map_err(|error| format!("无法读取文档内容：{error}"))?;
+    let content_hash = hash_bytes(&bytes);
+
+    let (blocks, warnings) = match document.file_type.as_str() {
+        "docx" => {
+            if !is_docx_document_file(&target_path) {
+                return Err("只能读取 DOCX 文件。".to_owned());
+            }
+            let preview_blocks = extract_docx_preview_blocks(&target_path)?;
+            let has_empty_placeholder = preview_blocks.len() == 1
+                && preview_blocks[0].text == "该 DOCX 暂无可预览正文。";
+            let blocks = if has_empty_placeholder {
+                Vec::new()
+            } else {
+                preview_blocks
+                    .into_iter()
+                    .enumerate()
+                    .map(|(index, block)| DocumentTextBlock {
+                        index: index + 1,
+                        r#type: block.r#type,
+                        text: block.text,
+                        page: None,
+                    })
+                    .collect()
+            };
+            let warnings = if blocks.is_empty() {
+                vec!["未从 DOCX 正文提取到可读文本；图片、文本框和批注不会自动识别。".to_owned()]
+            } else {
+                vec!["DOCX 首期仅提取正文段落和表格文本；图片、文本框、批注和修订可能未包含。".to_owned()]
+            };
+            (blocks, warnings)
+        }
+        "pdf" => {
+            if !is_pdf_document_file(&target_path) {
+                return Err("只能读取 PDF 文件。".to_owned());
+            }
+            let extracted = pdf_extract::extract_text_from_mem(&bytes)
+                .map_err(|error| format!("PDF 文本提取失败：{error}"))?;
+            // pdf-extract 通常用换页符分隔页面；缺失时仍把结果作为第一页，避免丢失文本。
+            let blocks: Vec<DocumentTextBlock> = extracted
+                .split('\u{c}')
+                .enumerate()
+                .filter_map(|(index, page_text)| {
+                    let text = page_text.trim();
+                    (!text.is_empty()).then(|| DocumentTextBlock {
+                        index: index + 1,
+                        r#type: "page".to_owned(),
+                        text: text.to_owned(),
+                        page: Some(index + 1),
+                    })
+                })
+                .collect();
+            let warnings = if blocks.is_empty() {
+                vec!["未从 PDF 提取到文本；这可能是扫描件或受保护文档。可在对话中明确要求读取页面图片。".to_owned()]
+            } else {
+                Vec::new()
+            };
+            (blocks, warnings)
+        }
+        _ => return Err("该文档类型不支持内容读取。".to_owned()),
+    };
+    let content_chars = blocks.iter().map(|block| block.text.chars().count()).sum();
+
+    log::info!(
+        target: "document_extraction",
+        "文档文本抽取完成：type={} path={} blocks={} chars={} warnings={}",
+        document.file_type,
+        document.path,
+        blocks.len(),
+        content_chars,
+        warnings.len()
+    );
+    Ok(DocumentTextExtraction {
+        document_id: document.id.clone(),
+        file_type: document.file_type.clone(),
+        content_hash,
+        blocks,
+        content_chars,
+        warnings,
+    })
 }
 
 /** 判断带命名空间或不带命名空间的 XML 名称是否匹配目标本地名。 */
@@ -5083,7 +5203,7 @@ mod tests {
     use super::{
         atomic_write_markdown, atomic_write_text_document, create_blank_markdown_file,
         create_blank_text_document_file, create_folder, create_id, create_stable_note_id,
-        ensure_database_schema, ensure_persistent_model_keyring, extract_docx_preview_blocks,
+        ensure_database_schema, ensure_persistent_model_keyring, extract_document_text, extract_docx_preview_blocks,
         file_modified_local_datetime, format_local_datetime, format_local_datetime_from_millis,
         hash_bytes, hash_content, insert_app_event_log, insert_document_history_entry,
         is_missing_keyring_entry_error, keyring_service_for_build,
@@ -6445,6 +6565,29 @@ mod tests {
         assert_eq!(blocks[1].r#type, "paragraph");
         assert_eq!(blocks[1].text, "第一段");
         assert!(extract_docx_preview_blocks(&corrupt_path).is_err());
+    }
+
+    /** DOCX 读取应复用预览解析结果，并保留表格来源及结构块序号。 */
+    #[test]
+    fn document_text_extraction_reads_docx_blocks() {
+        let dir = tempdir().unwrap();
+        let docx_path = dir.path().join("brief.docx");
+        write_minimal_docx(
+            &docx_path,
+            r#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:p><w:r><w:t>段落</w:t></w:r></w:p><w:tbl><w:tr><w:tc><w:p><w:r><w:t>单元格</w:t></w:r></w:p></w:tc></w:tr></w:tbl></w:body></w:document>"#,
+        );
+
+        let extraction = extract_document_text(
+            dir.path(),
+            &test_workspace_document("docx", "brief.docx"),
+        )
+        .unwrap();
+
+        assert_eq!(extraction.blocks.len(), 2);
+        assert_eq!(extraction.blocks[0].text, "段落");
+        assert_eq!(extraction.blocks[1].r#type, "table");
+        assert_eq!(extraction.blocks[1].text, "单元格");
+        assert!(extraction.content_chars > 0);
     }
 
     /** PDF 预览只允许返回知识库内文件的 asset 路径，拒绝越界相对路径。 */
