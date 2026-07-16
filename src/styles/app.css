@@ -259,7 +259,7 @@ textarea:disabled {
 .workspace-grid {
   display: grid;
   min-height: 0;
-  grid-template-columns: 285px 10px minmax(500px, 1fr) 10px 380px;
+  grid-template-columns: 285px 10px minmax(500px, 1fr);
   overflow: hidden;
 }
 
@@ -4375,14 +4375,10 @@ select:focus-visible,
 }
 
 .workspace-grid {
-  grid-template-columns: minmax(220px, 285px) 12px minmax(440px, 1fr) 12px minmax(320px, 380px);
+  grid-template-columns: minmax(220px, 285px) 12px minmax(440px, 1fr);
   gap: 0;
   padding: 12px 14px 14px;
   background: var(--app-bg);
-}
-
-.workspace-grid.is-agent-collapsed {
-  grid-template-columns: minmax(220px, 285px) 12px minmax(440px, 1fr) 48px !important;
 }
 
 .sidebar,
@@ -5144,31 +5140,6 @@ button.diff-line:not(:disabled):hover,
   background: rgba(232, 236, 255, 0.42);
 }
 
-.agent-panel-reopen {
-  display: grid;
-  height: 100%;
-  min-width: 0;
-  place-items: center;
-  align-content: center;
-  gap: 8px;
-  border: 1px solid rgba(59, 92, 204, 0.18);
-  border-radius: var(--radius-panel);
-  background: rgba(232, 236, 255, 0.58);
-  color: var(--agent-strong);
-  font-size: 11px;
-  font-weight: 800;
-  writing-mode: vertical-rl;
-}
-
-.agent-panel-reopen svg {
-  writing-mode: horizontal-tb;
-}
-
-.agent-panel-reopen:hover {
-  border-color: rgba(59, 92, 204, 0.34);
-  background: var(--agent-soft);
-}
-
 .agent-input {
   grid-template-columns: minmax(0, 1fr) auto;
   gap: 8px;
@@ -5495,7 +5466,7 @@ button.diff-line:not(:disabled):hover,
   }
 
   .workspace-grid {
-    grid-template-columns: minmax(210px, 250px) 10px minmax(420px, 1fr) 10px minmax(280px, 330px) !important;
+    grid-template-columns: minmax(210px, 250px) 10px minmax(420px, 1fr) !important;
     padding: 10px;
   }
 
@@ -5513,11 +5484,6 @@ button.diff-line:not(:disabled):hover,
 
   .workspace-grid {
     grid-template-columns: 220px 8px minmax(0, 1fr) !important;
-  }
-
-  .workspace-grid > .agent-panel,
-  .workspace-grid > .workspace-resizer:last-of-type {
-    display: none;
   }
 
   .topbar-context {
@@ -5598,6 +5564,8 @@ button.diff-line:not(:disabled):hover,
 :root {
   --z-menu: 120;
   --z-agent-popover: 180;
+  --z-agent-float: 200;
+  --z-agent-float-toggle: 210;
   --z-settings: 320;
   --z-modal: 420;
   --z-confirm: 520;
@@ -5719,6 +5687,156 @@ select::-ms-expand {
 
 .confirm-backdrop {
   z-index: var(--z-confirm);
+}
+
+/* Floating agent card (portaled outside workspace-grid). */
+.agent-float-card {
+  position: fixed;
+  z-index: var(--z-agent-float, 200);
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+  border: 1px solid rgba(230, 224, 214, 0.92);
+  border-radius: var(--radius-panel);
+  background: rgba(251, 250, 247, 0.96);
+  box-shadow:
+    0 18px 48px rgba(47, 42, 36, 0.14),
+    0 0 0 1px rgba(255, 255, 255, 0.4) inset;
+  overflow: hidden;
+  pointer-events: auto;
+}
+
+.agent-float-card.is-interacting {
+  user-select: none;
+}
+
+.agent-float-card-body {
+  display: flex;
+  flex: 1 1 auto;
+  flex-direction: column;
+  min-height: 0;
+  min-width: 0;
+  height: 100%;
+}
+
+.agent-float-card-body .agent-panel {
+  flex: 1 1 auto;
+  height: 100%;
+  min-height: 0;
+  border: 0;
+  border-radius: 0;
+  box-shadow: none;
+  background: transparent;
+}
+
+/* Header drag cursors only when floating. */
+.agent-float-card .agent-header {
+  cursor: grab;
+}
+
+.agent-float-card .agent-header:active {
+  cursor: grabbing;
+}
+
+.agent-float-card .agent-header .icon-button,
+.agent-float-card .agent-header button {
+  cursor: pointer;
+}
+
+.agent-float-resize-handle {
+  position: absolute;
+  z-index: 2;
+  touch-action: none;
+}
+
+.agent-float-resize-n,
+.agent-float-resize-s {
+  left: 8px;
+  right: 8px;
+  height: 6px;
+  cursor: ns-resize;
+}
+
+.agent-float-resize-e,
+.agent-float-resize-w {
+  top: 8px;
+  bottom: 8px;
+  width: 6px;
+  cursor: ew-resize;
+}
+
+.agent-float-resize-n {
+  top: 0;
+}
+
+.agent-float-resize-s {
+  bottom: 0;
+}
+
+.agent-float-resize-e {
+  right: 0;
+}
+
+.agent-float-resize-w {
+  left: 0;
+}
+
+.agent-float-resize-ne,
+.agent-float-resize-nw,
+.agent-float-resize-se,
+.agent-float-resize-sw {
+  width: 12px;
+  height: 12px;
+}
+
+.agent-float-resize-ne {
+  top: 0;
+  right: 0;
+  cursor: nesw-resize;
+}
+
+.agent-float-resize-nw {
+  top: 0;
+  left: 0;
+  cursor: nwse-resize;
+}
+
+.agent-float-resize-se {
+  bottom: 0;
+  right: 0;
+  cursor: nwse-resize;
+}
+
+.agent-float-resize-sw {
+  bottom: 0;
+  left: 0;
+  cursor: nesw-resize;
+}
+
+body.agent-float-interacting {
+  cursor: grabbing;
+  user-select: none;
+}
+
+.topbar-agent-toggle {
+  border: 1px solid rgba(59, 92, 204, 0.22);
+  border-radius: 999px;
+  padding: 6px 12px;
+  background: rgba(232, 236, 255, 0.72);
+  color: var(--agent-strong);
+  font-size: 12px;
+  font-weight: 700;
+  z-index: var(--z-agent-float-toggle, 210);
+}
+
+.topbar-agent-toggle.is-open {
+  border-color: rgba(59, 92, 204, 0.4);
+  background: var(--agent-soft);
+}
+
+.topbar-agent-toggle:hover {
+  border-color: rgba(59, 92, 204, 0.4);
 }
 
 .settings-drawer .modal-backdrop {
@@ -6358,14 +6476,12 @@ select:focus-visible,
 .tool-call,
 .tool-call.running,
 .citation,
-.agent-panel-reopen,
 .review-trust-strip {
   border-color: var(--color-primary-border);
   background: var(--color-primary-wash);
   color: var(--agent-strong);
 }
 
-.agent-panel-reopen:hover,
 .tool-call.running,
 .diff-hunk-header {
   background: var(--agent-soft);
