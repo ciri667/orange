@@ -9,8 +9,11 @@
     "preview": "vite preview --host 0.0.0.0",
     "tauri": "tauri",
     "dev:signing:init": "node scripts/macos-dev-signing-init.mjs",
+    "icon:macos:generate": "python3 scripts/generate-macos-icon.py",
     "desktop:dev": "node scripts/desktop-dev.mjs",
-    "desktop:build": "node scripts/desktop-build.mjs",
+    "desktop:build": "node scripts/desktop-build.mjs --local",
+    "desktop:build:dmg": "node scripts/desktop-build.mjs --local-dmg",
+    "desktop:build:release": "node scripts/desktop-build.mjs --release",
     "sidecar:im:build": "node scripts/build-im-sidecars.mjs",
     "sidecar:feishu:build": "npm run sidecar:im:build -- --provider feishu",
     "rust:test": "cargo test --manifest-path src-tauri/Cargo.toml"

@@ -64,9 +64,20 @@ npm run build
 # Rust 单元测试
 npm run rust:test
 
-# 构建 macOS 桌面包
+# 重新生成 macOS App图标
+npm run icon:macos:generate
+
+# 构建仅供本机验收的 macOS 应用包（无需证书的 ad-hoc 签名）
 npm run desktop:build
+
+# 构建用于本机安装流程验收的 DMG（无需证书的 ad-hoc 签名）
+npm run desktop:build:dmg
+
+# 构建正式发布的 macOS 桌面包（必须设置 Apple 发布签名身份）
+ORANGE_RELEASE_SIGNING_IDENTITY='Developer ID Application: 名称 (TEAM_ID)' npm run desktop:build:release
 ```
+
+`desktop:build` 不读取或创建钥匙串证书；Tauri 会使用无需证书的 ad-hoc 签名，并只生成可直接运行的 `.app`。如需验证安装流程，使用 `desktop:build:dmg` 生成包含 `Applications` 快捷方式的本地测试 DMG，将 `Orange.app` 拖入该快捷方式即可安装。两者均不能用于对外分发。对外发布前须使用 `desktop:build:release`，该命令会生成 `.app` 与 `.dmg`，并要求完成 Apple 签名和公证流程。
 
 Vite 开发服务默认监听 `http://localhost:5173/`。前端变更请至少执行 `npm run build`；涉及 Rust 或文件系统行为时，请同时执行 `npm run rust:test`。
 

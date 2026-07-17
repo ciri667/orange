@@ -16,8 +16,11 @@
 - `npm run dev` starts the Vite web app, usually at `http://localhost:5173/`.
 - `npm run build` runs TypeScript checks with `tsc --noEmit` and builds the frontend.
 - `npm run preview` serves the production frontend build locally.
+- `npm run icon:macos:generate` regenerates the macOS icon assets from the Orange illustration.
 - `npm run desktop:dev` launches the Tauri desktop app in development mode.
-- `npm run desktop:build` creates a desktop release build.
+- `npm run desktop:build` creates an ad-hoc-signed `.app` bundle for on-device verification without a certificate.
+- `npm run desktop:build:dmg` creates a certificate-free local DMG for installation-flow verification.
+- `npm run desktop:build:release` creates a release package and requires `ORANGE_RELEASE_SIGNING_IDENTITY`.
 - `npm run rust:test` runs Rust tests via `cargo test --manifest-path src-tauri/Cargo.toml`.
 
 ## Coding Style & Naming Conventions
