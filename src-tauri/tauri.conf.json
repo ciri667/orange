@@ -40,6 +40,6 @@
     "resources": {
       "sidecars/bin/": ""
     },
-    "icon": []
+    "icon": ["icons/macos-icon.icns"]
   }
 }
