@@ -595,6 +595,17 @@ fn should_walk_skill_entry(entry: &walkdir::DirEntry) -> bool {
     !name.starts_with('.') && !matches!(name, "node_modules" | "target" | "dist" | "build")
 }
 
+/** 将展示和持久化路径统一成 `/` 分隔，避免 Windows 原生分隔符进入跨平台领域模型。 */
+fn portable_path_string(path: &Path) -> String {
+    let path = path.to_string_lossy();
+
+    if std::path::MAIN_SEPARATOR == '/' {
+        path.into_owned()
+    } else {
+        path.replace(std::path::MAIN_SEPARATOR, "/")
+    }
+}
+
 /** 从单个 SKILL.md 读取自定义 skill，并合并 SQLite 中的启停覆盖。 */
 fn load_custom_skill(
     root: &Path,
@@ -613,8 +624,8 @@ fn load_custom_skill(
     );
     let relative_path = absolute_path
         .strip_prefix(&absolute_root)
-        .map(|path| path.to_string_lossy().to_string())
-        .unwrap_or_else(|_| absolute_path.to_string_lossy().to_string());
+        .map(portable_path_string)
+        .unwrap_or_else(|_| portable_path_string(&absolute_path));
     let mut metadata_map = HashMap::new();
 
     metadata_map.insert("frontmatterName".to_owned(), parsed_skill.name.clone());
