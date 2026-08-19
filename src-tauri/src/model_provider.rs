@@ -733,6 +733,29 @@ mod tests {
         assert_eq!(parsed.model_config.default_provider_id, "provider-a");
     }
 
+    /** Provider 暂无模型时 API 仍需返回空数组，保持 TypeScript 的必填数组契约。 */
+    #[test]
+    fn serializes_empty_provider_models_as_array() {
+        let mut provider = test_provider("provider-empty", false);
+        provider.model.clear();
+        let settings = UserSettings {
+            model_config: ModelConfig {
+                enabled: false,
+                default_provider_id: provider.id.clone(),
+                providers: vec![provider],
+            },
+            privacy_policy: "allow-selected-scope".to_owned(),
+            write_confirmation_required: true,
+        };
+
+        let serialized = serde_json::to_value(settings).unwrap();
+
+        assert_eq!(
+            serialized.pointer("/modelConfig/providers/0/models"),
+            Some(&serde_json::json!([]))
+        );
+    }
+
     /** 新格式历史 JSON 没有 models 字段时要用 serde default 正常加载，并把旧 model 保留成 manual 启用项。 */
     #[test]
     fn parses_new_format_without_models_field_and_keeps_default_model() {

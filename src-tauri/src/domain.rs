@@ -524,7 +524,7 @@ pub struct LlmProviderConfig {
     #[serde(default = "default_requires_api_key")]
     pub requires_api_key: bool,
     /** 自动发现或手动保留的模型列表；为空时继续使用 model 字段兼容旧配置。 */
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[serde(default)]
     pub models: Vec<LlmProviderModel>,
     /** 最近一次从 provider API 获取模型列表的本地时间。 */
     #[serde(default, skip_serializing_if = "Option::is_none")]
