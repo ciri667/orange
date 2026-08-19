@@ -1,9 +1,10 @@
 import { chmodSync, mkdirSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { spawnSync } from "node:child_process";
+import { fileURLToPath } from "node:url";
 
 /** 项目根目录，脚本从 package.json 所在目录运行，避免 cwd 变化影响路径解析。 */
-const projectRoot = resolve(new URL("..", import.meta.url).pathname);
+const projectRoot = resolve(fileURLToPath(new URL("..", import.meta.url)));
 
 /** Rust 开发态和 Tauri 打包态共享的 sidecar 二进制输出目录。 */
 const sidecarOutputDir = join(projectRoot, "src-tauri", "sidecars", "bin");
