@@ -1,4 +1,5 @@
 import { spawnSync } from "node:child_process";
+import { createRequire } from "node:module";
 import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
@@ -8,6 +9,9 @@ const RELEASE_SIGNING_IDENTITY_ENV = "ORANGE_RELEASE_SIGNING_IDENTITY";
 
 /** 当前项目根目录；用于定位 Tauri 打包后的应用包和本地 DMG 输出目录。 */
 const PROJECT_DIRECTORY = process.cwd();
+
+/** 直接执行项目内 Tauri CLI 的 Node 入口，避免不同平台的 shell 包装命令差异。 */
+const TAURI_CLI_ENTRY = createRequire(import.meta.url).resolve("@tauri-apps/cli/tauri.js");
 
 /** 桌面包构建模式：本机验收使用无证书的 ad-hoc 签名，正式发布必须使用 Apple 发布证书。 */
 const BUILD_MODE = {
@@ -135,7 +139,7 @@ function runDesktopBuild() {
   console.info(`[desktop-build] level=info event=build_started platform=${process.platform} mode=${buildMode}`);
 
   args.push(...tauriArguments);
-  const result = spawnSync("tauri", args, { stdio: "inherit" });
+  const result = spawnSync(process.execPath, [TAURI_CLI_ENTRY, ...args], { stdio: "inherit" });
 
   if (result.error) {
     throw result.error;

@@ -1,10 +1,14 @@
 import { spawnSync } from "node:child_process";
+import { createRequire } from "node:module";
 import { fileURLToPath } from "node:url";
 import { resolve } from "node:path";
 import { ensureDevelopmentSigningIdentity } from "./macos-dev-signing-init.mjs";
 
 /** 当前 Node 脚本所在目录，用于生成不受 Tauri 工作目录影响的 runner 绝对路径。 */
 const scriptsDirectory = resolve(fileURLToPath(new URL(".", import.meta.url)));
+
+/** 直接执行项目内 Tauri CLI 的 Node 入口，避免不同平台的 shell 包装命令差异。 */
+const tauriCliEntry = createRequire(import.meta.url).resolve("@tauri-apps/cli/tauri.js");
 
 /** 根据宿主 CPU 架构选择 Cargo 识别的 macOS target runner 环境变量。 */
 function cargoRunnerEnvironmentName() {
@@ -36,7 +40,7 @@ function runDesktopDevelopment() {
     console.info(`[dev-signing] level=info event=cargo_runner_skipped platform=${process.platform}`);
   }
 
-  const result = spawnSync("tauri", ["dev", ...process.argv.slice(2)], {
+  const result = spawnSync(process.execPath, [tauriCliEntry, "dev", ...process.argv.slice(2)], {
     env: environment,
     stdio: "inherit",
   });
@@ -54,6 +58,10 @@ try {
   const message = error instanceof Error ? error.message : String(error);
 
   console.error(`[dev-signing] level=error event=desktop_dev_failed message=${message}`);
-  console.error("Run npm run dev:signing:init, then restart npm run desktop:dev.");
+  if (process.platform === "darwin") {
+    console.error("Run npm run dev:signing:init, then restart npm run desktop:dev.");
+  } else {
+    console.error("Check the Tauri prerequisites for this platform, then rerun npm run desktop:dev.");
+  }
   process.exit(1);
 }
