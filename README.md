@@ -6,7 +6,7 @@
 
 笔记仍以用户自己的本地文件保存；Agent 只在用户选定的知识库范围内工作；所有由 Agent 发起的 Markdown 写入都会先展示 diff，且仅在用户确认后执行。
 
-> 当前桌面打包配置面向 macOS；前端开发服务可单独运行于浏览器，但本地目录、索引和 Agent 文件操作需要通过桌面端体验。
+> 桌面端支持 macOS 与 Windows 11。前端开发服务可单独运行于浏览器，但本地目录、索引和 Agent 文件操作需要通过桌面端体验。
 
 ## 功能
 
@@ -34,7 +34,8 @@
 
 - Node.js 20 或更高版本
 - Rust stable 与当前平台的 Tauri 构建依赖
-- 仅在使用飞书/Lark 集成时：Go 工具链
+- Windows 11：安装 Visual Studio 2022 的“使用 C++ 的桌面开发”工作负载和 Microsoft Edge WebView2，并使用 `stable-msvc` Rust 工具链
+- 仅在使用飞书/Lark 集成时：Go 1.22 或更高版本
 
 安装依赖并启动前端开发服务：
 
@@ -47,6 +48,13 @@ npm run dev
 
 ```bash
 npm run desktop:dev
+```
+
+Windows 首次安装 Rust 后需要重启终端或 IDE，使 `cargo` 加入 `PATH`。可用以下命令确认环境完整：
+
+```powershell
+rustup default stable-msvc
+npx tauri info
 ```
 
 首次进入应用后，依次完成：
@@ -76,6 +84,8 @@ npm run desktop:build:dmg
 # 构建正式发布的 macOS 桌面包（必须设置 Apple 发布签名身份）
 ORANGE_RELEASE_SIGNING_IDENTITY='Developer ID Application: 名称 (TEAM_ID)' npm run desktop:build:release
 ```
+
+在 Windows 上，`npm run desktop:build` 会使用 `src-tauri/tauri.windows.conf.json` 构建 NSIS 安装包，不需要 macOS 签名配置。Windows 日常开发只需运行 `npm run desktop:dev`。
 
 `desktop:build` 不读取或创建钥匙串证书；Tauri 会使用无需证书的 ad-hoc 签名，并只生成可直接运行的 `.app`。如需验证安装流程，使用 `desktop:build:dmg` 生成包含 `Applications` 快捷方式的本地测试 DMG，将 `Orange.app` 拖入该快捷方式即可安装。两者均不能用于对外分发。对外发布前须使用 `desktop:build:release`，该命令会生成 `.app` 与 `.dmg`，并要求完成 Apple 签名和公证流程。
 

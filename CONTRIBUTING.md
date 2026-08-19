@@ -10,7 +10,7 @@
 
 - 请先搜索已有的 Issue 和 Pull Request，避免重复工作。
 - 较大的功能、涉及数据存储、文件写入、模型调用或 IM 集成的变更，请先创建 Issue 说明目标和方案。
-- 本项目当前主要构建 macOS 桌面端；开发需要 Node.js、Rust stable 和相应的 Tauri 平台依赖。飞书/Lark 集成额外需要 Go 工具链。
+- 桌面端支持 macOS 与 Windows 11；开发需要 Node.js、Rust stable 和相应的 Tauri 平台依赖。Windows 使用 MSVC Rust 工具链，并需要 Visual Studio 的 C++ 桌面开发工作负载与 WebView2。飞书/Lark 集成额外需要 Go 1.22 或更高版本。
 
 安装依赖并启动桌面开发环境：
 
