@@ -731,6 +731,7 @@ pub async fn run_agent_turn(
         provider.clone(),
         selected_model_id.clone(),
         api_key,
+        settings.agent_security.clone(),
     )
     .await
     {
@@ -796,6 +797,7 @@ async fn run_model_loop(
     provider: LlmProviderConfig,
     selected_model_id: String,
     api_key: String,
+    agent_security: crate::domain::AgentSecuritySettings,
 ) -> Result<RuntimeTurnResult, String> {
     let session_index = resolve_session_index(&snapshot, &request)?;
 
@@ -826,7 +828,9 @@ async fn run_model_loop(
         &kb_memories,
     );
     let endpoint = model_provider::chat_completions_endpoint(&provider.api_base);
-    let tool_registry = ToolRegistry::default();
+    let tool_registry =
+        ToolRegistry::for_session(&snapshot.sessions[session_index], &agent_security);
+    let tool_schemas = tool_registry.schemas();
     let mut tool_calls = vec![skill_context_tool_call(&available_skills)];
     tool_calls.extend(activate_skill_tool_calls(
         &explicit_skills,
@@ -869,7 +873,7 @@ async fn run_model_loop(
             &endpoint,
             &api_key,
             &model_messages,
-            true,
+            Some(&tool_schemas),
         )
         .await?;
         let message = response
@@ -950,8 +954,93 @@ async fn run_model_loop(
 
                 tool_registry.execute_model_tool_call(&mut tool_context, &model_tool_call)
             };
-            let tool_result_text =
+            let mut tool_result_text =
                 truncate_chars(&tool_outcome.payload.to_string(), MAX_TOOL_RESULT_CHARS);
+            if tool_outcome.call.name == "run_skill" && tool_outcome.call.status == "completed" {
+                let pending_request = snapshot.sessions[session_index].pending_execution.clone();
+                if let Some(pending_request) = pending_request.filter(|pending_request| {
+                    crate::skill_execution::can_auto_execute(
+                        &snapshot.sessions[session_index],
+                        pending_request,
+                        &agent_security,
+                    )
+                }) {
+                    // 自动批准仍先持久化结构化请求，审批执行器只从 SQLite 重载可信载荷。
+                    crate::storage::save_sessions(app, &snapshot)?;
+                    let execution_app = app.clone();
+                    let execution_snapshot = snapshot.clone();
+                    snapshot = tauri::async_runtime::spawn_blocking(move || {
+                        crate::skill_execution::approve_and_execute(
+                            &execution_app,
+                            execution_snapshot,
+                        )
+                    })
+                    .await
+                    .map_err(|error| format!("完全级别 Skill 执行任务失败：{error}"))??;
+                    tool_result_text = truncate_chars(
+                        &json!({
+                            "executionId": pending_request.id,
+                            "status": "completed",
+                            "autoApproved": true,
+                            "changeCount": snapshot.sessions[session_index]
+                                .pending_change_set
+                                .as_ref()
+                                .map(|change_set| change_set.operations.len())
+                                .unwrap_or_default()
+                        })
+                        .to_string(),
+                        MAX_TOOL_RESULT_CHARS,
+                    );
+                }
+            }
+            // 完全级别下，Agent 直接产出的变更集在校验通过后自动应用；
+            // 校验失败（受保护目录、既有文件冲突等）会暂停自动应用，保留 pending 让用户处理。
+            if tool_outcome.call.status == "completed"
+                && crate::skill_execution::can_auto_apply_agent_change_set(
+                    &snapshot.sessions[session_index],
+                    &agent_security,
+                )
+            {
+                crate::storage::save_sessions(app, &snapshot)?;
+                let apply_app = app.clone();
+                let apply_snapshot = snapshot.clone();
+                let auto_result = tauri::async_runtime::spawn_blocking(move || {
+                    crate::skill_execution::apply_agent_change_set(&apply_app, apply_snapshot)
+                })
+                .await
+                .map_err(|error| format!("自主模式 Agent 变更集应用任务失败：{error}"))?;
+                match auto_result {
+                    Ok(applied_snapshot) => {
+                        snapshot = applied_snapshot;
+                        let operation_count = snapshot.sessions[session_index]
+                            .pending_change_set
+                            .as_ref()
+                            .map(|change_set| change_set.operations.len())
+                            .unwrap_or_default();
+                        tool_result_text = truncate_chars(
+                            &json!({
+                                "status": "applied",
+                                "autoApproved": true,
+                                "operationCount": operation_count
+                            })
+                            .to_string(),
+                            MAX_TOOL_RESULT_CHARS,
+                        );
+                    }
+                    Err(error) => {
+                        // 校验未通过：保留 pending，告知模型需等待用户处理，避免它反复重试同一操作。
+                        tool_result_text = truncate_chars(
+                            &json!({
+                                "status": "pending_review",
+                                "autoApproved": false,
+                                "reason": error
+                            })
+                            .to_string(),
+                            MAX_TOOL_RESULT_CHARS,
+                        );
+                    }
+                }
+            }
             log::debug!(
                 target: "agent_runtime",
                 "工具调用完成：session={} tool={} status={}",
@@ -982,7 +1071,7 @@ async fn run_model_loop(
         &endpoint,
         &api_key,
         &model_messages,
-        false,
+        None,
     )
     .await?;
     let final_message = response
@@ -1368,6 +1457,16 @@ fn build_model_messages(
     let session = &snapshot.sessions[session_index];
     // Agent 的工具选择策略只作为模型指令，不再由宿主预判用户意图。
     let autonomous_tool_policy = "你需要根据用户输入和上下文自主判断是否调用工具：需要 Markdown 引用时使用 search_notes；需要当前 scope 内 Markdown/TXT 正文或写入建议时使用 read_file、get_current_file、propose_file_change；需要 DOCX/PDF 正文时，先用 list_tree 发现文件，再调用只读 read_document。DOCX/PDF 不可编辑，且不会自动进入全文搜索。TXT 必须按纯文本原样处理。无关的通用问题可以直接回答。界面 action 只是 UI 分类，不能替代你的判断。";
+    // 通用文件操作能力按安全等级开放；基础模式不提供，进阶/完全模式可创建文件夹。
+    let general_fs_policy = if session.security_level != "basic" {
+        if session.security_level == "autonomous" {
+            "当前为完全级别：你可以在当前 scope 内知识库使用相对路径，也可以对用户设备上的合规绝对路径（含 ~）调用 create_folder、list_path 和 read_path。Windows、Program Files 等受保护系统目录会被拒绝。create_folder 生成的变更集会自动应用；校验失败则保留待确认。Skill 脚本仍在隔离副本中运行，不会获得真实系统路径。"
+        } else {
+            "当前为进阶级别：你可以在当前 scope 内知识库调用 create_folder 创建文件夹，路径必须相对知识库根目录；生成的变更集需要用户确认后才会应用。"
+        }
+    } else {
+        ""
+    };
     let scope_summary = build_scope_summary(snapshot, session);
     let active_note_summary = request
         .active_note_id
@@ -1406,8 +1505,8 @@ fn build_model_messages(
     let mut messages = vec![json!({
         "role": "system",
         "content": format!(
-            "你是橘记的本地优先知识库 Agent。search_notes 只检索 Markdown；read_file、get_current_file、propose_file_change 可作用于当前 scope 内的 Markdown/TXT，TXT 必须原样按纯文本处理；read_document 可只读 DOCX/PDF 并返回可信的页码或结构块引用。所有写入只能调用 propose_file_change 或 create_file_draft 生成待确认 diff，不能声称已经写入文件。create_file_draft 的 fileType 只能是 markdown 或 txt，路径扩展名必须匹配。局部替换使用 operation=replace，文末追加使用 operation=append 且 next 只含增量；同一文件多处编辑使用 operation=multi_replace 和 edits。必须使用服务端标准 tool_calls 字段调用工具，不要在普通回复中输出 DSML、XML 或伪工具调用标签。引用只允许来自已执行工具结果。{}\n{}\n允许 scope：{}\n{}\n{}\n{}",
-            skill_policy, autonomous_tool_policy, scope_summary, active_note_summary, skill_catalog, explicit_skill_prompt
+            "你是橘记的本地优先知识库 Agent。search_notes 只检索 Markdown；read_file、get_current_file、propose_file_change 可作用于当前 scope 内的 Markdown/TXT，TXT 必须原样按纯文本处理；read_document 可只读 DOCX/PDF 并返回可信的页码或结构块引用。所有写入只能调用 propose_file_change 或 create_file_draft 生成待确认 diff，不能声称已经写入文件。create_file_draft 的 fileType 只能是 markdown 或 txt，路径扩展名必须匹配。局部替换使用 operation=replace，文末追加使用 operation=append 且 next 只含增量；同一文件多处编辑使用 operation=multi_replace 和 edits。必须使用服务端标准 tool_calls 字段调用工具，不要在普通回复中输出 DSML、XML 或伪工具调用标签。引用只允许来自已执行工具结果。{}\n{}\n{}\n允许 scope：{}\n{}\n{}\n{}",
+            skill_policy, autonomous_tool_policy, general_fs_policy, scope_summary, active_note_summary, skill_catalog, explicit_skill_prompt
         )
     })];
 
@@ -1813,11 +1912,11 @@ async fn send_chat_completion_logged(
     endpoint: &str,
     api_key: &str,
     messages: &[Value],
-    include_tools: bool,
+    tool_schemas: Option<&Value>,
 ) -> Result<Value, String> {
     let started_at = Instant::now();
     let result =
-        send_chat_completion(client, endpoint, api_key, model_id, messages, include_tools).await;
+        send_chat_completion(client, endpoint, api_key, model_id, messages, tool_schemas).await;
 
     match &result {
         Ok(_) => log_model_request_event(
@@ -1884,7 +1983,7 @@ async fn send_chat_completion(
     api_key: &str,
     model: &str,
     messages: &[Value],
-    include_tools: bool,
+    tool_schemas: Option<&Value>,
 ) -> Result<Value, String> {
     let mut payload = json!({
         "model": model,
@@ -1892,9 +1991,9 @@ async fn send_chat_completion(
         "temperature": 0.2
     });
 
-    if include_tools {
-        // 工具 schema 统一来自 ToolRegistry，避免模型 loop 和本地兜底各维护一份列表。
-        payload["tools"] = ToolRegistry::default().schemas();
+    if let Some(tool_schemas) = tool_schemas {
+        // 工具 schema 来自当前会话的动态 ToolRegistry，基础级别不会暴露高权限工具。
+        payload["tools"] = tool_schemas.clone();
         payload["tool_choice"] = json!("auto");
     }
 
@@ -1945,7 +2044,7 @@ async fn update_agent_context_summary_best_effort(
         &endpoint,
         api_key,
         &messages,
-        false,
+        None,
     )
     .await
     .and_then(parse_context_summary_response);
@@ -3124,6 +3223,9 @@ mod tests {
                 pinned_note_ids: vec!["note-a".to_owned()],
                 messages: Vec::new(),
                 pending_change: None,
+                pending_change_set: None,
+                pending_execution: None,
+                security_level: "basic".to_owned(),
                 context_summary: None,
                 created_at: "刚刚".to_owned(),
                 updated_at: "刚刚".to_owned(),

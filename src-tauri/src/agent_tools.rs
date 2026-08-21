@@ -1,8 +1,9 @@
 use crate::domain::{
-    AgentSession, AgentToolCall, AgentTurnRequest, Citation, ProposedChange, WorkspaceDocument,
-    WorkspaceSnapshot,
+    AgentSecurityLevel, AgentSecuritySettings, AgentSession, AgentToolCall, AgentTurnRequest,
+    Citation, ProposedChange, ProposedChangeSet, ProposedFileOperation, SkillExecutionRequest,
+    WorkspaceDocument, WorkspaceSnapshot, AGENT_DIRECT_EXECUTION_ID, AGENT_DIRECT_SOURCE,
 };
-use crate::storage::{create_id, hash_content};
+use crate::storage::{create_id, format_local_datetime, hash_content};
 use crate::text_edit::{
     count_non_overlapping_matches, replace_occurrence, replace_unique, OccurrenceReplacementError,
     UniqueReplacementError,
@@ -28,6 +29,12 @@ const MAX_KB_MEMORY_TOOL_ENTRIES: usize = 32;
 
 /** 跨会话记忆工具单条内容最多返回的字符数，保存层和读取层都会做长度保护。 */
 const MAX_KB_MEMORY_TOOL_ENTRY_CHARS: usize = 800;
+
+/** list_path 单次最多返回的目录项数量，避免把超大目录一次性塞进模型上下文。 */
+const MAX_LIST_PATH_ENTRIES: usize = 200;
+
+/** read_path 最多读取的字节数；超出后按字符预算再截断。 */
+const MAX_READ_PATH_BYTES: usize = 256 * 1024;
 
 /** list_tree 按支持文档类型输出的计数，避免模型把未知扩展名误认为已索引内容。 */
 #[derive(Clone, Debug)]
@@ -133,6 +140,34 @@ impl Default for ToolRegistry {
 }
 
 impl ToolRegistry {
+    /** 按会话安全级别构造工具集；高权限工具在注册层不可见，而不是执行时才软拒绝。 */
+    pub fn for_session(session: &AgentSession, settings: &AgentSecuritySettings) -> Self {
+        let mut registry = Self::default();
+        let local_session = session.im_identity.is_none();
+        let can_run_skills = local_session
+            && session.security_level != "basic"
+            && settings.advanced_execution_enabled
+            && (session.security_level != "autonomous" || settings.autonomous_mode_enabled);
+        let level = AgentSecurityLevel::parse(&session.security_level);
+        // 通用文件操作工具在进阶/完全级别可用；IM 会话即使被标成进阶也不注册。
+        let can_use_general_fs_tools = local_session && level.allows_general_fs_tools();
+        // 知识库外合规路径工具只在完全级别注册，避免进阶模式越出授权目录。
+        let can_use_external_fs_tools = local_session && level.allows_external_filesystem();
+
+        if can_run_skills {
+            registry.tools.push(Box::new(RunSkillTool));
+        }
+        if can_use_general_fs_tools {
+            registry.tools.push(Box::new(CreateFolderTool));
+        }
+        if can_use_external_fs_tools {
+            registry.tools.push(Box::new(ListPathTool));
+            registry.tools.push(Box::new(ReadPathTool));
+        }
+
+        registry
+    }
+
     /** 将当前注册工具转换成 OpenAI-compatible tools schema。 */
     pub fn schemas(&self) -> Value {
         Value::Array(
@@ -190,11 +225,248 @@ impl ToolRegistry {
     }
 }
 
+/** run_skill 只创建结构化执行请求；真正启动进程由独立审批命令和沙箱运行器负责。 */
+struct RunSkillTool;
+
+impl AgentTool for RunSkillTool {
+    fn name(&self) -> &'static str {
+        "run_skill"
+    }
+
+    fn description(&self) -> &'static str {
+        "Request execution of an enabled Skill entry script inside Orange's isolated workspace. The user may need to approve it before execution."
+    }
+
+    fn parameters(&self) -> Value {
+        json!({
+            "type": "object",
+            "properties": {
+                "skillId": { "type": "string" },
+                "arguments": {
+                    "type": "array",
+                    "items": { "type": "string" },
+                    "maxItems": 32,
+                    "description": "Non-secret arguments passed as separate process arguments."
+                }
+            },
+            "required": ["skillId"]
+        })
+    }
+
+    fn execute(&self, context: &mut AgentToolContext<'_>, args: &Value) -> ToolExecutionResult {
+        execute_run_skill_request(context, args)
+    }
+}
+
+/** create_folder 工具，只在进阶/完全级别可用，产出待确认的 create_folder 变更集操作，不直接落盘。 */
+struct CreateFolderTool;
+
+impl AgentTool for CreateFolderTool {
+    fn name(&self) -> &'static str {
+        "create_folder"
+    }
+
+    fn description(&self) -> &'static str {
+        "Create a folder. In advanced mode, targetPath is relative to a knowledge base root. In full/autonomous mode, targetPath may also be a compliant absolute filesystem path (protected system directories are rejected). Produces a pending change-set operation; it does not create the folder directly."
+    }
+
+    fn parameters(&self) -> Value {
+        json!({
+            "type": "object",
+            "properties": {
+                "knowledgeBaseId": { "type": "string", "description": "Target knowledge base id for relative paths. Defaults to the active knowledge base if omitted. Ignored when targetPath is an absolute path that maps to a knowledge base or a compliant external location." },
+                "targetPath": {
+                    "type": "string",
+                    "description": "Folder path using forward slashes. Advanced mode: relative to the knowledge base root, no '..' or absolute paths. Full mode: relative path stays inside the knowledge base; absolute or ~-prefixed paths may target any compliant location outside protected system directories."
+                }
+            },
+            "required": ["targetPath"]
+        })
+    }
+
+    fn execute(&self, context: &mut AgentToolContext<'_>, args: &Value) -> ToolExecutionResult {
+        execute_create_folder(context, args)
+    }
+}
+
+/** list_path 只在完全级别注册，用于查看知识库内外的合规目录。 */
+struct ListPathTool;
+
+impl AgentTool for ListPathTool {
+    fn name(&self) -> &'static str {
+        "list_path"
+    }
+
+    fn description(&self) -> &'static str {
+        "List files and folders at a compliant filesystem path. In full/autonomous mode, path may be a knowledge-base relative path or a compliant absolute path. Protected system directories are rejected. This tool does not follow symlinks."
+    }
+
+    fn parameters(&self) -> Value {
+        json!({
+            "type": "object",
+            "properties": {
+                "knowledgeBaseId": { "type": "string", "description": "Target knowledge base id for relative paths. Defaults to the active knowledge base if omitted." },
+                "path": {
+                    "type": "string",
+                    "description": "Directory to list. Relative paths stay inside the knowledge base; absolute or ~-prefixed paths may target any compliant location."
+                }
+            },
+            "required": ["path"]
+        })
+    }
+
+    fn execute(&self, context: &mut AgentToolContext<'_>, args: &Value) -> ToolExecutionResult {
+        execute_list_path(context, args)
+    }
+}
+
+/** read_path 只在完全级别注册，用于读取知识库内外的合规文本文件。 */
+struct ReadPathTool;
+
+impl AgentTool for ReadPathTool {
+    fn name(&self) -> &'static str {
+        "read_path"
+    }
+
+    fn description(&self) -> &'static str {
+        "Read a UTF-8 text file at a compliant filesystem path. In full/autonomous mode, path may be a knowledge-base relative path or a compliant absolute path. Protected system directories and binary files are rejected."
+    }
+
+    fn parameters(&self) -> Value {
+        json!({
+            "type": "object",
+            "properties": {
+                "knowledgeBaseId": { "type": "string", "description": "Target knowledge base id for relative paths. Defaults to the active knowledge base if omitted." },
+                "path": {
+                    "type": "string",
+                    "description": "File to read. Relative paths stay inside the knowledge base; absolute or ~-prefixed paths may target any compliant location."
+                }
+            },
+            "required": ["path"]
+        })
+    }
+
+    fn execute(&self, context: &mut AgentToolContext<'_>, args: &Value) -> ToolExecutionResult {
+        execute_read_path(context, args)
+    }
+}
+
+/** 校验 Skill 当前包 hash、运行时和会话 scope，然后生成可审计的待审批执行请求。 */
+fn execute_run_skill_request(
+    context: &mut AgentToolContext<'_>,
+    args: &Value,
+) -> ToolExecutionResult {
+    let Some(app) = context.app else {
+        return ToolExecutionResult::failed("当前环境不支持执行 Skill。");
+    };
+    let session = &context.snapshot.sessions[context.session_index];
+    if session.im_identity.is_some() || session.security_level == "basic" {
+        return ToolExecutionResult::failed("当前会话安全级别不允许执行 Skill。");
+    }
+    if session
+        .pending_execution
+        .as_ref()
+        .is_some_and(|request| request.status == "pending")
+    {
+        return ToolExecutionResult::failed("当前会话已有待确认执行，请先处理。");
+    }
+
+    let skill_id = args
+        .get("skillId")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    let Some(skill_id) = skill_id else {
+        return ToolExecutionResult::failed("run_skill 缺少 skillId。");
+    };
+    let arguments = args
+        .get("arguments")
+        .and_then(Value::as_array)
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(Value::as_str)
+                .take(32)
+                .map(|value| value.chars().take(1000).collect::<String>())
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+
+    let connection = match crate::storage::open_database(app) {
+        Ok(connection) => connection,
+        Err(error) => return ToolExecutionResult::failed(&error),
+    };
+    let skill = match crate::skills::load_agent_skills(app, &connection).and_then(|skills| {
+        skills
+            .into_iter()
+            .find(|skill| skill.id == skill_id && skill.enabled)
+            .ok_or_else(|| "找不到已启用的 Skill。".to_owned())
+    }) {
+        Ok(skill) => skill,
+        Err(error) => return ToolExecutionResult::failed(&error),
+    };
+    let Some(manifest) = skill.runtime_manifest.as_ref() else {
+        return ToolExecutionResult::failed("该 Skill 是纯指令 Skill，没有可执行入口。");
+    };
+    let Some(compatibility) = skill.compatibility.as_ref() else {
+        return ToolExecutionResult::failed("无法确认 Skill 兼容性，已拒绝执行。");
+    };
+    if compatibility.status != "ready" {
+        return ToolExecutionResult::failed(&format!(
+            "Skill 当前不可执行：{}。",
+            compatibility.status
+        ));
+    }
+
+    let request = SkillExecutionRequest {
+        id: create_id("execution"),
+        skill_id: skill.id.clone(),
+        skill_name: skill.display_name.clone(),
+        package_hash: compatibility.package_hash.clone(),
+        runtime: manifest.runtime.clone(),
+        command_preview: format!(
+            "{} {}（{} 个参数）",
+            manifest.runtime,
+            manifest.entry,
+            arguments.len()
+        ),
+        args: arguments,
+        knowledge_base_ids: session.knowledge_base_ids.clone(),
+        network_domains: manifest.network_domains.clone(),
+        credential_aliases: manifest.credential_aliases.clone(),
+        status: "pending".to_owned(),
+        created_at: format_local_datetime(),
+    };
+    context.snapshot.sessions[context.session_index].pending_execution = Some(request.clone());
+    context.snapshot.sessions[context.session_index].updated_at = format_local_datetime();
+
+    ToolExecutionResult {
+        success: true,
+        summary: format!("已创建 Skill「{}」执行请求。", request.skill_name),
+        payload: json!({
+            "executionId": request.id,
+            "skillId": request.skill_id,
+            "status": request.status,
+            "requiresApproval": true
+        }),
+        citations: Vec::new(),
+        audit_fragment: Some(format!(
+            "Skill 执行请求：skill_id={} runtime={} scope_count={} network_domain_count={}",
+            request.skill_id,
+            request.runtime,
+            request.knowledge_base_ids.len(),
+            request.network_domains.len()
+        )),
+    }
+}
+
 /** 把历史 noteId 参数转换为统一 fileId，避免旧会话重试失效。 */
 fn remap_legacy_file_id(mut args: Value) -> Value {
     if let Some(object) = args.as_object_mut() {
         if !object.contains_key("fileId") {
-            if let Some(note_id) = object.get("noteId").cloned() { object.insert("fileId".to_owned(), note_id); }
+            if let Some(note_id) = object.get("noteId").cloned() {
+                object.insert("fileId".to_owned(), note_id);
+            }
         }
     }
     args
@@ -202,7 +474,11 @@ fn remap_legacy_file_id(mut args: Value) -> Value {
 
 /** 为历史新建 Markdown 草稿补齐统一工具所需的类型字段。 */
 fn remap_legacy_markdown_draft(mut args: Value) -> Value {
-    if let Some(object) = args.as_object_mut() { object.entry("fileType").or_insert_with(|| Value::String("markdown".to_owned())); }
+    if let Some(object) = args.as_object_mut() {
+        object
+            .entry("fileType")
+            .or_insert_with(|| Value::String("markdown".to_owned()));
+    }
     args
 }
 
@@ -260,7 +536,9 @@ impl AgentTool for ReadFileTool {
 struct ReadDocumentTool;
 
 impl AgentTool for ReadDocumentTool {
-    fn name(&self) -> &'static str { "read_document" }
+    fn name(&self) -> &'static str {
+        "read_document"
+    }
 
     fn description(&self) -> &'static str {
         "Read extracted text from one read-only DOCX or PDF in the selected scope. It never edits the source file. PDF blocks include page numbers; DOCX blocks include structural indexes."
@@ -328,7 +606,11 @@ impl AgentTool for GetCurrentFileTool {
         } else {
             context.snapshot.active_document_id.clone()
         };
-        execute_read_file(context.snapshot, context.session_index, &json!({ "fileId": file_id }))
+        execute_read_file(
+            context.snapshot,
+            context.session_index,
+            &json!({ "fileId": file_id }),
+        )
     }
 }
 
@@ -652,64 +934,66 @@ fn execute_read_file(
         .and_then(Value::as_str)
         .unwrap_or_default();
     if let Some(note) = scoped_note(snapshot, session_index, file_id) {
-    let knowledge_base = snapshot
-        .knowledge_bases
-        .iter()
-        .find(|knowledge_base| knowledge_base.id == note.knowledge_base_id);
-    let citation = Citation {
-        knowledge_base_id: note.knowledge_base_id.clone(),
-        knowledge_base_name: knowledge_base
-            .map(|knowledge_base| knowledge_base.name.clone())
-            .unwrap_or_else(|| "未知知识库".to_owned()),
-        note_id: note.id.clone(),
-        title: note.title.clone(),
-        path: note.path.clone(),
-        snippet: note
-            .content
-            .lines()
-            .map(str::trim)
-            .find(|line| !line.is_empty() && !line.starts_with('#'))
-            .unwrap_or("已读取该笔记。")
-            .to_owned(),
-        score: 1.0,
-        location: None,
-    };
-    let note_content_chars = note.content.chars().count();
-    let bounded_content = truncate_chars(&note.content, MAX_READ_NOTE_CHARS);
+        let knowledge_base = snapshot
+            .knowledge_bases
+            .iter()
+            .find(|knowledge_base| knowledge_base.id == note.knowledge_base_id);
+        let citation = Citation {
+            knowledge_base_id: note.knowledge_base_id.clone(),
+            knowledge_base_name: knowledge_base
+                .map(|knowledge_base| knowledge_base.name.clone())
+                .unwrap_or_else(|| "未知知识库".to_owned()),
+            note_id: note.id.clone(),
+            title: note.title.clone(),
+            path: note.path.clone(),
+            snippet: note
+                .content
+                .lines()
+                .map(str::trim)
+                .find(|line| !line.is_empty() && !line.starts_with('#'))
+                .unwrap_or("已读取该笔记。")
+                .to_owned(),
+            score: 1.0,
+            location: None,
+        };
+        let note_content_chars = note.content.chars().count();
+        let bounded_content = truncate_chars(&note.content, MAX_READ_NOTE_CHARS);
 
-    return ToolExecutionResult {
-        success: true,
-        summary: format!("已读取笔记《{}》", note.title),
-        payload: json!({
-            "note": {
-                "id": &note.id,
-                "knowledgeBaseId": &note.knowledge_base_id,
-                "title": &note.title,
-                "path": &note.path,
-                "tags": &note.tags,
-                "updatedAt": &note.updated_at,
-                "contentHash": &note.content_hash,
-                "content": bounded_content,
-                "contentChars": note_content_chars,
-                "contentTruncated": note_content_chars > MAX_READ_NOTE_CHARS
-            }
-        }),
-        citations: vec![citation],
-        audit_fragment: Some(format!(
-            "read_file type=markdown path={} chars={}{}",
-            note.path,
-            note_content_chars.min(MAX_READ_NOTE_CHARS),
-            if note_content_chars > MAX_READ_NOTE_CHARS {
-                "（已截断）"
-            } else {
-                ""
-            }
-        )),
-    };
+        return ToolExecutionResult {
+            success: true,
+            summary: format!("已读取笔记《{}》", note.title),
+            payload: json!({
+                "note": {
+                    "id": &note.id,
+                    "knowledgeBaseId": &note.knowledge_base_id,
+                    "title": &note.title,
+                    "path": &note.path,
+                    "tags": &note.tags,
+                    "updatedAt": &note.updated_at,
+                    "contentHash": &note.content_hash,
+                    "content": bounded_content,
+                    "contentChars": note_content_chars,
+                    "contentTruncated": note_content_chars > MAX_READ_NOTE_CHARS
+                }
+            }),
+            citations: vec![citation],
+            audit_fragment: Some(format!(
+                "read_file type=markdown path={} chars={}{}",
+                note.path,
+                note_content_chars.min(MAX_READ_NOTE_CHARS),
+                if note_content_chars > MAX_READ_NOTE_CHARS {
+                    "（已截断）"
+                } else {
+                    ""
+                }
+            )),
+        };
     }
 
     let Some(document) = scoped_text_document(snapshot, session_index, file_id) else {
-        return ToolExecutionResult::failed("目标文件不在当前会话允许范围内，或不是可编辑的 Markdown/TXT 文件。");
+        return ToolExecutionResult::failed(
+            "目标文件不在当前会话允许范围内，或不是可编辑的 Markdown/TXT 文件。",
+        );
     };
     let content = document.content.as_deref().unwrap_or_default();
     let content_chars = content.chars().count();
@@ -726,7 +1010,16 @@ fn execute_read_file(
             "contentTruncated": content_chars > MAX_READ_NOTE_CHARS
         }}),
         citations: Vec::new(),
-        audit_fragment: Some(format!("read_file type=txt path={} chars={}{}", document.path, content_chars.min(MAX_READ_NOTE_CHARS), if content_chars > MAX_READ_NOTE_CHARS { "（已截断）" } else { "" })),
+        audit_fragment: Some(format!(
+            "read_file type=txt path={} chars={}{}",
+            document.path,
+            content_chars.min(MAX_READ_NOTE_CHARS),
+            if content_chars > MAX_READ_NOTE_CHARS {
+                "（已截断）"
+            } else {
+                ""
+            }
+        )),
     }
 }
 
@@ -742,7 +1035,9 @@ fn execute_read_document(
         .and_then(Value::as_str)
         .unwrap_or_default();
     let Some(document) = scoped_readonly_document(snapshot, session_index, document_id) else {
-        return ToolExecutionResult::failed("目标文档不在当前会话允许范围内，或不是可读取的 DOCX/PDF 文件。");
+        return ToolExecutionResult::failed(
+            "目标文档不在当前会话允许范围内，或不是可读取的 DOCX/PDF 文件。",
+        );
     };
     let Some(knowledge_base) = snapshot
         .knowledge_bases
@@ -780,13 +1075,29 @@ fn execute_read_document(
         note_id: document.id.clone(),
         title: document.title.clone(),
         path: document.path.clone(),
-        snippet: first_block.map(|block| truncate_chars(&block.text, 500)).unwrap_or_else(|| "未提取到文本。".to_owned()),
+        snippet: first_block
+            .map(|block| truncate_chars(&block.text, 500))
+            .unwrap_or_else(|| "未提取到文本。".to_owned()),
         score: 1.0,
-        location: first_block.map(|block| block.page.map(|page| format!("第 {page} 页")).unwrap_or_else(|| format!("结构块 {}", block.index))),
+        location: first_block.map(|block| {
+            block
+                .page
+                .map(|page| format!("第 {page} 页"))
+                .unwrap_or_else(|| format!("结构块 {}", block.index))
+        }),
     };
     ToolExecutionResult {
         success: true,
-        summary: format!("已读取 {} 文档《{}》{}", document.file_type.to_ascii_uppercase(), document.title, if truncated { "（已按上下文预算截断）" } else { "" }),
+        summary: format!(
+            "已读取 {} 文档《{}》{}",
+            document.file_type.to_ascii_uppercase(),
+            document.title,
+            if truncated {
+                "（已按上下文预算截断）"
+            } else {
+                ""
+            }
+        ),
         payload: json!({ "document": {
             "id": &document.id, "knowledgeBaseId": &document.knowledge_base_id,
             "title": &document.title, "path": &document.path, "fileType": &document.file_type,
@@ -795,7 +1106,15 @@ fn execute_read_document(
             "warnings": extraction.warnings
         }}),
         citations: vec![citation],
-        audit_fragment: Some(format!("read_document type={} path={} blocks={} chars={} truncated={} warnings={}", document.file_type, document.path, extraction.blocks.len(), extraction.content_chars.min(MAX_READ_NOTE_CHARS), truncated, extraction.warnings.len())),
+        audit_fragment: Some(format!(
+            "read_document type={} path={} blocks={} chars={} truncated={} warnings={}",
+            document.file_type,
+            document.path,
+            extraction.blocks.len(),
+            extraction.content_chars.min(MAX_READ_NOTE_CHARS),
+            truncated,
+            extraction.warnings.len()
+        )),
     }
 }
 
@@ -1197,11 +1516,31 @@ fn execute_propose_file_change(
         .and_then(Value::as_str)
         .unwrap_or_default();
     let target = if let Some(note) = scoped_note(snapshot, session_index, file_id) {
-        (note.id.clone(), note.knowledge_base_id.clone(), note.title.clone(), note.path.clone(), note.content.clone(), note.content_hash.clone(), "note", "markdown")
+        (
+            note.id.clone(),
+            note.knowledge_base_id.clone(),
+            note.title.clone(),
+            note.path.clone(),
+            note.content.clone(),
+            note.content_hash.clone(),
+            "note",
+            "markdown",
+        )
     } else if let Some(document) = scoped_text_document(snapshot, session_index, file_id) {
-        (document.id.clone(), document.knowledge_base_id.clone(), document.title.clone(), document.path.clone(), document.content.clone().unwrap_or_default(), document.content_hash.clone(), "document", "txt")
+        (
+            document.id.clone(),
+            document.knowledge_base_id.clone(),
+            document.title.clone(),
+            document.path.clone(),
+            document.content.clone().unwrap_or_default(),
+            document.content_hash.clone(),
+            "document",
+            "txt",
+        )
     } else {
-        return ToolExecutionResult::failed("目标文件不在当前会话允许范围内，或不是可编辑的 Markdown/TXT 文件。");
+        return ToolExecutionResult::failed(
+            "目标文件不在当前会话允许范围内，或不是可编辑的 Markdown/TXT 文件。",
+        );
     };
     let operation = args
         .get("operation")
@@ -1209,10 +1548,11 @@ fn execute_propose_file_change(
         .and_then(Value::as_str)
         .filter(|value| matches!(*value, "append" | "replace" | "multi_replace"))
         .unwrap_or("replace");
-    let (original, next) = match prepare_rewrite_content(&target.4, operation, args, target.7 == "markdown") {
-        Ok(prepared_change) => prepared_change,
-        Err(message) => return ToolExecutionResult::failed(&message),
-    };
+    let (original, next) =
+        match prepare_rewrite_content(&target.4, operation, args, target.7 == "markdown") {
+            Ok(prepared_change) => prepared_change,
+            Err(message) => return ToolExecutionResult::failed(&message),
+        };
 
     let change = ProposedChange {
         id: create_id("change"),
@@ -1241,7 +1581,8 @@ fn execute_propose_file_change(
     snapshot.sessions[session_index].pending_change = Some(change.clone());
     let audit_fragment = Some(format!(
         "propose_file_change type={} path={} operation={} original_chars={} next_chars={}",
-        target.7, target.3,
+        target.7,
+        target.3,
         operation,
         change.original.chars().count(),
         change.next.chars().count()
@@ -1299,7 +1640,11 @@ fn prepare_single_replace_rewrite(content: &str, args: &Value) -> Result<(String
 }
 
 /** 准备文末追加，工具层合成整篇 diff，避免模型把整篇正文塞进局部替换。 */
-fn prepare_append_rewrite(content: &str, args: &Value, is_markdown: bool) -> Result<(String, String), String> {
+fn prepare_append_rewrite(
+    content: &str,
+    args: &Value,
+    is_markdown: bool,
+) -> Result<(String, String), String> {
     let addition = args
         .get("next")
         .and_then(Value::as_str)
@@ -1311,7 +1656,11 @@ fn prepare_append_rewrite(content: &str, args: &Value, is_markdown: bool) -> Res
     }
 
     // TXT 不修剪或注入 Markdown 分隔空行，确保 Agent 纯文本写入保持原始语义。
-    let next = if is_markdown { append_note_content(content, &addition) } else { format!("{content}{addition}") };
+    let next = if is_markdown {
+        append_note_content(content, &addition)
+    } else {
+        format!("{content}{addition}")
+    };
     Ok((content.to_owned(), next))
 }
 
@@ -1523,7 +1872,11 @@ fn execute_create_file_draft(
         .unwrap_or("00-Inbox/Agent 草稿.md")
         .trim()
         .to_owned();
-    let file_type = args.get("fileType").or_else(|| args.get("file_type")).and_then(Value::as_str).unwrap_or_default();
+    let file_type = args
+        .get("fileType")
+        .or_else(|| args.get("file_type"))
+        .and_then(Value::as_str)
+        .unwrap_or_default();
     let content = args
         .get("content")
         .and_then(Value::as_str)
@@ -1531,17 +1884,32 @@ fn execute_create_file_draft(
         .trim()
         .to_owned();
 
-    if knowledge_base_id.is_empty() || content.is_empty() || !matches!(file_type, "markdown" | "txt") {
-        return ToolExecutionResult::failed("新建草稿工具缺少目标知识库、正文或有效 fileType（markdown/txt）。");
+    if knowledge_base_id.is_empty()
+        || content.is_empty()
+        || !matches!(file_type, "markdown" | "txt")
+    {
+        return ToolExecutionResult::failed(
+            "新建草稿工具缺少目标知识库、正文或有效 fileType（markdown/txt）。",
+        );
     }
 
     let valid_extension = match file_type {
-        "markdown" => matches!(std::path::Path::new(&target_path).extension().and_then(|value| value.to_str()), Some("md") | Some("markdown")),
-        "txt" => std::path::Path::new(&target_path).extension().and_then(|value| value.to_str()) == Some("txt"),
+        "markdown" => matches!(
+            std::path::Path::new(&target_path)
+                .extension()
+                .and_then(|value| value.to_str()),
+            Some("md") | Some("markdown")
+        ),
+        "txt" => {
+            std::path::Path::new(&target_path)
+                .extension()
+                .and_then(|value| value.to_str())
+                == Some("txt")
+        }
         _ => false,
     };
     if !valid_extension {
-        return ToolExecutionResult::failed("目标路径扩展名必须与 fileType 匹配。" );
+        return ToolExecutionResult::failed("目标路径扩展名必须与 fileType 匹配。");
     }
 
     if !snapshot
@@ -1557,7 +1925,11 @@ fn execute_create_file_draft(
         knowledge_base_id,
         note_id: None,
         target_id: None,
-        target_kind: Some(if file_type == "markdown" { "note".to_owned() } else { "document".to_owned() }),
+        target_kind: Some(if file_type == "markdown" {
+            "note".to_owned()
+        } else {
+            "document".to_owned()
+        }),
         file_type: Some(file_type.to_owned()),
         r#type: "create".to_owned(),
         operation: None,
@@ -1579,7 +1951,8 @@ fn execute_create_file_draft(
     snapshot.sessions[session_index].pending_change = Some(change.clone());
     let audit_fragment = Some(format!(
         "create_file_draft type={} path={} chars={}",
-        file_type, change.target_path,
+        file_type,
+        change.target_path,
         change.next.chars().count()
     ));
 
@@ -1589,6 +1962,274 @@ fn execute_create_file_draft(
         payload: json!({ "change": &change }),
         citations: Vec::new(),
         audit_fragment,
+    }
+}
+
+/** 执行 create_folder：生成待确认的 create_folder 变更集操作，不直接落盘。 */
+fn execute_create_folder(context: &mut AgentToolContext<'_>, args: &Value) -> ToolExecutionResult {
+    let session = &context.snapshot.sessions[context.session_index];
+    if session.im_identity.is_some() || session.security_level == "basic" {
+        return ToolExecutionResult::failed("当前会话安全级别不允许创建文件夹。");
+    }
+    // Skill 变更集必须先处理完，避免把 Agent 文件夹操作混入 Skill 隔离区差异比对结果。
+    if let Some(existing) = session.pending_change_set.as_ref() {
+        if existing.status == "pending" && existing.execution_id != AGENT_DIRECT_EXECUTION_ID {
+            return ToolExecutionResult::failed(
+                "当前已有待确认的 Skill 变更集，请先处理后再创建文件夹。",
+            );
+        }
+    }
+
+    let requested_knowledge_base_id = args
+        .get("knowledgeBaseId")
+        .or_else(|| args.get("knowledge_base_id"))
+        .and_then(Value::as_str);
+    let raw_target_path = args
+        .get("targetPath")
+        .or_else(|| args.get("target_path"))
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    let resolved = match crate::fs_guard::resolve_agent_fs_target(
+        &context.snapshot.knowledge_bases,
+        &session.knowledge_base_ids,
+        &context.request.active_knowledge_base_id,
+        &session.security_level,
+        requested_knowledge_base_id,
+        raw_target_path,
+        false,
+    ) {
+        Ok(resolved) => resolved,
+        Err(message) => return ToolExecutionResult::failed(&message),
+    };
+    if resolved.stored_path.is_empty() {
+        return ToolExecutionResult::failed("目标文件夹路径不能为空。");
+    }
+
+    let operation = ProposedFileOperation {
+        id: create_id("op"),
+        knowledge_base_id: resolved.knowledge_base_id.clone(),
+        operation: "create_folder".to_owned(),
+        source_path: None,
+        target_path: resolved.stored_path.clone(),
+        file_type: "folder".to_owned(),
+        original_hash: String::new(),
+        original: None,
+        next: None,
+        selected: true,
+        binary: false,
+        byte_size: 0,
+        staged_path: None,
+    };
+
+    let summary = format!(
+        "在 {} 新建文件夹 {}",
+        resolved.knowledge_base_id, resolved.stored_path
+    );
+    let session = &mut context.snapshot.sessions[context.session_index];
+    let mut change_set = session
+        .pending_change_set
+        .clone()
+        .unwrap_or_else(|| ProposedChangeSet {
+            id: create_id("change-set"),
+            execution_id: AGENT_DIRECT_EXECUTION_ID.to_owned(),
+            skill_id: AGENT_DIRECT_SOURCE.to_owned(),
+            status: "pending".to_owned(),
+            summary: String::new(),
+            operations: Vec::new(),
+            warnings: Vec::new(),
+            created_at: format_local_datetime(),
+        });
+    change_set.operations.push(operation.clone());
+    change_set.summary = summary.clone();
+    change_set.status = "pending".to_owned();
+    change_set.created_at = format_local_datetime();
+    session.pending_change_set = Some(change_set.clone());
+    session.updated_at = format_local_datetime();
+
+    ToolExecutionResult {
+        success: true,
+        summary: format!("已生成待确认的文件夹变更：{}", resolved.stored_path),
+        payload: json!({ "changeSet": &change_set, "operation": &operation }),
+        citations: Vec::new(),
+        audit_fragment: Some(format!(
+            "create_folder knowledge_base_id={} target_path={}",
+            resolved.knowledge_base_id, resolved.stored_path
+        )),
+    }
+}
+
+/** 执行 list_path：列出完全级别下合规目录的一层内容，不跟随符号链接。 */
+fn execute_list_path(context: &mut AgentToolContext<'_>, args: &Value) -> ToolExecutionResult {
+    let session = &context.snapshot.sessions[context.session_index];
+    if session.im_identity.is_some()
+        || !AgentSecurityLevel::parse(&session.security_level).allows_external_filesystem()
+    {
+        return ToolExecutionResult::failed("当前会话安全级别不允许列出知识库外路径。");
+    }
+
+    let requested_knowledge_base_id = args
+        .get("knowledgeBaseId")
+        .or_else(|| args.get("knowledge_base_id"))
+        .and_then(Value::as_str);
+    let raw_path = args.get("path").and_then(Value::as_str).unwrap_or_default();
+    let resolved = match crate::fs_guard::resolve_agent_fs_target(
+        &context.snapshot.knowledge_bases,
+        &session.knowledge_base_ids,
+        &context.request.active_knowledge_base_id,
+        &session.security_level,
+        requested_knowledge_base_id,
+        raw_path,
+        true,
+    ) {
+        Ok(resolved) => resolved,
+        Err(message) => return ToolExecutionResult::failed(&message),
+    };
+    let metadata = match std::fs::symlink_metadata(&resolved.absolute_path) {
+        Ok(metadata) => metadata,
+        Err(error) => return ToolExecutionResult::failed(&format!("无法读取目标路径：{error}")),
+    };
+    if metadata.file_type().is_symlink() {
+        return ToolExecutionResult::failed("目标路径是符号链接，已拒绝访问。");
+    }
+    if !metadata.is_dir() {
+        return ToolExecutionResult::failed("目标路径不是目录。");
+    }
+
+    let mut entries = Vec::new();
+    let read_dir = match std::fs::read_dir(&resolved.absolute_path) {
+        Ok(read_dir) => read_dir,
+        Err(error) => return ToolExecutionResult::failed(&format!("无法列出目录：{error}")),
+    };
+    for entry in read_dir {
+        let entry = match entry {
+            Ok(entry) => entry,
+            Err(_) => continue,
+        };
+        let file_type = match entry.file_type() {
+            Ok(file_type) => file_type,
+            Err(_) => continue,
+        };
+        if file_type.is_symlink() {
+            continue;
+        }
+        let name = entry.file_name().to_string_lossy().into_owned();
+        let size = if file_type.is_file() {
+            entry.metadata().map(|metadata| metadata.len()).unwrap_or(0)
+        } else {
+            0
+        };
+        entries.push(json!({
+            "name": name,
+            "kind": if file_type.is_dir() { "folder" } else { "file" },
+            "size": size
+        }));
+    }
+    entries.sort_by(|left, right| {
+        left.get("name")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .cmp(
+                right
+                    .get("name")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default(),
+            )
+    });
+    let total = entries.len();
+    let truncated = total > MAX_LIST_PATH_ENTRIES;
+    entries.truncate(MAX_LIST_PATH_ENTRIES);
+
+    ToolExecutionResult {
+        success: true,
+        summary: format!("已列出 {}，共 {} 项", resolved.stored_path, total),
+        payload: json!({
+            "path": resolved.stored_path,
+            "knowledgeBaseId": resolved.knowledge_base_id,
+            "external": resolved.is_external(),
+            "entries": entries,
+            "total": total,
+            "truncated": truncated
+        }),
+        citations: Vec::new(),
+        audit_fragment: Some(format!(
+            "list_path knowledge_base_id={} path={} total={}",
+            resolved.knowledge_base_id, resolved.stored_path, total
+        )),
+    }
+}
+
+/** 执行 read_path：读取完全级别下合规 UTF-8 文本文件，二进制和超大文件会被拒绝或截断。 */
+fn execute_read_path(context: &mut AgentToolContext<'_>, args: &Value) -> ToolExecutionResult {
+    let session = &context.snapshot.sessions[context.session_index];
+    if session.im_identity.is_some()
+        || !AgentSecurityLevel::parse(&session.security_level).allows_external_filesystem()
+    {
+        return ToolExecutionResult::failed("当前会话安全级别不允许读取知识库外路径。");
+    }
+
+    let requested_knowledge_base_id = args
+        .get("knowledgeBaseId")
+        .or_else(|| args.get("knowledge_base_id"))
+        .and_then(Value::as_str);
+    let raw_path = args.get("path").and_then(Value::as_str).unwrap_or_default();
+    let resolved = match crate::fs_guard::resolve_agent_fs_target(
+        &context.snapshot.knowledge_bases,
+        &session.knowledge_base_ids,
+        &context.request.active_knowledge_base_id,
+        &session.security_level,
+        requested_knowledge_base_id,
+        raw_path,
+        true,
+    ) {
+        Ok(resolved) => resolved,
+        Err(message) => return ToolExecutionResult::failed(&message),
+    };
+    let metadata = match std::fs::symlink_metadata(&resolved.absolute_path) {
+        Ok(metadata) => metadata,
+        Err(error) => return ToolExecutionResult::failed(&format!("无法读取目标文件：{error}")),
+    };
+    if metadata.file_type().is_symlink() {
+        return ToolExecutionResult::failed("目标路径是符号链接，已拒绝读取。");
+    }
+    if !metadata.is_file() {
+        return ToolExecutionResult::failed("目标路径不是文件。");
+    }
+
+    let bytes = match std::fs::read(&resolved.absolute_path) {
+        Ok(bytes) => bytes,
+        Err(error) => return ToolExecutionResult::failed(&format!("无法读取目标文件：{error}")),
+    };
+    let truncated_bytes = bytes.len() > MAX_READ_PATH_BYTES;
+    let limited = if truncated_bytes {
+        bytes.get(..MAX_READ_PATH_BYTES).unwrap_or(&bytes)
+    } else {
+        bytes.as_slice()
+    };
+    let Ok(text) = std::str::from_utf8(limited) else {
+        return ToolExecutionResult::failed("目标文件不是有效 UTF-8 文本，已拒绝读取。");
+    };
+    let truncated = truncated_bytes || text.chars().count() > MAX_READ_NOTE_CHARS;
+    let content = truncate_chars(text, MAX_READ_NOTE_CHARS);
+
+    ToolExecutionResult {
+        success: true,
+        summary: format!(
+            "已读取 {}，{} 字符",
+            resolved.stored_path,
+            content.chars().count()
+        ),
+        payload: json!({
+            "path": resolved.stored_path,
+            "knowledgeBaseId": resolved.knowledge_base_id,
+            "external": resolved.is_external(),
+            "content": content,
+            "truncated": truncated
+        }),
+        citations: Vec::new(),
+        audit_fragment: Some(format!(
+            "read_path knowledge_base_id={} path={} truncated={}",
+            resolved.knowledge_base_id, resolved.stored_path, truncated
+        )),
     }
 }
 
@@ -1765,6 +2406,9 @@ mod tests {
                 pinned_note_ids: vec!["note-a".to_owned()],
                 messages: Vec::new(),
                 pending_change: None,
+                pending_change_set: None,
+                pending_execution: None,
+                security_level: "basic".to_owned(),
                 context_summary: None,
                 created_at: "刚刚".to_owned(),
                 updated_at: "刚刚".to_owned(),
@@ -1847,6 +2491,271 @@ mod tests {
         assert!(tool_names.contains(&"read_document"));
         assert!(tool_names.contains(&"propose_file_change"));
         assert!(tool_names.contains(&"create_file_draft"));
+        assert!(!tool_names.contains(&"run_skill"));
+    }
+
+    /** run_skill 仅在本地进阶/完全会话和全局执行开关同时满足时注册；create_folder 同样要求本地进阶会话。 */
+    #[test]
+    fn run_skill_registry_requires_local_advanced_session() {
+        let mut snapshot = tool_test_snapshot("正文内容足够用于测试。".to_owned());
+        let mut settings = AgentSecuritySettings::default();
+        settings.advanced_execution_enabled = true;
+
+        snapshot.sessions[0].security_level = "advanced".to_owned();
+        let advanced_tools =
+            ToolRegistry::for_session(&snapshot.sessions[0], &settings).tool_names();
+        assert!(advanced_tools.contains(&"run_skill"));
+        assert!(advanced_tools.contains(&"create_folder"));
+        assert!(!advanced_tools.contains(&"list_path"));
+        assert!(!advanced_tools.contains(&"read_path"));
+
+        snapshot.sessions[0].security_level = "basic".to_owned();
+        let basic_tools = ToolRegistry::for_session(&snapshot.sessions[0], &settings).tool_names();
+        assert!(!basic_tools.contains(&"run_skill"));
+        assert!(!basic_tools.contains(&"create_folder"));
+        assert!(!basic_tools.contains(&"list_path"));
+
+        // create_folder 不要求 autonomous 开关；知识库外路径工具则跟随完全级别。
+        snapshot.sessions[0].security_level = "autonomous".to_owned();
+        settings.autonomous_mode_enabled = false;
+        let autonomous_without_toggle =
+            ToolRegistry::for_session(&snapshot.sessions[0], &settings).tool_names();
+        assert!(!autonomous_without_toggle.contains(&"run_skill"));
+        assert!(autonomous_without_toggle.contains(&"create_folder"));
+        assert!(autonomous_without_toggle.contains(&"list_path"));
+        assert!(autonomous_without_toggle.contains(&"read_path"));
+
+        snapshot.sessions[0].security_level = "advanced".to_owned();
+        snapshot.sessions[0].im_identity = Some(crate::domain::ImSessionIdentity {
+            provider_id: "feishu".to_owned(),
+            conversation_kind: "direct".to_owned(),
+            channel_hash: "redacted".to_owned(),
+            initial_message_preview: "IM".to_owned(),
+            last_message_preview: "IM".to_owned(),
+        });
+        let im_tools = ToolRegistry::for_session(&snapshot.sessions[0], &settings).tool_names();
+        assert!(!im_tools.contains(&"run_skill"));
+        assert!(!im_tools.contains(&"create_folder"));
+    }
+
+    /** create_folder 在 advanced 会话执行后应生成 agent-direct 变更集，operation 类型为 create_folder。 */
+    #[test]
+    fn create_folder_builds_agent_direct_change_set() {
+        let kb_root = tempfile::tempdir().expect("kb root");
+        let mut snapshot = tool_test_snapshot("正文内容足够用于测试。".to_owned());
+        snapshot.knowledge_bases[0].path = kb_root.path().to_string_lossy().into_owned();
+        snapshot.sessions[0].security_level = "advanced".to_owned();
+        let mut settings = AgentSecuritySettings::default();
+        settings.advanced_execution_enabled = true;
+        let registry = ToolRegistry::for_session(&snapshot.sessions[0], &settings);
+        let request = tool_test_request("create", "建文件夹");
+        let mut context = tool_test_context(&mut snapshot, &request);
+        let outcome = registry.execute_named(
+            &mut context,
+            "create_folder",
+            json!({ "targetPath": "Notes/新目录" }),
+        );
+
+        assert_eq!(outcome.call.status, "completed");
+        let change_set = context.snapshot.sessions[0]
+            .pending_change_set
+            .as_ref()
+            .unwrap();
+        assert_eq!(change_set.execution_id, "agent-direct");
+        assert_eq!(change_set.status, "pending");
+        assert_eq!(change_set.operations.len(), 1);
+        assert_eq!(change_set.operations[0].operation, "create_folder");
+        assert_eq!(change_set.operations[0].file_type, "folder");
+        assert_eq!(change_set.operations[0].target_path, "Notes/新目录");
+        assert!(!change_set.operations[0].binary);
+    }
+
+    /** 连续两次 create_folder 应追加到同一 agent-direct 变更集。 */
+    #[test]
+    fn create_folder_appends_to_existing_agent_change_set() {
+        let kb_root = tempfile::tempdir().expect("kb root");
+        let mut snapshot = tool_test_snapshot("正文内容足够用于测试。".to_owned());
+        snapshot.knowledge_bases[0].path = kb_root.path().to_string_lossy().into_owned();
+        snapshot.sessions[0].security_level = "advanced".to_owned();
+        let mut settings = AgentSecuritySettings::default();
+        settings.advanced_execution_enabled = true;
+        let registry = ToolRegistry::for_session(&snapshot.sessions[0], &settings);
+        let request = tool_test_request("create", "建文件夹");
+        let mut context = tool_test_context(&mut snapshot, &request);
+        registry.execute_named(
+            &mut context,
+            "create_folder",
+            json!({ "targetPath": "Notes/目录A" }),
+        );
+        registry.execute_named(
+            &mut context,
+            "create_folder",
+            json!({ "targetPath": "Notes/目录B" }),
+        );
+
+        let change_set = context.snapshot.sessions[0]
+            .pending_change_set
+            .as_ref()
+            .unwrap();
+        assert_eq!(change_set.operations.len(), 2);
+        assert_eq!(change_set.operations[0].target_path, "Notes/目录A");
+        assert_eq!(change_set.operations[1].target_path, "Notes/目录B");
+    }
+
+    /** create_folder 必须拒绝路径穿越和 scope 外知识库。 */
+    #[test]
+    fn create_folder_rejects_unsafe_paths_and_outside_scope() {
+        let mut snapshot = tool_test_snapshot("正文内容足够用于测试。".to_owned());
+        snapshot.sessions[0].security_level = "advanced".to_owned();
+        let mut settings = AgentSecuritySettings::default();
+        settings.advanced_execution_enabled = true;
+        let registry = ToolRegistry::for_session(&snapshot.sessions[0], &settings);
+        let request = tool_test_request("create", "建文件夹");
+        let mut context = tool_test_context(&mut snapshot, &request);
+
+        let escape_outcome = registry.execute_named(
+            &mut context,
+            "create_folder",
+            json!({ "targetPath": "../escape" }),
+        );
+        assert_eq!(escape_outcome.call.status, "failed");
+        assert!(context.snapshot.sessions[0].pending_change_set.is_none());
+
+        let absolute_outcome = registry.execute_named(
+            &mut context,
+            "create_folder",
+            json!({ "targetPath": "/etc/evil" }),
+        );
+        assert_eq!(absolute_outcome.call.status, "failed");
+
+        let outside_scope_outcome = registry.execute_named(
+            &mut context,
+            "create_folder",
+            json!({ "knowledgeBaseId": "kb-b", "targetPath": "Notes/目录" }),
+        );
+        assert_eq!(outside_scope_outcome.call.status, "failed");
+        assert!(context.snapshot.sessions[0].pending_change_set.is_none());
+    }
+
+    /** 完全级别允许合规的绝对路径，并把它记为 external scope。 */
+    #[test]
+    fn create_folder_full_mode_accepts_compliant_absolute_path() {
+        let kb_root = tempfile::tempdir().expect("kb root");
+        let external = tempfile::tempdir().expect("external root");
+        let mut snapshot = tool_test_snapshot("正文内容足够用于测试。".to_owned());
+        snapshot.knowledge_bases[0].path = kb_root.path().to_string_lossy().into_owned();
+        snapshot.sessions[0].security_level = "autonomous".to_owned();
+        let mut settings = AgentSecuritySettings::default();
+        settings.advanced_execution_enabled = true;
+        settings.autonomous_mode_enabled = true;
+        let registry = ToolRegistry::for_session(&snapshot.sessions[0], &settings);
+        let request = tool_test_request("create", "建外部文件夹");
+        let mut context = tool_test_context(&mut snapshot, &request);
+        let target = external.path().join("AgentOut");
+        let outcome = registry.execute_named(
+            &mut context,
+            "create_folder",
+            json!({ "targetPath": target.to_string_lossy() }),
+        );
+
+        assert_eq!(outcome.call.status, "completed");
+        let operation = &context.snapshot.sessions[0]
+            .pending_change_set
+            .as_ref()
+            .unwrap()
+            .operations[0];
+        assert_eq!(operation.knowledge_base_id, "external");
+        assert!(operation.target_path.contains("AgentOut"));
+    }
+
+    /** 完全级别下，落在授权知识库内的绝对路径仍按知识库相对路径保存。 */
+    #[test]
+    fn create_folder_full_mode_maps_absolute_path_inside_kb() {
+        let kb_root = tempfile::tempdir().expect("kb root");
+        std::fs::create_dir_all(kb_root.path().join("Notes")).expect("notes");
+        let mut snapshot = tool_test_snapshot("正文内容足够用于测试。".to_owned());
+        snapshot.knowledge_bases[0].path = kb_root.path().to_string_lossy().into_owned();
+        snapshot.sessions[0].security_level = "autonomous".to_owned();
+        let mut settings = AgentSecuritySettings::default();
+        settings.advanced_execution_enabled = true;
+        settings.autonomous_mode_enabled = true;
+        let registry = ToolRegistry::for_session(&snapshot.sessions[0], &settings);
+        let request = tool_test_request("create", "建知识库文件夹");
+        let mut context = tool_test_context(&mut snapshot, &request);
+        let target = kb_root.path().join("Notes").join("归档");
+        let outcome = registry.execute_named(
+            &mut context,
+            "create_folder",
+            json!({ "targetPath": target.to_string_lossy() }),
+        );
+
+        assert_eq!(outcome.call.status, "completed");
+        let operation = &context.snapshot.sessions[0]
+            .pending_change_set
+            .as_ref()
+            .unwrap()
+            .operations[0];
+        assert_eq!(operation.knowledge_base_id, "kb-a");
+        assert_eq!(operation.target_path, "Notes/归档");
+    }
+
+    /** list_path / read_path 可读取知识库外的合规目录和文本。 */
+    #[test]
+    fn list_and_read_path_full_mode_round_trip() {
+        let kb_root = tempfile::tempdir().expect("kb root");
+        let external = tempfile::tempdir().expect("external root");
+        std::fs::write(external.path().join("hello.txt"), "hello orange").expect("write file");
+        let mut snapshot = tool_test_snapshot("正文内容足够用于测试。".to_owned());
+        snapshot.knowledge_bases[0].path = kb_root.path().to_string_lossy().into_owned();
+        snapshot.sessions[0].security_level = "autonomous".to_owned();
+        let mut settings = AgentSecuritySettings::default();
+        settings.advanced_execution_enabled = true;
+        settings.autonomous_mode_enabled = true;
+        let registry = ToolRegistry::for_session(&snapshot.sessions[0], &settings);
+        let request = tool_test_request("ask", "看外部目录");
+        let mut context = tool_test_context(&mut snapshot, &request);
+
+        let list_outcome = registry.execute_named(
+            &mut context,
+            "list_path",
+            json!({ "path": external.path().to_string_lossy() }),
+        );
+        assert_eq!(list_outcome.call.status, "completed");
+        assert!(list_outcome.payload["entries"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|entry| entry["name"] == "hello.txt"));
+
+        let read_outcome = registry.execute_named(
+            &mut context,
+            "read_path",
+            json!({ "path": external.path().join("hello.txt").to_string_lossy() }),
+        );
+        assert_eq!(read_outcome.call.status, "completed");
+        assert!(read_outcome.payload["content"]
+            .as_str()
+            .unwrap()
+            .contains("hello orange"));
+        assert_eq!(read_outcome.payload["external"], true);
+    }
+
+    /** basic 会话即使手动调用 create_folder 也必须失败。 */
+    #[test]
+    fn create_folder_rejects_basic_session() {
+        let mut snapshot = tool_test_snapshot("正文内容足够用于测试。".to_owned());
+        // 会话保持 basic；模拟模型误调用。这里用 default registry，因为 for_session 在 basic 不会注册 create_folder。
+        let registry = ToolRegistry::default();
+        let request = tool_test_request("create", "建文件夹");
+        let mut context = tool_test_context(&mut snapshot, &request);
+        let outcome = registry.execute_named(
+            &mut context,
+            "create_folder",
+            json!({ "targetPath": "Notes/新目录" }),
+        );
+
+        assert_eq!(outcome.call.status, "failed");
+        assert!(context.snapshot.sessions[0].pending_change_set.is_none());
     }
 
     /** 未知工具调用必须失败且不能修改 pending_change。 */
@@ -1908,14 +2817,19 @@ mod tests {
     fn unified_tools_read_and_propose_txt_change() {
         let registry = ToolRegistry::default();
         let mut snapshot = tool_test_snapshot("Markdown 正文".to_owned());
-        let mut document = tool_test_document("document-txt", "kb-a", "Docs/brief.txt", "txt", false);
+        let mut document =
+            tool_test_document("document-txt", "kb-a", "Docs/brief.txt", "txt", false);
         document.content = Some("旧纯文本".to_owned());
         document.content_hash = hash_content("旧纯文本");
         snapshot.documents = vec![document];
         let request = tool_test_request("rewrite", "改写 TXT");
         let mut context = tool_test_context(&mut snapshot, &request);
 
-        let read = registry.execute_named(&mut context, "read_file", json!({ "fileId": "document-txt" }));
+        let read = registry.execute_named(
+            &mut context,
+            "read_file",
+            json!({ "fileId": "document-txt" }),
+        );
         assert_eq!(read.call.status, "completed");
         assert_eq!(read.payload["file"]["fileType"].as_str(), Some("txt"));
         assert_eq!(read.payload["file"]["content"].as_str(), Some("旧纯文本"));
@@ -1924,7 +2838,10 @@ mod tests {
             "fileId": "document-txt", "operation": "replace", "original": "旧纯文本", "next": "新纯文本"
         }));
         assert_eq!(change.call.status, "completed");
-        let pending = context.snapshot.sessions[0].pending_change.as_ref().unwrap();
+        let pending = context.snapshot.sessions[0]
+            .pending_change
+            .as_ref()
+            .unwrap();
         assert_eq!(pending.file_type.as_deref(), Some("txt"));
         assert_eq!(pending.target_kind.as_deref(), Some("document"));
         assert_eq!(pending.next, "新纯文本");

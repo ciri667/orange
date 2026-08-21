@@ -22,6 +22,7 @@ use crate::domain::{
 use crate::logging::{self, AppEventBuilder, AppLogCategory, AppLogLevel};
 use crate::model_provider::{self, ProviderTemplate};
 use crate::runtime;
+use crate::skill_execution;
 use crate::skills;
 use crate::storage;
 use crate::text_edit::{replace_unique, UniqueReplacementError};
@@ -4188,46 +4189,100 @@ pub async fn apply_proposed_change(
         })
         .await?;
         if change_file_type == "txt" {
-            let document_id = storage::create_stable_note_id(&change.knowledge_base_id, &change.target_path);
-            let title = Path::new(&change.target_path).file_stem().and_then(|value| value.to_str()).unwrap_or("Agent 草稿").to_owned();
-            snapshot.documents.insert(0, crate::domain::WorkspaceDocument {
-                id: document_id.clone(), knowledge_base_id: change.knowledge_base_id.clone(), title,
-                path: change.target_path.clone(), file_type: "txt".to_owned(), updated_at: "刚刚".to_owned(),
-                content_hash: storage::hash_content(&change.next), content: Some(change.next.clone()), preview_available: false,
-            });
+            let document_id =
+                storage::create_stable_note_id(&change.knowledge_base_id, &change.target_path);
+            let title = Path::new(&change.target_path)
+                .file_stem()
+                .and_then(|value| value.to_str())
+                .unwrap_or("Agent 草稿")
+                .to_owned();
+            snapshot.documents.insert(
+                0,
+                crate::domain::WorkspaceDocument {
+                    id: document_id.clone(),
+                    knowledge_base_id: change.knowledge_base_id.clone(),
+                    title,
+                    path: change.target_path.clone(),
+                    file_type: "txt".to_owned(),
+                    updated_at: "刚刚".to_owned(),
+                    content_hash: storage::hash_content(&change.next),
+                    content: Some(change.next.clone()),
+                    preview_available: false,
+                },
+            );
             snapshot.active_note_id.clear();
             snapshot.active_document_id = document_id;
-        } else { snapshot.notes.insert(
-            0,
-            crate::domain::Note {
-                id: storage::create_stable_note_id(&change.knowledge_base_id, &change.target_path),
-                knowledge_base_id: change.knowledge_base_id.clone(),
-                title: change.title.replace("创建《", "").replace("》草稿", ""),
-                path: change.target_path.clone(),
-                content: change.next.clone(),
-                tags: vec!["Agent".to_owned(), "草稿".to_owned()],
-                updated_at: "刚刚".to_owned(),
-                backlinks: Vec::new(),
-                content_hash: storage::hash_content(&change.next),
-            },
-        ); }
+        } else {
+            snapshot.notes.insert(
+                0,
+                crate::domain::Note {
+                    id: storage::create_stable_note_id(
+                        &change.knowledge_base_id,
+                        &change.target_path,
+                    ),
+                    knowledge_base_id: change.knowledge_base_id.clone(),
+                    title: change.title.replace("创建《", "").replace("》草稿", ""),
+                    path: change.target_path.clone(),
+                    content: change.next.clone(),
+                    tags: vec!["Agent".to_owned(), "草稿".to_owned()],
+                    updated_at: "刚刚".to_owned(),
+                    backlinks: Vec::new(),
+                    content_hash: storage::hash_content(&change.next),
+                },
+            );
+        }
     } else if change_file_type == "txt" {
-        let document_id = change.target_id.as_ref().ok_or_else(|| "待写入 TXT 缺少目标 ID。".to_owned())?;
-        let document_index = snapshot.documents.iter().position(|document| document.id == *document_id && document.file_type == "txt").ok_or_else(|| "找不到待写入 TXT 文件。".to_owned())?;
+        let document_id = change
+            .target_id
+            .as_ref()
+            .ok_or_else(|| "待写入 TXT 缺少目标 ID。".to_owned())?;
+        let document_index = snapshot
+            .documents
+            .iter()
+            .position(|document| document.id == *document_id && document.file_type == "txt")
+            .ok_or_else(|| "找不到待写入 TXT 文件。".to_owned())?;
         let read_path = target_path.clone();
-        let fallback_content = snapshot.documents[document_index].content.clone().unwrap_or_default();
-        let current_content = run_blocking("读取待写入 TXT 文件", move || Ok(fs::read_to_string(&read_path).unwrap_or(fallback_content))).await?;
+        let fallback_content = snapshot.documents[document_index]
+            .content
+            .clone()
+            .unwrap_or_default();
+        let current_content = run_blocking("读取待写入 TXT 文件", move || {
+            Ok(fs::read_to_string(&read_path).unwrap_or(fallback_content))
+        })
+        .await?;
         let current_hash = storage::hash_content(&current_content);
-        let next_content = apply_rewrite_change(&current_content, &current_hash, &snapshot.documents[document_index].content_hash, &change)?;
-        capture_document_history_before_write(&app, storage::DocumentHistoryCapture {
-            target_kind: "document".to_owned(), knowledge_base_id: knowledge_base_id.clone(), target_id: document_id.clone(),
-            relative_path: snapshot.documents[document_index].path.clone(), title: snapshot.documents[document_index].title.clone(),
-            file_type: "txt".to_owned(), content: current_content, source: "agent-change".to_owned(),
-            session_id: Some(session_id.clone()), change_id: Some(change.id.clone()), operation_id: Some(operation_id.clone()),
-        }, AppLogCategory::Agent, "apply_proposed_change", started_at).await?;
+        let next_content = apply_rewrite_change(
+            &current_content,
+            &current_hash,
+            &snapshot.documents[document_index].content_hash,
+            &change,
+        )?;
+        capture_document_history_before_write(
+            &app,
+            storage::DocumentHistoryCapture {
+                target_kind: "document".to_owned(),
+                knowledge_base_id: knowledge_base_id.clone(),
+                target_id: document_id.clone(),
+                relative_path: snapshot.documents[document_index].path.clone(),
+                title: snapshot.documents[document_index].title.clone(),
+                file_type: "txt".to_owned(),
+                content: current_content,
+                source: "agent-change".to_owned(),
+                session_id: Some(session_id.clone()),
+                change_id: Some(change.id.clone()),
+                operation_id: Some(operation_id.clone()),
+            },
+            AppLogCategory::Agent,
+            "apply_proposed_change",
+            started_at,
+        )
+        .await?;
         let write_path = target_path.clone();
         let write_content = next_content.clone();
-        run_blocking("写回 TXT 文件", move || storage::atomic_write_text_document(&write_path, &write_content)).await?;
+        run_blocking("写回 TXT 文件", move || {
+            storage::atomic_write_text_document(&write_path, &write_content)
+        })
+        .await?;
         snapshot.documents[document_index].content = Some(next_content.clone());
         snapshot.documents[document_index].content_hash = storage::hash_content(&next_content);
         snapshot.documents[document_index].updated_at = "刚刚".to_owned();
@@ -4468,6 +4523,192 @@ pub async fn reject_proposed_change(
     index_snapshot_in_background(app.clone(), &snapshot).await?;
 
     Ok(snapshot)
+}
+
+/** 批准待执行 Skill；命令在线程池中完成隔离副本、沙箱执行和变更集生成。 */
+#[tauri::command]
+pub async fn approve_skill_execution(
+    app: AppHandle,
+    payload: ChangePayload,
+) -> Result<WorkspaceSnapshot, String> {
+    let execution_app = app.clone();
+    let started_at = Instant::now();
+    let session_id = payload.snapshot.active_session_id.clone();
+    let result = run_blocking("执行已批准 Skill", move || {
+        skill_execution::approve_and_execute(&execution_app, payload.snapshot)
+    })
+    .await;
+
+    logging::write_app_event_best_effort(
+        &app,
+        AppEventBuilder::new(
+            if result.is_ok() {
+                AppLogLevel::Info
+            } else {
+                AppLogLevel::Warn
+            },
+            AppLogCategory::Agent,
+            "approve_skill_execution",
+            if result.is_ok() {
+                "completed"
+            } else {
+                "failed"
+            },
+            if result.is_ok() {
+                "Skill 隔离执行完成。"
+            } else {
+                "Skill 隔离执行失败。"
+            },
+        )
+        .session_id(session_id)
+        .duration(started_at.elapsed()),
+    );
+    result
+}
+
+/** 拒绝待执行 Skill；不创建隔离副本，也不启动进程。 */
+#[tauri::command]
+pub async fn reject_skill_execution(
+    app: AppHandle,
+    payload: ChangePayload,
+) -> Result<WorkspaceSnapshot, String> {
+    let rejection_app = app.clone();
+    let session_id = payload.snapshot.active_session_id.clone();
+    let result = run_blocking("拒绝 Skill 执行", move || {
+        skill_execution::reject_execution(&rejection_app, payload.snapshot)
+    })
+    .await;
+
+    logging::write_app_event_best_effort(
+        &app,
+        AppEventBuilder::new(
+            if result.is_ok() {
+                AppLogLevel::Info
+            } else {
+                AppLogLevel::Warn
+            },
+            AppLogCategory::Agent,
+            "reject_skill_execution",
+            if result.is_ok() {
+                "completed"
+            } else {
+                "failed"
+            },
+            if result.is_ok() {
+                "已拒绝 Skill 执行。"
+            } else {
+                "拒绝 Skill 执行失败。"
+            },
+        )
+        .session_id(session_id),
+    );
+    result
+}
+
+/** 应用当前 Skill 变更集；后端负责全量预检、原子写入与失败回滚。 */
+#[tauri::command]
+pub async fn apply_skill_change_set(
+    app: AppHandle,
+    payload: ChangePayload,
+) -> Result<WorkspaceSnapshot, String> {
+    let change_app = app.clone();
+    let started_at = Instant::now();
+    let session_id = payload.snapshot.active_session_id.clone();
+    let result = run_blocking("应用 Skill 变更集", move || {
+        skill_execution::apply_change_set(&change_app, payload.snapshot)
+    })
+    .await;
+    logging::write_app_event_best_effort(
+        &app,
+        AppEventBuilder::new(
+            if result.is_ok() {
+                AppLogLevel::Info
+            } else {
+                AppLogLevel::Warn
+            },
+            AppLogCategory::Agent,
+            "apply_skill_change_set",
+            if result.is_ok() {
+                "completed"
+            } else {
+                "failed"
+            },
+            if result.is_ok() {
+                "已应用 Skill 文件变更集。"
+            } else {
+                "应用 Skill 文件变更集失败。"
+            },
+        )
+        .session_id(session_id)
+        .duration(started_at.elapsed()),
+    );
+    result
+}
+
+/** 拒绝当前 Skill 变更集并清理隔离副本。 */
+#[tauri::command]
+pub async fn reject_skill_change_set(
+    app: AppHandle,
+    payload: ChangePayload,
+) -> Result<WorkspaceSnapshot, String> {
+    let change_app = app.clone();
+    run_blocking("拒绝 Skill 变更集", move || {
+        skill_execution::reject_change_set(&change_app, payload.snapshot)
+    })
+    .await
+}
+
+/** 应用当前 Agent 直接产出的变更集（无 Skill 执行隔离区）；同样走全量预检、原子写入与回滚。 */
+#[tauri::command]
+pub async fn apply_agent_change_set(
+    app: AppHandle,
+    payload: ChangePayload,
+) -> Result<WorkspaceSnapshot, String> {
+    let change_app = app.clone();
+    let started_at = Instant::now();
+    let session_id = payload.snapshot.active_session_id.clone();
+    let result = run_blocking("应用 Agent 变更集", move || {
+        skill_execution::apply_agent_change_set(&change_app, payload.snapshot)
+    })
+    .await;
+    logging::write_app_event_best_effort(
+        &app,
+        AppEventBuilder::new(
+            if result.is_ok() {
+                AppLogLevel::Info
+            } else {
+                AppLogLevel::Warn
+            },
+            AppLogCategory::Agent,
+            "apply_agent_change_set",
+            if result.is_ok() {
+                "completed"
+            } else {
+                "failed"
+            },
+            if result.is_ok() {
+                "已应用 Agent 文件变更集。"
+            } else {
+                "应用 Agent 文件变更集失败。"
+            },
+        )
+        .session_id(session_id)
+        .duration(started_at.elapsed()),
+    );
+    result
+}
+
+/** 拒绝当前 Agent 变更集；只清空待确认状态，不触碰 Skill 隔离目录。 */
+#[tauri::command]
+pub async fn reject_agent_change_set(
+    app: AppHandle,
+    payload: ChangePayload,
+) -> Result<WorkspaceSnapshot, String> {
+    let change_app = app.clone();
+    run_blocking("拒绝 Agent 变更集", move || {
+        skill_execution::reject_agent_change_set(&change_app, payload.snapshot)
+    })
+    .await
 }
 
 /** Agent turn 前合并 SQLite 中的持久化会话，避免模型或规则 Agent 只信任前端传入的 scope 快照。 */
@@ -4889,15 +5130,25 @@ fn replace_note_reference_after_rename(
 /** 将旧会话的 Markdown 专用 pending change 补齐统一目标字段，保持既有审阅可继续确认。 */
 fn migrate_legacy_pending_changes(snapshot: &mut WorkspaceSnapshot) {
     for session in &mut snapshot.sessions {
-        let Some(change) = session.pending_change.as_mut() else { continue; };
+        let Some(change) = session.pending_change.as_mut() else {
+            continue;
+        };
         if change.target_id.is_none() {
             change.target_id = change.note_id.clone();
         }
         if change.target_kind.is_none() {
-            change.target_kind = Some(if change.file_type.as_deref() == Some("txt") { "document".to_owned() } else { "note".to_owned() });
+            change.target_kind = Some(if change.file_type.as_deref() == Some("txt") {
+                "document".to_owned()
+            } else {
+                "note".to_owned()
+            });
         }
         if change.file_type.is_none() {
-            change.file_type = Some(if change.target_kind.as_deref() == Some("document") { "txt".to_owned() } else { "markdown".to_owned() });
+            change.file_type = Some(if change.target_kind.as_deref() == Some("document") {
+                "txt".to_owned()
+            } else {
+                "markdown".to_owned()
+            });
         }
     }
 }
@@ -4915,11 +5166,11 @@ fn remove_note_references_after_delete(snapshot: &mut WorkspaceSnapshot, note_id
 
         session.pinned_note_ids.retain(|id| id != note_id);
 
-        if session
-            .pending_change
-            .as_ref()
-            .is_some_and(|change| change.note_id.as_deref() == Some(note_id) || (change.target_kind.as_deref() == Some("note") && change.target_id.as_deref() == Some(note_id)))
-        {
+        if session.pending_change.as_ref().is_some_and(|change| {
+            change.note_id.as_deref() == Some(note_id)
+                || (change.target_kind.as_deref() == Some("note")
+                    && change.target_id.as_deref() == Some(note_id))
+        }) {
             session.pending_change = None;
         }
     }
@@ -5128,6 +5379,9 @@ mod tests {
                 review_state: None,
                 diff_stats: None,
             }),
+            pending_change_set: None,
+            pending_execution: None,
+            security_level: "basic".to_owned(),
             context_summary: None,
             created_at: "刚刚".to_owned(),
             updated_at: "刚刚".to_owned(),

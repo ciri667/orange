@@ -3,10 +3,12 @@ mod agent_tools;
 mod commands;
 mod domain;
 mod export;
+mod fs_guard;
 mod im;
 mod logging;
 mod model_provider;
 mod runtime;
+mod skill_execution;
 mod skills;
 mod storage;
 mod text_edit;
@@ -231,6 +233,12 @@ pub fn run() {
             export::export_current_file,
             commands::run_agent_turn,
             commands::compact_agent_context,
+            commands::approve_skill_execution,
+            commands::reject_skill_execution,
+            commands::apply_skill_change_set,
+            commands::reject_skill_change_set,
+            commands::apply_agent_change_set,
+            commands::reject_agent_change_set,
             commands::apply_proposed_change,
             commands::reject_proposed_change
         ])
