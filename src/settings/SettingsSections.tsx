@@ -478,7 +478,7 @@ export function SkillsSettingsSection({
   );
 }
 
-/** Agent 权限分区只保存隔离执行资源上限；会话级别在 Agent 协作区切换。 */
+/** Agent 权限分区解释三级放手策略，并保存隔离任务资源上限。 */
 export function AgentSecuritySettingsSection({
   settingsDraft,
   isBusy,
@@ -515,7 +515,7 @@ export function AgentSecuritySettingsSection({
         <div>
           <p className="section-label">Security</p>
           <h3 id="agent-security-settings-title">Agent 权限</h3>
-          <p>基础 / 进阶 / 完全在 Agent 协作区按会话切换。这里只设置 Skill 隔离执行的资源上限。</p>
+          <p>三级权限决定你愿意把多少执行权交给 Agent，好让模型把能力用出来。Skill 只是更高权限下可发挥的能力之一。权限在 Agent 协作区按会话切换。</p>
         </div>
         <button className="primary-button compact" type="button" onClick={onSaveSettings} disabled={isBusy}>
           <Save size={14} />
@@ -523,11 +523,26 @@ export function AgentSecuritySettingsSection({
         </button>
       </div>
 
+      <div className="security-level-guide" aria-label="三级权限说明">
+        <article>
+          <strong>基础</strong>
+          <p>你盯紧每一步。Agent 只在知识库文档里工作，写入必须你确认。</p>
+        </article>
+        <article>
+          <strong>进阶</strong>
+          <p>开始放手。Agent 可以做更多事（整理目录、运行 Skill 等），落盘前仍要你看一眼。</p>
+        </article>
+        <article>
+          <strong>完全</strong>
+          <p>真正放手。校验通过后连续执行并自动落盘，让模型一次把任务做完。系统保护边界仍然有效。</p>
+        </article>
+      </div>
+
       <div className="settings-section-subblock">
         <div className="settings-section-title">
           <div>
-            <h4>单次执行上限</h4>
-            <p>超过任一上限时终止隔离任务。</p>
+            <h4>隔离任务上限</h4>
+            <p>当 Agent 被允许运行隔离进程时，超过任一上限就终止该任务。</p>
           </div>
         </div>
         <div className="settings-grid security-limit-grid">

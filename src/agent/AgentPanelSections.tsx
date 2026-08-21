@@ -57,6 +57,22 @@ export function AgentSessionSummary({
   );
 }
 
+/** 三级权限是用户愿意把多少执行权交给 Agent。 */
+export const AGENT_SECURITY_LEVEL_COPY = {
+  basic: {
+    label: "基础",
+    description: "Agent只在选中的知识库文档里工作。",
+  },
+  advanced: {
+    label: "进阶",
+    description: "Agent可以做更多事，仍需手动确认。",
+  },
+  autonomous: {
+    label: "完全",
+    description: "可不受限制地访问你的电脑上任何文件。",
+  },
+} as const;
+
 /** 钉在输入条上的三级权限开关；IM 会话不渲染。 */
 export function AgentSecurityLevelControl({
   activeSession,
@@ -80,23 +96,28 @@ export function AgentSecurityLevelControl({
       </span>
       <div className="agent-security-level-options" role="radiogroup" aria-label="当前会话权限级别">
         {([
-          ["basic", "基础", true, "仅使用文档相关工具，关键写入需要确认"],
-          ["advanced", "进阶", agentSecurity.advancedExecutionEnabled, "可运行 Skill 和命令，执行前需要确认"],
-          ["autonomous", "完全", agentSecurity.autonomousModeEnabled, "可信 Skill 可连续执行；文件工具可使用合规绝对路径"],
-        ] as const).map(([level, label, isEnabled, description]) => (
-          <button
-            className={activeSession.securityLevel === level ? "active" : ""}
-            type="button"
-            role="radio"
-            aria-checked={activeSession.securityLevel === level}
-            title={`${description}${isEnabled ? "" : "；选择后将启用此能力"}`}
-            disabled={isBusy}
-            key={level}
-            onClick={() => onSecurityLevelChange?.(level)}
-          >
-            {label}
-          </button>
-        ))}
+          ["basic", true],
+          ["advanced", agentSecurity.advancedExecutionEnabled],
+          ["autonomous", agentSecurity.autonomousModeEnabled],
+        ] as const).map(([level, isEnabled]) => {
+          const copy = AGENT_SECURITY_LEVEL_COPY[level];
+
+          return (
+            <button
+              className={activeSession.securityLevel === level ? "active" : ""}
+              type="button"
+              role="radio"
+              aria-checked={activeSession.securityLevel === level}
+              aria-label={`${copy.label}权限。${copy.description}`}
+              title={`${copy.description}${isEnabled ? "" : "选择后将启用此能力。"}`}
+              disabled={isBusy}
+              key={level}
+              onClick={() => onSecurityLevelChange?.(level)}
+            >
+              {copy.label}
+            </button>
+          );
+        })}
       </div>
     </div>
   );

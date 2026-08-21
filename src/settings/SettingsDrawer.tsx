@@ -252,7 +252,7 @@ export function SettingsDrawer({
         id: "agentSecurity",
         group: "配置",
         label: "Agent 权限",
-        description: "Skill 隔离执行的资源上限",
+        description: "你愿意把多少执行权交给 Agent",
         meta: `${settingsDraft.agentSecurity.resourceLimits.timeoutSeconds}s`,
         icon: ShieldCheck,
         tone: "neutral",

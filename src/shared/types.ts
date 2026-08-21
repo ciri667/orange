@@ -7,7 +7,7 @@ export type AgentActionType = "ask" | "find" | "rewrite" | "create" | "organize"
 /** Agent 会话类型，用于区分笔记上下文、知识库上下文和临时任务上下文。 */
 export type AgentSessionType = "note" | "knowledge-base" | "task";
 
-/** Agent 安全等级决定可见工具和确认策略；提高等级只能由用户主动操作。 */
+/** Agent 安全等级决定工具范围和确认策略：基础由用户盯紧，进阶扩大能力仍需确认，完全在校验后连续执行。提高等级只能由用户主动操作。 */
 export type AgentSecurityLevel = "basic" | "advanced" | "autonomous";
 
 /** Markdown 编辑器视图模式，控制编辑、预览和分屏布局。 */
