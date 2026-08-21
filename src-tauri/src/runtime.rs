@@ -1,5 +1,6 @@
 use crate::agent;
-use crate::agent_tools::{AgentToolContext, ToolRegistry};
+use crate::agent_tools::{model_tool_call_name, parse_tool_args, AgentToolContext, ToolRegistry};
+use crate::agent_trace::AgentTurnTracer;
 use crate::domain::{
     AgentContextSummary, AgentContextTouchedNote, AgentMemoryEntry, AgentMessage, AgentSession,
     AgentSkill, AgentToolCall, AgentTurnRequest, AgentTurnResult, Citation, KnowledgeBaseMemory,
@@ -668,6 +669,7 @@ pub async fn run_agent_turn(
                 &available_skills,
                 &explicit_skills,
                 &error.to_string(),
+                None,
             )
         }
     };
@@ -686,6 +688,7 @@ pub async fn run_agent_turn(
                 "Provider「{}」未标记支持工具调用（tool calling），无法用于 Agent Loop。",
                 provider.name
             ),
+            None,
         );
     }
 
@@ -704,6 +707,7 @@ pub async fn run_agent_turn(
                         "Provider「{}」未找到模型密钥。请在设置中保存 API key 后重试。",
                         provider.name
                     ),
+                    None,
                 )
             }
             Err(error) => {
@@ -715,12 +719,17 @@ pub async fn run_agent_turn(
                     &available_skills,
                     &explicit_skills,
                     &error,
+                    None,
                 )
             }
         }
     } else {
         String::new()
     };
+
+    let live_message_id = create_id("assistant");
+    let mut tracer = AgentTurnTracer::new(request.session_id.clone(), live_message_id);
+    tracer.emit_started(Some(app));
 
     match run_model_loop(
         app,
@@ -732,19 +741,26 @@ pub async fn run_agent_turn(
         selected_model_id.clone(),
         api_key,
         settings.agent_security.clone(),
+        &mut tracer,
     )
     .await
     {
         Ok(result) => result,
-        Err(error) => model_error_turn(
-            snapshot,
-            request,
-            Some(&provider),
-            Some(&selected_model_id),
-            &available_skills,
-            &explicit_skills,
-            &format!("模型请求失败：{error}"),
-        ),
+        Err(error) => {
+            tracer.mark_failed();
+            let error_text = format!("模型请求失败：{error}");
+            tracer.finish(Some(&error_text), Some(app));
+            model_error_turn(
+                snapshot,
+                request,
+                Some(&provider),
+                Some(&selected_model_id),
+                &available_skills,
+                &explicit_skills,
+                &error_text,
+                Some(&tracer),
+            )
+        }
     }
 }
 
@@ -798,6 +814,7 @@ async fn run_model_loop(
     selected_model_id: String,
     api_key: String,
     agent_security: crate::domain::AgentSecuritySettings,
+    tracer: &mut AgentTurnTracer,
 ) -> Result<RuntimeTurnResult, String> {
     let session_index = resolve_session_index(&snapshot, &request)?;
 
@@ -899,6 +916,7 @@ async fn run_model_loop(
             } else {
                 extracted_tool_calls.visible_content
             };
+            tracer.finish(Some(&content), Some(app));
 
             push_assistant_message(
                 &mut snapshot,
@@ -907,6 +925,7 @@ async fn run_model_loop(
                 content,
                 citations,
                 tool_calls,
+                tracer,
             );
             update_agent_context_summary_after_turn(
                 &client,
@@ -943,7 +962,17 @@ async fn run_model_loop(
             &extracted_tool_calls.visible_content,
         ));
 
+        tracer.push_thinking(&extracted_tool_calls.visible_content, Some(app));
+
         for model_tool_call in model_tool_calls {
+            let tool_name = model_tool_call_name(&model_tool_call);
+            let tool_args = parse_tool_args(&model_tool_call);
+            let trace_step_id = tracer.begin_tool(
+                &tool_name,
+                &format!("正在调用 {tool_name}"),
+                tool_args,
+                Some(app),
+            );
             let tool_outcome = {
                 let mut tool_context = AgentToolContext {
                     app: Some(app),
@@ -1099,8 +1128,21 @@ async fn run_model_loop(
 
             audit_trail.record_sent_fragment(tool_outcome.audit_fragment);
             citations.extend(tool_outcome.citations);
-            if tool_outcome.call.status == "failed" {
-                last_failed_tool_summary = Some(tool_outcome.call.summary.clone());
+            let tool_error = if tool_outcome.call.status == "failed" {
+                Some(tool_outcome.call.summary.clone())
+            } else {
+                None
+            };
+            tracer.finish_tool(
+                trace_step_id.as_deref(),
+                &tool_outcome.call.status,
+                &tool_outcome.call.summary,
+                Some(&tool_result_text),
+                tool_error.as_deref(),
+                Some(app),
+            );
+            if let Some(tool_error) = tool_error {
+                last_failed_tool_summary = Some(tool_error);
             }
             tool_calls.push(tool_outcome.call);
             model_messages.push(json!({
@@ -1146,6 +1188,7 @@ async fn run_model_loop(
         raw_final_content,
         last_failed_tool_summary.as_deref(),
     );
+    tracer.finish(Some(&content), Some(app));
 
     push_assistant_message(
         &mut snapshot,
@@ -1154,6 +1197,7 @@ async fn run_model_loop(
         content,
         citations,
         tool_calls,
+        tracer,
     );
     update_agent_context_summary_after_turn(
         &client,
@@ -2651,6 +2695,8 @@ fn fallback_agent_turn(
     available_skills: &[AgentSkill],
     reason: &str,
 ) -> RuntimeTurnResult {
+    let mut tracer = AgentTurnTracer::new(request.session_id.clone(), create_id("assistant"));
+    tracer.emit_started(Some(app));
     let mut turn_result = agent::run_agent_turn(app, snapshot, request.clone());
     let session_index = turn_result
         .snapshot
@@ -2673,6 +2719,13 @@ fn fallback_agent_turn(
             .tool_calls
             .get_or_insert_with(Vec::new)
             .insert(0, skill_context_tool_call(available_skills));
+        last_message.id = tracer.live_message_id().to_owned();
+        tracer.ingest_completed_tools(last_message.tool_calls.as_deref().unwrap_or(&[]));
+        last_message.trace = tracer.steps();
+        tracer.finish(Some(&last_message.content), Some(app));
+        last_message.turn_duration_ms = Some(tracer.duration_ms());
+    } else {
+        tracer.finish(None, Some(app));
     }
 
     update_agent_context_summary_deterministic(
@@ -2733,6 +2786,8 @@ fn build_user_message(request: &AgentTurnRequest, id: String) -> AgentMessage {
         citations: None,
         tool_calls: None,
         mentioned_file_ids: request.mentioned_file_ids.clone(),
+        trace: Vec::new(),
+        turn_duration_ms: None,
     }
 }
 
@@ -2878,6 +2933,7 @@ fn model_error_turn(
     available_skills: &[AgentSkill],
     explicit_skills: &[AgentSkill],
     reason: &str,
+    tracer: Option<&AgentTurnTracer>,
 ) -> RuntimeTurnResult {
     let session_index = resolve_session_index(&snapshot, &request).unwrap_or(0);
     let redacted_reason = model_provider::redact_model_error_text(reason);
@@ -2920,7 +2976,9 @@ fn model_error_turn(
     snapshot.sessions[session_index]
         .messages
         .push(AgentMessage {
-            id: create_id("assistant"),
+            id: tracer
+                .map(|tracer| tracer.live_message_id().to_owned())
+                .unwrap_or_else(|| create_id("assistant")),
             role: "assistant".to_owned(),
             content: if explicit_skills.is_empty() {
                 format!("真实模型请求没有完成：{redacted_reason}")
@@ -2931,6 +2989,11 @@ fn model_error_turn(
             citations: Some(Vec::new()),
             tool_calls: Some(tool_calls),
             mentioned_file_ids: Vec::new(),
+            trace: tracer
+                .map(|tracer| tracer.steps())
+                .filter(|steps| !steps.is_empty())
+                .unwrap_or_default(),
+            turn_duration_ms: tracer.map(|tracer| tracer.duration_ms()),
         });
     snapshot.sessions[session_index].updated_at = "刚刚".to_owned();
     update_agent_context_summary_deterministic(
@@ -3002,6 +3065,8 @@ fn skill_activation_error_turn(
             citations: Some(Vec::new()),
             tool_calls: Some(tool_calls),
             mentioned_file_ids: Vec::new(),
+            trace: Vec::new(),
+            turn_duration_ms: None,
         });
     snapshot.sessions[session_index].updated_at = "刚刚".to_owned();
     update_agent_context_summary_deterministic(
@@ -3094,17 +3159,20 @@ fn push_assistant_message(
     content: String,
     citations: Vec<Citation>,
     tool_calls: Vec<AgentToolCall>,
+    tracer: &AgentTurnTracer,
 ) {
     snapshot.sessions[session_index]
         .messages
         .push(AgentMessage {
-            id: create_id("assistant"),
+            id: tracer.live_message_id().to_owned(),
             role: "assistant".to_owned(),
             content,
             action: Some(action.to_owned()),
             citations: Some(deduplicate_citations(citations)),
             tool_calls: Some(tool_calls),
             mentioned_file_ids: Vec::new(),
+            trace: tracer.steps(),
+            turn_duration_ms: Some(tracer.duration_ms()),
         });
     snapshot.sessions[session_index].updated_at = "刚刚".to_owned();
 }
@@ -3489,6 +3557,8 @@ mod tests {
             citations: None,
             tool_calls: None,
             mentioned_file_ids: Vec::new(),
+            trace: Vec::new(),
+            turn_duration_ms: None,
         });
 
         let messages = build_model_messages(
@@ -3753,6 +3823,8 @@ mod tests {
                 citations: None,
                 tool_calls: None,
                 mentioned_file_ids: Vec::new(),
+                trace: Vec::new(),
+                turn_duration_ms: None,
             })
             .collect();
         snapshot.sessions[0].context_summary = Some(AgentContextSummary {
@@ -3803,6 +3875,8 @@ mod tests {
                 citations: None,
                 tool_calls: None,
                 mentioned_file_ids: Vec::new(),
+                trace: Vec::new(),
+                turn_duration_ms: None,
             })
             .collect();
         snapshot.sessions[0].context_summary = Some(AgentContextSummary {
@@ -3842,6 +3916,7 @@ mod tests {
             &available_skills,
             &[],
             "模型请求失败：测试错误",
+            None,
         );
         let session = &result.turn_result.snapshot.sessions[0];
         let last_message = session.messages.last().unwrap();
@@ -3872,6 +3947,7 @@ mod tests {
             &available_skills,
             &[],
             "未找到 Provider 配置：missing-provider",
+            None,
         );
         let session = &result.turn_result.snapshot.sessions[0];
         let last_message = session.messages.last().unwrap();
@@ -4002,6 +4078,8 @@ mod tests {
             citations: None,
             tool_calls: None,
             mentioned_file_ids: Vec::new(),
+            trace: Vec::new(),
+            turn_duration_ms: None,
         });
         snapshot.sessions[0].pending_change = Some(runtime_test_pending_change("pending"));
 
@@ -4204,6 +4282,7 @@ mod tests {
         let mut snapshot = runtime_test_snapshot("这是一段可以被改写的正文内容。".to_owned());
         let request = runtime_test_request("rewrite", "请改写当前笔记");
 
+        let tracer = AgentTurnTracer::new("session-a", "assistant-test");
         push_assistant_message(
             &mut snapshot,
             0,
@@ -4211,6 +4290,7 @@ mod tests {
             "模型直接返回的改写正文".to_owned(),
             Vec::new(),
             Vec::new(),
+            &tracer,
         );
 
         assert!(snapshot.sessions[0].pending_change.is_none());

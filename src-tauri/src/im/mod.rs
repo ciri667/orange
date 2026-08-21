@@ -286,6 +286,8 @@ pub(crate) fn build_im_user_message(prompt: &str) -> AgentMessage {
         citations: None,
         tool_calls: None,
         mentioned_file_ids: Vec::new(),
+        trace: Vec::new(),
+        turn_duration_ms: None,
     }
 }
 

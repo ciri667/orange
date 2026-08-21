@@ -1,4 +1,5 @@
 use crate::agent_tools::{AgentToolContext, ToolOutcome, ToolRegistry};
+use crate::agent_trace::trace_from_tool_calls;
 use crate::domain::{
     AgentMessage, AgentToolCall, AgentTurnRequest, AgentTurnResult, Citation, WorkspaceSnapshot,
 };
@@ -91,6 +92,7 @@ pub fn run_agent_turn(
         citations.len()
     );
 
+    let trace = trace_from_tool_calls(&tool_calls);
     snapshot.sessions[session_index]
         .messages
         .push(AgentMessage {
@@ -101,6 +103,8 @@ pub fn run_agent_turn(
             citations: Some(deduplicate_citations(citations)),
             tool_calls: Some(tool_calls),
             mentioned_file_ids: Vec::new(),
+            trace,
+            turn_duration_ms: None,
         });
     snapshot.sessions[session_index].updated_at = "刚刚".to_owned();
 
@@ -223,6 +227,8 @@ fn ensure_user_message_for_turn(
         citations: None,
         tool_calls: None,
         mentioned_file_ids: request.mentioned_file_ids.clone(),
+        trace: Vec::new(),
+        turn_duration_ms: None,
     });
 }
 
@@ -320,6 +326,8 @@ mod tests {
                 citations: None,
                 tool_calls: None,
                 mentioned_file_ids: Vec::new(),
+                trace: Vec::new(),
+                turn_duration_ms: None,
             }],
             pending_change: None,
             pending_change_set: None,

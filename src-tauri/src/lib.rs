@@ -1,5 +1,6 @@
 mod agent;
 mod agent_tools;
+mod agent_trace;
 mod agent_writes;
 mod commands;
 mod domain;

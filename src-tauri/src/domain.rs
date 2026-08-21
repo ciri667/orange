@@ -284,6 +284,32 @@ pub struct AgentToolCall {
     pub args: serde_json::Value,
 }
 
+/** Agent 一轮中的一个过程步骤，按时间顺序记录模型思考或用户可见工具调用。 */
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentTraceStep {
+    pub id: String,
+    #[serde(rename = "type")]
+    pub step_type: String,
+    pub timestamp: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub content: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub status: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub summary: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub args: Option<serde_json::Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub result_preview: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub duration_ms: Option<u64>,
+}
+
 /** Agent 与用户的会话消息。 */
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -297,6 +323,12 @@ pub struct AgentMessage {
     /** 本条用户消息在发送时显式 @ 的文件 ID；仅用于历史回显，不会成为长期上下文。 */
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub mentioned_file_ids: Vec<String>,
+    /** 本轮过程时间线；旧会话没有该字段时按空轨迹兼容。 */
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub trace: Vec<AgentTraceStep>,
+    /** 本轮墙钟耗时，供过程区展示「已处理 12s」。 */
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub turn_duration_ms: Option<u64>,
 }
 
 /** Agent 对可编辑文本文件提出的待确认变更；正文始终留在 diff 中，不进入日志。 */

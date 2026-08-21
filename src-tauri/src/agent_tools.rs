@@ -836,8 +836,18 @@ fn function_tool(name: &str, description: &str, parameters: Value) -> Value {
     })
 }
 
+/** 读取模型 tool_call 的 function.name，缺失时回退为 unknown_tool。 */
+pub(crate) fn model_tool_call_name(model_tool_call: &Value) -> String {
+    model_tool_call
+        .get("function")
+        .and_then(|function| function.get("name"))
+        .and_then(Value::as_str)
+        .unwrap_or("unknown_tool")
+        .to_owned()
+}
+
 /** 解析模型 tool_call 的 arguments JSON 字符串。 */
-fn parse_tool_args(model_tool_call: &Value) -> Value {
+pub(crate) fn parse_tool_args(model_tool_call: &Value) -> Value {
     model_tool_call
         .get("function")
         .and_then(|function| function.get("arguments"))
