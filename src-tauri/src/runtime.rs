@@ -3087,7 +3087,7 @@ fn truncate_chars(value: &str, max_chars: usize) -> String {
 
 /** 汇总会话允许的知识库名称，用于 system prompt 和请求审计。 */
 fn build_scope_summary(snapshot: &WorkspaceSnapshot, session: &AgentSession) -> String {
-    let names = session
+    let labels = session
         .knowledge_base_ids
         .iter()
         .filter_map(|id| {
@@ -3095,16 +3095,16 @@ fn build_scope_summary(snapshot: &WorkspaceSnapshot, session: &AgentSession) -> 
                 .knowledge_bases
                 .iter()
                 .find(|knowledge_base| knowledge_base.id == *id)
-                .map(|knowledge_base| knowledge_base.name.clone())
+                .map(|knowledge_base| format!("{} (id={})", knowledge_base.name, knowledge_base.id))
         })
         .collect::<Vec<_>>();
 
-    if names.is_empty() {
+    if labels.is_empty() {
         "未绑定知识库".to_owned()
-    } else if names.len() == 1 {
-        names[0].clone()
+    } else if labels.len() == 1 {
+        labels[0].clone()
     } else {
-        format!("{} 个知识库：{}", names.len(), names.join(" / "))
+        format!("{} 个知识库：{}", labels.len(), labels.join(" / "))
     }
 }
 
@@ -3254,6 +3254,19 @@ mod tests {
             explicit_skill_ids: Vec::new(),
             mentioned_file_ids: Vec::new(),
         }
+    }
+
+    /** 多知识库 scope 摘要必须带上 id，避免模型和 list_tree 的 knowledgeBaseId 对不上号。 */
+    #[test]
+    fn build_scope_summary_includes_knowledge_base_ids() {
+        let mut snapshot = runtime_test_snapshot("授权笔记".to_owned());
+        snapshot.knowledge_bases[0].name = "jd调研".to_owned();
+        snapshot.knowledge_bases[1].name = "橘记".to_owned();
+        snapshot.sessions[0].knowledge_base_ids = vec!["kb-a".to_owned(), "kb-b".to_owned()];
+
+        let summary = build_scope_summary(&snapshot, &snapshot.sessions[0]);
+
+        assert_eq!(summary, "2 个知识库：jd调研 (id=kb-a) / 橘记 (id=kb-b)");
     }
 
     /** @ 文件必须重新受会话 scope 约束，重复项去重且文本正文仅注入允许的 Markdown/TXT。 */
