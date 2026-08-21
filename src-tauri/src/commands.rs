@@ -25,7 +25,7 @@ use crate::runtime;
 use crate::skill_execution;
 use crate::skills;
 use crate::storage;
-use crate::text_edit::{replace_unique, UniqueReplacementError};
+
 use serde_json::json;
 use std::fs;
 use std::io::Read;
@@ -4125,336 +4125,18 @@ pub async fn apply_proposed_change(
     app: AppHandle,
     payload: ChangePayload,
 ) -> Result<WorkspaceSnapshot, String> {
-    let started_at = Instant::now();
-    let operation_id = storage::create_id("op");
-    let mut snapshot = payload.snapshot;
-    let session_id = snapshot.active_session_id.clone();
+    let apply_app = app.clone();
+    let mut snapshot = run_blocking("应用 Agent 变更", move || {
+        crate::agent_writes::apply_pending_change(&apply_app, payload.snapshot)
+    })
+    .await?;
     let session_index = snapshot
         .sessions
         .iter()
         .position(|session| session.id == snapshot.active_session_id)
         .ok_or_else(|| "找不到当前 Agent 会话".to_owned())?;
-    let Some(change) = snapshot.sessions[session_index].pending_change.clone() else {
-        return Ok(snapshot);
-    };
-    let knowledge_base = snapshot
-        .knowledge_bases
-        .iter()
-        .find(|item| item.id == change.knowledge_base_id)
-        .ok_or_else(|| "找不到变更所属知识库".to_owned())?;
-    let knowledge_base_id = knowledge_base.id.clone();
-    let target_path = storage::resolve_inside_root(
-        PathBuf::from(&knowledge_base.path).as_path(),
-        &change.target_path,
-    )?;
-
-    let change_file_type = change.file_type.as_deref().unwrap_or("markdown");
-    if !matches!(change_file_type, "markdown" | "txt") {
-        return Err("待确认变更的文件类型不受支持。".to_owned());
-    }
-
-    if change.r#type == "create" {
-        // 新建草稿不能覆盖用户已有文件；如路径已存在，应重新生成不同目标路径的 diff。
-        if target_path.exists() {
-            logging::write_app_event_best_effort(
-                &app,
-                AppEventBuilder::new(
-                    AppLogLevel::Warn,
-                    AppLogCategory::Agent,
-                    "apply_proposed_change",
-                    "blocked",
-                    "目标文件已存在，已阻止覆盖。",
-                )
-                .operation_id(operation_id)
-                .session_id(session_id)
-                .knowledge_base_id(knowledge_base_id)
-                .entity("change", change.id)
-                .relative_path(change.target_path)
-                .duration(started_at.elapsed()),
-            );
-
-            return Err("目标文件已存在，已阻止覆盖。请重新生成草稿路径。".to_owned());
-        }
-
-        let write_path = target_path.clone();
-        let next_content = change.next.clone();
-
-        let create_file_type = change_file_type.to_owned();
-        run_blocking("写入新的 Agent 文件", move || {
-            if create_file_type == "txt" {
-                storage::atomic_write_text_document(&write_path, &next_content)
-            } else {
-                storage::atomic_write_markdown(&write_path, &next_content)
-            }
-        })
-        .await?;
-        if change_file_type == "txt" {
-            let document_id =
-                storage::create_stable_note_id(&change.knowledge_base_id, &change.target_path);
-            let title = Path::new(&change.target_path)
-                .file_stem()
-                .and_then(|value| value.to_str())
-                .unwrap_or("Agent 草稿")
-                .to_owned();
-            snapshot.documents.insert(
-                0,
-                crate::domain::WorkspaceDocument {
-                    id: document_id.clone(),
-                    knowledge_base_id: change.knowledge_base_id.clone(),
-                    title,
-                    path: change.target_path.clone(),
-                    file_type: "txt".to_owned(),
-                    updated_at: "刚刚".to_owned(),
-                    content_hash: storage::hash_content(&change.next),
-                    content: Some(change.next.clone()),
-                    preview_available: false,
-                },
-            );
-            snapshot.active_note_id.clear();
-            snapshot.active_document_id = document_id;
-        } else {
-            snapshot.notes.insert(
-                0,
-                crate::domain::Note {
-                    id: storage::create_stable_note_id(
-                        &change.knowledge_base_id,
-                        &change.target_path,
-                    ),
-                    knowledge_base_id: change.knowledge_base_id.clone(),
-                    title: change.title.replace("创建《", "").replace("》草稿", ""),
-                    path: change.target_path.clone(),
-                    content: change.next.clone(),
-                    tags: vec!["Agent".to_owned(), "草稿".to_owned()],
-                    updated_at: "刚刚".to_owned(),
-                    backlinks: Vec::new(),
-                    content_hash: storage::hash_content(&change.next),
-                },
-            );
-        }
-    } else if change_file_type == "txt" {
-        let document_id = change
-            .target_id
-            .as_ref()
-            .ok_or_else(|| "待写入 TXT 缺少目标 ID。".to_owned())?;
-        let document_index = snapshot
-            .documents
-            .iter()
-            .position(|document| document.id == *document_id && document.file_type == "txt")
-            .ok_or_else(|| "找不到待写入 TXT 文件。".to_owned())?;
-        let read_path = target_path.clone();
-        let fallback_content = snapshot.documents[document_index]
-            .content
-            .clone()
-            .unwrap_or_default();
-        let current_content = run_blocking("读取待写入 TXT 文件", move || {
-            Ok(fs::read_to_string(&read_path).unwrap_or(fallback_content))
-        })
-        .await?;
-        let current_hash = storage::hash_content(&current_content);
-        let next_content = apply_rewrite_change(
-            &current_content,
-            &current_hash,
-            &snapshot.documents[document_index].content_hash,
-            &change,
-        )?;
-        capture_document_history_before_write(
-            &app,
-            storage::DocumentHistoryCapture {
-                target_kind: "document".to_owned(),
-                knowledge_base_id: knowledge_base_id.clone(),
-                target_id: document_id.clone(),
-                relative_path: snapshot.documents[document_index].path.clone(),
-                title: snapshot.documents[document_index].title.clone(),
-                file_type: "txt".to_owned(),
-                content: current_content,
-                source: "agent-change".to_owned(),
-                session_id: Some(session_id.clone()),
-                change_id: Some(change.id.clone()),
-                operation_id: Some(operation_id.clone()),
-            },
-            AppLogCategory::Agent,
-            "apply_proposed_change",
-            started_at,
-        )
-        .await?;
-        let write_path = target_path.clone();
-        let write_content = next_content.clone();
-        run_blocking("写回 TXT 文件", move || {
-            storage::atomic_write_text_document(&write_path, &write_content)
-        })
-        .await?;
-        snapshot.documents[document_index].content = Some(next_content.clone());
-        snapshot.documents[document_index].content_hash = storage::hash_content(&next_content);
-        snapshot.documents[document_index].updated_at = "刚刚".to_owned();
-        snapshot.active_note_id.clear();
-        snapshot.active_document_id = document_id.clone();
-    } else if let Some(note_id) = change.target_id.as_ref().or(change.note_id.as_ref()) {
-        let note_index = snapshot
-            .notes
-            .iter()
-            .position(|note| note.id == *note_id)
-            .ok_or_else(|| "找不到待写入笔记".to_owned())?;
-        let read_path = target_path.clone();
-        let fallback_content = snapshot.notes[note_index].content.clone();
-        let current_content = run_blocking("读取待写入 Markdown 文件", move || {
-            Ok(fs::read_to_string(&read_path).unwrap_or(fallback_content))
-        })
-        .await?;
-        let current_hash = storage::hash_content(&current_content);
-
-        let next_content = match apply_rewrite_change(
-            &current_content,
-            &current_hash,
-            &snapshot.notes[note_index].content_hash,
-            &change,
-        ) {
-            Ok(next_content) => next_content,
-            Err(error) => {
-                logging::write_app_event_best_effort(
-                    &app,
-                    AppEventBuilder::new(
-                        AppLogLevel::Warn,
-                        AppLogCategory::Agent,
-                        "apply_proposed_change",
-                        "blocked",
-                        error.clone(),
-                    )
-                    .operation_id(operation_id)
-                    .session_id(session_id)
-                    .knowledge_base_id(knowledge_base_id)
-                    .entity("change", change.id)
-                    .relative_path(change.target_path)
-                    .duration(started_at.elapsed()),
-                );
-
-                return Err(error);
-            }
-        };
-        let write_path = target_path.clone();
-        let write_content = next_content.clone();
-
-        capture_document_history_before_write(
-            &app,
-            storage::DocumentHistoryCapture {
-                target_kind: "note".to_owned(),
-                knowledge_base_id: knowledge_base_id.clone(),
-                target_id: note_id.clone(),
-                relative_path: snapshot.notes[note_index].path.clone(),
-                title: snapshot.notes[note_index].title.clone(),
-                file_type: "markdown".to_owned(),
-                content: current_content,
-                source: "agent-change".to_owned(),
-                session_id: Some(session_id.clone()),
-                change_id: Some(change.id.clone()),
-                operation_id: Some(operation_id.clone()),
-            },
-            AppLogCategory::Agent,
-            "apply_proposed_change",
-            started_at,
-        )
-        .await?;
-
-        run_blocking("写回 Markdown 文件", move || {
-            storage::atomic_write_markdown(&write_path, &write_content)
-        })
-        .await?;
-        snapshot.notes[note_index].content = next_content.clone();
-        snapshot.notes[note_index].content_hash = storage::hash_content(&next_content);
-        snapshot.notes[note_index].updated_at = "刚刚".to_owned();
-    }
-
-    let accepted_change_id = change.id.clone();
-    let accepted_change_type = change.r#type.clone();
-    let accepted_operation = change.operation.clone();
-    let accepted_review_comment_count = change
-        .review_comments
-        .as_ref()
-        .map(|comments| comments.len())
-        .unwrap_or_default();
-    let accepted_diff_hunk_count = change.diff_stats.as_ref().map(|stats| stats.hunk_count);
-    let accepted_target_path = change.target_path.clone();
-    snapshot.sessions[session_index].pending_change = Some(crate::domain::ProposedChange {
-        status: "accepted".to_owned(),
-        ..change
-    });
     runtime::update_agent_context_summary_deterministic(&mut snapshot, session_index, None, false);
-    index_snapshot_in_background(app.clone(), &snapshot).await?;
-
-    logging::write_app_event_best_effort(
-        &app,
-        AppEventBuilder::new(
-            AppLogLevel::Info,
-            AppLogCategory::Agent,
-            "apply_proposed_change",
-            "completed",
-            "已接受并写入 Agent diff。",
-        )
-        .operation_id(operation_id)
-        .session_id(session_id)
-        .knowledge_base_id(knowledge_base_id)
-        .entity("change", accepted_change_id)
-        .relative_path(accepted_target_path)
-        .duration(started_at.elapsed())
-        .metadata(json!({
-            "changeType": accepted_change_type,
-            "operation": accepted_operation,
-            "reviewCommentCount": accepted_review_comment_count,
-            "diffHunkCount": accepted_diff_hunk_count,
-        })),
-    );
-
     Ok(snapshot)
-}
-
-/** 在落盘前执行 hash 冲突检测和唯一片段替换，确保一次确认只改一处。 */
-fn apply_rewrite_change(
-    current_content: &str,
-    current_hash: &str,
-    snapshot_hash: &str,
-    change: &ProposedChange,
-) -> Result<String, String> {
-    // hash 不一致说明文件可能被外部修改，必须阻止写入并要求用户重新生成 diff。
-    if current_hash != change.original_hash && snapshot_hash != change.original_hash {
-        return Err("目标文件已变化，已阻止写入。请重新生成 diff。".to_owned());
-    }
-
-    if matches!(
-        change.operation.as_deref(),
-        Some("append" | "multi_replace")
-    ) {
-        if current_content != change.original {
-            let action_label = if change.operation.as_deref() == Some("multi_replace") {
-                "多处编辑写入"
-            } else {
-                "追加写入"
-            };
-
-            return Err(format!(
-                "目标文件已变化，已阻止{action_label}。请重新生成 diff。"
-            ));
-        }
-
-        return Ok(change.next.clone());
-    }
-
-    replace_unique(current_content, &change.original, &change.next)
-        .map_err(rewrite_apply_error_message)
-}
-
-/** 将单处改写定位失败转换为用户可理解的写入错误。 */
-fn rewrite_apply_error_message(error: UniqueReplacementError) -> String {
-    match error {
-        UniqueReplacementError::EmptyOriginal => {
-            "待写入 diff 缺少原文片段，已阻止写入。请重新生成 diff。".to_owned()
-        }
-        UniqueReplacementError::NotFound => {
-            "待写入 diff 的原文片段未命中当前文件，已阻止写入。请重新生成 diff。".to_owned()
-        }
-        UniqueReplacementError::Ambiguous { .. } => {
-            "待写入 diff 的原文片段在当前文件中出现多次，已阻止写入。请重新生成更精确的 diff。"
-                .to_owned()
-        }
-    }
 }
 
 /** 拒绝待写入 diff，只更新会话状态，不修改任何 Markdown 文件。 */
@@ -5469,8 +5151,13 @@ mod tests {
         let current_hash = storage::hash_content(current_content);
         let change = test_rewrite_change("旧段落", "新段落", &current_hash);
 
-        let next_content =
-            apply_rewrite_change(current_content, &current_hash, &current_hash, &change).unwrap();
+        let next_content = crate::agent_writes::apply_rewrite_change(
+            current_content,
+            &current_hash,
+            &current_hash,
+            &change,
+        )
+        .unwrap();
 
         assert_eq!(next_content, "开头\n新段落\n结尾");
     }
@@ -5482,7 +5169,12 @@ mod tests {
         let current_hash = storage::hash_content(current_content);
         let change = test_rewrite_change("旧段落", "新段落", &current_hash);
 
-        let result = apply_rewrite_change(current_content, &current_hash, &current_hash, &change);
+        let result = crate::agent_writes::apply_rewrite_change(
+            current_content,
+            &current_hash,
+            &current_hash,
+            &change,
+        );
 
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("出现多次"));
@@ -5496,7 +5188,7 @@ mod tests {
         let stale_hash = storage::hash_content("旧段落");
         let change = test_rewrite_change("旧段落", "新段落", &stale_hash);
 
-        let result = apply_rewrite_change(
+        let result = crate::agent_writes::apply_rewrite_change(
             current_content,
             &current_hash,
             &storage::hash_content("snapshot changed"),
@@ -5520,8 +5212,13 @@ mod tests {
 
         change.operation = Some("append".to_owned());
 
-        let next_content =
-            apply_rewrite_change(current_content, &current_hash, &current_hash, &change).unwrap();
+        let next_content = crate::agent_writes::apply_rewrite_change(
+            current_content,
+            &current_hash,
+            &current_hash,
+            &change,
+        )
+        .unwrap();
 
         assert_eq!(next_content, "第一段\n第二段\n\n新增段落");
     }
@@ -5541,7 +5238,12 @@ mod tests {
 
         change.operation = Some("append".to_owned());
 
-        let result = apply_rewrite_change(current_content, &current_hash, &snapshot_hash, &change);
+        let result = crate::agent_writes::apply_rewrite_change(
+            current_content,
+            &current_hash,
+            &snapshot_hash,
+            &change,
+        );
 
         assert_eq!(
             result.unwrap_err(),
@@ -5558,8 +5260,13 @@ mod tests {
 
         change.operation = Some("multi_replace".to_owned());
 
-        let next_content =
-            apply_rewrite_change(current_content, &current_hash, &current_hash, &change).unwrap();
+        let next_content = crate::agent_writes::apply_rewrite_change(
+            current_content,
+            &current_hash,
+            &current_hash,
+            &change,
+        )
+        .unwrap();
 
         assert_eq!(next_content, "标题\n正文\n结尾");
     }
@@ -5575,7 +5282,12 @@ mod tests {
 
         change.operation = Some("multi_replace".to_owned());
 
-        let result = apply_rewrite_change(current_content, &current_hash, &snapshot_hash, &change);
+        let result = crate::agent_writes::apply_rewrite_change(
+            current_content,
+            &current_hash,
+            &snapshot_hash,
+            &change,
+        );
 
         assert_eq!(
             result.unwrap_err(),

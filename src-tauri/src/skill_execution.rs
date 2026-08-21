@@ -145,10 +145,7 @@ pub fn can_auto_execute(
     request: &SkillExecutionRequest,
     settings: &crate::domain::AgentSecuritySettings,
 ) -> bool {
-    if session.im_identity.is_some()
-        || session.security_level != "autonomous"
-        || !settings.autonomous_mode_enabled
-    {
+    if !crate::agent_writes::allows_autonomous_auto_apply(session, settings) {
         return false;
     }
 
@@ -514,10 +511,7 @@ pub fn can_auto_apply_agent_change_set(
     session: &crate::domain::AgentSession,
     settings: &crate::domain::AgentSecuritySettings,
 ) -> bool {
-    if session.im_identity.is_some()
-        || session.security_level != "autonomous"
-        || !settings.autonomous_mode_enabled
-    {
+    if !crate::agent_writes::allows_autonomous_auto_apply(session, settings) {
         return false;
     }
     session

@@ -713,6 +713,11 @@ impl AgentSecurityLevel {
     pub fn allows_external_filesystem(self) -> bool {
         matches!(self, Self::Full)
     }
+
+    /** 完全级别允许校验通过后自动落盘，不再中途打断用户确认。 */
+    pub fn allows_auto_apply(self) -> bool {
+        matches!(self, Self::Full)
+    }
 }
 
 fn default_agent_security_level() -> String {
