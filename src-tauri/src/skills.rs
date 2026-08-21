@@ -1,4 +1,7 @@
-use crate::domain::{AgentSkill, InstallAgentSkillResult};
+use crate::domain::{
+    AgentSkill, InstallAgentSkillResult, SkillCompatibilityReport, SkillRuntimeManifest,
+    SkillRuntimeStatus,
+};
 use crate::storage::{create_id, format_local_datetime, lock_database_writer};
 use rusqlite::{params, Connection};
 use sha2::{Digest, Sha256};
@@ -6,6 +9,8 @@ use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::io::Cursor;
 use std::path::{Component, Path, PathBuf};
+use std::process::Command;
+use std::sync::OnceLock;
 use tauri::{AppHandle, Manager};
 use tempfile::TempDir;
 use walkdir::WalkDir;
@@ -46,6 +51,9 @@ pub const MAX_REMOTE_SKILL_ARCHIVE_BYTES: usize = 25 * 1024 * 1024;
 
 /** 第三方 skill 安装时保存在 agents 目录中的橘记元数据文件。 */
 const ORANGE_INSTALL_METADATA_FILE_NAME: &str = "orange.yaml";
+
+/** 可执行 Skill 的稳定声明文件；与安装来源元数据分离，便于独立审阅和签名。 */
+pub const ORANGE_RUNTIME_MANIFEST_FILE_NAME: &str = "orange-runtime.yaml";
 
 /** 第三方 skill 安装冲突时直接失败，不覆盖用户现有目录。 */
 const INSTALL_CONFLICT_FAIL: &str = "fail";
@@ -540,6 +548,8 @@ fn built_in_skill(
         path: None,
         relative_path: None,
         metadata: None,
+        runtime_manifest: None,
+        compatibility: None,
     }
 }
 
@@ -642,6 +652,10 @@ fn load_custom_skill(
         );
     }
 
+    let skill_dir = skill_markdown_path
+        .parent()
+        .ok_or_else(|| "无法解析 skill 目录。".to_owned())?;
+    let (runtime_manifest, compatibility) = inspect_skill_runtime(skill_dir)?;
     let mut skill = AgentSkill {
         id: create_custom_skill_id(&absolute_path),
         name: normalize_skill_name(&parsed_skill.name),
@@ -659,6 +673,8 @@ fn load_custom_skill(
         path: Some(absolute_path.to_string_lossy().to_string()),
         relative_path: Some(relative_path),
         metadata: Some(metadata_map),
+        runtime_manifest,
+        compatibility: Some(compatibility),
     };
 
     if skill.name.is_empty() {
@@ -846,6 +862,209 @@ fn read_openai_yaml_metadata(skill_dir: &Path) -> OpenAiSkillMetadata {
     metadata
 }
 
+/** 从 agents/orange-runtime.yaml 读取并校验可执行 Skill 声明。 */
+fn inspect_skill_runtime(
+    skill_dir: &Path,
+) -> Result<(Option<SkillRuntimeManifest>, SkillCompatibilityReport), String> {
+    let package_hash = hash_skill_directory(skill_dir)?;
+    let manifest_path = skill_dir
+        .join("agents")
+        .join(ORANGE_RUNTIME_MANIFEST_FILE_NAME);
+
+    if !manifest_path.exists() {
+        return Ok((
+            None,
+            SkillCompatibilityReport {
+                status: "instruction-only".to_owned(),
+                package_hash,
+                runtime: None,
+                warnings: Vec::new(),
+            },
+        ));
+    }
+
+    let manifest_content = fs::read_to_string(&manifest_path)
+        .map_err(|error| format!("无法读取 agents/orange-runtime.yaml：{error}"))?;
+    let mut manifest = serde_yaml::from_str::<SkillRuntimeManifest>(&manifest_content)
+        .map_err(|error| format!("orange-runtime.yaml 不是有效 YAML：{error}"))?;
+
+    manifest.runtime = manifest.runtime.trim().to_lowercase();
+    manifest.entry = manifest.entry.trim().replace('\\', "/");
+    manifest.args = normalize_terms(manifest.args);
+    manifest.network_domains = normalize_terms(manifest.network_domains)
+        .into_iter()
+        .map(|domain| domain.to_lowercase())
+        .collect();
+    manifest.credential_aliases = normalize_terms(manifest.credential_aliases);
+    manifest.artifact_patterns = normalize_terms(manifest.artifact_patterns);
+    validate_runtime_manifest(skill_dir, &manifest)?;
+
+    let runtime = detect_runtime(skill_dir, &manifest);
+    let mut warnings = Vec::new();
+    let status = if !runtime.available {
+        "missing-runtime"
+    } else if !strong_sandbox_available() {
+        warnings.push("当前 Windows 环境未通过强沙箱探针，可执行 Skill 已失败关闭。".to_owned());
+        "unsupported"
+    } else if !manifest.network_domains.is_empty() {
+        warnings.push(
+            "当前 Windows 首版尚未开放 Skill 网络代理，声明联网的 Skill 暂不可执行。".to_owned(),
+        );
+        "partial"
+    } else {
+        "ready"
+    };
+
+    Ok((
+        Some(manifest),
+        SkillCompatibilityReport {
+            status: status.to_owned(),
+            package_hash,
+            runtime: Some(runtime),
+            warnings,
+        },
+    ))
+}
+
+/** 强沙箱探针按进程缓存；不可用时可执行 Skill 显示为不支持并拒绝运行。 */
+#[cfg(windows)]
+fn strong_sandbox_available() -> bool {
+    static AVAILABLE: OnceLock<bool> = OnceLock::new();
+
+    *AVAILABLE.get_or_init(|| !sandboxrs_windows::Sandbox::available_backends().is_empty())
+}
+
+#[cfg(not(windows))]
+fn strong_sandbox_available() -> bool {
+    false
+}
+
+/** 运行声明只允许 Skill 目录内的普通入口文件，拒绝绝对路径、父目录和符号链接逃逸。 */
+fn validate_runtime_manifest(
+    skill_dir: &Path,
+    manifest: &SkillRuntimeManifest,
+) -> Result<(), String> {
+    if !matches!(
+        manifest.runtime.as_str(),
+        "python" | "node" | "powershell" | "bash" | "executable"
+    ) {
+        return Err(format!("不支持的 Skill runtime：{}。", manifest.runtime));
+    }
+    if manifest.entry.is_empty() {
+        return Err("orange-runtime.yaml 缺少 entry。".to_owned());
+    }
+
+    let relative_entry = Path::new(&manifest.entry);
+    if relative_entry.is_absolute()
+        || relative_entry.components().any(|component| {
+            matches!(
+                component,
+                Component::ParentDir | Component::RootDir | Component::Prefix(_)
+            )
+        })
+    {
+        return Err("Skill entry 必须是包内相对路径。".to_owned());
+    }
+
+    let entry_path = skill_dir.join(relative_entry);
+    let metadata = fs::symlink_metadata(&entry_path)
+        .map_err(|_| format!("找不到 Skill entry：{}。", manifest.entry))?;
+    if !metadata.is_file() || metadata.file_type().is_symlink() {
+        return Err("Skill entry 必须是包内普通文件，不能是目录或符号链接。".to_owned());
+    }
+    if manifest.args.iter().any(|argument| argument.contains('\0')) {
+        return Err("Skill 参数不能包含空字符。".to_owned());
+    }
+
+    for domain in &manifest.network_domains {
+        if domain.is_empty()
+            || domain.contains('/')
+            || domain.contains(':')
+            || domain.chars().any(char::is_whitespace)
+        {
+            return Err(format!("无效的网络域名声明：{domain}。"));
+        }
+    }
+    Ok(())
+}
+
+/** 检测本机运行时；这里只读系统状态，不安装、不修改 PATH。 */
+fn detect_runtime(skill_dir: &Path, manifest: &SkillRuntimeManifest) -> SkillRuntimeStatus {
+    if manifest.runtime == "executable" {
+        let executable_path = skill_dir.join(&manifest.entry);
+        return SkillRuntimeStatus {
+            runtime: manifest.runtime.clone(),
+            available: executable_path.is_file(),
+            executable_path: executable_path
+                .is_file()
+                .then(|| executable_path.to_string_lossy().to_string()),
+            version: None,
+            message: "使用 Skill 包内可执行文件。".to_owned(),
+        };
+    }
+
+    let candidates: &[&str] = match manifest.runtime.as_str() {
+        "python" => &["python.exe", "python3.exe", "python"],
+        "node" => &["node.exe", "node"],
+        "powershell" => &["pwsh.exe", "powershell.exe", "pwsh", "powershell"],
+        "bash" => &["bash.exe", "bash"],
+        _ => &[],
+    };
+    let executable_path = candidates
+        .iter()
+        .find_map(|candidate| find_executable(candidate));
+    let version = executable_path
+        .as_ref()
+        .and_then(|path| runtime_version(path));
+    let available = executable_path.is_some() && version.is_some();
+
+    SkillRuntimeStatus {
+        runtime: manifest.runtime.clone(),
+        available,
+        executable_path,
+        version,
+        message: if available {
+            "本机运行时可用。".to_owned()
+        } else {
+            "未检测到可用运行时；橘记不会自动安装。".to_owned()
+        },
+    }
+}
+
+/** 通过系统查找命令解析运行时绝对路径，忽略不可执行的 WindowsApps 别名。 */
+fn find_executable(candidate: &str) -> Option<String> {
+    let locator = if cfg!(windows) { "where.exe" } else { "which" };
+    let output = Command::new(locator).arg(candidate).output().ok()?;
+    if !output.status.success() {
+        return None;
+    }
+
+    String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .map(str::trim)
+        .find(|path| !path.is_empty() && !path.to_lowercase().contains("windowsapps"))
+        .map(str::to_owned)
+}
+
+/** 用无副作用的版本参数确认运行时路径不是空壳或系统商店别名。 */
+fn runtime_version(executable_path: &str) -> Option<String> {
+    let output = Command::new(executable_path)
+        .arg("--version")
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let value = if output.stdout.is_empty() {
+        &output.stderr
+    } else {
+        &output.stdout
+    };
+    let version = String::from_utf8_lossy(value).trim().to_owned();
+
+    (!version.is_empty()).then_some(version)
+}
+
 /** 从单行 yaml 字段中提取冒号后的标量值。 */
 fn parse_yaml_value_after_colon(line: &str) -> Option<String> {
     line.split_once(':')
@@ -1027,7 +1246,7 @@ fn move_previous_skill_directory_if_needed(
     }
 
     if previous_skill_dir.exists() {
-        // 目录迁移保留用户可能放在 skill 文件夹中的附加资料，但不执行这些资料。
+        // 目录迁移保留用户放在 skill 文件夹中的附加资料；是否可执行由运行清单和权限级别决定。
         fs::rename(previous_skill_dir, next_skill_dir).map_err(|error| {
             format!(
                 "无法迁移 skill 目录 {} 到 {}：{error}",
@@ -1306,7 +1525,7 @@ fn copy_skill_directory_checked(
                 .components()
                 .any(|component| component.as_os_str() == "scripts")
             {
-                warnings.push("安装包包含 scripts 目录；橘记已保留文件但不会执行脚本。".to_owned());
+                warnings.push("安装包包含 scripts 目录；仅声明 agents/orange-runtime.yaml 且通过权限审批后才可执行。".to_owned());
             }
 
             fs::create_dir_all(&target_path)
@@ -1459,7 +1678,7 @@ fn create_custom_skill_id(skill_markdown_path: &Path) -> String {
 }
 
 /** 计算 skill 目录内容 hash，安装日志和元数据只记录摘要，不记录正文。 */
-fn hash_skill_directory(skill_dir: &Path) -> Result<String, String> {
+pub(crate) fn hash_skill_directory(skill_dir: &Path) -> Result<String, String> {
     let mut files = Vec::new();
 
     for entry in WalkDir::new(skill_dir)
@@ -1851,6 +2070,8 @@ fn skill_state_override_payload(skill: &AgentSkill) -> AgentSkill {
         path: None,
         relative_path: None,
         metadata: None,
+        runtime_manifest: None,
+        compatibility: None,
     }
 }
 
@@ -1937,6 +2158,15 @@ mod tests {
         fs::write(metadata_dir.join("openai.yaml"), yaml).expect("write openai.yaml");
     }
 
+    /** 写入橘记可执行 Skill 运行清单。 */
+    fn write_orange_runtime_yaml(root: &Path, folder: &str, yaml: &str) {
+        let metadata_dir = root.join(folder).join("agents");
+
+        fs::create_dir_all(&metadata_dir).expect("create agents directory");
+        fs::write(metadata_dir.join(ORANGE_RUNTIME_MANIFEST_FILE_NAME), yaml)
+            .expect("write orange runtime manifest");
+    }
+
     /** 从合并列表中过滤自定义 skill，便于测试关注扫描结果。 */
     fn custom_skills(skills: &[AgentSkill]) -> Vec<AgentSkill> {
         skills
@@ -1949,6 +2179,48 @@ mod tests {
     /** 创建一个最小有效 SKILL.md 文本，正文作为完整 instructions。 */
     fn valid_skill_markdown(name: &str, description: &str, instructions: &str) -> String {
         format!("---\nname: {name}\ndescription: {description}\n---\n\n{instructions}\n")
+    }
+
+    /** 缺少运行清单的自定义 Skill 保持纯指令兼容状态。 */
+    #[test]
+    fn custom_skill_without_runtime_manifest_is_instruction_only() {
+        let temp_dir = tempdir().expect("create tempdir");
+        let root = temp_dir.path().join("skills");
+        let connection = test_connection();
+        write_skill_markdown(
+            &root,
+            "plain",
+            &valid_skill_markdown("plain", "纯指令", "只提供说明。"),
+        );
+
+        let skill = custom_skills(&load_agent_skills_from_roots(&connection, &[root]).unwrap())
+            .pop()
+            .unwrap();
+
+        assert!(skill.runtime_manifest.is_none());
+        assert_eq!(skill.compatibility.unwrap().status, "instruction-only");
+    }
+
+    /** 运行清单必须拒绝包外入口路径，防止 Skill 借声明越过安装目录。 */
+    #[test]
+    fn runtime_manifest_rejects_parent_directory_entry() {
+        let temp_dir = tempdir().expect("create tempdir");
+        let root = temp_dir.path().join("skills");
+        let connection = test_connection();
+        write_skill_markdown(
+            &root,
+            "unsafe",
+            &valid_skill_markdown("unsafe", "越界入口", "执行脚本。"),
+        );
+        write_orange_runtime_yaml(
+            &root,
+            "unsafe",
+            "runtime: powershell\nentry: ../outside.ps1\n",
+        );
+
+        let skills = load_agent_skills_from_roots(&connection, &[root]).unwrap();
+
+        assert!(custom_skills(&skills).is_empty());
     }
 
     /** 从临时目录加载单个自定义 skill，便于验证扫描后的领域模型。 */
@@ -1984,6 +2256,8 @@ mod tests {
             path: None,
             relative_path: None,
             metadata: None,
+            runtime_manifest: None,
+            compatibility: None,
         }
     }
 
@@ -2113,7 +2387,7 @@ tags:
         assert!(result.installed_skills.iter().all(|skill| !skill.enabled));
     }
 
-    /** 安装包中的 scripts 目录会保留但给出不会执行的提示。 */
+    /** 安装包中的 scripts 目录会保留，并提示需要运行清单与审批。 */
     #[test]
     fn install_keeps_scripts_but_returns_warning() {
         let temp_dir = tempdir().expect("create tempdir");
@@ -2141,7 +2415,7 @@ tags:
         assert!(result
             .warnings
             .iter()
-            .any(|warning| warning.contains("不会执行脚本")));
+            .any(|warning| warning.contains("orange-runtime.yaml")));
     }
 
     /** 同名 skill 默认拒绝覆盖；replace 策略才会替换已有目录。 */

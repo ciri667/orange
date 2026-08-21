@@ -331,6 +331,71 @@ pub struct ProposedChange {
     pub diff_stats: Option<ProposedChangeDiffStats>,
 }
 
+/** 变更集中一项待确认的文件操作；create_folder 操作的 file_type 为 "folder"，不带正文。 */
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProposedFileOperation {
+    pub id: String,
+    pub knowledge_base_id: String,
+    pub operation: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_path: Option<String>,
+    pub target_path: String,
+    pub file_type: String,
+    pub original_hash: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub original: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub next: Option<String>,
+    pub selected: bool,
+    pub binary: bool,
+    pub byte_size: usize,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub staged_path: Option<String>,
+}
+
+/** Agent 直接产出（非 Skill 执行）的变更集使用的执行 ID 占位符。 */
+pub const AGENT_DIRECT_EXECUTION_ID: &str = "agent-direct";
+/** Agent 直接产出变更集时填入 ProposedChangeSet.skill_id 的来源标记。 */
+pub const AGENT_DIRECT_SOURCE: &str = "agent";
+/** 完全级别下，知识库范围外的合规路径使用该 scope id，避免误绑到某个知识库。 */
+pub const EXTERNAL_FILESYSTEM_SCOPE_ID: &str = "external";
+
+/** 一次执行产生的多文件变更集；executionId 为 agent-direct 时表示由 Agent 工具直接生成，应用前始终保留待确认。 */
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProposedChangeSet {
+    pub id: String,
+    pub execution_id: String,
+    pub skill_id: String,
+    pub status: String,
+    pub summary: String,
+    pub operations: Vec<ProposedFileOperation>,
+    #[serde(default)]
+    pub warnings: Vec<String>,
+    pub created_at: String,
+}
+
+/** Skill 命令在真正运行前持久化的审批请求。 */
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SkillExecutionRequest {
+    pub id: String,
+    pub skill_id: String,
+    pub skill_name: String,
+    pub package_hash: String,
+    pub runtime: String,
+    pub command_preview: String,
+    pub args: Vec<String>,
+    pub knowledge_base_ids: Vec<String>,
+    #[serde(default)]
+    pub network_domains: Vec<String>,
+    #[serde(default)]
+    pub credential_aliases: Vec<String>,
+    pub status: String,
+    pub created_at: String,
+}
+
 /** 审阅评论绑定到 diff 的一侧和行号，正文只随会话 payload 传递。 */
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -426,6 +491,13 @@ pub struct AgentSession {
     pub pinned_note_ids: Vec<String>,
     pub messages: Vec<AgentMessage>,
     pub pending_change: Option<ProposedChange>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pending_change_set: Option<ProposedChangeSet>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pending_execution: Option<SkillExecutionRequest>,
+    /** 安全级别按会话固化；IM 会话始终由入口强制降为 basic。 */
+    #[serde(default = "default_agent_security_level")]
+    pub security_level: String,
     /** 会话滚动工作记忆，用于让模型在只带最近历史时仍保留早期目标和决定。 */
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub context_summary: Option<AgentContextSummary>,
@@ -562,6 +634,152 @@ pub struct AgentSkill {
     pub relative_path: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub metadata: Option<HashMap<String, String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub runtime_manifest: Option<SkillRuntimeManifest>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub compatibility: Option<SkillCompatibilityReport>,
+}
+
+/** 可执行 Skill 的跨平台运行声明。 */
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SkillRuntimeManifest {
+    pub runtime: String,
+    pub entry: String,
+    #[serde(default)]
+    pub args: Vec<String>,
+    #[serde(default)]
+    pub network_domains: Vec<String>,
+    #[serde(default)]
+    pub credential_aliases: Vec<String>,
+    #[serde(default)]
+    pub artifact_patterns: Vec<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SkillRuntimeStatus {
+    pub runtime: String,
+    pub available: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub executable_path: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub version: Option<String>,
+    pub message: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SkillCompatibilityReport {
+    pub status: String,
+    pub package_hash: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub runtime: Option<SkillRuntimeStatus>,
+    #[serde(default)]
+    pub warnings: Vec<String>,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum AgentSecurityLevel {
+    Basic,
+    Advanced,
+    #[serde(rename = "autonomous")]
+    Full,
+}
+
+impl Default for AgentSecurityLevel {
+    fn default() -> Self {
+        Self::Basic
+    }
+}
+
+impl AgentSecurityLevel {
+    /** 解析会话/设置中的安全级别字符串；未知值一律降为基础级别。 */
+    pub fn parse(value: &str) -> Self {
+        match value {
+            "advanced" => Self::Advanced,
+            "autonomous" | "full" => Self::Full,
+            _ => Self::Basic,
+        }
+    }
+
+    /** 进阶/完全级别可使用通用文件工具（如 create_folder）。 */
+    pub fn allows_general_fs_tools(self) -> bool {
+        !matches!(self, Self::Basic)
+    }
+
+    /** 完全级别允许对知识库根目录之外的合规绝对路径进行操作。 */
+    pub fn allows_external_filesystem(self) -> bool {
+        matches!(self, Self::Full)
+    }
+}
+
+fn default_agent_security_level() -> String {
+    "basic".to_owned()
+}
+
+fn default_agent_resource_limits() -> AgentResourceLimits {
+    AgentResourceLimits {
+        timeout_seconds: 120,
+        max_memory_mb: 512,
+        max_processes: 20,
+        max_artifact_mb: 100,
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentResourceLimits {
+    pub timeout_seconds: u64,
+    pub max_memory_mb: u64,
+    pub max_processes: u32,
+    pub max_artifact_mb: u64,
+}
+
+impl Default for AgentResourceLimits {
+    fn default() -> Self {
+        default_agent_resource_limits()
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TrustedSkillGrant {
+    pub skill_id: String,
+    pub package_hash: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expires_at: Option<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentSecuritySettings {
+    #[serde(default = "default_agent_security_level")]
+    pub default_level: String,
+    #[serde(default)]
+    pub advanced_execution_enabled: bool,
+    #[serde(default)]
+    pub autonomous_mode_enabled: bool,
+    #[serde(default = "default_agent_resource_limits")]
+    pub resource_limits: AgentResourceLimits,
+    #[serde(default)]
+    pub trusted_skill_grants: Vec<TrustedSkillGrant>,
+    #[serde(default)]
+    pub allowed_network_domains: Vec<String>,
+}
+
+impl Default for AgentSecuritySettings {
+    fn default() -> Self {
+        Self {
+            default_level: default_agent_security_level(),
+            advanced_execution_enabled: false,
+            autonomous_mode_enabled: false,
+            resource_limits: default_agent_resource_limits(),
+            trusted_skill_grants: Vec::new(),
+            allowed_network_domains: Vec::new(),
+        }
+    }
 }
 
 /** 用户设置聚合模型、隐私和写入确认策略，供 M3 Runtime 读取。 */
@@ -571,6 +789,8 @@ pub struct UserSettings {
     pub model_config: ModelConfig,
     pub privacy_policy: String,
     pub write_confirmation_required: bool,
+    #[serde(default)]
+    pub agent_security: AgentSecuritySettings,
 }
 
 /** 首个内置 IM provider ID；后续 provider 继续使用稳定小写 ID。 */

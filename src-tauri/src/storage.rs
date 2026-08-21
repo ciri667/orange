@@ -1,13 +1,14 @@
 use crate::domain::{
     AgentSession, AppEventLog, DocumentHistoryEntry, DocumentHistoryEntryDetail, DocumentPreview,
-    DocumentPreviewBlock, DocumentTextBlock, DocumentTextExtraction, FeishuCredentialStatus, FeishuIntegrationSettings, FolderEntry,
-    ImIntegrationSettings, ImProviderConfig, ImProviderCredentialStatus, ImProviderSettings,
-    KnowledgeBase, KnowledgeBaseMemory, KnowledgeBaseSelection, LlmProviderConfig,
-    ModelApiKeyStatus, ModelConfig, Note, NoteImageAttachmentInput, RequestAuditLog,
-    SavedNoteImageAttachment, ScanReport, UserSettings, WorkspaceBootstrapState, WorkspaceDocument,
-    WorkspaceEditorState, WorkspaceEditorTab, WorkspaceSnapshot, IM_PROVIDER_FEISHU,
-    MEMORY_CATEGORY_CONVENTION, MEMORY_CATEGORY_NOTE_STRUCTURE, MEMORY_CATEGORY_ORGANIZATION,
-    MEMORY_CATEGORY_OTHER, MEMORY_CATEGORY_TAG_CONVENTION, MEMORY_SOURCE_AUTO, MEMORY_SOURCE_USER,
+    DocumentPreviewBlock, DocumentTextBlock, DocumentTextExtraction, FeishuCredentialStatus,
+    FeishuIntegrationSettings, FolderEntry, ImIntegrationSettings, ImProviderConfig,
+    ImProviderCredentialStatus, ImProviderSettings, KnowledgeBase, KnowledgeBaseMemory,
+    KnowledgeBaseSelection, LlmProviderConfig, ModelApiKeyStatus, ModelConfig, Note,
+    NoteImageAttachmentInput, RequestAuditLog, SavedNoteImageAttachment, ScanReport, UserSettings,
+    WorkspaceBootstrapState, WorkspaceDocument, WorkspaceEditorState, WorkspaceEditorTab,
+    WorkspaceSnapshot, IM_PROVIDER_FEISHU, MEMORY_CATEGORY_CONVENTION,
+    MEMORY_CATEGORY_NOTE_STRUCTURE, MEMORY_CATEGORY_ORGANIZATION, MEMORY_CATEGORY_OTHER,
+    MEMORY_CATEGORY_TAG_CONVENTION, MEMORY_SOURCE_AUTO, MEMORY_SOURCE_USER,
 };
 use crate::model_provider;
 use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
@@ -476,6 +477,7 @@ pub fn default_user_settings() -> UserSettings {
         },
         privacy_policy: "allow-selected-scope".to_owned(),
         write_confirmation_required: true,
+        agent_security: Default::default(),
     }
 }
 
@@ -1016,8 +1018,32 @@ pub fn save_sessions(app: &AppHandle, snapshot: &WorkspaceSnapshot) -> Result<()
 pub fn save_session(
     app: &AppHandle,
     mut snapshot: WorkspaceSnapshot,
-    session: AgentSession,
+    mut session: AgentSession,
 ) -> Result<WorkspaceSnapshot, String> {
+    if let Some(existing) = load_persisted_session(app, &session.id)? {
+        // 普通会话保存不能改写高权限审批载荷；仅允许按稳定 operation id 更新勾选状态。
+        session.knowledge_base_ids = existing.knowledge_base_ids;
+        session.im_identity = existing.im_identity;
+        session.pending_execution = existing.pending_execution;
+        session.pending_change_set = match (existing.pending_change_set, session.pending_change_set)
+        {
+            (Some(mut trusted), Some(draft)) if trusted.id == draft.id => {
+                let selected_by_id = draft
+                    .operations
+                    .into_iter()
+                    .map(|operation| (operation.id, operation.selected))
+                    .collect::<HashMap<_, _>>();
+                for operation in &mut trusted.operations {
+                    if let Some(selected) = selected_by_id.get(&operation.id) {
+                        operation.selected = *selected;
+                    }
+                }
+                Some(trusted)
+            }
+            (trusted, _) => trusted,
+        };
+    }
+
     if let Some(index) = snapshot
         .sessions
         .iter()
@@ -1033,6 +1059,28 @@ pub fn save_session(
     save_sessions(app, &snapshot)?;
 
     Ok(snapshot)
+}
+
+/** 按 ID 读取未经前端覆盖的持久化会话，供审批状态保护复用。 */
+fn load_persisted_session(
+    app: &AppHandle,
+    session_id: &str,
+) -> Result<Option<AgentSession>, String> {
+    let connection = open_database(app)?;
+    let payload = connection
+        .query_row(
+            "SELECT payload_json FROM agent_sessions WHERE id = ?1",
+            params![session_id],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()
+        .map_err(|error| format!("无法读取持久化会话：{error}"))?;
+
+    payload
+        .map(|payload| {
+            serde_json::from_str(&payload).map_err(|error| format!("无法解析持久化会话：{error}"))
+        })
+        .transpose()
 }
 
 /** 逻辑删除单个会话，保留 payload 历史但从返回快照和普通读取中隐藏。 */
@@ -1374,6 +1422,18 @@ pub fn normalize_session_for_snapshot(
 ) -> bool {
     normalize_session_created_at(session);
 
+    if session.im_identity.is_some() {
+        // 远程入口无论前端或历史 payload 如何声明，都只能保持基础级别和无待执行任务。
+        session.security_level = "basic".to_owned();
+        session.pending_execution = None;
+        session.pending_change_set = None;
+    } else if !matches!(
+        session.security_level.as_str(),
+        "basic" | "advanced" | "autonomous"
+    ) {
+        session.security_level = "basic".to_owned();
+    }
+
     if session.deleted_at.is_some() {
         return false;
     }
@@ -1464,14 +1524,43 @@ pub fn save_user_settings(
     app: &AppHandle,
     settings: &UserSettings,
 ) -> Result<UserSettings, String> {
-    let connection = open_database(app)?;
-    let _write_guard = lock_database_writer()?;
     let mut normalized_settings = settings.clone();
+    if let Ok(persisted_settings) = load_user_settings(app) {
+        // 短时 Skill 信任授权只允许后端执行器写入，普通设置 payload 不能伪造或延长授权。
+        normalized_settings.agent_security.trusted_skill_grants =
+            persisted_settings.agent_security.trusted_skill_grants;
+    }
 
     model_provider::normalize_model_config(&mut normalized_settings.model_config);
+    normalize_agent_security_settings(&mut normalized_settings.agent_security);
 
-    let payload_json = serde_json::to_string(&normalized_settings)
-        .map_err(|error| format!("无法序列化用户设置：{error}"))?;
+    persist_user_settings(app, &normalized_settings)?;
+
+    Ok(normalized_settings)
+}
+
+/** 后端在用户实际批准完全模式执行后写入短时 Skill hash 授权。 */
+pub(crate) fn save_trusted_skill_grant(
+    app: &AppHandle,
+    grant: crate::domain::TrustedSkillGrant,
+) -> Result<(), String> {
+    let mut settings = load_user_settings(app)?;
+    settings
+        .agent_security
+        .trusted_skill_grants
+        .retain(|existing| existing.skill_id != grant.skill_id);
+    settings.agent_security.trusted_skill_grants.push(grant);
+    normalize_agent_security_settings(&mut settings.agent_security);
+    persist_user_settings(app, &settings)
+}
+
+/** 写入已经过调用方归一化的设置，避免内部授权写入再次走前端字段保护。 */
+fn persist_user_settings(app: &AppHandle, settings: &UserSettings) -> Result<(), String> {
+    let connection = open_database(app)?;
+    let _write_guard = lock_database_writer()?;
+
+    let payload_json =
+        serde_json::to_string(settings).map_err(|error| format!("无法序列化用户设置：{error}"))?;
 
     connection
         .execute(
@@ -1480,7 +1569,37 @@ pub fn save_user_settings(
         )
         .map_err(|error| format!("无法保存用户设置：{error}"))?;
 
-    Ok(normalized_settings)
+    Ok(())
+}
+
+/** 归一化 Agent 权限设置，阻止前端草稿绕过开关或提交不合理资源上限。 */
+fn normalize_agent_security_settings(settings: &mut crate::domain::AgentSecuritySettings) {
+    if !settings.advanced_execution_enabled {
+        settings.default_level = "basic".to_owned();
+        settings.autonomous_mode_enabled = false;
+    } else if settings.default_level == "autonomous" && !settings.autonomous_mode_enabled {
+        settings.default_level = "advanced".to_owned();
+    } else if !matches!(
+        settings.default_level.as_str(),
+        "basic" | "advanced" | "autonomous"
+    ) {
+        settings.default_level = "basic".to_owned();
+    }
+
+    settings.resource_limits.timeout_seconds =
+        settings.resource_limits.timeout_seconds.clamp(5, 1800);
+    settings.resource_limits.max_memory_mb = settings.resource_limits.max_memory_mb.clamp(64, 4096);
+    settings.resource_limits.max_processes = settings.resource_limits.max_processes.clamp(1, 64);
+    settings.resource_limits.max_artifact_mb =
+        settings.resource_limits.max_artifact_mb.clamp(1, 1024);
+    settings.allowed_network_domains = settings
+        .allowed_network_domains
+        .iter()
+        .map(|domain| domain.trim().to_lowercase())
+        .filter(|domain| !domain.is_empty() && !domain.contains('/') && !domain.contains(':'))
+        .collect::<HashSet<_>>()
+        .into_iter()
+        .collect();
 }
 
 /** 跨会话记忆单条内容允许的最大字符数，避免用户写入过长偏好挤占上下文预算。 */
@@ -5081,8 +5200,7 @@ pub fn extract_document_text(
     document: &WorkspaceDocument,
 ) -> Result<DocumentTextExtraction, String> {
     let target_path = resolve_existing_file_inside_root(root, &document.path)?;
-    let bytes = fs::read(&target_path)
-        .map_err(|error| format!("无法读取文档内容：{error}"))?;
+    let bytes = fs::read(&target_path).map_err(|error| format!("无法读取文档内容：{error}"))?;
     let content_hash = hash_bytes(&bytes);
 
     let (blocks, warnings) = match document.file_type.as_str() {
@@ -5091,8 +5209,8 @@ pub fn extract_document_text(
                 return Err("只能读取 DOCX 文件。".to_owned());
             }
             let preview_blocks = extract_docx_preview_blocks(&target_path)?;
-            let has_empty_placeholder = preview_blocks.len() == 1
-                && preview_blocks[0].text == "该 DOCX 暂无可预览正文。";
+            let has_empty_placeholder =
+                preview_blocks.len() == 1 && preview_blocks[0].text == "该 DOCX 暂无可预览正文。";
             let blocks = if has_empty_placeholder {
                 Vec::new()
             } else {
@@ -5110,7 +5228,10 @@ pub fn extract_document_text(
             let warnings = if blocks.is_empty() {
                 vec!["未从 DOCX 正文提取到可读文本；图片、文本框和批注不会自动识别。".to_owned()]
             } else {
-                vec!["DOCX 首期仅提取正文段落和表格文本；图片、文本框、批注和修订可能未包含。".to_owned()]
+                vec![
+                    "DOCX 首期仅提取正文段落和表格文本；图片、文本框、批注和修订可能未包含。"
+                        .to_owned(),
+                ]
             };
             (blocks, warnings)
         }
@@ -5203,10 +5324,10 @@ mod tests {
     use super::{
         atomic_write_markdown, atomic_write_text_document, create_blank_markdown_file,
         create_blank_text_document_file, create_folder, create_id, create_stable_note_id,
-        ensure_database_schema, ensure_persistent_model_keyring, extract_document_text, extract_docx_preview_blocks,
-        file_modified_local_datetime, format_local_datetime, format_local_datetime_from_millis,
-        hash_bytes, hash_content, insert_app_event_log, insert_document_history_entry,
-        is_missing_keyring_entry_error, keyring_service_for_build,
+        ensure_database_schema, ensure_persistent_model_keyring, extract_document_text,
+        extract_docx_preview_blocks, file_modified_local_datetime, format_local_datetime,
+        format_local_datetime_from_millis, hash_bytes, hash_content, insert_app_event_log,
+        insert_document_history_entry, is_missing_keyring_entry_error, keyring_service_for_build,
         load_document_history_ids_for_target, load_document_preview,
         load_keyring_password_after_cache_miss_with, load_latest_document_history_hash,
         load_model_api_key_from_cache, model_keyring_persists_until_delete,
@@ -5251,6 +5372,9 @@ mod tests {
             pinned_note_ids: Vec::new(),
             messages: Vec::new(),
             pending_change: None,
+            pending_change_set: None,
+            pending_execution: None,
+            security_level: "basic".to_owned(),
             context_summary: None,
             created_at: created_at.to_owned(),
             updated_at: created_at.to_owned(),
@@ -6577,11 +6701,9 @@ mod tests {
             r#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:p><w:r><w:t>段落</w:t></w:r></w:p><w:tbl><w:tr><w:tc><w:p><w:r><w:t>单元格</w:t></w:r></w:p></w:tc></w:tr></w:tbl></w:body></w:document>"#,
         );
 
-        let extraction = extract_document_text(
-            dir.path(),
-            &test_workspace_document("docx", "brief.docx"),
-        )
-        .unwrap();
+        let extraction =
+            extract_document_text(dir.path(), &test_workspace_document("docx", "brief.docx"))
+                .unwrap();
 
         assert_eq!(extraction.blocks.len(), 2);
         assert_eq!(extraction.blocks[0].text, "段落");
