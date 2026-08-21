@@ -158,6 +158,7 @@ export function KnowledgeBaseSidebar({
           activeNoteId={activeNoteId}
           activeDocumentId={activeDocumentId}
           collapsedFolderPaths={collapsedFolderPaths}
+          isFiltered={Boolean(searchTerm.trim())}
           onToggleFolder={onToggleFolder}
           onSelectNote={onSelectNote}
           onSelectDocument={onSelectDocument}

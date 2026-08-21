@@ -2535,6 +2535,8 @@ export function WorkspaceShell() {
             onRejectChange={handleRejectChange}
             onAddReviewComment={handleAddReviewComment}
             onSubmitReviewComments={handleSubmitReviewComments}
+            onCreateMarkdown={(parentPath) => openCreateDialog("markdown", parentPath)}
+            onCreateText={(parentPath) => openCreateDialog("text", parentPath)}
               />
             )}
           </div>

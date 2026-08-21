@@ -26,6 +26,7 @@ export function FileTree({
   activeDocumentId,
   collapsedFolderPaths,
   depth = 0,
+  isFiltered = false,
   onToggleFolder,
   onSelectNote,
   onSelectDocument,
@@ -44,6 +45,7 @@ export function FileTree({
   activeDocumentId: string;
   collapsedFolderPaths: Set<string>;
   depth?: number;
+  isFiltered?: boolean;
   onToggleFolder: (folderPath: string) => void;
   onSelectNote: (noteId: string) => void;
   onSelectDocument: (documentId: string) => void;
@@ -79,8 +81,17 @@ export function FileTree({
     setOpenCreateMenuPath(null);
   }
 
+  // 空树仍要保留根目录新建入口；否则没有文件的知识库会只剩一句提示、无法创建。
   if (!nodes.length && depth === 0) {
-    return <p className="file-tree-empty">没有匹配的支持文档</p>;
+    return (
+      <EmptyFolderCreateHint
+        isFiltered={isFiltered}
+        folderPath=""
+        onCreateMarkdown={onCreateMarkdown}
+        onCreateText={onCreateText}
+        onCreateFolder={onCreateFolder}
+      />
+    );
   }
 
   return (
@@ -124,27 +135,37 @@ export function FileTree({
                   />
                 </div>
               </div>
-              {!isCollapsed && (
-                <FileTree
-                  nodes={node.children}
-                  activeNoteId={activeNoteId}
-                  activeDocumentId={activeDocumentId}
-                  collapsedFolderPaths={collapsedFolderPaths}
-                  depth={depth + 1}
-                  onToggleFolder={onToggleFolder}
-                  onSelectNote={onSelectNote}
-                  onSelectDocument={onSelectDocument}
-                  onRenameNote={onRenameNote}
-                  onDeleteNote={onDeleteNote}
-                  onOpenNoteHistory={onOpenNoteHistory}
-                  onRenameDocument={onRenameDocument}
-                  onDeleteDocument={onDeleteDocument}
-                  onOpenDocumentHistory={onOpenDocumentHistory}
-                  onCreateMarkdown={onCreateMarkdown}
-                  onCreateText={onCreateText}
-                  onCreateFolder={onCreateFolder}
-                />
-              )}
+              {!isCollapsed &&
+                (node.children.length ? (
+                  <FileTree
+                    nodes={node.children}
+                    activeNoteId={activeNoteId}
+                    activeDocumentId={activeDocumentId}
+                    collapsedFolderPaths={collapsedFolderPaths}
+                    depth={depth + 1}
+                    isFiltered={isFiltered}
+                    onToggleFolder={onToggleFolder}
+                    onSelectNote={onSelectNote}
+                    onSelectDocument={onSelectDocument}
+                    onRenameNote={onRenameNote}
+                    onDeleteNote={onDeleteNote}
+                    onOpenNoteHistory={onOpenNoteHistory}
+                    onRenameDocument={onRenameDocument}
+                    onDeleteDocument={onDeleteDocument}
+                    onOpenDocumentHistory={onOpenDocumentHistory}
+                    onCreateMarkdown={onCreateMarkdown}
+                    onCreateText={onCreateText}
+                    onCreateFolder={onCreateFolder}
+                  />
+                ) : node.isRoot ? (
+                  <EmptyFolderCreateHint
+                    isFiltered={isFiltered}
+                    folderPath={node.path}
+                    onCreateMarkdown={onCreateMarkdown}
+                    onCreateText={onCreateText}
+                    onCreateFolder={onCreateFolder}
+                  />
+                ) : null)}
             </li>
           );
         }
@@ -205,6 +226,43 @@ export function FileTree({
         );
       })}
     </ul>
+  );
+}
+
+/** 空根目录的可见新建入口，避免只依赖可能被滚动容器裁切的「+」下拉菜单。 */
+function EmptyFolderCreateHint({
+  isFiltered,
+  folderPath,
+  onCreateMarkdown,
+  onCreateText,
+  onCreateFolder,
+}: {
+  isFiltered: boolean;
+  folderPath: string;
+  onCreateMarkdown: (parentPath: string) => void;
+  onCreateText: (parentPath: string) => void;
+  onCreateFolder: (parentPath: string) => void;
+}) {
+  return (
+    <div className="file-tree-empty-create">
+      <p className="file-tree-empty">
+        {isFiltered ? "没有匹配的支持文档" : "当前知识库还没有文件，可以在根目录新建。"}
+      </p>
+      <div className="file-tree-empty-actions">
+        <button type="button" onClick={() => onCreateMarkdown(folderPath)}>
+          <FileText size={14} />
+          新建 Markdown
+        </button>
+        <button type="button" onClick={() => onCreateText(folderPath)}>
+          <FileType size={14} />
+          新建 TXT
+        </button>
+        <button type="button" onClick={() => onCreateFolder(folderPath)}>
+          <FolderPlus size={14} />
+          新建目录
+        </button>
+      </div>
+    </div>
   );
 }
 

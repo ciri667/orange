@@ -1,5 +1,5 @@
 import { convertFileSrc } from "@tauri-apps/api/core";
-import { Clock3, Columns2, Eye, PencilLine, Save, Tags } from "lucide-react";
+import { Clock3, Columns2, Eye, FileText, FileType, PencilLine, Save, Tags } from "lucide-react";
 import type { ClipboardEventHandler, RefObject, UIEventHandler } from "react";
 import ReactMarkdown, { defaultUrlTransform } from "react-markdown";
 import type { UrlTransform } from "react-markdown";
@@ -76,6 +76,8 @@ export function EditorPane({
   onRejectChange,
   onAddReviewComment,
   onSubmitReviewComments,
+  onCreateMarkdown,
+  onCreateText,
 }: {
   note?: Note;
   knowledgeBase: KnowledgeBase;
@@ -95,6 +97,8 @@ export function EditorPane({
   onRejectChange: () => void;
   onAddReviewComment: (comment: ReviewCommentDraft) => void;
   onSubmitReviewComments: () => void;
+  onCreateMarkdown: (parentPath: string) => void;
+  onCreateText: (parentPath: string) => void;
 }) {
   /** 分屏模式下同步源码和预览滚动；非分屏时 hook 会保持静默。 */
   const { editorRef, previewRef, handleEditorScroll, handlePreviewScroll } = useSyncedMarkdownScroll(viewMode === "split");
@@ -112,7 +116,17 @@ export function EditorPane({
           ) : (
             <>
               <strong>当前知识库还没有可编辑的 Markdown 文件。</strong>
-              <span>请在左侧目录树的根目录或任意文件夹中使用新建入口创建文档，或在本地目录中添加文件后重新扫描。</span>
+              <span>可以在当前知识库根目录直接新建文档，或在本地目录中添加文件后重新扫描。</span>
+              <div className="editor-empty-actions">
+                <button className="primary-button compact" type="button" onClick={() => onCreateMarkdown("")}>
+                  <FileText size={14} />
+                  新建 Markdown
+                </button>
+                <button className="ghost-button compact" type="button" onClick={() => onCreateText("")}>
+                  <FileType size={14} />
+                  新建 TXT
+                </button>
+              </div>
             </>
           )}
         </div>

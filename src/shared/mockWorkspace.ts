@@ -92,6 +92,31 @@ const initialKnowledgeBases: KnowledgeBase[] = [
       errors: [],
     },
   },
+  {
+    id: "kb-empty",
+    name: "空知识库",
+    path: "/Users/me/Documents/EmptyVault",
+    description: "尚未放入支持文档的本地目录。",
+    status: "ready",
+    noteCount: 0,
+    documentCount: 0,
+    updatedAt: "刚刚",
+    isDefault: false,
+    semanticIndexEnabled: false,
+    scanReport: {
+      scannedFileCount: 0,
+      scannedByType: {
+        markdown: 0,
+        txt: 0,
+        docx: 0,
+        pdf: 0,
+        image: 0,
+      },
+      failedFileCount: 0,
+      skippedDirectories: [],
+      errors: [],
+    },
+  },
 ];
 
 /** 浏览器开发态内置笔记，覆盖问答、检索、隐私和写入确认场景。 */

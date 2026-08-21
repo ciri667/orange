@@ -476,6 +476,9 @@ textarea:disabled {
 }
 
 .local-tree {
+  display: flex;
+  flex: 1 1 auto;
+  flex-direction: column;
   min-height: 0;
   overflow: auto;
 }
@@ -558,6 +561,42 @@ textarea:disabled {
   margin: 18px 0;
   color: var(--text-muted);
   font-size: 13px;
+}
+
+.file-tree-empty-create {
+  margin: 8px 4px 12px;
+  border: 1px dashed var(--border);
+  border-radius: 8px;
+  padding: 12px;
+  background: rgba(255, 253, 248, 0.72);
+}
+
+.file-tree-empty-create .file-tree-empty {
+  margin: 0 0 10px;
+}
+
+.file-tree-empty-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.file-tree-empty-actions button {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 28px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 0 8px;
+  background: #ffffff;
+  color: var(--text);
+  font-size: 12px;
+}
+
+.file-tree-empty-actions button:hover {
+  border-color: var(--border-strong);
+  background: var(--surface-hover);
 }
 
 .file-tree-actions {
@@ -1418,6 +1457,14 @@ textarea:disabled {
   max-width: 420px;
   font-size: 13px;
   line-height: 1.55;
+}
+
+.editor-empty-actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 8px;
+  margin-top: 6px;
 }
 
 .diff-panel {
