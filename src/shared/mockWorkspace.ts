@@ -1,4 +1,5 @@
-import { createContentHash, createLocalId } from "./id";
+import { traceFromToolCalls } from "../agent/agentTrace";
+import { createContentHash, createLocalId, formatLocalDateTime } from "./id";
 import { buildMarkdownDiff } from "../diff/markdownDiff";
 import type {
   AgentActionType,
@@ -780,6 +781,16 @@ export function runMockAgentTurn(
     action,
     citations,
     toolCalls,
+    trace: [
+      {
+        id: createLocalId("trace"),
+        type: "thinking",
+        timestamp: formatLocalDateTime(),
+        content: "浏览器开发态模拟思考：根据当前请求选择工具，并给出可回放的过程轨迹。",
+      },
+      ...traceFromToolCalls(toolCalls),
+    ],
+    turnDurationMs: 1200,
   });
   session.updatedAt = "刚刚";
 
@@ -856,16 +867,19 @@ export function acceptMockProposedChange(snapshot: WorkspaceSnapshot): Workspace
   }
 
   session.pendingChange = { ...pendingChange, status: "accepted" };
+  const reviewToolCalls = [
+    createToolCall("review_change", "用户已确认审阅 diff，mock 环境已更新内存中的笔记内容", {
+      changeId: pendingChange.id,
+    }),
+  ];
   session.messages.push({
     id: createLocalId("assistant"),
     role: "assistant",
     content: "已根据你的确认应用这次变更。正式桌面版会在这里完成路径校验、hash 校验和原子写入。",
     action: pendingChange.type,
-    toolCalls: [
-      createToolCall("review_change", "用户已确认审阅 diff，mock 环境已更新内存中的笔记内容", {
-        changeId: pendingChange.id,
-      }),
-    ],
+    toolCalls: reviewToolCalls,
+    trace: traceFromToolCalls(reviewToolCalls),
+    turnDurationMs: 400,
   });
 
   return nextSnapshot;

@@ -285,6 +285,34 @@ export interface AgentToolCall {
   args: Record<string, unknown>;
 }
 
+/** 过程时间线步骤类型：思考段落或用户可见工具调用。 */
+export type AgentTraceStepType = "thinking" | "tool";
+
+/** 一轮 Agent 中的一个过程步骤，按时间顺序交错思考和工具结果。 */
+export interface AgentTraceStep {
+  id: string;
+  type: AgentTraceStepType;
+  timestamp: string;
+  content?: string;
+  name?: AgentToolName;
+  status?: AgentToolCallStatus;
+  summary?: string;
+  args?: Record<string, unknown>;
+  resultPreview?: string;
+  error?: string;
+  durationMs?: number;
+}
+
+/** 后端在 turn 执行中推送的过程快照，live 气泡和最终助手消息共用 liveMessageId。 */
+export interface AgentTurnProgressEvent {
+  sessionId: string;
+  liveMessageId: string;
+  status: "running" | "completed" | "failed";
+  steps: AgentTraceStep[];
+  turnDurationMs: number;
+  content?: string;
+}
+
 /** Agent 与用户的会话消息，可携带引用和工具调用轨迹。 */
 export interface AgentMessage {
   id: string;
@@ -295,6 +323,10 @@ export interface AgentMessage {
   mentionedFileIds?: string[];
   citations?: Citation[];
   toolCalls?: AgentToolCall[];
+  /** 本轮过程时间线；旧消息没有该字段时回退到扁平 toolCalls。 */
+  trace?: AgentTraceStep[];
+  /** 本轮墙钟耗时，过程区展示「已处理 12s」。 */
+  turnDurationMs?: number;
 }
 
 /** 审阅评论绑定到 diff 的一侧和行号，正文只进入会话消息，不进入诊断日志。 */

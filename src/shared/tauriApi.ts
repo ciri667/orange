@@ -14,6 +14,7 @@ import type {
   AgentContextSummary,
   AgentSkill,
   AgentSession,
+  AgentTurnProgressEvent,
   AgentTurnRequest,
   AgentTurnResult,
   AppEventLog,
@@ -2045,6 +2046,20 @@ export async function runAgentTurn(
   }
 
   return invokeLogged<AgentTurnResult>("run_agent_turn", { payload: { snapshot, request } });
+}
+
+/** 订阅 Agent 过程事件；浏览器开发态没有 Tauri 窗口时返回空卸载函数。 */
+export async function listenAgentTurnProgress(
+  onProgress: (payload: AgentTurnProgressEvent) => void,
+): Promise<() => void> {
+  if (!isTauriRuntime()) {
+    return () => undefined;
+  }
+
+  const { listen } = await import("@tauri-apps/api/event");
+  return listen<AgentTurnProgressEvent>("agent-turn-progress", (event) => {
+    onProgress(event.payload);
+  });
 }
 
 /** 手动整理当前 Agent 会话工作记忆，桌面端由后端决定使用模型或本地降级。 */
