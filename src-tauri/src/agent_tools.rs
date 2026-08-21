@@ -566,7 +566,7 @@ impl AgentTool for ListTreeTool {
     }
 
     fn description(&self) -> &'static str {
-        "List folders, Markdown notes, and supported document metadata inside the selected scope. It does not read non-Markdown document contents."
+        "List folders, Markdown notes, and supported document metadata inside the selected scope. The result includes every scoped knowledge base (even empty ones) with id and name, and every item carries knowledgeBaseName so files are not attributed to another knowledge base that happens to share a folder name. It does not read non-Markdown document contents."
     }
 
     fn parameters(&self) -> Value {
@@ -1120,7 +1120,8 @@ fn execute_read_document(
 
 /** 执行 list_tree，只返回当前 scope 内的目录、Markdown 笔记和普通文档元数据。 */
 fn execute_list_tree(snapshot: &WorkspaceSnapshot, session_index: usize) -> ToolExecutionResult {
-    let scope_ids = scope_id_set(&snapshot.sessions[session_index]);
+    let session = &snapshot.sessions[session_index];
+    let scope_ids = scope_id_set(session);
     let scoped_folders: Vec<_> = snapshot
         .folders
         .iter()
@@ -1138,15 +1139,60 @@ fn execute_list_tree(snapshot: &WorkspaceSnapshot, session_index: usize) -> Tool
         .collect();
     let file_type_counts = build_list_tree_file_type_counts(scoped_notes.len(), &scoped_documents);
     let total_files = scoped_notes.len() + scoped_documents.len();
+    // 按会话 scope 顺序输出知识库清单，空知识库也必须出现，避免模型把同名文件夹当成另一个知识库。
+    let knowledge_bases: Vec<_> = session
+        .knowledge_base_ids
+        .iter()
+        .filter_map(|knowledge_base_id| {
+            snapshot
+                .knowledge_bases
+                .iter()
+                .find(|knowledge_base| knowledge_base.id == *knowledge_base_id)
+        })
+        .map(|knowledge_base| {
+            json!({
+                "id": &knowledge_base.id,
+                "name": &knowledge_base.name,
+                "folderCount": scoped_folders
+                    .iter()
+                    .filter(|folder| folder.knowledge_base_id == knowledge_base.id)
+                    .count(),
+                "noteCount": scoped_notes
+                    .iter()
+                    .filter(|note| note.knowledge_base_id == knowledge_base.id)
+                    .count(),
+                "documentCount": scoped_documents
+                    .iter()
+                    .filter(|document| document.knowledge_base_id == knowledge_base.id)
+                    .count()
+            })
+        })
+        .collect();
     let folders: Vec<_> = scoped_folders
         .iter()
         .take(MAX_TREE_ITEMS)
-        .map(|folder| json!({ "id": folder.id, "name": folder.name, "path": folder.path, "knowledgeBaseId": folder.knowledge_base_id }))
+        .map(|folder| {
+            json!({
+                "id": folder.id,
+                "name": folder.name,
+                "path": folder.path,
+                "knowledgeBaseId": folder.knowledge_base_id,
+                "knowledgeBaseName": knowledge_base_display_name(snapshot, &folder.knowledge_base_id)
+            })
+        })
         .collect();
     let notes: Vec<_> = scoped_notes
         .iter()
         .take(MAX_TREE_ITEMS)
-        .map(|note| json!({ "id": note.id, "title": note.title, "path": note.path, "knowledgeBaseId": note.knowledge_base_id }))
+        .map(|note| {
+            json!({
+                "id": note.id,
+                "title": note.title,
+                "path": note.path,
+                "knowledgeBaseId": note.knowledge_base_id,
+                "knowledgeBaseName": knowledge_base_display_name(snapshot, &note.knowledge_base_id)
+            })
+        })
         .collect();
     let documents: Vec<_> = scoped_documents
         .iter()
@@ -1157,6 +1203,7 @@ fn execute_list_tree(snapshot: &WorkspaceSnapshot, session_index: usize) -> Tool
                 "title": &document.title,
                 "path": &document.path,
                 "knowledgeBaseId": &document.knowledge_base_id,
+                "knowledgeBaseName": knowledge_base_display_name(snapshot, &document.knowledge_base_id),
                 "fileType": &document.file_type,
                 "previewAvailable": document.preview_available,
                 "agentReadable": matches!(document.file_type.as_str(), "txt" | "docx" | "pdf"),
@@ -1198,6 +1245,7 @@ fn execute_list_tree(snapshot: &WorkspaceSnapshot, session_index: usize) -> Tool
             }
         ),
         payload: json!({
+            "knowledgeBases": knowledge_bases,
             "folders": folders,
             "notes": notes,
             "documents": documents,
@@ -2301,6 +2349,16 @@ fn scope_id_set(session: &AgentSession) -> HashSet<&str> {
         .collect()
 }
 
+/** 按知识库 id 取展示名，缺失时给出明确占位，避免模型把文件归到错误的知识库。 */
+fn knowledge_base_display_name(snapshot: &WorkspaceSnapshot, knowledge_base_id: &str) -> String {
+    snapshot
+        .knowledge_bases
+        .iter()
+        .find(|knowledge_base| knowledge_base.id == knowledge_base_id)
+        .map(|knowledge_base| knowledge_base.name.clone())
+        .unwrap_or_else(|| "未知知识库".to_owned())
+}
+
 /** 提取首个可改写正文段落。 */
 fn first_body_paragraph(content: &str) -> String {
     content
@@ -2806,6 +2864,8 @@ mod tests {
         assert_eq!(outcome.call.status, "completed");
         assert_eq!(documents.len(), 2);
         assert_eq!(txt_document["fileType"].as_str(), Some("txt"));
+        assert_eq!(txt_document["knowledgeBaseId"].as_str(), Some("kb-a"));
+        assert_eq!(txt_document["knowledgeBaseName"].as_str(), Some("主知识库"));
         assert_eq!(txt_document["previewAvailable"].as_bool(), Some(false));
         assert_eq!(txt_document["agentReadable"].as_bool(), Some(true));
         assert!(txt_document.get("content").is_none());
