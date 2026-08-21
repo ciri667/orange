@@ -14,7 +14,8 @@ import {
 } from "../shared/modelSelection";
 import { ModelCascadeSelector } from "../shared/ModelCascadeSelector";
 import { OverflowTooltipText } from "../shared/OverflowTooltipText";
-import type { AgentSession, AgentSkill, ModelConfig } from "../shared/types";
+import type { AgentSecuritySettings, AgentSession, AgentSkill, ModelConfig } from "../shared/types";
+import { AgentSecurityLevelControl } from "./AgentPanelSections";
 
 /** 兼容旧组件导入的“跟随默认”占位值，实际定义集中在 shared/modelSelection。 */
 export const FOLLOW_DEFAULT_VALUE = FOLLOW_DEFAULT_MODEL_SELECTION;
@@ -120,6 +121,7 @@ export function AgentInput({
   mentionedFiles = [],
   selectedMentionedFileIds = [],
   modelConfig,
+  agentSecurity,
   turnModelSelection,
   isBusy,
   onPromptChange,
@@ -127,6 +129,7 @@ export function AgentInput({
   onSelectedMentionedFileIdsChange,
   onSubmitPrompt,
   onTurnModelSelectionChange,
+  onSecurityLevelChange,
 }: {
   activeSession: AgentSession;
   prompt: string;
@@ -137,6 +140,7 @@ export function AgentInput({
   /** 本轮临时选择的 @ 文件 ID；发送成功后由父组件清空。 */
   selectedMentionedFileIds?: string[];
   modelConfig: ModelConfig;
+  agentSecurity?: AgentSecuritySettings;
   /** 本轮显式选择的 provider/model，空字符串表示跟随会话/全局默认。 */
   turnModelSelection: string;
   isBusy: boolean;
@@ -145,6 +149,7 @@ export function AgentInput({
   onSelectedMentionedFileIdsChange?: (fileIds: string[]) => void;
   onSubmitPrompt: () => void;
   onTurnModelSelectionChange: (selection: string) => void;
+  onSecurityLevelChange: (level: AgentSession["securityLevel"]) => void;
 }) {
   /** 已启用的 Provider 列表；未启用的 provider 不出现在选择器中。 */
   const enabledProviders = modelConfig.providers.filter((provider) => provider.enabled);
@@ -557,57 +562,51 @@ export function AgentInput({
     onSubmitPrompt();
   };
 
+  const hasComposerChips = selectedExplicitSkillChips.length > 0 || selectedMentionFileChips.length > 0;
+  /** 权限设置缺失时仍展示基础档，避免输入条因旧设置结构崩溃。 */
+  const resolvedAgentSecurity = agentSecurity ?? {
+    defaultLevel: "basic" as const,
+    advancedExecutionEnabled: false,
+    autonomousModeEnabled: false,
+    resourceLimits: { timeoutSeconds: 120, maxMemoryMb: 512, maxProcesses: 20, maxArtifactMb: 100 },
+    trustedSkillGrants: [],
+    allowedNetworkDomains: [],
+  };
+
   return (
     <footer className="agent-input">
-      <div className="agent-input-toolbar">
-        <div className="agent-input-toolbar-start">
-          <div className="skill-select" aria-label="当前启用 Skills">
-            <Sparkles size={14} />
-            <span>Skill</span>
-            <strong>{enabledSkillCount} 个已启用</strong>
+      {hasComposerChips && (
+        <div className="agent-input-toolbar">
+          <div className="agent-input-toolbar-start">
+            {selectedExplicitSkillChips.length > 0 && (
+              <div className="selected-skill-chips" aria-label="本轮显式激活 Skills">
+                {selectedExplicitSkillChips.map((skill) => (
+                  <span className={`selected-skill-chip ${skill.source === "unknown" ? "missing" : ""}`} key={skill.id}>
+                    <Sparkles size={12} />
+                    <OverflowTooltipText text={skill.displayName} logArea="agent_selected_skill_chip" />
+                    <button type="button" aria-label={`移除 ${skill.displayName}`} onClick={() => handleRemoveExplicitSkill(skill.id)}>
+                      <X size={12} />
+                    </button>
+                  </span>
+                ))}
+              </div>
+            )}
+            {selectedMentionFileChips.length > 0 && (
+              <div className="selected-mention-file-chips" aria-label="本轮 @ 文件">
+                {selectedMentionFileChips.map((file) => (
+                  <span className={`selected-mention-file-chip ${file.relativePath ? "" : "missing"}`} key={file.id}>
+                    {file.kind === "image" ? <Image size={12} /> : <FileText size={12} />}
+                    <OverflowTooltipText text={file.displayName} logArea="agent_mentioned_file_chip" />
+                    <button type="button" aria-label={`移除 ${file.displayName}`} onClick={() => handleRemoveMentionFile(file.id)}>
+                      <X size={12} />
+                    </button>
+                  </span>
+                ))}
+              </div>
+            )}
           </div>
-          {selectedExplicitSkillChips.length > 0 && (
-            <div className="selected-skill-chips" aria-label="本轮显式激活 Skills">
-              {selectedExplicitSkillChips.map((skill) => (
-                <span className={`selected-skill-chip ${skill.source === "unknown" ? "missing" : ""}`} key={skill.id}>
-                  <Sparkles size={12} />
-                  <OverflowTooltipText text={skill.displayName} logArea="agent_selected_skill_chip" />
-                  <button type="button" aria-label={`移除 ${skill.displayName}`} onClick={() => handleRemoveExplicitSkill(skill.id)}>
-                    <X size={12} />
-                  </button>
-                </span>
-              ))}
-            </div>
-          )}
-          {selectedMentionFileChips.length > 0 && (
-            <div className="selected-mention-file-chips" aria-label="本轮 @ 文件">
-              {selectedMentionFileChips.map((file) => (
-                <span className={`selected-mention-file-chip ${file.relativePath ? "" : "missing"}`} key={file.id}>
-                  {file.kind === "image" ? <Image size={12} /> : <FileText size={12} />}
-                  <OverflowTooltipText text={file.displayName} logArea="agent_mentioned_file_chip" />
-                  <button type="button" aria-label={`移除 ${file.displayName}`} onClick={() => handleRemoveMentionFile(file.id)}>
-                    <X size={12} />
-                  </button>
-                </span>
-              ))}
-            </div>
-          )}
         </div>
-        {modelConfig.enabled && enabledProviders.length > 0 && (
-          <div className="turn-model-select" aria-label="本轮使用的模型">
-            <BrainCircuit size={14} />
-            <ModelCascadeSelector
-              value={turnModelSelection}
-              providers={enabledProviders}
-              defaultLabel={`本轮：跟随会话默认${followDefaultLabel ? `（${followDefaultLabel}）` : ""}`}
-              triggerPrefix="本轮："
-              ariaLabel="本轮使用的模型"
-              onChange={onTurnModelSelectionChange}
-              logArea="agent_turn_model_cascade"
-            />
-          </div>
-        )}
-      </div>
+      )}
       <div className="agent-input-main">
         {shouldShowMentionFilePicker && (
           <div className="mention-file-picker-popover" role="listbox" aria-label="选择本轮 @ 文件">
@@ -670,15 +669,45 @@ export function AgentInput({
           onCompositionStart={handlePromptCompositionStart}
           onCompositionEnd={handlePromptCompositionEnd}
           onKeyDown={handlePromptKeyDown}
-          placeholder="输入 @ 引用文件，/ 选择本轮 Skill；Agent 仍可按需检索知识库"
+          placeholder="问橘记，或 @ 文件、/ Skill"
           aria-label="Agent 输入"
           disabled={isBusy}
         />
       </div>
-      <button className="primary-button compact agent-send-button" type="button" onClick={onSubmitPrompt} disabled={isBusy}>
-        <ArrowRight size={16} />
-        发送
-      </button>
+      <div className="agent-input-footer">
+        {!activeSession.imIdentity && (
+          <AgentSecurityLevelControl
+            activeSession={activeSession}
+            agentSecurity={resolvedAgentSecurity}
+            isBusy={isBusy}
+            onSecurityLevelChange={onSecurityLevelChange}
+          />
+        )}
+        {modelConfig.enabled && enabledProviders.length > 0 && (
+          <div className="turn-model-select" aria-label="本轮使用的模型">
+            <BrainCircuit size={14} />
+            <ModelCascadeSelector
+              value={turnModelSelection}
+              providers={enabledProviders}
+              defaultLabel={`跟随默认${followDefaultLabel ? `（${followDefaultLabel}）` : ""}`}
+              triggerPrefix=""
+              ariaLabel="本轮使用的模型"
+              onChange={onTurnModelSelectionChange}
+              logArea="agent_turn_model_cascade"
+            />
+          </div>
+        )}
+        <button
+          className="primary-button compact agent-send-button"
+          type="button"
+          title="发送"
+          aria-label="发送"
+          onClick={onSubmitPrompt}
+          disabled={isBusy || !prompt.trim()}
+        >
+          <ArrowRight size={16} />
+        </button>
+      </div>
     </footer>
   );
 }

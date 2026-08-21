@@ -2,7 +2,7 @@ import { Database, Settings } from "lucide-react";
 import { OverflowTooltipText } from "../shared/OverflowTooltipText";
 import type { KnowledgeBase } from "../shared/types";
 
-/** 顶部应用栏，承载产品状态、激活知识库同步状态、Agent 浮窗开关和设置入口。 */
+/** 顶部应用栏，承载产品状态、激活知识库同步状态、Agent 停靠栏开关和设置入口。 */
 export function TopBar({
   activeKnowledgeBase,
   knowledgeBaseCount,
@@ -13,9 +13,9 @@ export function TopBar({
   activeKnowledgeBase: KnowledgeBase;
   knowledgeBaseCount: number;
   onOpenSettings: () => void;
-  /** Agent 浮窗是否打开；仅在提供 onToggleAgent 时参与渲染。 */
+  /** 右侧 Agent 停靠栏是否打开；仅在提供 onToggleAgent 时参与渲染。 */
   agentOpen?: boolean;
-  /** 切换 Agent 协作浮窗显隐；未提供时不渲染顶部 Agent 按钮。 */
+  /** 切换右侧 Agent 停靠栏显隐；未提供时不渲染顶部 Agent 按钮。 */
   onToggleAgent?: () => void;
 }) {
   return (

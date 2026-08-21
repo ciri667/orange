@@ -1,4 +1,4 @@
-import { Check, Database, Layers3, MessageSquareText, Pencil, Sparkles, Trash2, X } from "lucide-react";
+import { Check, Database, FileText, Layers3, MessageSquareText, ShieldAlert, Sparkles, Trash2, X } from "lucide-react";
 import ReactMarkdown from "react-markdown";
 import rehypeSanitize from "rehype-sanitize";
 import remarkGfm from "remark-gfm";
@@ -16,43 +16,88 @@ import {
   encodeModelSelection,
   FOLLOW_DEFAULT_MODEL_SELECTION,
   getProviderModelSelectionLabel,
-  getSessionModelLabel,
 } from "../shared/modelSelection";
 import { ModelCascadeSelector } from "../shared/ModelCascadeSelector";
-import type { AgentSession, KnowledgeBase, ModelConfig, Note, WorkspaceDocument } from "../shared/types";
+import type {
+  AgentSecuritySettings,
+  AgentSession,
+  KnowledgeBase,
+  ModelConfig,
+  Note,
+  WorkspaceDocument,
+} from "../shared/types";
 import { CitationList } from "./CitationList";
 import { ToolCallList } from "./ToolCallList";
 
-/** 会话摘要条，展示工具范围、工作台当前文件、模型和写入状态。 */
+/** 会话摘要条只保留当前文件和待确认写入，避免和输入条、范围入口重复。 */
 export function AgentSessionSummary({
   activeSession,
-  knowledgeBases,
   currentFileLabel,
-  modelConfig,
 }: {
   activeSession: AgentSession;
-  knowledgeBases: KnowledgeBase[];
   /** 工作台当前焦点文件；它是本轮默认编辑目标，独立于会话恢复锚点。 */
   currentFileLabel: string;
-  modelConfig: ModelConfig;
 }) {
-  /** 当前会话范围摘要，展示 Agent 可调用检索工具的权限边界。 */
-  const selectedScopeLabel = getScopeSummaryLabel(activeSession, knowledgeBases);
-  /** 当前会话的写入状态，用不可点击标签展示，避免和上下文弹窗入口混淆。 */
-  const writeStatus = activeSession.pendingChange?.status === "pending" ? "待确认 diff" : "写入需确认";
+  const isPendingWrite = activeSession.pendingChange?.status === "pending";
 
   return (
     <div className="session-summary" aria-label="当前会话摘要">
-      <OverflowTooltipText text={selectedScopeLabel} logArea="agent_session_scope_summary" />
-      <OverflowTooltipText text={currentFileLabel} logArea="agent_session_current_file_summary" />
-      {modelConfig.enabled && (
-        <OverflowTooltipText text={getSessionModelLabel(activeSession, modelConfig)} logArea="agent_session_provider" />
+      <span className="agent-file-chip">
+        <FileText size={13} />
+        <OverflowTooltipText text={currentFileLabel} logArea="agent_session_current_file_summary" />
+      </span>
+      {isPendingWrite && (
+        <OverflowTooltipText
+          className="session-write-status pending"
+          text="待确认 diff"
+          logArea="agent_session_write_status"
+        />
       )}
-      <OverflowTooltipText
-        className={`session-write-status ${activeSession.pendingChange?.status === "pending" ? "pending" : ""}`}
-        text={writeStatus}
-        logArea="agent_session_write_status"
-      />
+    </div>
+  );
+}
+
+/** 钉在输入条上的三级权限开关；IM 会话不渲染。 */
+export function AgentSecurityLevelControl({
+  activeSession,
+  agentSecurity,
+  isBusy,
+  onSecurityLevelChange,
+}: {
+  activeSession: AgentSession;
+  agentSecurity?: AgentSecuritySettings;
+  isBusy: boolean;
+  onSecurityLevelChange?: (level: AgentSession["securityLevel"]) => void;
+}) {
+  if (!agentSecurity) {
+    return null;
+  }
+
+  return (
+    <div className="agent-security-level-control" aria-label="当前会话权限">
+      <span className="agent-security-level-label">
+        <ShieldAlert size={13} />
+      </span>
+      <div className="agent-security-level-options" role="radiogroup" aria-label="当前会话权限级别">
+        {([
+          ["basic", "基础", true, "仅使用文档相关工具，关键写入需要确认"],
+          ["advanced", "进阶", agentSecurity.advancedExecutionEnabled, "可运行 Skill 和命令，执行前需要确认"],
+          ["autonomous", "完全", agentSecurity.autonomousModeEnabled, "可信 Skill 可连续执行；文件工具可使用合规绝对路径"],
+        ] as const).map(([level, label, isEnabled, description]) => (
+          <button
+            className={activeSession.securityLevel === level ? "active" : ""}
+            type="button"
+            role="radio"
+            aria-checked={activeSession.securityLevel === level}
+            title={`${description}${isEnabled ? "" : "；选择后将启用此能力"}`}
+            disabled={isBusy}
+            key={level}
+            onClick={() => onSecurityLevelChange?.(level)}
+          >
+            {label}
+          </button>
+        ))}
+      </div>
     </div>
   );
 }
@@ -302,26 +347,17 @@ export function AgentScopeSelector({
 
   return (
     <>
-      <div
+      <button
         className={`scope-selector ${selectedKnowledgeBaseIds.length > 1 ? "active" : ""}`}
+        type="button"
+        title="编辑工具范围"
         aria-label="工具范围"
+        aria-expanded={isScopeSelectorOpen}
+        onClick={onToggleScopeSelector}
       >
-        <Layers3 size={17} />
-        <span className="scope-selector-copy">
-          <OverflowTooltipText as="strong" text={`工具范围：${selectedScopeLabel}`} logArea="agent_scope_selector_summary" />
-          <span>当前知识库默认选中，Agent 不能越权检索未选目录</span>
-        </span>
-        <button
-          className="icon-button scope-selector-edit"
-          type="button"
-          title="编辑工具范围"
-          aria-expanded={isScopeSelectorOpen}
-          aria-label="编辑工具范围"
-          onClick={onToggleScopeSelector}
-        >
-          <Pencil size={15} />
-        </button>
-      </div>
+        <Layers3 size={14} />
+        <OverflowTooltipText text={selectedScopeLabel} logArea="agent_scope_selector_summary" />
+      </button>
 
       {isScopeSelectorOpen && (
         <section className="scope-popover" aria-label="选择检索知识库">
@@ -384,6 +420,13 @@ export function AgentMessageList({
 }) {
   return (
     <div className="message-list" aria-live="polite">
+      {activeSession.messages.length === 0 && (
+        <div className="message-list-empty">
+          <Sparkles size={16} />
+          <p>从下面开始提问</p>
+          <span>@ 引用当前库里的文件，/ 选择本轮 Skill</span>
+        </div>
+      )}
       {activeSession.messages.map((message) => (
         <article className={`message ${message.role}`} key={message.id}>
           <div className="message-role">

@@ -1,8 +1,6 @@
 import { useEffect, useState } from "react";
-import { AgentFloatingCard } from "../agent/AgentFloatingCard";
 import { AgentPanel } from "../agent/AgentPanel";
 import type { AgentMentionFile } from "../agent/AgentInput";
-import { useAgentFloatLayout } from "../agent/useAgentFloatLayout";
 import { DocumentPane } from "../editor/DocumentPane";
 import { EditorTabBar, type EditorTabBarItem } from "../editor/EditorTabBar";
 import { EditorPane } from "../editor/EditorPane";
@@ -404,16 +402,15 @@ export function WorkspaceShell() {
   } | null>(null);
   /** 待确认的危险操作，使用应用内弹窗替代 window.confirm，避免 Tauri dialog 权限依赖。 */
   const [pendingConfirmation, setPendingConfirmation] = useState<PendingConfirmation | null>(null);
-  /** 主工作台侧栏布局偏好，负责拖拽分隔条、键盘调整和本机持久化。 */
-  const { workspaceRef, gridTemplateColumns, resizingPane, getSeparatorProps } = useResizableWorkspaceLayout();
-  /** Agent 浮窗开关、几何与拖拽/缩放，与工作台 grid 解耦。 */
+  /** 主工作台三栏布局：知识库、编辑区、可停靠 Agent；负责拖拽分隔条和本机持久化。 */
   const {
-    layout: agentFloatLayout,
-    isInteracting: isAgentFloatInteracting,
-    setOpen: setAgentFloatOpen,
-    beginMove: beginAgentFloatMove,
-    beginResize: beginAgentFloatResize,
-  } = useAgentFloatLayout();
+    workspaceRef,
+    gridTemplateColumns,
+    resizingPane,
+    getSeparatorProps,
+    agentOpen,
+    setAgentOpen,
+  } = useResizableWorkspaceLayout();
   /** 启动和诊断数据 hook 返回工作台全局状态及刷新入口，根组件继续负责业务动作。 */
   const {
     snapshot,
@@ -1860,9 +1857,9 @@ export function WorkspaceShell() {
     setIsSessionContextOpen(false);
   }
 
-  /** 切换 Agent 协作浮窗显隐，保留编辑区优先的桌面工作流。 */
+  /** 切换右侧 Agent 停靠栏显隐，编辑区始终留在中间。 */
   function handleToggleAgentPanel() {
-    const nextOpen = !agentFloatLayout.open;
+    const nextOpen = !agentOpen;
 
     logInfo("切换 Agent 协作区显隐。", {
       category: "frontend",
@@ -1873,7 +1870,7 @@ export function WorkspaceShell() {
         hasActivePendingChange: activeSession.pendingChange?.status === "pending",
       },
     });
-    setAgentFloatOpen(nextOpen);
+    setAgentOpen(nextOpen);
   }
 
   /** 提交 Agent 输入，运行时会自行决定是否调用检索工具。 */
@@ -2451,11 +2448,11 @@ export function WorkspaceShell() {
         activeKnowledgeBase={activeKnowledgeBase}
         knowledgeBaseCount={currentSnapshot.knowledgeBases.length}
         onOpenSettings={handleOpenSettings}
-        agentOpen={agentFloatLayout.open}
+        agentOpen={agentOpen}
         onToggleAgent={handleToggleAgentPanel}
       />
       <main
-        className={`workspace-grid ${resizingPane ? "is-resizing" : ""}`}
+        className={`workspace-grid${resizingPane ? " is-resizing" : ""}${agentOpen ? " agent-open" : ""}`}
         ref={workspaceRef}
         style={{ gridTemplateColumns }}
       >
@@ -2488,7 +2485,7 @@ export function WorkspaceShell() {
           onRefreshKnowledgeBase={handleRescanKnowledgeBase}
         />
         <div
-          className={`workspace-resizer ${resizingPane === "sidebar" ? "active" : ""}`}
+          className={`workspace-resizer workspace-resizer-sidebar ${resizingPane === "sidebar" ? "active" : ""}`}
           {...getSeparatorProps("sidebar")}
         />
         <div className="editor-workbench">
@@ -2541,13 +2538,13 @@ export function WorkspaceShell() {
             )}
           </div>
         </div>
-      </main>
-      {agentFloatLayout.open && (
-        <AgentFloatingCard
-          layout={agentFloatLayout}
-          isInteracting={isAgentFloatInteracting}
-          onBeginResize={beginAgentFloatResize}
-        >
+        {agentOpen && (
+          <div
+            className={`workspace-resizer workspace-resizer-agent ${resizingPane === "agent" ? "active" : ""}`}
+            {...getSeparatorProps("agent")}
+          />
+        )}
+        {agentOpen && (
           <AgentPanel
             sessions={currentSnapshot.sessions}
             activeSession={activeSession}
@@ -2575,7 +2572,6 @@ export function WorkspaceShell() {
             onToggleSessionContext={handleToggleSessionContext}
             onToggleScopeSelector={handleToggleScopeSelector}
             onCollapsePanel={handleToggleAgentPanel}
-            onHeaderDragStart={beginAgentFloatMove}
             onCreateSession={handleCreateSession}
             onSelectSession={handleSelectSession}
             onDeleteSession={handleDeleteSession}
@@ -2594,8 +2590,8 @@ export function WorkspaceShell() {
             onSecurityLevelChange={handleSessionSecurityLevelChange}
             onToggleChangeOperation={handleToggleSkillChangeOperation}
           />
-        </AgentFloatingCard>
-      )}
+        )}
+      </main>
       {isSettingsOpen && (
         <SettingsDrawer
           knowledgeBases={currentSnapshot.knowledgeBases}

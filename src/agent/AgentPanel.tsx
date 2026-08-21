@@ -1,6 +1,5 @@
 import { History, Book, PanelRightClose, Play, Plus, ShieldAlert, X } from "lucide-react";
 import { useRef } from "react";
-import type { PointerEvent as ReactPointerEvent } from "react";
 import { OverflowTooltipText } from "../shared/OverflowTooltipText";
 import { getImSessionSourceLabel } from "../shared/selectors";
 import { useDismissable } from "../shared/useDismissable";
@@ -14,7 +13,7 @@ import {
   AgentSessionSummary,
 } from "./AgentPanelSections";
 
-/** Agent 协作区内容：承载会话、工具调用、检索范围、引用和输入框；可由浮窗外壳承载。 */
+/** Agent 停靠工作台：承载会话、工具调用、检索范围、引用和输入框。 */
 export function AgentPanel({
   sessions,
   activeSession,
@@ -39,7 +38,6 @@ export function AgentPanel({
   onToggleSessionContext,
   onToggleScopeSelector,
   onCollapsePanel,
-  onHeaderDragStart,
   onCreateSession,
   onSelectSession,
   onDeleteSession,
@@ -87,8 +85,6 @@ export function AgentPanel({
   onToggleSessionContext: () => void;
   onToggleScopeSelector: () => void;
   onCollapsePanel: () => void;
-  /** 浮窗模式下在 header 空白处开始拖动；交互控件上不触发。 */
-  onHeaderDragStart?: (event: ReactPointerEvent) => void;
   onCreateSession: () => void;
   onSelectSession: (sessionId: string) => void;
   onDeleteSession: (sessionId: string) => void;
@@ -118,17 +114,7 @@ export function AgentPanel({
 
   return (
     <aside ref={panelRef} className="agent-panel" aria-label="AI 协作区">
-      <header
-        className="agent-header"
-        onPointerDown={(event) => {
-          // 按钮/链接/表单控件上不启动拖动，避免与 header 操作冲突。
-          const target = event.target as HTMLElement;
-          if (target.closest("button, a, input, textarea, select")) {
-            return;
-          }
-          onHeaderDragStart?.(event);
-        }}
-      >
+      <header className="agent-header">
         <div>
           <p className="section-label">Agent</p>
           <div className="agent-session-title">
@@ -152,41 +138,20 @@ export function AgentPanel({
         </div>
       </header>
 
-      <AgentSessionSummary
-        activeSession={activeSession}
-        knowledgeBases={knowledgeBases}
-        currentFileLabel={currentFileLabel}
-        modelConfig={modelConfig}
-      />
-
-      {!activeSession.imIdentity && (
-        <div className="agent-security-level-control">
-          <span className="agent-security-level-label">
-            <ShieldAlert size={14} />
-            权限
-          </span>
-          <div className="agent-security-level-options" role="radiogroup" aria-label="当前会话权限级别">
-            {([
-              ["basic", "基础", true, "仅使用文档相关工具，关键写入需要确认"],
-              ["advanced", "进阶", agentSecurity.advancedExecutionEnabled, "可运行 Skill 和命令，执行前需要确认"],
-              ["autonomous", "完全", agentSecurity.autonomousModeEnabled, "可信 Skill 可连续执行；文件工具可使用合规绝对路径"],
-            ] as const).map(([level, label, isEnabled, description]) => (
-              <button
-                className={activeSession.securityLevel === level ? "active" : ""}
-                type="button"
-                role="radio"
-                aria-checked={activeSession.securityLevel === level}
-                title={`${description}${isEnabled ? "" : "；选择后将启用此能力"}`}
-                disabled={isBusy}
-                key={level}
-                onClick={() => onSecurityLevelChange(level)}
-              >
-                {label}
-              </button>
-            ))}
-          </div>
-        </div>
-      )}
+      <div className="agent-context-bar" aria-label="当前会话上下文">
+        <AgentScopeSelector
+          activeSession={activeSession}
+          activeKnowledgeBase={activeKnowledgeBase}
+          knowledgeBases={knowledgeBases}
+          isScopeSelectorOpen={isScopeSelectorOpen}
+          onToggleScopeSelector={onToggleScopeSelector}
+          onToggleScopeKnowledgeBase={onToggleScopeKnowledgeBase}
+        />
+        <AgentSessionSummary
+          activeSession={activeSession}
+          currentFileLabel={currentFileLabel}
+        />
+      </div>
 
       {isSessionListOpen && (
         <AgentSessionHistoryPopover
@@ -212,15 +177,6 @@ export function AgentPanel({
           onCompactAgentContext={onCompactAgentContext}
         />
       )}
-
-      <AgentScopeSelector
-        activeSession={activeSession}
-        activeKnowledgeBase={activeKnowledgeBase}
-        knowledgeBases={knowledgeBases}
-        isScopeSelectorOpen={isScopeSelectorOpen}
-        onToggleScopeSelector={onToggleScopeSelector}
-        onToggleScopeKnowledgeBase={onToggleScopeKnowledgeBase}
-      />
 
       <AgentMessageList activeSession={activeSession} notes={notes} documents={documents} />
 
@@ -283,6 +239,7 @@ export function AgentPanel({
         mentionedFiles={mentionedFiles}
         selectedMentionedFileIds={selectedMentionedFileIds}
         modelConfig={modelConfig}
+        agentSecurity={agentSecurity}
         turnModelSelection={turnModelSelection}
         isBusy={isBusy}
         onPromptChange={onPromptChange}
@@ -290,6 +247,7 @@ export function AgentPanel({
         onSelectedMentionedFileIdsChange={onSelectedMentionedFileIdsChange}
         onSubmitPrompt={onSubmitPrompt}
         onTurnModelSelectionChange={onTurnModelSelectionChange}
+        onSecurityLevelChange={onSecurityLevelChange}
       />
     </aside>
   );
