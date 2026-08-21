@@ -401,6 +401,7 @@ function createInitialSessions(): AgentSession[] {
       type: "knowledge-base",
       knowledgeBaseIds: ["kb-personal"],
       pinnedNoteIds: [],
+      securityLevel: "basic",
       createdAt: "今天 14:18",
       updatedAt: "今天 14:18",
       messages: [],

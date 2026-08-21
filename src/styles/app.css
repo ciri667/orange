@@ -1707,6 +1707,7 @@ button.diff-line:not(:disabled):hover,
 
 .agent-header,
 .session-summary,
+.agent-security-level-control,
 .scope-selector,
 .agent-input {
   /* 顶部信息和输入框不能参与纵向压缩；空间不足时只压缩消息列表。 */
@@ -6775,4 +6776,224 @@ button.diff-line:not(:disabled):hover,
 .editor-tab.active .editor-tab-select:focus-visible {
   outline: 2px solid var(--control-ring);
   outline-offset: -2px;
+}
+.security-limit-grid input {
+  width: 100%;
+}
+
+@media (max-width: 760px) {
+  .settings-workbench {
+    grid-template-columns: 1fr;
+    grid-template-rows: auto minmax(0, 1fr);
+  }
+
+  .settings-sidebar {
+    display: flex;
+    gap: 14px;
+    overflow-x: auto;
+    border-right: 0;
+    border-bottom: 1px solid var(--border);
+    padding: 12px 14px;
+  }
+
+  .settings-content {
+    min-width: 0;
+    padding: 16px;
+  }
+}
+.agent-execution-approval,
+.agent-change-set-summary {
+  margin: 8px 12px;
+  padding: 12px;
+  border: 1px solid var(--border-strong);
+  border-radius: 6px;
+  background: var(--surface-warm);
+}
+
+.agent-execution-heading,
+.agent-execution-actions,
+.agent-execution-approval dl > div,
+.agent-change-set-summary li {
+  display: flex;
+  align-items: center;
+}
+
+.agent-execution-heading {
+  gap: 8px;
+}
+
+.agent-execution-heading div {
+  min-width: 0;
+  display: grid;
+  gap: 3px;
+}
+
+.agent-execution-heading span,
+.agent-execution-approval dd,
+.agent-change-set-summary p {
+  color: var(--text-muted);
+  font-size: 12px;
+}
+
+.agent-execution-approval dl {
+  margin: 10px 0;
+}
+
+.agent-execution-approval dl > div {
+  justify-content: space-between;
+  gap: 12px;
+  padding: 3px 0;
+}
+
+.agent-execution-approval dt,
+.agent-execution-approval dd {
+  margin: 0;
+}
+
+.agent-execution-actions {
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+.agent-change-set-summary ul {
+  list-style: none;
+  padding: 0;
+  margin: 8px 0 0;
+}
+
+.agent-change-set-summary li {
+  gap: 8px;
+  min-width: 0;
+  padding: 3px 0;
+}
+
+.agent-change-set-summary li .control-checkbox {
+  flex: 0 0 auto;
+}
+
+.agent-change-set-summary li span {
+  width: 48px;
+  flex: 0 0 48px;
+  color: var(--accent);
+  font-size: 11px;
+  text-transform: uppercase;
+}
+
+.agent-change-set-summary code {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.agent-security-level-control {
+  min-height: 44px;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  border: 1px solid var(--color-primary-border);
+  border-radius: var(--radius-control);
+  padding: 5px 6px 5px 10px;
+  background: var(--color-primary-wash);
+  color: var(--agent-strong);
+  font-size: 12px;
+}
+
+.agent-security-level-label {
+  display: inline-flex;
+  align-items: center;
+  flex: 0 0 auto;
+  gap: 6px;
+  font-weight: 700;
+}
+
+.agent-security-level-options {
+  margin-left: auto;
+  width: min(240px, 62%);
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 2px;
+  border: 1px solid var(--color-border-translucent);
+  border-radius: 7px;
+  padding: 2px;
+  background: var(--color-surface-translucent);
+}
+
+.agent-security-level-options button {
+  min-width: 0;
+  min-height: 30px;
+  border: 0;
+  border-radius: 5px;
+  padding: 0 8px;
+  background: transparent;
+  color: var(--text-muted);
+  font-size: 12px;
+  font-weight: 700;
+  white-space: nowrap;
+}
+
+.agent-security-level-options button:hover:not(:disabled) {
+  background: var(--surface-hover);
+  color: var(--text);
+}
+
+.agent-security-level-options button.active {
+  background: var(--surface);
+  box-shadow: 0 1px 3px rgba(47, 39, 29, 0.12);
+  color: var(--agent-strong);
+}
+
+.agent-security-level-options button:focus-visible {
+  outline: 2px solid var(--control-ring);
+  outline-offset: -2px;
+}
+.skill-runtime-block {
+  display: grid;
+  gap: 8px;
+}
+
+.skill-runtime-status {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--surface-warm);
+}
+
+.skill-runtime-status span {
+  color: var(--text-muted);
+  font-size: 12px;
+  text-align: right;
+}
+
+.skill-runtime-status.ready strong {
+  color: var(--success);
+}
+
+.skill-runtime-status.missing-runtime strong,
+.skill-runtime-status.partial strong,
+.skill-runtime-status.unsupported strong {
+  color: var(--warning);
+}
+
+.skill-runtime-block dl {
+  margin: 0;
+}
+
+.skill-runtime-block dl > div {
+  display: grid;
+  grid-template-columns: 72px minmax(0, 1fr);
+  gap: 8px;
+  padding: 3px 0;
+}
+
+.skill-runtime-block dt,
+.skill-runtime-block dd {
+  min-width: 0;
+  margin: 0;
+}
+
+.skill-runtime-block dd code {
+  overflow-wrap: anywhere;
 }

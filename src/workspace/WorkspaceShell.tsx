@@ -21,6 +21,9 @@ import {
 } from "../shared/selectors";
 import {
   acceptProposedChange,
+  approveSkillExecution,
+  applySkillChangeSet,
+  applyAgentChangeSet,
   attachKnowledgeBase,
   compactAgentContext,
   createDocument,
@@ -36,6 +39,9 @@ import {
   renameDocument,
   renameNote,
   rejectProposedChange,
+  rejectSkillExecution,
+  rejectSkillChangeSet,
+  rejectAgentChangeSet,
   rescanKnowledgeBase,
   restoreSessionContext,
   runAgentTurn,
@@ -44,6 +50,7 @@ import {
   saveNoteContent,
   saveNoteImageAttachments,
   saveSession,
+  saveUserSettings,
   selectKnowledgeBaseDirectory,
   updateSessionScope,
 } from "../shared/tauriApi";
@@ -144,10 +151,12 @@ function buildAgentSession({
   knowledgeBase,
   title = DEFAULT_SESSION_TITLE,
   knowledgeBaseIds,
+  securityLevel = "basic",
 }: {
   knowledgeBase: KnowledgeBase;
   title?: string;
   knowledgeBaseIds?: string[];
+  securityLevel?: AgentSession["securityLevel"];
 }): AgentSession {
   /** 会话创建时间需要长期可辨认，避免历史列表里多个“刚刚”无法区分。 */
   const createdAt = formatLocalDateTime();
@@ -159,6 +168,7 @@ function buildAgentSession({
     knowledgeBaseIds: knowledgeBaseIds?.length ? knowledgeBaseIds : [knowledgeBase.id],
     pinnedNoteIds: [],
     messages: [],
+    securityLevel,
     createdAt,
     updatedAt: createdAt,
   };
@@ -173,6 +183,7 @@ function buildDraftAgentSession(knowledgeBase: KnowledgeBase): AgentSession {
     knowledgeBaseIds: [knowledgeBase.id],
     pinnedNoteIds: [],
     messages: [],
+    securityLevel: "basic",
     createdAt: "未保存",
     updatedAt: "未保存",
   };
@@ -2285,6 +2296,150 @@ export function WorkspaceShell() {
   }
 
   /** 打开设置抽屉时刷新非阻塞诊断信息，避免展示过旧的日志列表。 */
+  async function handleApproveSkillExecution() {
+    beginBusy("正在隔离区运行 Skill...");
+    try {
+      const nextSnapshot = await approveSkillExecution(currentSnapshot);
+      commitSnapshot(nextSnapshot);
+      setNotice(nextSnapshot.sessions.find((session) => session.id === nextSnapshot.activeSessionId)?.pendingChangeSet?.summary ?? "Skill 执行完成。");
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : String(error));
+    } finally {
+      endBusy();
+    }
+  }
+
+  /** 拒绝待审批执行，明确不创建工作区、不启动进程。 */
+  async function handleRejectSkillExecution() {
+    beginBusy("正在拒绝 Skill 执行...");
+    try {
+      commitSnapshot(await rejectSkillExecution(currentSnapshot));
+      setNotice("已拒绝 Skill 执行。");
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : String(error));
+    } finally {
+      endBusy();
+    }
+  }
+
+  /** 应用 Skill 多文件变更集，完成后使用后端重扫结果替换当前快照。 */
+  async function handleApplySkillChangeSet() {
+    const isAgentChangeSet = activeSession.pendingChangeSet?.executionId === "agent-direct";
+    beginBusy(isAgentChangeSet ? "正在应用 Agent 文件变更..." : "正在应用 Skill 文件变更...");
+    try {
+      const nextSnapshot = isAgentChangeSet
+        ? await applyAgentChangeSet(currentSnapshot)
+        : await applySkillChangeSet(currentSnapshot);
+      commitSnapshot(nextSnapshot, new Set(), new Set());
+      setNotice(isAgentChangeSet ? "已应用 Agent 文件变更集。" : "已应用 Skill 文件变更集。");
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : String(error));
+    } finally {
+      endBusy();
+    }
+  }
+
+  /** 拒绝 Skill 或 Agent 多文件变更集；Agent 变更集只清空待确认状态，不触碰 Skill 隔离目录。 */
+  async function handleRejectSkillChangeSet() {
+    const isAgentChangeSet = activeSession.pendingChangeSet?.executionId === "agent-direct";
+    beginBusy(isAgentChangeSet ? "正在拒绝 Agent 文件变更..." : "正在拒绝 Skill 文件变更...");
+    try {
+      const nextSnapshot = isAgentChangeSet
+        ? await rejectAgentChangeSet(currentSnapshot)
+        : await rejectSkillChangeSet(currentSnapshot);
+      commitSnapshot(nextSnapshot);
+      setNotice(isAgentChangeSet ? "已拒绝 Agent 文件变更集。" : "已拒绝 Skill 文件变更集。");
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : String(error));
+    } finally {
+      endBusy();
+    }
+  }
+
+  /** 更新当前本地会话的安全级别，并将用户的显式选择同步为对应能力授权。 */
+  async function handleSessionSecurityLevelChange(securityLevel: AgentSession["securityLevel"]) {
+    if (!userSettings || activeSession.imIdentity || securityLevel === activeSession.securityLevel) {
+      return;
+    }
+    const currentUserSettings = userSettings;
+
+    /** 权限选择是用户的显式授权动作；先保存能力开关，再保存依赖它的会话级别。 */
+    async function persistSecurityLevel() {
+      beginBusy("正在更新 Agent 权限...");
+
+      try {
+        const requiresAdvanced = securityLevel !== "basic";
+        const requiresAutonomous = securityLevel === "autonomous";
+        const nextAgentSecurity = {
+          ...currentUserSettings.agentSecurity,
+          advancedExecutionEnabled: requiresAdvanced ? true : currentUserSettings.agentSecurity.advancedExecutionEnabled,
+          autonomousModeEnabled: requiresAutonomous ? true : currentUserSettings.agentSecurity.autonomousModeEnabled,
+        };
+
+        if (
+          nextAgentSecurity.advancedExecutionEnabled !== currentUserSettings.agentSecurity.advancedExecutionEnabled ||
+          nextAgentSecurity.autonomousModeEnabled !== currentUserSettings.agentSecurity.autonomousModeEnabled
+        ) {
+          setUserSettings(await saveUserSettings({ ...currentUserSettings, agentSecurity: nextAgentSecurity }));
+        }
+
+        const nextSession = { ...activeSession, securityLevel, updatedAt: formatLocalDateTime() };
+        const nextSnapshot = {
+          ...currentSnapshot,
+          sessions: currentSnapshot.sessions.map((session) => session.id === activeSession.id ? nextSession : session),
+        };
+        commitSnapshot(await saveSession(nextSnapshot, nextSession));
+        setNotice(`当前会话已切换为${securityLevel === "basic" ? "基础" : securityLevel === "advanced" ? "进阶" : "完全"}权限。`);
+      } catch (error) {
+        setNotice(error instanceof Error ? error.message : String(error));
+      } finally {
+        endBusy();
+      }
+    }
+
+    if (securityLevel === "autonomous") {
+      requestConfirmation(
+        {
+          title: "切换到完全权限",
+          message: "完全权限允许可信 Skill 在授权期内连续执行，并允许 Agent 对知识库之外的合规路径进行列表、读取和创建文件夹。系统保护目录、Skill 隔离沙箱和资源上限仍然生效。",
+          confirmLabel: "切换到完全权限",
+          tone: "default",
+        },
+        persistSecurityLevel,
+      );
+      return;
+    }
+
+    await persistSecurityLevel();
+  }
+
+  /** 更新变更集中的单文件选择状态，并立即持久化以支持重启后继续审阅。 */
+  async function handleToggleSkillChangeOperation(operationId: string, selected: boolean) {
+    if (!activeSession.pendingChangeSet) {
+      return;
+    }
+    const nextSession: AgentSession = {
+      ...activeSession,
+      pendingChangeSet: {
+        ...activeSession.pendingChangeSet,
+        operations: activeSession.pendingChangeSet.operations.map((operation) =>
+          operation.id === operationId ? { ...operation, selected } : operation,
+        ),
+      },
+      updatedAt: formatLocalDateTime(),
+    };
+    const nextSnapshot = {
+      ...currentSnapshot,
+      sessions: currentSnapshot.sessions.map((session) => session.id === activeSession.id ? nextSession : session),
+    };
+    try {
+      commitSnapshot(await saveSession(nextSnapshot, nextSession));
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : String(error));
+    }
+  }
+
+  /** 打开设置抽屉时刷新非阻塞诊断信息，避免展示过旧的日志列表。 */
   function handleOpenSettings() {
     setIsSettingsOpen(true);
     void loadInitialDiagnosticLogs();
@@ -2408,6 +2563,7 @@ export function WorkspaceShell() {
             mentionedFiles={mentionableFiles}
             selectedMentionedFileIds={mentionedFileIds}
             modelConfig={userSettings.modelConfig}
+            agentSecurity={userSettings.agentSecurity}
             turnModelSelection={turnModelSelection}
             isBusy={isBusy}
             isSessionListOpen={isSessionListOpen}
@@ -2429,6 +2585,12 @@ export function WorkspaceShell() {
             onTurnModelSelectionChange={setTurnModelSelection}
             onSetSessionModelSelection={handleSetSessionModelSelection}
             onCompactAgentContext={handleCompactAgentContext}
+            onApproveExecution={handleApproveSkillExecution}
+            onRejectExecution={handleRejectSkillExecution}
+            onApplyChangeSet={handleApplySkillChangeSet}
+            onRejectChangeSet={handleRejectSkillChangeSet}
+            onSecurityLevelChange={handleSessionSecurityLevelChange}
+            onToggleChangeOperation={handleToggleSkillChangeOperation}
           />
         </AgentFloatingCard>
       )}

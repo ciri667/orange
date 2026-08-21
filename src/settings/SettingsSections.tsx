@@ -478,6 +478,69 @@ export function SkillsSettingsSection({
   );
 }
 
+/** Agent 权限分区只保存隔离执行资源上限；会话级别在 Agent 协作区切换。 */
+export function AgentSecuritySettingsSection({
+  settingsDraft,
+  isBusy,
+  onSettingsChange,
+  onSaveSettings,
+}: {
+  settingsDraft: UserSettings;
+  isBusy: boolean;
+  onSettingsChange: (settings: UserSettings) => void;
+  onSaveSettings: () => void | Promise<void>;
+}) {
+  const security = settingsDraft.agentSecurity;
+
+  /** 数字输入在 UI 层限制到合理范围，后端保存时仍会二次归一化。 */
+  function updateLimit(
+    key: keyof UserSettings["agentSecurity"]["resourceLimits"],
+    value: number,
+  ) {
+    onSettingsChange({
+      ...settingsDraft,
+      agentSecurity: {
+        ...security,
+        resourceLimits: {
+          ...security.resourceLimits,
+          [key]: Number.isFinite(value) ? value : 0,
+        },
+      },
+    });
+  }
+
+  return (
+    <section className="settings-section" aria-labelledby="agent-security-settings-title">
+      <div className="settings-section-title settings-content-title">
+        <div>
+          <p className="section-label">Security</p>
+          <h3 id="agent-security-settings-title">Agent 权限</h3>
+          <p>基础 / 进阶 / 完全在 Agent 协作区按会话切换。这里只设置 Skill 隔离执行的资源上限。</p>
+        </div>
+        <button className="primary-button compact" type="button" onClick={onSaveSettings} disabled={isBusy}>
+          <Save size={14} />
+          保存设置
+        </button>
+      </div>
+
+      <div className="settings-section-subblock">
+        <div className="settings-section-title">
+          <div>
+            <h4>单次执行上限</h4>
+            <p>超过任一上限时终止隔离任务。</p>
+          </div>
+        </div>
+        <div className="settings-grid security-limit-grid">
+          <label><span>超时（秒）</span><input type="number" min={5} max={1800} value={security.resourceLimits.timeoutSeconds} onChange={(event) => updateLimit("timeoutSeconds", Number(event.target.value))} /></label>
+          <label><span>内存（MB）</span><input type="number" min={64} max={4096} value={security.resourceLimits.maxMemoryMb} onChange={(event) => updateLimit("maxMemoryMb", Number(event.target.value))} /></label>
+          <label><span>进程数</span><input type="number" min={1} max={64} value={security.resourceLimits.maxProcesses} onChange={(event) => updateLimit("maxProcesses", Number(event.target.value))} /></label>
+          <label><span>产物（MB）</span><input type="number" min={1} max={1024} value={security.resourceLimits.maxArtifactMb} onChange={(event) => updateLimit("maxArtifactMb", Number(event.target.value))} /></label>
+        </div>
+      </div>
+    </section>
+  );
+}
+
 /** 即时通讯设置分区，首版仅渲染飞书/Lark provider。 */
 export function ImSettingsSection({
   knowledgeBases,

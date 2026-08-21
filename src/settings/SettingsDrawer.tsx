@@ -5,6 +5,7 @@ import {
   MessageCircle,
   ScrollText,
   Settings2,
+  ShieldCheck,
   Sparkles,
   X,
 } from "lucide-react";
@@ -41,11 +42,12 @@ import {
   ImSettingsSection,
   KnowledgeSettingsSection,
   ModelSettingsSection,
+  AgentSecuritySettingsSection,
   SkillsSettingsSection,
 } from "./SettingsSections";
 
 /** 设置页左侧导航的可选分区，和右侧主内容一一对应。 */
-type SettingsSectionId = "knowledge" | "model" | "im" | "skills" | "agentMemory" | "eventLogs" | "auditLogs";
+type SettingsSectionId = "knowledge" | "model" | "agentSecurity" | "im" | "skills" | "agentMemory" | "eventLogs" | "auditLogs";
 
 /** 设置页导航分组，帮助用户区分可配置项和只读诊断项。 */
 type SettingsSectionGroup = "配置" | "诊断";
@@ -247,6 +249,15 @@ export function SettingsDrawer({
         tone: settingsDraft.modelConfig.enabled ? "success" : "neutral",
       },
       {
+        id: "agentSecurity",
+        group: "配置",
+        label: "Agent 权限",
+        description: "Skill 隔离执行的资源上限",
+        meta: `${settingsDraft.agentSecurity.resourceLimits.timeoutSeconds}s`,
+        icon: ShieldCheck,
+        tone: "neutral",
+      },
+      {
         id: "im",
         group: "配置",
         label: "即时通讯",
@@ -303,6 +314,7 @@ export function SettingsDrawer({
       settingsSummary.feishuStatus,
       knowledgeBases,
       settingsDraft.modelConfig.enabled,
+      settingsDraft.agentSecurity.resourceLimits.timeoutSeconds,
       skills.length,
     ],
   );
@@ -952,6 +964,17 @@ export function SettingsDrawer({
           customSkillCount={customSkillCount}
           isBusy={isBusy}
           onOpenSkillsModal={() => setIsSkillsModalOpen(true)}
+          onSaveSettings={handleSaveSettings}
+        />
+      );
+    }
+
+    if (activeSection === "agentSecurity") {
+      return (
+        <AgentSecuritySettingsSection
+          settingsDraft={settingsDraft}
+          isBusy={isBusy}
+          onSettingsChange={setSettingsDraft}
           onSaveSettings={handleSaveSettings}
         />
       );

@@ -391,7 +391,7 @@ export function SkillsModal({
                 >
                   <span>
                     <OverflowTooltipText as="strong" text={skill.displayName} logArea="skills_modal_row_name" />
-                    <OverflowTooltipText as="small" text={sourceLabel(skill.source)} logArea="skills_modal_row_source" />
+                    <OverflowTooltipText as="small" text={`${sourceLabel(skill.source)} · ${skillCompatibilityLabel(skill)}`} logArea="skills_modal_row_source" />
                   </span>
                   <em className={skill.enabled ? "enabled" : "disabled"}>{skill.enabled ? "启用" : "停用"}</em>
                 </button>
@@ -487,6 +487,20 @@ function SkillDetail({
           <OverflowTooltipText as="code" text={skill.path ?? skill.relativePath ?? "未返回路径"} logArea="skills_modal_detail_path" />
         </section>
       )}
+      <section className="skill-runtime-block">
+        <h4>运行兼容性</h4>
+        <div className={`skill-runtime-status ${skill.compatibility?.status ?? "instruction-only"}`}>
+          <strong>{skillCompatibilityLabel(skill)}</strong>
+          <span>{skillRuntimeMessage(skill)}</span>
+        </div>
+        {skill.runtimeManifest && (
+          <dl>
+            <div><dt>运行时</dt><dd>{skill.runtimeManifest.runtime}</dd></div>
+            <div><dt>入口</dt><dd><code>{skill.runtimeManifest.entry}</code></dd></div>
+            <div><dt>网络</dt><dd>{skill.runtimeManifest.networkDomains.length ? skill.runtimeManifest.networkDomains.join(", ") : "关闭"}</dd></div>
+          </dl>
+        )}
+      </section>
       <div className="skill-switches">
         <label className="toggle-row">
           <input
@@ -521,6 +535,32 @@ function sourceLabel(source: AgentSkillSource) {
   };
 
   return labels[source];
+}
+
+/** 将后端兼容性状态转换为简短、可操作的中文标签。 */
+function skillCompatibilityLabel(skill: AgentSkill) {
+  const status = skill.compatibility?.status ?? "instruction-only";
+  const labels = {
+    "instruction-only": "纯指令",
+    ready: "可运行",
+    "missing-runtime": "缺运行时",
+    "approval-required": "需审批",
+    partial: "部分支持",
+    unsupported: "不支持",
+  } as const;
+
+  return labels[status];
+}
+
+/** 运行兼容性说明不暴露绝对运行时路径，只显示版本和后端诊断。 */
+function skillRuntimeMessage(skill: AgentSkill) {
+  if (!skill.runtimeManifest) {
+    return "作为提示词工作流使用，不启动本地进程。";
+  }
+  const runtime = skill.compatibility?.runtime;
+  const warning = skill.compatibility?.warnings[0];
+
+  return warning ?? runtime?.version ?? runtime?.message ?? "等待本机兼容性检测。";
 }
 
 /** 把来源筛选值转换为按钮标签。 */
@@ -637,7 +677,7 @@ function SkillInstallForm({
       </div>
       <section className="skill-install-safety">
         <h4>安装边界</h4>
-        <p>安装只复制标准 skill 包，不执行 scripts 目录中的脚本；来源摘要会脱敏写入日志。</p>
+        <p>安装只复制 Skill 包；脚本必须声明 orange-runtime.yaml，并在进阶权限下审批后隔离执行。</p>
       </section>
       <div className="modal-actions">
         <button className="ghost-button" type="button" onClick={onCancel} disabled={isBusy}>

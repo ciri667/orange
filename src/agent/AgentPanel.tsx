@@ -1,10 +1,10 @@
-import { History, Book, PanelRightClose, Plus } from "lucide-react";
+import { History, Book, PanelRightClose, Play, Plus, ShieldAlert, X } from "lucide-react";
 import { useRef } from "react";
 import type { PointerEvent as ReactPointerEvent } from "react";
 import { OverflowTooltipText } from "../shared/OverflowTooltipText";
 import { getImSessionSourceLabel } from "../shared/selectors";
 import { useDismissable } from "../shared/useDismissable";
-import type { AgentSession, AgentSkill, KnowledgeBase, ModelConfig, Note, WorkspaceDocument } from "../shared/types";
+import type { AgentSecuritySettings, AgentSession, AgentSkill, KnowledgeBase, ModelConfig, Note, WorkspaceDocument } from "../shared/types";
 import { AgentInput, type AgentMentionFile } from "./AgentInput";
 import {
   AgentMessageList,
@@ -29,6 +29,7 @@ export function AgentPanel({
   mentionedFiles,
   selectedMentionedFileIds,
   modelConfig,
+  agentSecurity,
   turnModelSelection,
   isBusy,
   isSessionListOpen,
@@ -50,6 +51,12 @@ export function AgentPanel({
   onTurnModelSelectionChange,
   onSetSessionModelSelection,
   onCompactAgentContext,
+  onApproveExecution,
+  onRejectExecution,
+  onApplyChangeSet,
+  onRejectChangeSet,
+  onSecurityLevelChange,
+  onToggleChangeOperation,
 }: {
   sessions: AgentSession[];
   activeSession: AgentSession;
@@ -69,6 +76,7 @@ export function AgentPanel({
   /** 本轮临时选择的 @ 文件 ID。 */
   selectedMentionedFileIds: string[];
   modelConfig: ModelConfig;
+  agentSecurity: AgentSecuritySettings;
   /** 本轮显式选择的 provider/model，空字符串表示跟随会话/全局默认。 */
   turnModelSelection: string;
   isBusy: boolean;
@@ -92,6 +100,12 @@ export function AgentPanel({
   onTurnModelSelectionChange: (selection: string) => void;
   onSetSessionModelSelection: (selection: string) => void;
   onCompactAgentContext: () => void;
+  onApproveExecution: () => void;
+  onRejectExecution: () => void;
+  onApplyChangeSet: () => void;
+  onRejectChangeSet: () => void;
+  onSecurityLevelChange: (level: AgentSession["securityLevel"]) => void;
+  onToggleChangeOperation: (operationId: string, selected: boolean) => void;
 }) {
   /** 当前 IM 来源标签仅用于补充标题，不替代稳定会话名称。 */
   const activeImSourceLabel = getImSessionSourceLabel(activeSession);
@@ -145,6 +159,35 @@ export function AgentPanel({
         modelConfig={modelConfig}
       />
 
+      {!activeSession.imIdentity && (
+        <div className="agent-security-level-control">
+          <span className="agent-security-level-label">
+            <ShieldAlert size={14} />
+            权限
+          </span>
+          <div className="agent-security-level-options" role="radiogroup" aria-label="当前会话权限级别">
+            {([
+              ["basic", "基础", true, "仅使用文档相关工具，关键写入需要确认"],
+              ["advanced", "进阶", agentSecurity.advancedExecutionEnabled, "可运行 Skill 和命令，执行前需要确认"],
+              ["autonomous", "完全", agentSecurity.autonomousModeEnabled, "可信 Skill 可连续执行；文件工具可使用合规绝对路径"],
+            ] as const).map(([level, label, isEnabled, description]) => (
+              <button
+                className={activeSession.securityLevel === level ? "active" : ""}
+                type="button"
+                role="radio"
+                aria-checked={activeSession.securityLevel === level}
+                title={`${description}${isEnabled ? "" : "；选择后将启用此能力"}`}
+                disabled={isBusy}
+                key={level}
+                onClick={() => onSecurityLevelChange(level)}
+              >
+                {label}
+              </button>
+            ))}
+          </div>
+        </div>
+      )}
+
       {isSessionListOpen && (
         <AgentSessionHistoryPopover
           sessions={sessions}
@@ -180,6 +223,57 @@ export function AgentPanel({
       />
 
       <AgentMessageList activeSession={activeSession} notes={notes} documents={documents} />
+
+      {activeSession.pendingExecution?.status === "pending" && (
+        <section className="agent-execution-approval" aria-label="待确认 Skill 执行">
+          <div className="agent-execution-heading">
+            <ShieldAlert size={16} />
+            <div>
+              <strong>{activeSession.pendingExecution.skillName}</strong>
+              <span>{activeSession.pendingExecution.commandPreview}</span>
+            </div>
+          </div>
+          <dl>
+            <div><dt>范围</dt><dd>{activeSession.pendingExecution.knowledgeBaseIds.length} 个知识库副本</dd></div>
+            <div><dt>网络</dt><dd>{activeSession.pendingExecution.networkDomains.length ? "已声明" : "关闭"}</dd></div>
+            <div><dt>凭证</dt><dd>{activeSession.pendingExecution.credentialAliases.length ? "已声明" : "不注入"}</dd></div>
+          </dl>
+          <div className="agent-execution-actions">
+            <button type="button" onClick={onRejectExecution} disabled={isBusy}><X size={14} />拒绝</button>
+            <button className="primary-button compact" type="button" onClick={onApproveExecution} disabled={isBusy}><Play size={14} />在隔离区运行</button>
+          </div>
+        </section>
+      )}
+
+      {activeSession.pendingChangeSet?.status === "pending" && (
+        <section
+          className="agent-change-set-summary"
+          aria-label={activeSession.pendingChangeSet.executionId === "agent-direct" ? "Agent 文件变更集" : "Skill 文件变更集"}
+        >
+          <strong>{activeSession.pendingChangeSet.summary}</strong>
+          <ul>
+            {activeSession.pendingChangeSet.operations.slice(0, 8).map((operation) => (
+              <li key={operation.id}>
+                <input
+                  className="control-checkbox-input"
+                  type="checkbox"
+                  checked={operation.selected}
+                  onChange={(event) => onToggleChangeOperation(operation.id, event.target.checked)}
+                  aria-label={`${operation.selected ? "取消选择" : "选择"} ${operation.targetPath}`}
+                />
+                <span className="control-checkbox" aria-hidden="true" />
+                <span>{operation.operation}</span>
+                <code>{operation.targetPath}</code>
+              </li>
+            ))}
+          </ul>
+          {activeSession.pendingChangeSet.operations.length > 8 && <p>另有 {activeSession.pendingChangeSet.operations.length - 8} 项。</p>}
+          <div className="agent-execution-actions">
+            <button type="button" onClick={onRejectChangeSet} disabled={isBusy}><X size={14} />全部拒绝</button>
+            <button className="primary-button compact" type="button" onClick={onApplyChangeSet} disabled={isBusy}><Play size={14} />应用已选变更</button>
+          </div>
+        </section>
+      )}
 
       <AgentInput
         activeSession={activeSession}

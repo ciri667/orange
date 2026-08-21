@@ -7,6 +7,9 @@ export type AgentActionType = "ask" | "find" | "rewrite" | "create" | "organize"
 /** Agent 会话类型，用于区分笔记上下文、知识库上下文和临时任务上下文。 */
 export type AgentSessionType = "note" | "knowledge-base" | "task";
 
+/** Agent 安全等级决定可见工具和确认策略；提高等级只能由用户主动操作。 */
+export type AgentSecurityLevel = "basic" | "advanced" | "autonomous";
+
 /** Markdown 编辑器视图模式，控制编辑、预览和分屏布局。 */
 export type MarkdownViewMode = "edit" | "preview" | "split";
 
@@ -25,6 +28,10 @@ export type AgentToolName =
   | "get_session_summary"
   | "search_session_messages"
   | "read_session_context"
+  | "run_skill"
+  | "create_folder"
+  | "list_path"
+  | "read_path"
   | "propose_file_change"
   | "create_file_draft"
   | "suggest_organization";
@@ -107,6 +114,39 @@ export interface AgentSkill {
   relativePath?: string;
   /** 自定义 skill 的解析元数据，首版只记录覆盖来源等轻量信息。 */
   metadata?: Record<string, string>;
+  /** 可执行 Skill 的运行声明；缺失时仍可作为纯指令 Skill 使用。 */
+  runtimeManifest?: SkillRuntimeManifest;
+  /** 安装包和本机运行时共同决定的兼容性结果。 */
+  compatibility?: SkillCompatibilityReport;
+}
+
+export type SkillRuntimeKind = "python" | "node" | "powershell" | "bash" | "executable";
+
+/** agents/orange-runtime.yaml 的稳定运行声明。 */
+export interface SkillRuntimeManifest {
+  runtime: SkillRuntimeKind;
+  entry: string;
+  args: string[];
+  networkDomains: string[];
+  credentialAliases: string[];
+  artifactPatterns: string[];
+}
+
+export interface SkillRuntimeStatus {
+  runtime: SkillRuntimeKind;
+  available: boolean;
+  executablePath?: string;
+  version?: string;
+  message: string;
+}
+
+export type SkillCompatibilityStatus = "instruction-only" | "ready" | "missing-runtime" | "approval-required" | "partial" | "unsupported";
+
+export interface SkillCompatibilityReport {
+  status: SkillCompatibilityStatus;
+  packageHash: string;
+  runtime?: SkillRuntimeStatus;
+  warnings: string[];
 }
 
 /** 第三方 skill 安装请求；本地来源 source 为空时桌面端会打开系统选择器。 */
@@ -354,6 +394,77 @@ export interface ProposedChange {
   diffStats?: ProposedChangeDiffStats;
 }
 
+export type ProposedFileOperationType = "create" | "modify" | "delete" | "move" | "create_folder";
+
+/** Skill 一次执行产生的单个文件影响。 */
+export interface ProposedFileOperation {
+  id: string;
+  knowledgeBaseId: string;
+  operation: ProposedFileOperationType;
+  sourcePath?: string;
+  targetPath: string;
+  fileType: string;
+  originalHash: string;
+  original?: string;
+  next?: string;
+  selected: boolean;
+  binary: boolean;
+  byteSize: number;
+  stagedPath?: string;
+}
+
+/** 多文件 Skill 结果的统一审批容器。 */
+export interface ProposedChangeSet {
+  id: string;
+  executionId: string;
+  skillId: string;
+  summary: string;
+  operations: ProposedFileOperation[];
+  status: "pending" | "applied" | "rejected" | "conflict";
+  warnings: string[];
+  createdAt: string;
+}
+
+export type SkillExecutionStatus = "pending" | "running" | "completed" | "failed" | "rejected";
+
+/** 模型提出、用户批准后才会进入系统沙箱的执行请求。 */
+export interface SkillExecutionRequest {
+  id: string;
+  skillId: string;
+  skillName: string;
+  packageHash: string;
+  runtime: SkillRuntimeKind;
+  commandPreview: string;
+  args: string[];
+  knowledgeBaseIds: string[];
+  networkDomains: string[];
+  credentialAliases: string[];
+  status: SkillExecutionStatus;
+  createdAt: string;
+}
+
+export interface AgentResourceLimits {
+  timeoutSeconds: number;
+  maxMemoryMb: number;
+  maxProcesses: number;
+  maxArtifactMb: number;
+}
+
+export interface TrustedSkillGrant {
+  skillId: string;
+  packageHash: string;
+  expiresAt?: string;
+}
+
+export interface AgentSecuritySettings {
+  defaultLevel: AgentSecurityLevel;
+  advancedExecutionEnabled: boolean;
+  autonomousModeEnabled: boolean;
+  resourceLimits: AgentResourceLimits;
+  trustedSkillGrants: TrustedSkillGrant[];
+  allowedNetworkDomains: string[];
+}
+
 /** Agent 会话是上下文容器，绑定知识库范围、笔记、消息和待确认写入。 */
 export interface AgentSession {
   id: string;
@@ -366,6 +477,10 @@ export interface AgentSession {
   pinnedNoteIds: string[];
   messages: AgentMessage[];
   pendingChange?: ProposedChange;
+  /** 新执行链使用批量变更集；旧 pendingChange 保留兼容单文件审阅。 */
+  pendingChangeSet?: ProposedChangeSet;
+  pendingExecution?: SkillExecutionRequest;
+  securityLevel: AgentSecurityLevel;
   /** 会话滚动工作记忆，用于让模型在只带最近历史时仍保留早期目标和决定。 */
   contextSummary?: AgentContextSummary;
   createdAt: string;
@@ -441,6 +556,7 @@ export interface UserSettings {
   modelConfig: ModelConfig;
   privacyPolicy: PrivacyPolicy;
   writeConfirmationRequired: boolean;
+  agentSecurity: AgentSecuritySettings;
 }
 
 /** 当前内置 IM provider；新增 provider 时继续使用稳定小写 ID。 */
