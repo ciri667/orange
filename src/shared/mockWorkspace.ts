@@ -6,6 +6,7 @@ import type {
   AgentMessage,
   AgentSession,
   AgentToolCall,
+  AgentTraceStep,
   Citation,
   FolderEntry,
   KnowledgeBase,
@@ -546,6 +547,11 @@ function shouldMultiEditNote(prompt: string) {
   return /多处|批量|全部|重复|去重|multi/i.test(prompt);
 }
 
+/** 浏览器开发态没有独立「创建」按钮时，用自然语言触发新建草稿轨迹，方便预览过程卡片。 */
+function shouldCreateDraft(prompt: string) {
+  return /创建|新建|写一篇|生成一篇|生成.*笔记|生成.*指南/.test(prompt);
+}
+
 /** 生成浏览器 mock 的追加内容，避免把整篇原文误塞进 next。 */
 function buildAppendText(prompt: string) {
   return `## 补充内容\n\n${prompt.trim() || "这里是 Agent 追加的补充内容。"}`;
@@ -560,6 +566,38 @@ function createToolCall(name: AgentToolCall["name"], summary: string, args: Reco
     summary,
     args,
   };
+}
+
+/** 给写入类工具补上结果预览，让浏览器开发态也能验证稿纸卡片而不是空展开。 */
+function attachMockWriteTracePreview(steps: AgentTraceStep[], pendingChange?: ProposedChange): AgentTraceStep[] {
+  if (!pendingChange) {
+    return steps;
+  }
+
+  return steps.map((step) => {
+    if (step.name !== "create_file_draft" && step.name !== "propose_file_change") {
+      return step;
+    }
+
+    return {
+      ...step,
+      resultPreview: JSON.stringify({
+        change: {
+          fileType: pendingChange.fileType,
+          id: pendingChange.id,
+          knowledgeBaseId: pendingChange.knowledgeBaseId,
+          next: pendingChange.next,
+          original: pendingChange.original,
+          operation: pendingChange.operation,
+          status: pendingChange.status,
+          targetPath: pendingChange.targetPath,
+          title: pendingChange.title,
+          type: pendingChange.type,
+          diffStats: pendingChange.diffStats,
+        },
+      }),
+    };
+  });
 }
 
 /** 根据会话绑定范围生成可读标签，用于 Agent 回复文案。 */
@@ -655,7 +693,16 @@ export function runMockAgentTurn(
       targetPath: activeTextDocument.path, original, next, originalHash: activeTextDocument.contentHash, status: "pending",
     };
     nextChange.diffStats = buildMarkdownDiff(original, next).stats;
-    toolCalls.push(createToolCall("propose_file_change", `已为 TXT《${activeTextDocument.title}》生成待确认改写 diff`, { fileId: activeTextDocument.id }));
+    toolCalls.push(
+      createToolCall("propose_file_change", `已为 TXT《${activeTextDocument.title}》生成待确认改写`, {
+        fileId: activeTextDocument.id,
+        targetPath: activeTextDocument.path,
+        title: nextChange.title,
+        operation: nextChange.operation,
+        original,
+        next,
+      }),
+    );
     session.pendingChange = nextChange;
     content = "我已经生成 TXT 纯文本改写建议；确认前不会写入本地文件。";
   } else if (action === "rewrite") {
@@ -693,10 +740,13 @@ export function runMockAgentTurn(
         };
         nextChange.diffStats = buildMarkdownDiff(nextChange.original, nextChange.next).stats;
         toolCalls.push(
-          createToolCall("propose_file_change", `已为《${activeNote.title}》生成待确认改写 diff`, {
+          createToolCall("propose_file_change", `已为《${activeNote.title}》生成待确认改写`, {
             fileId: activeNote.id,
             targetPath: activeNote.path,
+            title: nextChange.title,
             operation: nextChange.operation,
+            original: nextChange.original,
+            next: nextChange.next,
           }),
         );
         session.pendingChange = nextChange;
@@ -705,7 +755,7 @@ export function runMockAgentTurn(
         content = "我已经生成一份改写建议。它现在只是待确认 diff，确认前不会修改本地 Markdown 文件。";
       }
     }
-  } else if (action === "create") {
+  } else if (action === "create" || shouldCreateDraft(prompt)) {
     const wantsTxt = /(?:\.txt|TXT|纯文本)/.test(prompt);
     const targetPath = wantsTxt ? "00-Inbox/上线检查清单.txt" : activeKnowledgeBase.id === "kb-work" ? "Release/上线检查清单.md" : "00-Inbox/上线检查清单.md";
     const nextChange: ProposedChange = {
@@ -733,7 +783,15 @@ export function runMockAgentTurn(
       status: "pending",
     };
     nextChange.diffStats = buildMarkdownDiff(nextChange.original, nextChange.next).stats;
-    toolCalls.push(createToolCall("create_file_draft", `已生成 ${targetPath} 的待确认新建 diff`, { targetPath, fileType: wantsTxt ? "txt" : "markdown" }));
+    toolCalls.push(
+      createToolCall("create_file_draft", `已生成 ${targetPath} 的待确认新建`, {
+        targetPath,
+        fileType: wantsTxt ? "txt" : "markdown",
+        title: nextChange.title,
+        content: nextChange.next,
+        knowledgeBaseId: activeKnowledgeBase.id,
+      }),
+    );
     session.pendingChange = nextChange;
     content = "我已经生成新笔记草稿，但它还没有写入本地目录。确认 diff 后才会创建 Markdown 文件。";
   } else if (action === "organize") {
@@ -788,7 +846,7 @@ export function runMockAgentTurn(
         timestamp: formatLocalDateTime(),
         content: "浏览器开发态模拟思考：根据当前请求选择工具，并给出可回放的过程轨迹。",
       },
-      ...traceFromToolCalls(toolCalls),
+      ...attachMockWriteTracePreview(traceFromToolCalls(toolCalls), session.pendingChange),
     ],
     turnDurationMs: 1200,
   });

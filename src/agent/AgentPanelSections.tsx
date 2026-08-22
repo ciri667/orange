@@ -1,4 +1,5 @@
 import { Check, Database, FileText, Layers3, MessageSquareText, ShieldAlert, Sparkles, Trash2, X } from "lucide-react";
+import { useEffect, useRef } from "react";
 import ReactMarkdown from "react-markdown";
 import rehypeSanitize from "rehype-sanitize";
 import remarkGfm from "remark-gfm";
@@ -19,14 +20,17 @@ import {
 } from "../shared/modelSelection";
 import { ModelCascadeSelector } from "../shared/ModelCascadeSelector";
 import type {
+  AgentMessage,
   AgentSecuritySettings,
   AgentSession,
+  AgentTurnProgressEvent,
   KnowledgeBase,
   ModelConfig,
   Note,
   WorkspaceDocument,
 } from "../shared/types";
 import { CitationList } from "./CitationList";
+import { AgentTurnTrace } from "./AgentTurnTrace";
 import { ToolCallList } from "./ToolCallList";
 
 /** 会话摘要条只保留当前文件和待确认写入，避免和输入条、范围入口重复。 */
@@ -429,19 +433,31 @@ export function AgentScopeSelector({
   );
 }
 
-/** Agent 消息列表，安全渲染 Markdown、工具调用和知识库引用。 */
+/** Agent 消息列表，安全渲染 Markdown、过程轨迹和知识库引用。 */
 export function AgentMessageList({
   activeSession,
   notes,
   documents,
+  liveTurn,
 }: {
   activeSession: AgentSession;
   notes: Note[];
   documents: WorkspaceDocument[];
+  liveTurn?: AgentTurnProgressEvent | null;
 }) {
+  const persistedIds = new Set(activeSession.messages.map((message) => message.id));
+  const showLiveTurn =
+    Boolean(liveTurn) && liveTurn?.sessionId === activeSession.id && !persistedIds.has(liveTurn.liveMessageId);
+  const listRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    // 过程增量到达时跟到底部，避免执行中展开的步骤被旧消息挡住。
+    listRef.current?.scrollTo({ top: listRef.current.scrollHeight });
+  }, [activeSession.messages.length, liveTurn?.steps.length, liveTurn?.content, liveTurn?.status]);
+
   return (
-    <div className="message-list" aria-live="polite">
-      {activeSession.messages.length === 0 && (
+    <div className="message-list" aria-live="polite" ref={listRef}>
+      {activeSession.messages.length === 0 && !showLiveTurn && (
         <div className="message-list-empty">
           <Sparkles size={16} />
           <p>从下面开始提问</p>
@@ -449,24 +465,69 @@ export function AgentMessageList({
         </div>
       )}
       {activeSession.messages.map((message) => (
-        <article className={`message ${message.role}`} key={message.id}>
-          <div className="message-role">
-            {message.role === "assistant" ? <Sparkles size={14} /> : <MessageSquareText size={14} />}
-            <span>{message.role === "assistant" ? "橘记 Agent" : "你"}</span>
-          </div>
-          {message.mentionedFileIds?.length ? (
-            <div className="message-mentioned-files" aria-label="本轮 @ 文件">
-              {message.mentionedFileIds.map((fileId) => (
-                <span key={fileId}>{getMentionedFileLabel(fileId, notes, documents)}</span>
-              ))}
-            </div>
-          ) : null}
-          <MessageMarkdown content={message.content} />
-          <ToolCallList toolCalls={message.toolCalls} />
-          <CitationList citations={message.citations} />
-        </article>
+        <AgentMessageItem documents={documents} key={message.id} message={message} notes={notes} />
       ))}
+      {showLiveTurn && liveTurn && (
+        <AgentMessageItem
+          documents={documents}
+          liveStatus={liveTurn.status}
+          message={{
+            id: liveTurn.liveMessageId,
+            role: "assistant",
+            content: liveTurn.content ?? "",
+            trace: liveTurn.steps,
+            turnDurationMs: liveTurn.turnDurationMs,
+          }}
+          notes={notes}
+        />
+      )}
     </div>
+  );
+}
+
+/** 单条会话消息：过程区在最终回答之前，旧消息没有 trace 时回退到扁平运行信息。 */
+function AgentMessageItem({
+  message,
+  notes,
+  documents,
+  liveStatus,
+}: {
+  message: AgentMessage;
+  notes: Note[];
+  documents: WorkspaceDocument[];
+  liveStatus?: AgentTurnProgressEvent["status"];
+}) {
+  const usesTurnTrace =
+    liveStatus != null || message.turnDurationMs != null || Boolean(message.trace?.length);
+  const showTurnTrace =
+    message.role === "assistant" &&
+    usesTurnTrace &&
+    (Boolean(message.trace?.length) || liveStatus === "running" || liveStatus === "failed");
+
+  return (
+    <article className={`message ${message.role}`}>
+      <div className="message-role">
+        {message.role === "assistant" ? <Sparkles size={14} /> : <MessageSquareText size={14} />}
+        <span>{message.role === "assistant" ? "橘记 Agent" : "你"}</span>
+      </div>
+      {message.mentionedFileIds?.length ? (
+        <div className="message-mentioned-files" aria-label="本轮 @ 文件">
+          {message.mentionedFileIds.map((fileId) => (
+            <span key={fileId}>{getMentionedFileLabel(fileId, notes, documents)}</span>
+          ))}
+        </div>
+      ) : null}
+      {showTurnTrace ? (
+        <AgentTurnTrace
+          durationMs={message.turnDurationMs}
+          status={liveStatus ?? "completed"}
+          steps={message.trace ?? []}
+        />
+      ) : null}
+      {message.content ? <MessageMarkdown content={message.content} /> : null}
+      {message.role === "assistant" && !usesTurnTrace ? <ToolCallList toolCalls={message.toolCalls} /> : null}
+      <CitationList citations={message.citations} />
+    </article>
   );
 }
 

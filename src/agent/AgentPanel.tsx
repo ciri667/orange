@@ -3,7 +3,16 @@ import { useRef } from "react";
 import { OverflowTooltipText } from "../shared/OverflowTooltipText";
 import { getImSessionSourceLabel } from "../shared/selectors";
 import { useDismissable } from "../shared/useDismissable";
-import type { AgentSecuritySettings, AgentSession, AgentSkill, KnowledgeBase, ModelConfig, Note, WorkspaceDocument } from "../shared/types";
+import type {
+  AgentSecuritySettings,
+  AgentSession,
+  AgentSkill,
+  AgentTurnProgressEvent,
+  KnowledgeBase,
+  ModelConfig,
+  Note,
+  WorkspaceDocument,
+} from "../shared/types";
 import { AgentInput, type AgentMentionFile } from "./AgentInput";
 import {
   AgentMessageList,
@@ -31,6 +40,7 @@ export function AgentPanel({
   agentSecurity,
   turnModelSelection,
   isBusy,
+  liveTurn,
   isSessionListOpen,
   isSessionContextOpen,
   isScopeSelectorOpen,
@@ -78,6 +88,8 @@ export function AgentPanel({
   /** 本轮显式选择的 provider/model，空字符串表示跟随会话/全局默认。 */
   turnModelSelection: string;
   isBusy: boolean;
+  /** 当前正在执行的过程快照；完成后由持久化助手消息接管。 */
+  liveTurn?: AgentTurnProgressEvent | null;
   isSessionListOpen: boolean;
   isSessionContextOpen: boolean;
   isScopeSelectorOpen: boolean;
@@ -178,7 +190,12 @@ export function AgentPanel({
         />
       )}
 
-      <AgentMessageList activeSession={activeSession} notes={notes} documents={documents} />
+      <AgentMessageList
+        activeSession={activeSession}
+        documents={documents}
+        liveTurn={liveTurn}
+        notes={notes}
+      />
 
       {activeSession.pendingExecution?.status === "pending" && (
         <section className="agent-execution-approval" aria-label="待确认 Skill 执行">

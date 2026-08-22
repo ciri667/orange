@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { AgentPanel } from "../agent/AgentPanel";
 import type { AgentMentionFile } from "../agent/AgentInput";
 import { DocumentPane } from "../editor/DocumentPane";
@@ -18,6 +18,7 @@ import {
   getActiveNote,
 } from "../shared/selectors";
 import {
+  listenAgentTurnProgress,
   acceptProposedChange,
   approveSkillExecution,
   applySkillChangeSet,
@@ -56,6 +57,7 @@ import type {
   AgentActionType,
   AgentMessage,
   AgentSession,
+  AgentTurnProgressEvent,
   DocumentHistoryTargetKind,
   EditorFileTab,
   ExportFormat,
@@ -368,6 +370,10 @@ export function WorkspaceShell() {
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
   /** 全局忙碌状态覆盖文件、会话、设置和日志刷新操作。 */
   const [isBusy, setIsBusy] = useState(false);
+  /** 当前 Agent turn 的过程快照；invoke 返回后由持久化助手消息接管。 */
+  const [liveTurn, setLiveTurn] = useState<AgentTurnProgressEvent | null>(null);
+  /** 只在本轮 invoke 进行中接受过程事件，避免结束后迟到事件把 live 气泡拉回来。 */
+  const liveTurnActiveRef = useRef(false);
   /** 忙碌状态文案只展示当前操作类型，不包含路径、密钥或请求内容。 */
   const [busyLabel, setBusyLabel] = useState("");
   /** 顶部/侧栏轻量通知，展示用户操作结果和可恢复错误。 */
@@ -499,6 +505,29 @@ export function WorkspaceShell() {
       setOpenFileTabs([initialTab]);
     }
   }, [snapshot, openFileTabs.length]);
+
+  useEffect(() => {
+    let disposed = false;
+    let unlisten: (() => void) | undefined;
+
+    void listenAgentTurnProgress((payload) => {
+      if (!disposed && liveTurnActiveRef.current) {
+        setLiveTurn(payload);
+      }
+    }).then((stop) => {
+      if (disposed) {
+        stop();
+        return;
+      }
+
+      unlisten = stop;
+    });
+
+    return () => {
+      disposed = true;
+      unlisten?.();
+    };
+  }, []);
   /** 设置动作 hook 统一处理保存、凭证、Skills 和诊断日志刷新，复用原有 Tauri API。 */
   const {
     handleSaveSettings,
@@ -1895,6 +1924,8 @@ export function WorkspaceShell() {
     const promptBeforeSubmit = agentPrompt;
     let didPersistOptimisticMessage = false;
 
+    liveTurnActiveRef.current = true;
+    setLiveTurn(null);
     beginBusy("Agent 正在处理...");
 
     try {
@@ -1981,6 +2012,7 @@ export function WorkspaceShell() {
       );
 
       commitSnapshot(result.snapshot);
+      setLiveTurn(null);
       if (!presetPrompt) {
         setExplicitSkillIds([]);
       }
@@ -1998,6 +2030,8 @@ export function WorkspaceShell() {
       }
       setNotice(error instanceof Error ? error.message : String(error));
     } finally {
+      liveTurnActiveRef.current = false;
+      setLiveTurn(null);
       endBusy();
     }
   }
@@ -2571,6 +2605,7 @@ export function WorkspaceShell() {
             agentSecurity={userSettings.agentSecurity}
             turnModelSelection={turnModelSelection}
             isBusy={isBusy}
+            liveTurn={liveTurn}
             isSessionListOpen={isSessionListOpen}
             isSessionContextOpen={isSessionContextOpen}
             isScopeSelectorOpen={isScopeSelectorOpen}
