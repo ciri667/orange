@@ -8,6 +8,7 @@ import type { Options as RehypeSanitizeOptions } from "rehype-sanitize";
 import remarkGfm from "remark-gfm";
 import { DiffPanel } from "../diff/DiffPanel";
 import type { ReviewCommentDraft } from "../diff/DiffPanel";
+import { Button } from "../shared/Button";
 import { MarkdownLink } from "../shared/MarkdownLink";
 import type { ExportFormat, KnowledgeBase, MarkdownViewMode, Note, ProposedChange } from "../shared/types";
 import { EditorEmptyHeader, EditorFileHeader, EditorMetaStrip, EditorMoreActionMenu } from "./EditorFileChrome";
@@ -118,14 +119,14 @@ export function EditorPane({
               <strong>当前知识库还没有可编辑的 Markdown 文件。</strong>
               <span>可以在当前知识库根目录直接新建文档，或在本地目录中添加文件后重新扫描。</span>
               <div className="editor-empty-actions">
-                <button className="primary-button compact" type="button" onClick={() => onCreateMarkdown("")}>
+                <Button variant="primary" size="compact" onClick={() => onCreateMarkdown("")}>
                   <FileText size={14} />
                   新建 Markdown
-                </button>
-                <button className="ghost-button compact" type="button" onClick={() => onCreateText("")}>
+                </Button>
+                <Button variant="ghost" size="compact" onClick={() => onCreateText("")}>
                   <FileType size={14} />
                   新建 TXT
-                </button>
+                </Button>
               </div>
             </>
           )}
@@ -174,10 +175,10 @@ export function EditorPane({
               </button>
             ))}
           </div>
-          <button className="text-button" type="button" onClick={onSaveNote} disabled={isBusy || !isDirty}>
+          <Button variant="text" onClick={onSaveNote} disabled={isBusy || !isDirty}>
             <Save size={16} />
             {isDirty ? "保存草稿" : "已保存"}
-          </button>
+          </Button>
           <EditorMoreActionMenu
             exportOptions={MARKDOWN_EXPORT_OPTIONS}
             isBusy={isBusy}

@@ -3,6 +3,7 @@ import { useEffect, useRef } from "react";
 import ReactMarkdown from "react-markdown";
 import rehypeSanitize from "rehype-sanitize";
 import remarkGfm from "remark-gfm";
+import { Button } from "../shared/Button";
 import { MarkdownLink } from "../shared/MarkdownLink";
 import { OverflowTooltipText } from "../shared/OverflowTooltipText";
 import {
@@ -150,9 +151,9 @@ export function AgentSessionHistoryPopover({
           <p className="section-label">Sessions</p>
           <h3>会话历史</h3>
         </div>
-        <button className="icon-button" type="button" title="关闭会话历史" onClick={onToggleSessionList}>
+        <Button variant="icon" title="关闭会话历史" onClick={onToggleSessionList}>
           <X size={15} />
-        </button>
+        </Button>
       </div>
       <div className="session-list">
         {sessions.map((session) => (
@@ -191,14 +192,15 @@ export function AgentSessionHistoryPopover({
               </span>
               {session.pendingChange?.status === "pending" && <span className="session-pending">待确认 diff</span>}
             </button>
-            <button
-              className="icon-button danger session-delete-button"
-              type="button"
+            <Button
+              variant="icon"
+              tone="danger"
+              className="session-delete-button"
               title="删除会话"
               onClick={() => onDeleteSession(session.id)}
             >
               <Trash2 size={14} />
-            </button>
+            </Button>
           </div>
         ))}
       </div>
@@ -256,12 +258,12 @@ export function AgentSessionContextPopover({
           <h3>上下文</h3>
         </div>
         <div className="popover-header-actions">
-          <button className="icon-button" type="button" title="整理上下文" onClick={onCompactAgentContext} disabled={isBusy}>
+          <Button variant="icon" title="整理上下文" onClick={onCompactAgentContext} disabled={isBusy}>
             <Sparkles size={15} />
-          </button>
-          <button className="icon-button" type="button" title="关闭上下文" onClick={onToggleSessionContext}>
+          </Button>
+          <Button variant="icon" title="关闭上下文" onClick={onToggleSessionContext}>
             <X size={15} />
-          </button>
+          </Button>
         </div>
       </div>
       <div className="context-popover-body">
@@ -395,9 +397,9 @@ export function AgentScopeSelector({
               <span>
                 {selectedKnowledgeBaseIds.length} / {knowledgeBases.length}
               </span>
-              <button className="icon-button" type="button" title="关闭工具范围" onClick={onToggleScopeSelector}>
+              <Button variant="icon" title="关闭工具范围" onClick={onToggleScopeSelector}>
                 <X size={15} />
-              </button>
+              </Button>
             </div>
           </div>
           <div className="scope-option-list">

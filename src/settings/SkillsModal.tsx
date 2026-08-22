@@ -1,6 +1,7 @@
 import { Archive, Download, Edit3, FolderOpen, Link, Plus, Save, Search, Trash2, X } from "lucide-react";
 import type { FormEvent } from "react";
 import { useMemo, useState } from "react";
+import { Button } from "../shared/Button";
 import { ConfirmDialog, type ConfirmDialogConfig } from "../shared/ConfirmDialog";
 import { logError, logInfo } from "../shared/logger";
 import { OverflowTooltipText } from "../shared/OverflowTooltipText";
@@ -316,13 +317,13 @@ export function SkillsModal({
             <span className="modal-subtitle">启用的 Skill 会作为能力说明进入 Agent 上下文。</span>
           </div>
           <div className="skills-modal-actions">
-            <button className="ghost-button" type="button" onClick={onOpenUserSkillsFolder} disabled={isBusy}>
+            <Button variant="ghost" onClick={onOpenUserSkillsFolder} disabled={isBusy}>
               <FolderOpen size={14} />
               打开用户 Skills 文件夹
-            </button>
-            <button className="icon-button" type="button" title="关闭 Skills" onClick={onClose}>
+            </Button>
+            <Button variant="icon" title="关闭 Skills" onClick={onClose}>
               <X size={17} />
-            </button>
+            </Button>
           </div>
         </header>
 
@@ -369,14 +370,14 @@ export function SkillsModal({
                 </button>
               ))}
             </div>
-            <button className="primary-button compact skill-new-button" type="button" onClick={handleCreateSkill} disabled={isBusy}>
+            <Button variant="primary" size="compact" className="w-full" onClick={handleCreateSkill} disabled={isBusy}>
               <Plus size={14} />
               新建 Skill
-            </button>
-            <button className="ghost-button skill-new-button" type="button" onClick={handleOpenInstallSkill} disabled={isBusy}>
+            </Button>
+            <Button variant="ghost" className="w-full" onClick={handleOpenInstallSkill} disabled={isBusy}>
               <Download size={14} />
               安装 Skill
-            </button>
+            </Button>
             <div className="skills-list">
               {filteredSkills.map((skill) => (
                 <button
@@ -467,16 +468,16 @@ function SkillDetail({
         </div>
         <div className="skill-detail-actions">
           {isUserManagedSkill(skill) && (
-            <button className="ghost-button" type="button" onClick={() => onEditSkill(skill)} disabled={isBusy}>
+            <Button variant="ghost" onClick={() => onEditSkill(skill)} disabled={isBusy}>
               <Edit3 size={14} />
               编辑
-            </button>
+            </Button>
           )}
           {isUserManagedSkill(skill) && (
-            <button className="ghost-button danger-action" type="button" onClick={() => onDeleteSkill(skill)} disabled={isBusy}>
+            <Button variant="ghost" tone="danger" onClick={() => onDeleteSkill(skill)} disabled={isBusy}>
               <Trash2 size={14} />
               删除
-            </button>
+            </Button>
           )}
         </div>
       </div>
@@ -680,13 +681,13 @@ function SkillInstallForm({
         <p>安装只复制 Skill 包；脚本必须声明 orange-runtime.yaml，并在进阶权限下审批后隔离执行。</p>
       </section>
       <div className="modal-actions">
-        <button className="ghost-button" type="button" onClick={onCancel} disabled={isBusy}>
+        <Button variant="ghost" onClick={onCancel} disabled={isBusy}>
           取消
-        </button>
-        <button className="primary-button compact" type="submit" disabled={isBusy || (draft.sourceType === "url" && !draft.source.trim())}>
+        </Button>
+        <Button variant="primary" size="compact" type="submit" disabled={isBusy || (draft.sourceType === "url" && !draft.source.trim())}>
           <Download size={14} />
           安装 Skill
-        </button>
+        </Button>
       </div>
     </form>
   );
@@ -763,11 +764,12 @@ function SkillForm({
         </label>
       </div>
       <div className="modal-actions">
-        <button className="ghost-button" type="button" onClick={onCancel} disabled={isBusy}>
+        <Button variant="ghost" onClick={onCancel} disabled={isBusy}>
           取消
-        </button>
-        <button
-          className="primary-button compact"
+        </Button>
+        <Button
+          variant="primary"
+          size="compact"
           type="submit"
           disabled={
             isBusy ||
@@ -779,7 +781,7 @@ function SkillForm({
         >
           <Save size={14} />
           保存为 SKILL.md
-        </button>
+        </Button>
       </div>
     </form>
   );

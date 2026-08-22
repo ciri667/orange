@@ -1,5 +1,7 @@
 import { useEffect, useId, useRef } from "react";
 import { AlertTriangle, ShieldCheck } from "lucide-react";
+import { Button } from "./Button";
+import { cn } from "./cn";
 
 /** 确认弹窗语义类型，danger 用于删除、移除授权等不可直接撤销的操作。 */
 export type ConfirmDialogTone = "default" | "danger";
@@ -81,7 +83,8 @@ export function ConfirmDialog({
 
   return (
     <div
-      className="modal-backdrop confirm-backdrop"
+      className="fixed inset-0 z-confirm grid isolate place-items-center bg-[radial-gradient(circle_at_top,rgba(255,255,255,0.12),transparent_360px),rgba(23,23,23,0.46)] backdrop-blur-[8px]"
+      data-confirm-overlay
       role="presentation"
       onMouseDown={(event) => {
         event.stopPropagation();
@@ -89,40 +92,53 @@ export function ConfirmDialog({
       }}
     >
       <section
-        className={`confirm-dialog ${tone}`}
+        className={cn(
+          "grid w-[min(430px,calc(100vw-40px))] isolate gap-3.5 rounded-panel border border-border-translucent bg-surface-translucent-strong p-4 shadow-app max-[760px]:w-[min(100%,calc(100vw-20px))]",
+          tone === "danger" && "border-danger/40",
+        )}
+        data-confirm-dialog
         role="dialog"
         aria-modal="true"
         aria-labelledby={titleId}
         onMouseDown={(event) => event.stopPropagation()}
       >
-        <div className="confirm-dialog-heading">
-          <span className="confirm-dialog-icon" aria-hidden="true">
+        <div className="flex items-start gap-3">
+          <span
+            className={cn(
+              "inline-flex size-[34px] shrink-0 items-center justify-center rounded-control",
+              tone === "danger" ? "bg-danger-soft text-danger" : "bg-accent-soft text-accent-strong",
+            )}
+            aria-hidden="true"
+          >
             <ToneIcon size={18} />
           </span>
           <div>
             <p className="section-label">{toneLabel}</p>
-            <h2 id={titleId}>{title}</h2>
+            <h2 id={titleId} className="mt-1 mb-0 text-lg leading-tight text-ink-strong">
+              {title}
+            </h2>
           </div>
         </div>
-        <p className="confirm-dialog-message">{message}</p>
-        <div className="modal-actions">
-          <button ref={cancelButtonRef} className="ghost-button" type="button" onClick={onCancel} disabled={isBusy}>
+        <p className="m-0 text-sm leading-[1.55] text-ink">{message}</p>
+        <div className="flex min-w-0 flex-wrap justify-end gap-2">
+          <Button ref={cancelButtonRef} variant="ghost" onClick={onCancel} disabled={isBusy}>
             {cancelLabel}
-          </button>
+          </Button>
           {canUseThirdAction && thirdAction ? (
-            <button
-              className={`primary-button compact confirm-dialog-confirm ${thirdAction.tone ?? "default"}`}
-              type="button"
+            <Button
+              variant="primary"
+              size="compact"
+              tone={thirdAction.tone ?? "default"}
               onClick={onThirdAction}
               disabled={isBusy}
               aria-label={thirdAction.ariaLabel ?? thirdAction.label}
             >
               {thirdAction.label}
-            </button>
+            </Button>
           ) : null}
-          <button className={`primary-button compact confirm-dialog-confirm ${tone}`} type="button" onClick={onConfirm} disabled={isBusy}>
+          <Button variant="primary" size="compact" tone={tone} onClick={onConfirm} disabled={isBusy}>
             {confirmLabel}
-          </button>
+          </Button>
         </div>
       </section>
     </div>

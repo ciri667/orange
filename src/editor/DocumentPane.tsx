@@ -1,5 +1,6 @@
 import { convertFileSrc } from "@tauri-apps/api/core";
 import { Clock3, Eye, FilePenLine, FileText, Save } from "lucide-react";
+import { Button } from "../shared/Button";
 import { logInfo, logWarn } from "../shared/logger";
 import type { DocumentFileType, DocumentPreview, ExportFormat, KnowledgeBase, WorkspaceDocument } from "../shared/types";
 import { EditorEmptyHeader, EditorFileHeader, EditorMetaStrip, EditorMoreActionMenu } from "./EditorFileChrome";
@@ -116,10 +117,10 @@ export function DocumentPane({
         actions={
           <>
           {isTextDocument && (
-            <button className="text-button" type="button" onClick={onSaveDocument} disabled={isBusy || !isDirty}>
+            <Button variant="text" onClick={onSaveDocument} disabled={isBusy || !isDirty}>
               <Save size={16} />
               {isDirty ? "保存草稿" : "已保存"}
-            </button>
+            </Button>
           )}
           <EditorMoreActionMenu
             exportOptions={exportOptions}

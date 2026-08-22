@@ -1,6 +1,7 @@
 import { History, RotateCcw, Trash2, X } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
 import { buildMarkdownDiff } from "../diff/markdownDiff";
+import { Button } from "../shared/Button";
 import { ConfirmDialog, type ConfirmDialogConfig } from "../shared/ConfirmDialog";
 import {
   clearDocumentHistory,
@@ -211,9 +212,9 @@ export function DocumentHistoryDialog({
               <p className="section-label">历史记录</p>
               <h2 id="history-dialog-title">{title}</h2>
             </div>
-            <button className="icon-button" type="button" title="关闭历史记录" onClick={onClose} disabled={isWorking}>
+            <Button variant="icon" title="关闭历史记录" onClick={onClose} disabled={isWorking}>
               <X size={18} />
-            </button>
+            </Button>
           </header>
 
           <div className="history-dialog-body">
@@ -287,19 +288,19 @@ export function DocumentHistoryDialog({
           </div>
 
           <footer className="history-dialog-actions">
-            <button className="ghost-button" type="button" onClick={requestClear} disabled={isActionDisabled || !entries.length}>
+            <Button variant="ghost" onClick={requestClear} disabled={isActionDisabled || !entries.length}>
               <Trash2 size={15} />
               清空当前文件历史
-            </button>
-            <button
-              className="primary-button compact"
-              type="button"
+            </Button>
+            <Button
+              variant="primary"
+              size="compact"
               onClick={requestRestore}
               disabled={isActionDisabled || isDirty || !selectedDetail}
             >
               <RotateCcw size={15} />
               恢复此版本
-            </button>
+            </Button>
           </footer>
         </section>
       </div>

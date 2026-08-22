@@ -1,5 +1,6 @@
 import { Check, ChevronDown, ChevronRight, MessageSquarePlus, SendHorizontal, X } from "lucide-react";
 import { useMemo, useState } from "react";
+import { Button } from "../shared/Button";
 import { OverflowTooltipText } from "../shared/OverflowTooltipText";
 import type { ProposedChange, ReviewComment } from "../shared/types";
 import { buildMarkdownDiff } from "./markdownDiff";
@@ -93,14 +94,14 @@ export function DiffPanel({
           <OverflowTooltipText text={change.targetPath} logArea="diff_target_path" />
         </div>
         <div className="diff-actions">
-          <button className="ghost-button danger-action" type="button" onClick={onReject} disabled={isBusy}>
+          <Button variant="ghost" tone="danger" onClick={onReject} disabled={isBusy}>
             <X size={16} />
             拒绝写入
-          </button>
-          <button className="primary-button compact" type="button" onClick={onAccept} disabled={isBusy}>
+          </Button>
+          <Button variant="primary" size="compact" onClick={onAccept} disabled={isBusy}>
             <Check size={16} />
             确认写入
-          </button>
+          </Button>
         </div>
       </div>
 
@@ -151,10 +152,10 @@ export function DiffPanel({
               placeholder="写下给 Agent 的具体修改意见"
               disabled={!selectedLine || isBusy}
             />
-            <button className="ghost-button compact" type="button" onClick={handleAddComment} disabled={!selectedLine || !commentBody.trim() || isBusy}>
+            <Button variant="ghost" size="compact" onClick={handleAddComment} disabled={!selectedLine || !commentBody.trim() || isBusy}>
               <MessageSquarePlus size={15} />
               添加评论
-            </button>
+            </Button>
           </div>
 
           <div className="review-comment-list">
@@ -174,10 +175,10 @@ export function DiffPanel({
             )}
           </div>
 
-          <button className="primary-button compact" type="button" onClick={onSubmitComments} disabled={!draftCommentCount || isBusy}>
+          <Button variant="primary" size="compact" onClick={onSubmitComments} disabled={!draftCommentCount || isBusy}>
             <SendHorizontal size={15} />
             发送给 Agent 处理
-          </button>
+          </Button>
         </aside>
       </div>
     </aside>

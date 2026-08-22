@@ -1,4 +1,5 @@
 import { Database, Settings } from "lucide-react";
+import { Button } from "../shared/Button";
 import { OverflowTooltipText } from "../shared/OverflowTooltipText";
 import type { KnowledgeBase } from "../shared/types";
 
@@ -55,9 +56,9 @@ export function TopBar({
             Agent
           </button>
         )}
-        <button className="icon-button" type="button" title="打开设置" onClick={onOpenSettings}>
+        <Button variant="icon" title="打开设置" onClick={onOpenSettings}>
           <Settings size={18} />
-        </button>
+        </Button>
       </div>
     </header>
   );

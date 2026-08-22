@@ -7,7 +7,10 @@ import { EditorPane } from "../editor/EditorPane";
 import { buildFileTree } from "../knowledge-base/treeUtils";
 import { KnowledgeBaseSidebar } from "../knowledge-base/KnowledgeBaseSidebar";
 import { SettingsDrawer } from "../settings/SettingsDrawer";
+import { BootCopy, BootErrorMessage, BootScreen, BootTitle } from "../shared/BootScreen";
+import { Button } from "../shared/Button";
 import { ConfirmDialog, type ConfirmDialogConfig } from "../shared/ConfirmDialog";
+import { ModalBackdrop, ModalForm } from "../shared/Modal";
 import { buildMarkdownDiff } from "../diff/markdownDiff";
 import { createContentHash, createLocalId, formatLocalDateTime } from "../shared/id";
 import { logError, logInfo, logWarn } from "../shared/logger";
@@ -569,12 +572,12 @@ export function WorkspaceShell() {
 
   if (isBooting) {
     return (
-      <main className="loading-shell">
+      <BootScreen>
         <div className="brand-mark">
           <img className="brand-logo" src="/orange-logo.svg" alt="" />
         </div>
         <p>正在加载本地知识库工作台...</p>
-      </main>
+      </BootScreen>
     );
   }
 
@@ -582,16 +585,16 @@ export function WorkspaceShell() {
     const errorMessage = bootError || "工作台初始化未完成，请重试。";
 
     return (
-      <main className="loading-shell boot-error-shell">
+      <BootScreen variant="error">
         <div className="brand-mark">
           <img className="brand-logo" src="/orange-logo.svg" alt="" />
         </div>
         <p>本地知识库工作台加载失败</p>
-        <p className="boot-error-message">{errorMessage}</p>
-        <button className="primary-button compact" type="button" onClick={() => void loadInitialData()}>
+        <BootErrorMessage>{errorMessage}</BootErrorMessage>
+        <Button variant="primary" size="compact" onClick={() => void loadInitialData()}>
           重试
-        </button>
-      </main>
+        </Button>
+      </BootScreen>
     );
   }
 
@@ -600,21 +603,21 @@ export function WorkspaceShell() {
 
   if (!currentSnapshot.knowledgeBases.length) {
     return (
-      <main className="empty-shell">
+      <BootScreen variant="empty">
         <div className="brand-mark">
           <img className="brand-logo" src="/orange-logo.svg" alt="" />
         </div>
-        <h1>连接一个支持文档目录，开始使用知识库 Agent 助手。</h1>
-        <p>目录树会展示 Markdown、TXT、DOCX、PDF 和图片；Agent 写入仍只作用于确认后的 Markdown diff。</p>
+        <BootTitle>连接一个支持文档目录，开始使用知识库 Agent 助手。</BootTitle>
+        <BootCopy>目录树会展示 Markdown、TXT、DOCX、PDF 和图片；Agent 写入仍只作用于确认后的 Markdown diff。</BootCopy>
         {(busyLabel || notice) && (
           <p className={`operation-notice ${notice.includes("失败") || notice.includes("阻止") ? "error" : ""}`}>
             {busyLabel || notice}
           </p>
         )}
-        <button className="primary-button" type="button" onClick={handleAddKnowledgeBase} disabled={isBusy}>
+        <Button variant="primary" onClick={handleAddKnowledgeBase} disabled={isBusy}>
           添加第一个知识库
-        </button>
-      </main>
+        </Button>
+      </BootScreen>
     );
   }
 
@@ -2690,21 +2693,17 @@ export function WorkspaceShell() {
         />
       )}
       {renameDialog && (
-        <div className="modal-backdrop" role="presentation" onMouseDown={() => setRenameDialog(null)}>
-          <form
-            className="rename-dialog"
+        <ModalBackdrop onClose={() => setRenameDialog(null)}>
+          <ModalForm
             aria-label={renameDialog.kind === "note" ? "重命名 Markdown 文件" : "重命名 TXT 文件"}
-            onMouseDown={(event) => event.stopPropagation()}
             onSubmit={(event) => {
               event.preventDefault();
               handleSubmitRename();
             }}
           >
-            <div className="modal-header">
-              <div>
-                <p className="section-label">{renameDialog.kind === "note" ? "Markdown 文件" : "TXT 文件"}</p>
-                <h2>重命名</h2>
-              </div>
+            <div>
+              <p className="section-label">{renameDialog.kind === "note" ? "Markdown 文件" : "TXT 文件"}</p>
+              <h2 className="mt-1 mb-0 text-lg leading-tight text-ink-strong [overflow-wrap:anywhere]">重命名</h2>
             </div>
             <label className="rename-field">
               <span>文件名</span>
@@ -2715,33 +2714,31 @@ export function WorkspaceShell() {
                 placeholder="例如：会议记录.md"
               />
             </label>
-            <div className="modal-actions">
-              <button className="ghost-button" type="button" onClick={() => setRenameDialog(null)} disabled={isBusy}>
+            <div className="flex min-w-0 flex-wrap justify-end gap-2">
+              <Button variant="ghost" onClick={() => setRenameDialog(null)} disabled={isBusy}>
                 取消
-              </button>
-              <button className="primary-button compact" type="submit" disabled={isBusy || !renameDialog.fileName.trim()}>
+              </Button>
+              <Button variant="primary" size="compact" type="submit" disabled={isBusy || !renameDialog.fileName.trim()}>
                 保存文件名
-              </button>
+              </Button>
             </div>
-          </form>
-        </div>
+          </ModalForm>
+        </ModalBackdrop>
       )}
       {createDialog && (
-        <div className="modal-backdrop" role="presentation" onMouseDown={() => setCreateDialog(null)}>
-          <form
-            className="rename-dialog"
+        <ModalBackdrop onClose={() => setCreateDialog(null)}>
+          <ModalForm
             aria-label={getCreateDialogAriaLabel(createDialog.kind)}
-            onMouseDown={(event) => event.stopPropagation()}
             onSubmit={(event) => {
               event.preventDefault();
               handleSubmitCreate();
             }}
           >
-            <div className="modal-header">
-              <div>
-                <p className="section-label">{getCreateParentLabel(createDialog.parentPath)}</p>
-                <h2>{getCreateDialogTitle(createDialog.kind)}</h2>
-              </div>
+            <div>
+              <p className="section-label">{getCreateParentLabel(createDialog.parentPath)}</p>
+              <h2 className="mt-1 mb-0 text-lg leading-tight text-ink-strong [overflow-wrap:anywhere]">
+                {getCreateDialogTitle(createDialog.kind)}
+              </h2>
             </div>
             <label className="rename-field">
               <span>{createDialog.kind === "folder" ? "目录名" : "文件名"}</span>
@@ -2752,16 +2749,16 @@ export function WorkspaceShell() {
                 placeholder={getCreatePlaceholder(createDialog.kind)}
               />
             </label>
-            <div className="modal-actions">
-              <button className="ghost-button" type="button" onClick={() => setCreateDialog(null)} disabled={isBusy}>
+            <div className="flex min-w-0 flex-wrap justify-end gap-2">
+              <Button variant="ghost" onClick={() => setCreateDialog(null)} disabled={isBusy}>
                 取消
-              </button>
-              <button className="primary-button compact" type="submit" disabled={isBusy || !createDialog.name.trim()}>
+              </Button>
+              <Button variant="primary" size="compact" type="submit" disabled={isBusy || !createDialog.name.trim()}>
                 {getCreateSubmitLabel(createDialog.kind)}
-              </button>
+              </Button>
             </div>
-          </form>
-        </div>
+          </ModalForm>
+        </ModalBackdrop>
       )}
       {pendingConfirmation && (
         <ConfirmDialog

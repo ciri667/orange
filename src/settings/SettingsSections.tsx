@@ -12,6 +12,7 @@ import {
   Trash2,
 } from "lucide-react";
 import { useEffect, useState } from "react";
+import { Button } from "../shared/Button";
 import { ConfirmDialog } from "../shared/ConfirmDialog";
 import { OverflowTooltipText } from "../shared/OverflowTooltipText";
 import type {
@@ -58,10 +59,10 @@ export function KnowledgeSettingsSection({
           <h3 id="knowledge-settings-title">知识库管理</h3>
           <p>管理已授权目录、激活知识库和本地索引刷新。</p>
         </div>
-        <button className="ghost-button" type="button" onClick={onAddKnowledgeBase}>
+        <Button variant="ghost" onClick={onAddKnowledgeBase}>
           <Plus size={15} />
           添加知识库
-        </button>
+        </Button>
       </div>
       <div className="settings-kb-list">
         {knowledgeBases.length ? (
@@ -78,22 +79,23 @@ export function KnowledgeSettingsSection({
                 <ScanReportDetails knowledgeBase={knowledgeBase} />
               </div>
               <div className="setting-actions">
-                <button type="button" onClick={() => onSelectKnowledgeBase(knowledgeBase.id)} disabled={isBusy}>
+                <Button variant="ghost" size="compact" onClick={() => onSelectKnowledgeBase(knowledgeBase.id)} disabled={isBusy}>
                   激活
-                </button>
-                <button type="button" onClick={() => onRescanKnowledgeBase(knowledgeBase.id)} disabled={isBusy}>
+                </Button>
+                <Button variant="ghost" size="compact" onClick={() => onRescanKnowledgeBase(knowledgeBase.id)} disabled={isBusy}>
                   <RotateCw size={13} />
                   重新扫描
-                </button>
-                <button
-                  className="danger-action"
-                  type="button"
+                </Button>
+                <Button
+                  variant="ghost"
+                  size="compact"
+                  tone="danger"
                   onClick={() => onRemoveKnowledgeBase(knowledgeBase.id)}
                   disabled={isBusy}
                 >
                   <Trash2 size={13} />
                   移除授权
-                </button>
+                </Button>
               </div>
             </article>
           ))
@@ -157,10 +159,10 @@ export function ModelSettingsSection({
           <h3 id="model-settings-title">模型与隐私</h3>
           <p>多服务商管理（兼容 OpenAI 协议），支持指定默认服务商。</p>
         </div>
-        <button className="primary-button compact" type="button" onClick={onSaveSettings} disabled={isBusy}>
+        <Button variant="primary" size="compact" onClick={onSaveSettings} disabled={isBusy}>
           <Save size={14} />
           保存设置
-        </button>
+        </Button>
       </div>
       <div className="settings-grid">
         <label className="toggle-row">
@@ -194,15 +196,15 @@ export function ModelSettingsSection({
             ))}
           </select>
         </span>
-        <button
-          className="ghost-button"
-          type="button"
+        <Button
+          variant="ghost"
+          className="min-h-[var(--control-height)]"
           onClick={() => onAddProviderFromTemplate(selectedTemplateId)}
           disabled={!selectedTemplateId}
         >
           <Plus size={14} />
           新增 Provider
-        </button>
+        </Button>
       </div>
 
       <div className="provider-list">
@@ -249,9 +251,9 @@ export function ModelSettingsSection({
                         默认
                       </span>
                     ) : (
-                      <button className="ghost-button compact" type="button" onClick={() => onSetDefaultProvider(provider.id)}>
+                      <Button variant="ghost" size="compact" onClick={() => onSetDefaultProvider(provider.id)}>
                         设为默认
-                      </button>
+                      </Button>
                     )}
                     <label className="toggle-row compact">
                       <input
@@ -264,24 +266,24 @@ export function ModelSettingsSection({
                       <span className="control-checkbox" aria-hidden="true" />
                       <span>启用</span>
                     </label>
-                    <button
-                      className="icon-button danger"
-                      type="button"
+                    <Button
+                      variant="icon"
+                      tone="danger"
                       title={isDefault ? "默认 Provider 不能直接删除，请先设为默认后再移除" : "移除 Provider"}
                       onClick={() => onRequestRemoveProvider(provider.id)}
                       disabled={isDefault || providers.length <= 1}
                     >
                       <Trash2 size={14} />
-                    </button>
-                    <button
-                      className="ghost-button compact"
-                      type="button"
+                    </Button>
+                    <Button
+                      variant="ghost"
+                      size="compact"
                       onClick={() => onRefreshProviderModels(provider.id)}
                       disabled={isBusy || !provider.apiBase.trim()}
                     >
                       <RotateCw size={13} />
                       获取模型
-                    </button>
+                    </Button>
                   </div>
                 </div>
                 <div className="provider-card-grid">
@@ -346,10 +348,10 @@ export function ModelSettingsSection({
                           placeholder="sk-..."
                           type="password"
                         />
-                        <button type="button" onClick={() => onSaveApiKey(provider.id)} disabled={isBusy || !apiKeyDraft.trim()}>
+                        <Button variant="ghost" size="compact" onClick={() => onSaveApiKey(provider.id)} disabled={isBusy || !apiKeyDraft.trim()}>
                           <KeyRound size={13} />
                           保存密钥
-                        </button>
+                        </Button>
                       </div>
                       <div className={`key-status ${keyStatus?.configured ? "verified" : "missing"}`}>
                         <KeyRound size={13} />
@@ -448,14 +450,14 @@ export function SkillsSettingsSection({
           <p>管理 Agent 可用能力和未显式选择时的匹配方式。</p>
         </div>
         <div className="settings-title-actions">
-          <button className="ghost-button" type="button" onClick={onOpenSkillsModal}>
+          <Button variant="ghost" onClick={onOpenSkillsModal}>
             <Sparkles size={14} />
             管理 Skills
-          </button>
-          <button className="primary-button compact" type="button" onClick={onSaveSettings} disabled={isBusy}>
+          </Button>
+          <Button variant="primary" size="compact" onClick={onSaveSettings} disabled={isBusy}>
             <Save size={14} />
             保存设置
-          </button>
+          </Button>
         </div>
       </div>
       <div className="skills-summary">
@@ -517,10 +519,10 @@ export function AgentSecuritySettingsSection({
           <h3 id="agent-security-settings-title">Agent 权限</h3>
           <p>三级权限决定你愿意把多少执行权交给 Agent，好让模型把能力用出来。Skill 只是更高权限下可发挥的能力之一。权限在 Agent 协作区按会话切换。</p>
         </div>
-        <button className="primary-button compact" type="button" onClick={onSaveSettings} disabled={isBusy}>
+        <Button variant="primary" size="compact" onClick={onSaveSettings} disabled={isBusy}>
           <Save size={14} />
           保存设置
-        </button>
+        </Button>
       </div>
 
       <div className="security-level-guide" aria-label="三级权限说明">
@@ -608,23 +610,23 @@ export function ImSettingsSection({
           <p>连接已注册的即时通讯 provider，允许白名单用户通过文本消息调用 Agent。</p>
         </div>
         <div className="settings-title-actions">
-          <button className="ghost-button" type="button" onClick={onRefreshFeishuStatus} disabled={isBusy}>
+          <Button variant="ghost" onClick={onRefreshFeishuStatus} disabled={isBusy}>
             <RotateCw size={14} />
             刷新
-          </button>
+          </Button>
           {feishuGatewayStatus?.running ? (
-            <button className="ghost-button danger-action" type="button" onClick={onStopFeishuGateway} disabled={isBusy}>
+            <Button variant="ghost" tone="danger" onClick={onStopFeishuGateway} disabled={isBusy}>
               停止
-            </button>
+            </Button>
           ) : (
-            <button className="primary-button compact" type="button" onClick={onStartFeishuGateway} disabled={isBusy}>
+            <Button variant="primary" size="compact" onClick={onStartFeishuGateway} disabled={isBusy}>
               启动
-            </button>
+            </Button>
           )}
-          <button className="primary-button compact" type="button" onClick={onSaveImSettings} disabled={isBusy}>
+          <Button variant="primary" size="compact" onClick={onSaveImSettings} disabled={isBusy}>
             <Save size={14} />
             保存设置
-          </button>
+          </Button>
         </div>
       </div>
 
@@ -661,10 +663,10 @@ export function ImSettingsSection({
               onChange={(event) => onFeishuSecretDraftChange(event.target.value)}
               placeholder={feishuCredentialStatus?.configured ? "已保存，输入新值可替换" : "输入飞书 appSecret"}
             />
-            <button className="ghost-button" type="button" onClick={onSaveFeishuSecret} disabled={isBusy || !feishuSecretDraft.trim()}>
+            <Button variant="ghost" onClick={onSaveFeishuSecret} disabled={isBusy || !feishuSecretDraft.trim()}>
               <KeyRound size={14} />
               保存密钥
-            </button>
+            </Button>
           </div>
           <em>{feishuCredentialStatus?.message ?? "尚未读取凭证状态。"}</em>
         </label>
@@ -740,9 +742,9 @@ export function ImSettingsSection({
                   <strong>用户候选 {index + 1}</strong>
                   <OverflowTooltipText text={formatIdentifierPreview(openId)} logArea="settings_im_discovered_user" />
                 </span>
-                <button className="ghost-button compact" type="button" onClick={() => onAllowDiscoveredFeishuUser(openId)}>
+                <Button variant="ghost" size="compact" onClick={() => onAllowDiscoveredFeishuUser(openId)}>
                   允许用户
-                </button>
+                </Button>
               </div>
             ))}
             {feishu.discoveredChatIds.map((chatId, index) => (
@@ -751,9 +753,9 @@ export function ImSettingsSection({
                   <strong>群候选 {index + 1}</strong>
                   <OverflowTooltipText text={formatIdentifierPreview(chatId)} logArea="settings_im_discovered_chat" />
                 </span>
-                <button className="ghost-button compact" type="button" onClick={() => onAllowDiscoveredFeishuChat(chatId)}>
+                <Button variant="ghost" size="compact" onClick={() => onAllowDiscoveredFeishuChat(chatId)}>
                   允许群聊
-                </button>
+                </Button>
               </div>
             ))}
           </div>
@@ -829,18 +831,18 @@ export function EventLogsSettingsSection({
           <p>查看应用事件日志，按级别和分类筛选。</p>
         </div>
         <div className="settings-title-actions">
-          <button className="ghost-button" type="button" onClick={onOpenAppLogFolder} disabled={isBusy}>
+          <Button variant="ghost" onClick={onOpenAppLogFolder} disabled={isBusy}>
             <FolderOpen size={14} />
             文件日志
-          </button>
-          <button className="ghost-button" type="button" onClick={onRefreshAppEventLogs} disabled={isBusy}>
+          </Button>
+          <Button variant="ghost" onClick={onRefreshAppEventLogs} disabled={isBusy}>
             <RotateCw size={14} />
             刷新
-          </button>
-          <button className="ghost-button danger-action" type="button" onClick={onClearAppEventLogs} disabled={isBusy}>
+          </Button>
+          <Button variant="ghost" tone="danger" onClick={onClearAppEventLogs} disabled={isBusy}>
             <Trash2 size={14} />
             清空
-          </button>
+          </Button>
         </div>
       </div>
       <div className="event-log-filters">
@@ -901,10 +903,10 @@ export function AuditLogsSettingsSection({
           <h3 id="audit-settings-title">请求审计</h3>
           <p>查看最近模型请求、本地规则回退和工具边界摘要。</p>
         </div>
-        <button className="ghost-button" type="button" onClick={onRefreshAuditLogs} disabled={isBusy}>
+        <Button variant="ghost" onClick={onRefreshAuditLogs} disabled={isBusy}>
           <RotateCw size={14} />
           刷新
-        </button>
+        </Button>
       </div>
       <div className="audit-list">
         {auditLogs.length ? auditLogs.map((log) => <AuditLogCard key={log.id} log={log} />) : <p className="settings-empty">暂无审计记录。</p>}
@@ -1228,24 +1230,25 @@ export function AgentMemorySettingsSection({
           <p>管理每个知识库的跨会话长期偏好，默认关闭，开启后注入 Agent 上下文。</p>
         </div>
         <div className="settings-title-actions agent-memory-title-actions">
-          <button
-            className="primary-button compact"
-            type="button"
+          <Button
+            variant="primary"
+            size="compact"
             onClick={handleSave}
             disabled={isBusy || !activeKnowledgeBaseId}
           >
             <Save size={14} />
             保存记忆
-          </button>
-          <button
-            className="text-button danger agent-memory-delete-button"
-            type="button"
+          </Button>
+          <Button
+            variant="text"
+            tone="danger"
+            className="agent-memory-delete-button"
             onClick={handleRequestDelete}
             disabled={isBusy || !activeKnowledgeBaseId || !hasPersistedMemory}
           >
             <Trash2 size={14} />
             删除记忆
-          </button>
+          </Button>
         </div>
       </div>
       <p className="agent-memory-hint">
@@ -1327,16 +1330,17 @@ export function AgentMemorySettingsSection({
                           </span>
                         </label>
                         <span className="agent-memory-source">{entry.source === "auto" ? "自动生成" : "用户录入"}</span>
-                        <button
-                          className="icon-button danger agent-memory-entry-delete"
-                          type="button"
+                        <Button
+                          variant="icon"
+                          tone="danger"
+                          className="agent-memory-entry-delete"
                           onClick={() => handleRemoveEntry(entry.id)}
                           disabled={isBusy}
                           title="删除条目"
                           aria-label="删除记忆条目"
                         >
                           <Trash2 size={14} />
-                        </button>
+                        </Button>
                       </div>
                       <textarea
                         className="agent-memory-textarea"
@@ -1350,10 +1354,10 @@ export function AgentMemorySettingsSection({
                   ))
                 )}
                 <div className="agent-memory-entry-actions">
-                  <button className="ghost-button compact" type="button" onClick={handleAddEntry} disabled={isBusy}>
+                  <Button variant="ghost" size="compact" onClick={handleAddEntry} disabled={isBusy}>
                     <Plus size={14} />
                     新增条目
-                  </button>
+                  </Button>
                 </div>
               </div>
             </article>

@@ -11,6 +11,7 @@ import {
 } from "lucide-react";
 import type { LucideIcon } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
+import { Button } from "../shared/Button";
 import { ConfirmDialog } from "../shared/ConfirmDialog";
 import { createLocalId, formatLocalDateTime } from "../shared/id";
 import { logDebug, logError, logInfo } from "../shared/logger";
@@ -1043,9 +1044,9 @@ export function SettingsDrawer({
             <p className="section-label">Settings</p>
             <h2>设置工作台</h2>
           </div>
-          <button className="icon-button" type="button" title="关闭设置" onClick={onClose}>
+          <Button variant="icon" title="关闭设置" onClick={onClose}>
             <X size={18} />
-          </button>
+          </Button>
         </header>
 
         <div className="settings-workbench">

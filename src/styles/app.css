@@ -1,3 +1,7 @@
+/**
+ * 既有语义化组件样式。设计 token 仍以本文件 :root 为准。
+ * 新 UI 与正在改动的界面优先用 src/styles/tailwind.css 中的工具类。
+ */
 :root {
   color: #172026;
   background: #f5f2ec;
@@ -103,57 +107,6 @@ textarea:disabled {
   to {
     transform: rotate(360deg);
   }
-}
-
-.loading-shell,
-.empty-shell {
-  display: grid;
-  width: 100%;
-  height: 100%;
-  place-items: center;
-  gap: 16px;
-  background: #eef1f4;
-  color: var(--text-muted);
-}
-
-.empty-shell {
-  align-content: center;
-  padding: 48px;
-  text-align: center;
-}
-
-.boot-error-shell {
-  align-content: center;
-  padding: 48px;
-  text-align: center;
-}
-
-.boot-error-message {
-  max-width: 680px;
-  margin: 0;
-  border: 1px solid #f2b8a8;
-  border-radius: 7px;
-  padding: 10px 12px;
-  background: var(--danger-soft);
-  color: var(--danger);
-  font-size: 13px;
-  line-height: 1.55;
-  overflow-wrap: anywhere;
-}
-
-.empty-shell h1 {
-  max-width: 680px;
-  margin: 10px 0 0;
-  color: #111b21;
-  font-size: 34px;
-  line-height: 1.18;
-}
-
-.empty-shell p {
-  max-width: 620px;
-  margin: 0;
-  font-size: 15px;
-  line-height: 1.7;
 }
 
 .operation-notice {
@@ -724,55 +677,6 @@ textarea:disabled {
   flex-wrap: wrap;
 }
 
-.primary-button,
-.ghost-button,
-.text-button,
-.icon-button {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  gap: 8px;
-  border: 1px solid transparent;
-  border-radius: 7px;
-  transition:
-    background 160ms ease,
-    border-color 160ms ease,
-    color 160ms ease;
-}
-
-.primary-button {
-  min-height: 40px;
-  padding: 0 14px;
-  color: #ffffff;
-  background: var(--accent);
-}
-
-.primary-button.compact {
-  min-height: 34px;
-}
-
-.ghost-button,
-.text-button,
-.icon-button {
-  min-height: 34px;
-  border-color: var(--border);
-  background: #ffffff;
-  color: #24323c;
-}
-
-.icon-button {
-  width: 34px;
-  padding: 0;
-}
-
-.icon-button.danger {
-  color: var(--danger);
-}
-
-.text-button.danger {
-  color: var(--danger);
-}
-
 .view-mode-toggle {
   display: inline-flex;
   align-items: center;
@@ -1174,72 +1078,6 @@ textarea:disabled {
   background: rgba(17, 27, 33, 0.28);
 }
 
-.rename-dialog {
-  display: grid;
-  width: min(420px, calc(100vw - 40px));
-  gap: 14px;
-  border: 1px solid var(--border);
-  border-radius: 8px;
-  padding: 16px;
-  background: var(--surface);
-  box-shadow: var(--shadow);
-}
-
-.confirm-backdrop {
-  z-index: 40;
-}
-
-.confirm-dialog {
-  display: grid;
-  width: min(430px, calc(100vw - 40px));
-  gap: 14px;
-  border: 1px solid var(--border);
-  border-radius: 8px;
-  padding: 16px;
-  background: var(--surface);
-  box-shadow: var(--shadow);
-}
-
-.confirm-dialog.danger {
-  border-color: #f2b8a8;
-}
-
-.confirm-dialog-heading {
-  display: flex;
-  align-items: flex-start;
-  gap: 12px;
-}
-
-.confirm-dialog-icon {
-  display: inline-flex;
-  width: 34px;
-  height: 34px;
-  flex: 0 0 auto;
-  align-items: center;
-  justify-content: center;
-  border-radius: 8px;
-  background: var(--danger-soft);
-  color: var(--danger);
-}
-
-.confirm-dialog-heading h2 {
-  margin: 4px 0 0;
-  color: #111b21;
-  font-size: 18px;
-  line-height: 1.25;
-}
-
-.confirm-dialog-message {
-  margin: 0;
-  color: #344550;
-  font-size: 14px;
-  line-height: 1.55;
-}
-
-.confirm-dialog-confirm.danger {
-  background: var(--danger);
-}
-
 .history-backdrop {
   z-index: 30;
 }
@@ -1391,13 +1229,6 @@ textarea:disabled {
 
 .history-dialog-actions {
   border-top: 1px solid var(--border);
-}
-
-.history-dialog-actions .ghost-button,
-.history-dialog-actions .primary-button {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
 }
 
 .modal-header h2 {
@@ -3516,18 +3347,6 @@ button.diff-line:not(:disabled):hover,
   white-space: nowrap;
 }
 
-.setting-actions button {
-  border: 1px solid var(--border);
-  border-radius: 7px;
-  padding: 7px 10px;
-  background: #ffffff;
-}
-
-.setting-actions .danger-action {
-  border-color: #f2b8a8;
-  color: var(--danger);
-}
-
 .scan-report {
   display: grid;
   gap: 4px;
@@ -3843,10 +3662,6 @@ button.diff-line:not(:disabled):hover,
   margin-top: 4px;
 }
 
-.provider-add-row button {
-  white-space: nowrap;
-}
-
 .provider-list {
   display: grid;
   gap: 10px;
@@ -3907,11 +3722,6 @@ button.diff-line:not(:disabled):hover,
   color: var(--accent);
 }
 
-.ghost-button.compact {
-  padding: 6px 9px;
-  font-size: 12px;
-}
-
 .toggle-row.compact {
   gap: 6px;
   font-size: 12px;
@@ -3941,14 +3751,6 @@ button.diff-line:not(:disabled):hover,
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto;
   gap: 8px;
-}
-
-.key-save-row button,
-.audit-list button {
-  border: 1px solid var(--border);
-  border-radius: 7px;
-  padding: 8px 10px;
-  background: #ffffff;
 }
 
 .key-status {
@@ -4359,10 +4161,6 @@ button.diff-line:not(:disabled):hover,
   color: var(--accent-strong);
 }
 
-.skill-new-button {
-  width: 100%;
-}
-
 .skills-list {
   display: grid;
   align-content: start;
@@ -4652,8 +4450,6 @@ select:focus-visible,
   box-shadow: none;
 }
 
-.loading-shell,
-.empty-shell,
 .app-shell {
   background:
     linear-gradient(180deg, rgba(255, 255, 255, 0.5), rgba(247, 246, 242, 0) 210px),
@@ -4897,9 +4693,6 @@ select:focus-visible,
 .add-kb-button,
 .tree-refresh-button,
 .search-box,
-.ghost-button,
-.text-button,
-.icon-button,
 .skill-select,
 .turn-model-select {
   border-color: rgba(230, 224, 214, 0.9);
@@ -4908,11 +4701,7 @@ select:focus-visible,
 }
 
 .add-kb-button,
-.tree-refresh-button,
-.text-button,
-.ghost-button,
-.icon-button,
-.primary-button {
+.tree-refresh-button {
   border-radius: var(--radius-control);
   transition:
     background var(--motion-fast),
@@ -4923,26 +4712,9 @@ select:focus-visible,
 
 .add-kb-button:hover,
 .tree-refresh-button:hover,
-.ghost-button:hover,
-.text-button:hover,
-.icon-button:hover,
-.file-action-button:hover,
-.setting-actions button:hover,
-.key-save-row button:hover,
-.audit-list button:hover {
+.file-action-button:hover {
   border-color: var(--border-strong);
   background: var(--surface-hover);
-}
-
-.primary-button {
-  border-color: transparent;
-  background: var(--accent);
-  color: #ffffff;
-  font-weight: 700;
-}
-
-.primary-button:hover:not(:disabled) {
-  background: var(--accent-strong);
 }
 
 .agent-send-button {
@@ -4963,11 +4735,6 @@ select:focus-visible,
 
 .agent-send-button:disabled {
   opacity: 0.38;
-}
-
-.icon-button {
-  width: 34px;
-  min-height: 34px;
 }
 
 .search-box {
@@ -5642,9 +5409,7 @@ button.diff-line:not(:disabled):hover,
 }
 
 .settings-drawer,
-.skills-modal,
-.rename-dialog,
-.confirm-dialog {
+.skills-modal {
   border-color: rgba(230, 224, 214, 0.9);
   border-radius: var(--radius-panel);
   background: var(--surface);
@@ -5769,20 +5534,7 @@ button.diff-line:not(:disabled):hover,
   color: var(--text);
 }
 
-.setting-actions button,
-.key-save-row button,
-.audit-list button {
-  border-color: var(--border);
-  border-radius: var(--radius-control);
-  background: #ffffff;
-  color: var(--text);
-}
-
-.danger-action,
-.icon-button.danger,
-.text-button.danger,
-.file-action-button.danger,
-.setting-actions .danger-action {
+.file-action-button.danger {
   color: var(--danger);
 }
 
@@ -5848,25 +5600,6 @@ button.diff-line:not(:disabled):hover,
   color: var(--text-muted);
 }
 
-.confirm-dialog-icon {
-  border-radius: var(--radius-control);
-  background: var(--accent-soft);
-  color: var(--accent-strong);
-}
-
-.confirm-dialog.danger .confirm-dialog-icon {
-  background: var(--danger-soft);
-  color: var(--danger);
-}
-
-.confirm-dialog-message {
-  color: var(--text);
-}
-
-.confirm-dialog-confirm.danger {
-  background: var(--danger);
-}
-
 .modal-subtitle {
   display: block;
   margin-top: 4px;
@@ -5906,8 +5639,7 @@ button.diff-line:not(:disabled):hover,
   color: var(--accent-strong);
 }
 
-.operation-notice.error,
-.boot-error-message {
+.operation-notice.error {
   border-color: rgba(180, 35, 24, 0.28);
   background: var(--danger-soft);
   color: var(--danger);
@@ -6087,9 +5819,7 @@ select::-ms-expand {
 .editor-pane,
 .agent-panel,
 .settings-drawer,
-.skills-modal,
-.rename-dialog,
-.confirm-dialog {
+.skills-modal {
   isolation: isolate;
 }
 
@@ -6139,8 +5869,17 @@ select::-ms-expand {
   z-index: var(--z-modal);
 }
 
-.confirm-backdrop {
-  z-index: var(--z-confirm);
+/** ConfirmDialog 叠在设置抽屉内时，压过 Skills 弹层且不逃出 isolation。 */
+.settings-drawer [data-confirm-overlay] {
+  z-index: 6;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+}
+
+.settings-drawer [data-confirm-dialog] {
+  position: relative;
 }
 
 .workspace-grid > .agent-panel {
@@ -6181,10 +5920,6 @@ select::-ms-expand {
   backdrop-filter: blur(10px);
 }
 
-.settings-drawer .confirm-backdrop {
-  z-index: 6;
-}
-
 .settings-drawer .skills-modal {
   position: relative;
   flex: 0 1 auto;
@@ -6198,9 +5933,7 @@ select::-ms-expand {
   box-shadow: 0 22px 56px rgba(var(--ink-rgb), 0.24);
 }
 
-.settings-drawer .confirm-dialog {
-  position: relative;
-}
+
 
 .settings-backdrop,
 .modal-backdrop {
@@ -6420,10 +6153,6 @@ select::-ms-expand {
   align-items: stretch;
 }
 
-.provider-add-row .ghost-button {
-  min-height: var(--control-height);
-}
-
 .provider-name-input {
   border-radius: var(--radius-small);
 }
@@ -6527,7 +6256,8 @@ select::-ms-expand {
 }
 
 @media (max-width: 980px) {
-  .settings-drawer .modal-backdrop {
+  .settings-drawer .modal-backdrop,
+  .settings-drawer [data-confirm-overlay] {
     padding: 12px;
   }
 
@@ -6552,10 +6282,12 @@ select::-ms-expand {
 
   .settings-drawer,
   .skills-modal,
-  .history-dialog,
-  .rename-dialog,
-  .confirm-dialog {
+  .history-dialog {
     width: min(100%, calc(100vw - 20px));
+  }
+
+  .settings-drawer [data-confirm-overlay] {
+    padding: 10px;
   }
 
   .settings-drawer {
@@ -6593,11 +6325,6 @@ select::-ms-expand {
   .history-dialog-actions {
     align-items: stretch;
     flex-direction: column-reverse;
-  }
-
-  .history-dialog-actions .ghost-button,
-  .history-dialog-actions .primary-button {
-    justify-content: center;
   }
 
   .agent-input-toolbar,
@@ -6650,8 +6377,6 @@ body,
   background: var(--app-bg);
 }
 
-.loading-shell,
-.empty-shell,
 .app-shell {
   background:
     linear-gradient(180deg, rgba(var(--surface-rgb), 0.58), rgba(var(--paper-rgb), 0) 210px),
@@ -6664,8 +6389,7 @@ body,
 }
 
 .brand-mark.small,
-.workspace-icon,
-.confirm-dialog-icon {
+.workspace-icon {
   background: var(--accent-soft);
   color: var(--accent-strong);
 }
@@ -6674,9 +6398,6 @@ body,
 .add-kb-button,
 .tree-refresh-button,
 .search-box,
-.ghost-button,
-.text-button,
-.icon-button,
 .skill-select,
 .turn-model-select,
 .selected-skill-chip,
@@ -6696,10 +6417,7 @@ body,
 .skill-source-filter button,
 .skill-tag-filter button,
 .skill-row,
-.skill-install-source-tabs button,
-.setting-actions button,
-.key-save-row button,
-.audit-list button {
+.skill-install-source-tabs button {
   border-color: var(--color-border-translucent);
   background: var(--color-surface-translucent);
 }
@@ -6708,8 +6426,6 @@ body,
 .editor-pane,
 .agent-panel,
 .settings-drawer,
-.rename-dialog,
-.confirm-dialog,
 .session-popover,
 .context-popover,
 .scope-popover {
@@ -6863,7 +6579,6 @@ button.diff-line:not(:disabled):hover,
 }
 
 .operation-notice.error,
-.boot-error-message,
 .event-log-card.error,
 .kb-row.error,
 .session-write-status.pending,

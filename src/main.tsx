@@ -1,6 +1,7 @@
 import { Component, StrictMode, type ErrorInfo, type ReactNode } from "react";
 import { createRoot } from "react-dom/client";
 import App from "./App";
+import { BootErrorMessage, BootScreen } from "./shared/BootScreen";
 import { logError } from "./shared/logger";
 import "./styles/tailwind.css";
 import "./styles/app.css";
@@ -28,10 +29,10 @@ class RootErrorBoundary extends Component<{ children: ReactNode }, { hasError: b
   render() {
     if (this.state.hasError) {
       return (
-        <main className="loading-shell boot-error-shell">
+        <BootScreen variant="error">
           <p>界面渲染失败</p>
-          <p className="boot-error-message">请重启橘记后重试。</p>
-        </main>
+          <BootErrorMessage>请重启橘记后重试。</BootErrorMessage>
+        </BootScreen>
       );
     }
 

@@ -1,5 +1,6 @@
 import { ChevronDown, FileDown, FilePenLine, History, MoreHorizontal, Trash2 } from "lucide-react";
 import { useState, type ReactNode } from "react";
+import { Button } from "../shared/Button";
 import { logDebug } from "../shared/logger";
 import { OverflowTooltipText } from "../shared/OverflowTooltipText";
 import { useDismissable } from "../shared/useDismissable";
@@ -127,9 +128,8 @@ export function EditorMoreActionMenu({
 
   return (
     <div className="more-menu-wrapper" ref={moreMenuRef}>
-      <button
-        className="icon-button"
-        type="button"
+      <Button
+        variant="icon"
         title="更多文件操作"
         aria-haspopup="menu"
         aria-expanded={isMoreMenuOpen}
@@ -137,7 +137,7 @@ export function EditorMoreActionMenu({
         disabled={isBusy}
       >
         <MoreHorizontal size={18} />
-      </button>
+      </Button>
       {isMoreMenuOpen && (
         <div className="more-action-menu" role="menu">
           <button

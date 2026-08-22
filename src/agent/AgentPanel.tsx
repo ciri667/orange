@@ -1,5 +1,6 @@
 import { History, Book, PanelRightClose, Play, Plus, ShieldAlert, X } from "lucide-react";
 import { useRef } from "react";
+import { Button } from "../shared/Button";
 import { OverflowTooltipText } from "../shared/OverflowTooltipText";
 import { getImSessionSourceLabel } from "../shared/selectors";
 import { useDismissable } from "../shared/useDismissable";
@@ -135,18 +136,18 @@ export function AgentPanel({
           </div>
         </div>
         <div className="agent-header-actions">
-          <button className="icon-button" type="button" title="收起 Agent 协作区" onClick={onCollapsePanel}>
+          <Button variant="icon" title="收起 Agent 协作区" onClick={onCollapsePanel}>
             <PanelRightClose size={17} />
-          </button>
-          <button className="icon-button" type="button" title="查看上下文" onClick={onToggleSessionContext}>
+          </Button>
+          <Button variant="icon" title="查看上下文" onClick={onToggleSessionContext}>
             <Book size={17} />
-          </button>
-          <button className="icon-button" type="button" title="会话历史" onClick={onToggleSessionList}>
+          </Button>
+          <Button variant="icon" title="会话历史" onClick={onToggleSessionList}>
             <History size={17} />
-          </button>
-          <button className="icon-button" type="button" title="新建会话" onClick={onCreateSession}>
+          </Button>
+          <Button variant="icon" title="新建会话" onClick={onCreateSession}>
             <Plus size={17} />
-          </button>
+          </Button>
         </div>
       </header>
 
@@ -212,8 +213,14 @@ export function AgentPanel({
             <div><dt>凭证</dt><dd>{activeSession.pendingExecution.credentialAliases.length ? "已声明" : "不注入"}</dd></div>
           </dl>
           <div className="agent-execution-actions">
-            <button type="button" onClick={onRejectExecution} disabled={isBusy}><X size={14} />拒绝</button>
-            <button className="primary-button compact" type="button" onClick={onApproveExecution} disabled={isBusy}><Play size={14} />在隔离区运行</button>
+            <Button variant="ghost" size="compact" tone="danger" onClick={onRejectExecution} disabled={isBusy}>
+              <X size={14} />
+              拒绝
+            </Button>
+            <Button variant="primary" size="compact" onClick={onApproveExecution} disabled={isBusy}>
+              <Play size={14} />
+              在隔离区运行
+            </Button>
           </div>
         </section>
       )}
@@ -242,8 +249,14 @@ export function AgentPanel({
           </ul>
           {activeSession.pendingChangeSet.operations.length > 8 && <p>另有 {activeSession.pendingChangeSet.operations.length - 8} 项。</p>}
           <div className="agent-execution-actions">
-            <button type="button" onClick={onRejectChangeSet} disabled={isBusy}><X size={14} />全部拒绝</button>
-            <button className="primary-button compact" type="button" onClick={onApplyChangeSet} disabled={isBusy}><Play size={14} />应用已选变更</button>
+            <Button variant="ghost" size="compact" tone="danger" onClick={onRejectChangeSet} disabled={isBusy}>
+              <X size={14} />
+              全部拒绝
+            </Button>
+            <Button variant="primary" size="compact" onClick={onApplyChangeSet} disabled={isBusy}>
+              <Play size={14} />
+              应用已选变更
+            </Button>
           </div>
         </section>
       )}

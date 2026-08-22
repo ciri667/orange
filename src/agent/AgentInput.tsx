@@ -7,6 +7,7 @@ import {
   type CompositionEventHandler,
   type KeyboardEventHandler,
 } from "react";
+import { Button } from "../shared/Button";
 import { logDebug } from "../shared/logger";
 import {
   FOLLOW_DEFAULT_MODEL_SELECTION,
@@ -697,16 +698,17 @@ export function AgentInput({
             />
           </div>
         )}
-        <button
-          className="primary-button compact agent-send-button"
-          type="button"
+        <Button
+          variant="primary"
+          size="compact"
+          className="agent-send-button"
           title="发送"
           aria-label="发送"
           onClick={onSubmitPrompt}
           disabled={isBusy || !prompt.trim()}
         >
           <ArrowRight size={16} />
-        </button>
+        </Button>
       </div>
     </footer>
   );
