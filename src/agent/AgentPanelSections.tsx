@@ -314,7 +314,7 @@ export function AgentSessionContextPopover({
           </label>
         )}
         <p className="context-note">
-          当前文件是本轮默认编辑目标；会话恢复笔记只用于恢复旧会话位置。Agent 可在已授权范围内按需检索其他文件。
+          当前文件是本轮默认编辑目标；会话恢复笔记只用于恢复旧会话位置。Agent 会按模型窗口装入尽量多的最近对话，更早内容进入工作记忆，也可按需检索会话历史和其他文件。
         </p>
       </div>
     </section>

@@ -1,6 +1,6 @@
 use crate::agent;
 use crate::agent_tools::{model_tool_call_name, parse_tool_args, AgentToolContext, ToolRegistry};
-use crate::agent_trace::AgentTurnTracer;
+use crate::agent_trace::{is_user_visible_tool, AgentTurnTracer};
 use crate::domain::{
     AgentContextSummary, AgentContextTouchedNote, AgentMemoryEntry, AgentMessage, AgentSession,
     AgentSkill, AgentToolCall, AgentTurnRequest, AgentTurnResult, Citation, KnowledgeBaseMemory,
@@ -19,11 +19,50 @@ use std::path::{Component, Path, PathBuf};
 use std::time::{Duration, Instant};
 use tauri::AppHandle;
 
-/** 模型最多读取的历史消息数量，避免长会话在 M3 首版阶段无限膨胀上下文。 */
-const MAX_MODEL_HISTORY_MESSAGES: usize = 8;
+/** 未知模型窗口时按 32k tokens 估算，避免把未上报窗口的本地模型撑爆。 */
+const DEFAULT_MODEL_CONTEXT_TOKENS: u64 = 32_000;
 
-/** 单条历史消息进入模型前的最大字符数。 */
-const MAX_HISTORY_MESSAGE_CHARS: usize = 1200;
+/** 会话历史最多占用模型窗口的比例；其余留给 system、工具 schema 和模型输出。 */
+const HISTORY_CONTEXT_WINDOW_RATIO: f64 = 0.40;
+
+/** 混合中英按 2 字符/token 估算，宁可少装也不超窗。 */
+const CHARS_PER_TOKEN_ESTIMATE: u64 = 2;
+
+/** 未知窗口时的历史层下限，保证明显宽于旧的 8 条硬切。 */
+const MIN_HISTORY_BUDGET_CHARS: usize = 16_000;
+
+/** 历史层上限，即使 200k 窗口也不把整本会话无脑塞进去。 */
+const MAX_HISTORY_BUDGET_CHARS: usize = 96_000;
+
+/** 已知小窗口时允许的历史层下限，避免 8k 模型被下限抬爆。 */
+const MIN_KNOWN_HISTORY_BUDGET_CHARS: usize = 4_000;
+
+/** 安全阀：最多回放多少条会话消息，防止超长会话线性膨胀。 */
+const MAX_MODEL_HISTORY_SESSION_MESSAGES: usize = 80;
+
+/** 最近若干条会话消息视为热窗口，保留更完整正文和工具结果。 */
+const HOT_HISTORY_SESSION_MESSAGES: usize = 16;
+
+/** 即使超预算也至少保留最近几条会话消息，避免当前轮工具协议被裁断。 */
+const MIN_RETAINED_SESSION_MESSAGES: usize = 2;
+
+/** 热窗口单条正文上限。 */
+const MAX_HOT_HISTORY_MESSAGE_CHARS: usize = 8000;
+
+/** 温窗口单条正文上限。 */
+const MAX_WARM_HISTORY_MESSAGE_CHARS: usize = 2500;
+
+/** 单条历史消息进入模型前的最大字符数；热窗口使用该上限。 */
+const MAX_HISTORY_MESSAGE_CHARS: usize = MAX_HOT_HISTORY_MESSAGE_CHARS;
+
+/** 热窗口工具结果上限。 */
+const MAX_HOT_HISTORY_TOOL_RESULT_CHARS: usize = 4000;
+
+/** 历史 tool arguments 里单个字符串字段的截断上限，避免切开整段 JSON。 */
+const MAX_HISTORY_TOOL_ARGUMENT_STRING_CHARS: usize = 360;
+
+/** 热窗口 tool arguments 字符串字段上限。 */
+const MAX_HOT_HISTORY_TOOL_ARGUMENT_STRING_CHARS: usize = 1200;
 
 /** 工作记忆渲染进 prompt 的最大字符数，避免 summary 自身吞掉上下文预算。 */
 const MAX_RENDERED_CONTEXT_SUMMARY_CHARS: usize = 6000;
@@ -44,16 +83,16 @@ const MAX_RENDERED_KB_MEMORY_CHARS: usize = 4000;
 const MAX_RENDERED_KB_MEMORY_ENTRIES_PER_KB: usize = 8;
 
 /** 手动和自动整理上下文时，最多把多少条未总结消息交给总结器。 */
-const MAX_RECENT_MESSAGES_FOR_SUMMARY: usize = 12;
+const MAX_RECENT_MESSAGES_FOR_SUMMARY: usize = 24;
 
 /** 超过该消息数后自动触发模型整理，避免长会话仅依赖短期历史。 */
-const AUTO_COMPACT_MESSAGE_COUNT_THRESHOLD: usize = 16;
+const AUTO_COMPACT_MESSAGE_COUNT_THRESHOLD: usize = 48;
 
 /** 最近未进入 summary 的消息超过该数量时自动整理。 */
-const AUTO_COMPACT_UNSUMMARIZED_MESSAGE_THRESHOLD: usize = 8;
+const AUTO_COMPACT_UNSUMMARIZED_MESSAGE_THRESHOLD: usize = 20;
 
 /** 估算 prompt 字符数超过该阈值时自动整理，避免请求上下文持续膨胀。 */
-const AUTO_COMPACT_PROMPT_CHAR_THRESHOLD: usize = 18_000;
+const AUTO_COMPACT_PROMPT_CHAR_THRESHOLD: usize = 48_000;
 
 /** 工具结果回填给模型时的最大 JSON 字符数。 */
 const MAX_TOOL_RESULT_CHARS: usize = 9000;
@@ -124,6 +163,27 @@ struct ContextSummaryAutoDecision {
     reasons: Vec<String>,
     estimated_prompt_chars: usize,
     unsummarized_message_count: usize,
+}
+
+/** 会话历史按窗口预算装箱后的统计，只用于日志和自动 compact，不进入模型正文。 */
+#[derive(Clone, Debug, Default)]
+struct PackedHistoryStats {
+    included_session_messages: usize,
+    dropped_session_messages: usize,
+    budget_chars: usize,
+    used_chars: usize,
+}
+
+/** 发给模型的完整 prompt 及其历史装箱统计。 */
+struct ModelPrompt {
+    messages: Vec<Value>,
+    history: PackedHistoryStats,
+}
+
+/** 会话历史装箱结果，包含协议消息和统计。 */
+struct PackedHistory {
+    messages: Vec<Value>,
+    stats: PackedHistoryStats,
 }
 
 /** Runtime 内部审计轨迹，用于汇总模型请求次数和实际发送的本地片段摘要。 */
@@ -835,7 +895,12 @@ async fn run_model_loop(
     // 加载当前会话 scope 内已启用的跨会话记忆，失败只写脱敏 warn，不阻塞 Agent 回合。
     let session_knowledge_base_ids = snapshot.sessions[session_index].knowledge_base_ids.clone();
     let kb_memories = load_enabled_session_kb_memories(app, &session_knowledge_base_ids);
-    let mut model_messages = build_model_messages(
+    let model_context_length = provider
+        .models
+        .iter()
+        .find(|model| model.id == selected_model_id)
+        .and_then(|model| model.context_length);
+    let model_prompt = build_model_prompt(
         &snapshot,
         session_index,
         &request,
@@ -843,7 +908,10 @@ async fn run_model_loop(
         &explicit_skills,
         &current_user_message_id,
         &kb_memories,
+        model_context_length,
     );
+    let history_pack = model_prompt.history.clone();
+    let mut model_messages = model_prompt.messages;
     let endpoint = model_provider::chat_completions_endpoint(&provider.api_base);
     let tool_registry =
         ToolRegistry::for_session(&snapshot.sessions[session_index], &agent_security);
@@ -891,6 +959,7 @@ async fn run_model_loop(
             &api_key,
             &model_messages,
             Some(&tool_schemas),
+            None,
         )
         .await?;
         let message = response
@@ -936,6 +1005,7 @@ async fn run_model_loop(
                 session_index,
                 estimate_model_messages_chars(&model_messages),
                 last_failed_tool_summary.as_deref(),
+                Some(&history_pack),
             )
             .await;
             let audit_log = build_audit_log(
@@ -1162,6 +1232,7 @@ async fn run_model_loop(
         &api_key,
         &model_messages,
         None,
+        None,
     )
     .await?;
     let final_message = response
@@ -1208,6 +1279,7 @@ async fn run_model_loop(
         session_index,
         estimate_model_messages_chars(&model_messages),
         last_failed_tool_summary.as_deref(),
+        Some(&history_pack),
     )
     .await;
     let audit_log = build_audit_log(
@@ -1536,7 +1608,8 @@ fn build_http_client() -> Result<Client, String> {
         .map_err(|error| format!("无法创建模型 HTTP client：{error}"))
 }
 
-/** 构造模型可用的 system、scope 摘要和历史消息，限制首版上下文长度。 */
+/** 构造模型可用的 system、scope 摘要和历史消息；测试默认按未知窗口装箱。 */
+#[cfg(test)]
 fn build_model_messages(
     snapshot: &WorkspaceSnapshot,
     session_index: usize,
@@ -1546,6 +1619,30 @@ fn build_model_messages(
     current_user_message_id: &str,
     knowledge_base_memories: &[KnowledgeBaseMemory],
 ) -> Vec<Value> {
+    build_model_prompt(
+        snapshot,
+        session_index,
+        request,
+        available_skills,
+        explicit_skills,
+        current_user_message_id,
+        knowledge_base_memories,
+        None,
+    )
+    .messages
+}
+
+/** 按模型窗口预算装箱会话历史，并返回可观测的装箱统计。 */
+fn build_model_prompt(
+    snapshot: &WorkspaceSnapshot,
+    session_index: usize,
+    request: &AgentTurnRequest,
+    available_skills: &[AgentSkill],
+    explicit_skills: &[AgentSkill],
+    current_user_message_id: &str,
+    knowledge_base_memories: &[KnowledgeBaseMemory],
+    model_context_length: Option<u64>,
+) -> ModelPrompt {
     let session = &snapshot.sessions[session_index];
     // Agent 的工具选择策略只作为模型指令，不再由宿主预判用户意图。
     let autonomous_tool_policy = "你需要根据用户输入和上下文自主判断是否调用工具：需要 Markdown 引用时使用 search_notes；需要当前 scope 内 Markdown/TXT 正文或写入建议时使用 read_file、get_current_file、propose_file_change；需要 DOCX/PDF 正文时，先用 list_tree 发现文件，再调用只读 read_document。DOCX/PDF 不可编辑，且不会自动进入全文搜索。TXT 必须按纯文本原样处理。无关的通用问题可以直接回答。界面 action 只是 UI 分类，不能替代你的判断。";
@@ -1638,9 +1735,16 @@ fn build_model_messages(
         }));
     }
 
+    let packed_history = session_history_model_messages(
+        session,
+        request,
+        current_user_message_id,
+        model_context_length,
+    );
+
     log::debug!(
         target: "agent_runtime",
-        "上下文注入完成：session={} summary_injected={} summary_chars={} summary_updated_at={} has_pending_change={} project_instruction_count={} kb_memory_injected={} kb_memory_chars={} kb_memory_entry_count={} kb_memory_kb_count={}",
+        "上下文注入完成：session={} summary_injected={} summary_chars={} summary_updated_at={} has_pending_change={} project_instruction_count={} kb_memory_injected={} kb_memory_chars={} kb_memory_entry_count={} kb_memory_kb_count={} history_included={} history_dropped={} history_budget_chars={} history_used_chars={} model_context_length={}",
         session.id,
         context_summary_prompt_chars > 0,
         context_summary_prompt_chars,
@@ -1650,17 +1754,104 @@ fn build_model_messages(
         knowledge_base_memory_chars > 0,
         knowledge_base_memory_chars,
         knowledge_base_memories.iter().map(|memory| memory.entries.len()).sum::<usize>(),
-        knowledge_base_memories.len()
+        knowledge_base_memories.len(),
+        packed_history.stats.included_session_messages,
+        packed_history.stats.dropped_session_messages,
+        packed_history.stats.budget_chars,
+        packed_history.stats.used_chars,
+        model_context_length.unwrap_or(0)
     );
 
-    for message in session
+    messages.extend(packed_history.messages);
+
+    ModelPrompt {
+        messages,
+        history: packed_history.stats,
+    }
+}
+
+/** 按模型窗口从新到旧装箱会话历史，热窗口保留较完整工具结果，温窗口只留摘要。 */
+fn session_history_model_messages(
+    session: &AgentSession,
+    request: &AgentTurnRequest,
+    current_user_message_id: &str,
+    model_context_length: Option<u64>,
+) -> PackedHistory {
+    let budget_chars = resolve_history_budget_chars(model_context_length);
+    let candidates = session
         .messages
         .iter()
         .rev()
-        .take(MAX_MODEL_HISTORY_MESSAGES)
-        .rev()
-    {
-        let content = if message.id == current_user_message_id && message.role == "user" {
+        .take(MAX_MODEL_HISTORY_SESSION_MESSAGES)
+        .collect::<Vec<_>>();
+    let dropped_by_cap = session.messages.len().saturating_sub(candidates.len());
+
+    let mut groups = Vec::new();
+    let mut used_chars = 0usize;
+
+    for (offset, message) in candidates.iter().enumerate() {
+        let is_hot = offset < HOT_HISTORY_SESSION_MESSAGES;
+        let group = history_messages_from_session_message(
+            message,
+            request,
+            current_user_message_id,
+            is_hot,
+        );
+        let group_chars = estimate_model_messages_chars(&group);
+        let must_keep = offset < MIN_RETAINED_SESSION_MESSAGES;
+        if !must_keep && used_chars + group_chars > budget_chars {
+            break;
+        }
+
+        used_chars = used_chars.saturating_add(group_chars);
+        groups.push(group);
+    }
+
+    let included_session_messages = groups.len();
+    let dropped_session_messages =
+        dropped_by_cap + candidates.len().saturating_sub(included_session_messages);
+    groups.reverse();
+
+    PackedHistory {
+        messages: groups.into_iter().flatten().collect(),
+        stats: PackedHistoryStats {
+            included_session_messages,
+            dropped_session_messages,
+            budget_chars,
+            used_chars,
+        },
+    }
+}
+
+/** 根据模型 context_length 计算历史层字符预算；未知窗口走保守默认值。 */
+fn resolve_history_budget_chars(model_context_length: Option<u64>) -> usize {
+    let Some(tokens) = model_context_length.filter(|tokens| *tokens >= 1_024) else {
+        let default_chars = (DEFAULT_MODEL_CONTEXT_TOKENS.saturating_mul(CHARS_PER_TOKEN_ESTIMATE)
+            as f64
+            * HISTORY_CONTEXT_WINDOW_RATIO) as usize;
+        return default_chars.clamp(MIN_HISTORY_BUDGET_CHARS, MAX_HISTORY_BUDGET_CHARS);
+    };
+
+    let chars = (tokens.saturating_mul(CHARS_PER_TOKEN_ESTIMATE) as f64
+        * HISTORY_CONTEXT_WINDOW_RATIO) as usize;
+    chars.clamp(MIN_KNOWN_HISTORY_BUDGET_CHARS, MAX_HISTORY_BUDGET_CHARS)
+}
+
+/** 单条会话消息转成模型协议消息；宿主注入的基建工具不会伪装成模型 tool_calls。 */
+fn history_messages_from_session_message(
+    message: &AgentMessage,
+    request: &AgentTurnRequest,
+    current_user_message_id: &str,
+    is_hot: bool,
+) -> Vec<Value> {
+    let max_content_chars = if is_hot {
+        MAX_HOT_HISTORY_MESSAGE_CHARS
+    } else {
+        MAX_WARM_HISTORY_MESSAGE_CHARS
+    };
+
+    if message.role == "user" {
+        let content = if message.id == current_user_message_id {
             format!(
                 "界面 action 提示：{}\n用户输入：{}",
                 request.action, message.content
@@ -1669,13 +1860,156 @@ fn build_model_messages(
             message.content.clone()
         };
 
-        messages.push(json!({
+        return vec![json!({
+            "role": "user",
+            "content": truncate_chars(&content, max_content_chars)
+        })];
+    }
+
+    let replayable_tools = message
+        .tool_calls
+        .as_deref()
+        .unwrap_or(&[])
+        .iter()
+        .filter(|tool_call| is_user_visible_tool(&tool_call.name))
+        .collect::<Vec<_>>();
+
+    if replayable_tools.is_empty() {
+        return vec![json!({
             "role": message.role,
-            "content": truncate_chars(&content, MAX_HISTORY_MESSAGE_CHARS)
+            "content": truncate_chars(&message.content, max_content_chars)
+        })];
+    }
+
+    let assistant_content = if message.content.trim().is_empty() {
+        Value::Null
+    } else {
+        Value::String(truncate_chars(&message.content, max_content_chars))
+    };
+    let tool_previews = message
+        .trace
+        .iter()
+        .filter(|step| step.step_type == "tool")
+        .map(|step| step.result_preview.as_deref())
+        .collect::<Vec<_>>();
+    let mut history = vec![json!({
+        "role": "assistant",
+        "content": assistant_content,
+        "tool_calls": replayable_tools
+            .iter()
+            .map(|tool_call| history_tool_call_payload(tool_call, is_hot))
+            .collect::<Vec<_>>()
+    })];
+
+    for (index, tool_call) in replayable_tools.iter().enumerate() {
+        history.push(json!({
+            "role": "tool",
+            "tool_call_id": tool_call.id,
+            "content": history_tool_result_content(
+                tool_call,
+                tool_previews.get(index).copied().flatten(),
+                is_hot
+            )
         }));
     }
 
-    messages
+    history
+}
+
+/** 把持久化的 AgentToolCall 还原成 OpenAI-compatible tool_call，arguments 必须是 JSON 字符串。 */
+fn history_tool_call_payload(tool_call: &AgentToolCall, is_hot: bool) -> Value {
+    json!({
+        "id": tool_call.id,
+        "type": "function",
+        "function": {
+            "name": tool_call.name,
+            "arguments": history_tool_arguments(&tool_call.args, is_hot)
+        }
+    })
+}
+
+/** 历史工具参数保持合法 JSON；超长时截断字符串字段，而不是切开整段 JSON。 */
+fn history_tool_arguments(args: &Value, is_hot: bool) -> String {
+    let max_total_chars = if is_hot {
+        MAX_HOT_HISTORY_MESSAGE_CHARS
+    } else {
+        MAX_WARM_HISTORY_MESSAGE_CHARS
+    };
+    let max_string_chars = if is_hot {
+        MAX_HOT_HISTORY_TOOL_ARGUMENT_STRING_CHARS
+    } else {
+        MAX_HISTORY_TOOL_ARGUMENT_STRING_CHARS
+    };
+    let serialized_chars = if is_hot {
+        MAX_HISTORY_MESSAGE_CHARS
+    } else {
+        MAX_WARM_HISTORY_MESSAGE_CHARS
+    };
+    let serialized = serde_json::to_string(args).unwrap_or_else(|_| "{}".to_owned());
+    if serialized.chars().count() <= max_total_chars {
+        return serialized;
+    }
+
+    let truncated = truncate_json_strings(args, max_string_chars);
+    let truncated_serialized =
+        serde_json::to_string(&truncated).unwrap_or_else(|_| "{}".to_owned());
+    if truncated_serialized.chars().count() <= serialized_chars {
+        return truncated_serialized;
+    }
+
+    json!({
+        "truncated": true,
+        "keys": truncated.as_object().map(|map| map.keys().cloned().collect::<Vec<_>>()).unwrap_or_default()
+    })
+    .to_string()
+}
+
+/** 递归截断 JSON 字符串字段，供历史 tool arguments 在预算内保持可解析。 */
+fn truncate_json_strings(value: &Value, max_chars: usize) -> Value {
+    match value {
+        Value::String(text) => Value::String(truncate_chars(text, max_chars)),
+        Value::Array(items) => Value::Array(
+            items
+                .iter()
+                .map(|item| truncate_json_strings(item, max_chars))
+                .collect(),
+        ),
+        Value::Object(map) => Value::Object(
+            map.iter()
+                .map(|(key, child)| (key.clone(), truncate_json_strings(child, max_chars)))
+                .collect(),
+        ),
+        other => other.clone(),
+    }
+}
+
+/** 优先回放过程区保存的工具结果；温窗口只留 status/summary，避免旧工具正文占满预算。 */
+fn history_tool_result_content(
+    tool_call: &AgentToolCall,
+    result_preview: Option<&str>,
+    is_hot: bool,
+) -> String {
+    if is_hot {
+        if let Some(preview) = result_preview
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+        {
+            return truncate_chars(preview, MAX_HOT_HISTORY_TOOL_RESULT_CHARS);
+        }
+    }
+
+    truncate_chars(
+        &json!({
+            "status": tool_call.status,
+            "summary": tool_call.summary
+        })
+        .to_string(),
+        if is_hot {
+            MAX_HOT_HISTORY_TOOL_RESULT_CHARS
+        } else {
+            MAX_WARM_HISTORY_MESSAGE_CHARS
+        },
+    )
 }
 
 /** 渲染知识库根目录 ORANGE_AGENT.md 指令；读取失败只写脱敏日志，不阻塞 Agent 回合。 */
@@ -2006,10 +2340,19 @@ async fn send_chat_completion_logged(
     api_key: &str,
     messages: &[Value],
     tool_schemas: Option<&Value>,
+    response_format: Option<&Value>,
 ) -> Result<Value, String> {
     let started_at = Instant::now();
-    let result =
-        send_chat_completion(client, endpoint, api_key, model_id, messages, tool_schemas).await;
+    let result = send_chat_completion(
+        client,
+        endpoint,
+        api_key,
+        model_id,
+        messages,
+        tool_schemas,
+        response_format,
+    )
+    .await;
 
     match &result {
         Ok(_) => log_model_request_event(
@@ -2069,15 +2412,13 @@ fn log_model_request_event(
     }
 }
 
-/** 发送一次 chat completions 请求，可选择是否携带工具定义；无 key 的本地免鉴权 provider 不附带 Authorization。 */
-async fn send_chat_completion(
-    client: &Client,
-    endpoint: &str,
-    api_key: &str,
+/** 构造 chat completions JSON；工具 schema 和 json_schema 互斥出现在不同请求里。 */
+fn build_chat_completion_payload(
     model: &str,
     messages: &[Value],
     tool_schemas: Option<&Value>,
-) -> Result<Value, String> {
+    response_format: Option<&Value>,
+) -> Value {
     let mut payload = json!({
         "model": model,
         "messages": messages,
@@ -2089,6 +2430,95 @@ async fn send_chat_completion(
         payload["tools"] = tool_schemas.clone();
         payload["tool_choice"] = json!("auto");
     }
+
+    if let Some(response_format) = response_format {
+        payload["response_format"] = response_format.clone();
+    }
+
+    payload
+}
+
+/** 工作记忆请求使用 json_schema，减少模型把 JSON 包进 Markdown fence 的情况。 */
+fn context_summary_response_format() -> Value {
+    json!({
+        "type": "json_schema",
+        "json_schema": {
+            "name": "agent_context_summary",
+            "strict": true,
+            "schema": {
+                "type": "object",
+                "additionalProperties": false,
+                "properties": {
+                    "version": { "type": "integer" },
+                    "updatedAt": { "type": "string" },
+                    "currentGoal": { "type": ["string", "null"] },
+                    "userConstraints": {
+                        "type": "array",
+                        "items": { "type": "string" }
+                    },
+                    "decisions": {
+                        "type": "array",
+                        "items": { "type": "string" }
+                    },
+                    "completedWork": {
+                        "type": "array",
+                        "items": { "type": "string" }
+                    },
+                    "pendingTasks": {
+                        "type": "array",
+                        "items": { "type": "string" }
+                    },
+                    "touchedNotes": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "additionalProperties": false,
+                            "properties": {
+                                "id": { "type": "string" },
+                                "title": { "type": "string" },
+                                "reason": { "type": "string" }
+                            },
+                            "required": ["id", "title", "reason"]
+                        }
+                    },
+                    "pendingChangeSummary": { "type": ["string", "null"] },
+                    "openQuestions": {
+                        "type": "array",
+                        "items": { "type": "string" }
+                    },
+                    "lastSummarizedMessageId": { "type": ["string", "null"] },
+                    "lastCompactedMessageId": { "type": ["string", "null"] }
+                },
+                "required": [
+                    "version",
+                    "updatedAt",
+                    "currentGoal",
+                    "userConstraints",
+                    "decisions",
+                    "completedWork",
+                    "pendingTasks",
+                    "touchedNotes",
+                    "pendingChangeSummary",
+                    "openQuestions",
+                    "lastSummarizedMessageId",
+                    "lastCompactedMessageId"
+                ]
+            }
+        }
+    })
+}
+
+/** 发送一次 chat completions 请求，可选择是否携带工具定义；无 key 的本地免鉴权 provider 不附带 Authorization。 */
+async fn send_chat_completion(
+    client: &Client,
+    endpoint: &str,
+    api_key: &str,
+    model: &str,
+    messages: &[Value],
+    tool_schemas: Option<&Value>,
+    response_format: Option<&Value>,
+) -> Result<Value, String> {
+    let payload = build_chat_completion_payload(model, messages, tool_schemas, response_format);
 
     let mut request_builder = client.post(endpoint).json(&payload);
 
@@ -2130,6 +2560,7 @@ async fn update_agent_context_summary_best_effort(
     let session_id = snapshot.sessions[session_index].id.clone();
     let messages =
         build_context_summary_model_messages(&snapshot.sessions[session_index], failure_reason);
+    let response_format = context_summary_response_format();
     let result = send_chat_completion_logged(
         client,
         provider,
@@ -2138,6 +2569,7 @@ async fn update_agent_context_summary_best_effort(
         api_key,
         &messages,
         None,
+        Some(&response_format),
     )
     .await
     .and_then(parse_context_summary_response);
@@ -2194,9 +2626,13 @@ async fn update_agent_context_summary_after_turn(
     session_index: usize,
     estimated_prompt_chars: usize,
     failure_reason: Option<&str>,
+    history_pack: Option<&PackedHistoryStats>,
 ) {
-    let decision =
-        context_summary_auto_decision(&snapshot.sessions[session_index], estimated_prompt_chars);
+    let decision = context_summary_auto_decision(
+        &snapshot.sessions[session_index],
+        estimated_prompt_chars,
+        history_pack,
+    );
 
     log::debug!(
         target: "agent_runtime",
@@ -2230,6 +2666,7 @@ async fn update_agent_context_summary_after_turn(
 fn context_summary_auto_decision(
     session: &AgentSession,
     estimated_prompt_chars: usize,
+    history_pack: Option<&PackedHistoryStats>,
 ) -> ContextSummaryAutoDecision {
     let mut reasons = Vec::new();
     let unsummarized_message_count = compact_unsummarized_message_count(session);
@@ -2254,6 +2691,14 @@ fn context_summary_auto_decision(
     if estimated_prompt_chars > AUTO_COMPACT_PROMPT_CHAR_THRESHOLD && unsummarized_message_count > 0
     {
         reasons.push("promptCharsOverThreshold".to_owned());
+    }
+
+    if let Some(history) = history_pack {
+        if history.dropped_session_messages > 0
+            && unsummarized_message_count > history.included_session_messages
+        {
+            reasons.push("unsummarizedHistoryDropped".to_owned());
+        }
     }
 
     if pending_change_summary_changed(session) {
@@ -3264,7 +3709,7 @@ fn build_audit_log(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::domain::{FolderEntry, KnowledgeBase, Note};
+    use crate::domain::{AgentTraceStep, FolderEntry, KnowledgeBase, Note};
     use crate::storage::hash_content;
 
     /** 构造 Runtime 单元测试使用的最小工作台快照。 */
@@ -3354,6 +3799,27 @@ mod tests {
             active_note_id: "note-a".to_owned(),
             active_document_id: String::new(),
             active_session_id: "session-a".to_owned(),
+        }
+    }
+
+    /** 构造历史回放测试用的会话消息，默认不含工具轨迹。 */
+    fn history_test_message(
+        id: &str,
+        role: &str,
+        content: &str,
+        tool_calls: Option<Vec<AgentToolCall>>,
+        trace: Vec<AgentTraceStep>,
+    ) -> AgentMessage {
+        AgentMessage {
+            id: id.to_owned(),
+            role: role.to_owned(),
+            content: content.to_owned(),
+            action: Some("ask".to_owned()),
+            citations: None,
+            tool_calls,
+            mentioned_file_ids: Vec::new(),
+            trace,
+            turn_duration_ms: None,
         }
     }
 
@@ -3524,7 +3990,7 @@ mod tests {
         assert!(!system_content.contains("当用户要求查找"));
     }
 
-    /** 会话工作记忆必须在 system 指令之后、短期历史之前注入，确保长会话目标不被最近 8 条限制丢掉。 */
+    /** 会话工作记忆必须在 system 指令之后、短期历史之前注入，确保被预算裁掉的早期目标仍能保留。 */
     #[test]
     fn model_messages_inject_context_summary_before_recent_history() {
         let mut snapshot = runtime_test_snapshot("正文内容足够用于测试。".to_owned());
@@ -3577,6 +4043,586 @@ mod tests {
         assert!(memory_content.contains("【会话工作记忆】"));
         assert!(memory_content.contains("按产品分析框架整理这篇文章"));
         assert_eq!(messages[2]["role"], "user");
+    }
+
+    /** 历史 assistant 必须按 chat completions 协议回放 tool_calls 和 tool 结果，不能只剩截断正文。 */
+    #[test]
+    fn model_messages_replay_assistant_tool_calls_and_tool_results() {
+        let mut snapshot = runtime_test_snapshot("正文内容足够用于测试。".to_owned());
+        let request = runtime_test_request("ask", "继续刚才的检索");
+        let available_skills = crate::skills::built_in_skills();
+
+        snapshot.sessions[0].messages = vec![
+            history_test_message("user-old", "user", "帮我找隐私边界", None, Vec::new()),
+            AgentMessage {
+                id: "assistant-old".to_owned(),
+                role: "assistant".to_owned(),
+                content: "我先检索相关笔记。".to_owned(),
+                action: Some("ask".to_owned()),
+                citations: None,
+                tool_calls: Some(vec![
+                    AgentToolCall {
+                        id: "host-skill-context".to_owned(),
+                        name: "skill_context".to_owned(),
+                        status: "completed".to_owned(),
+                        summary: "已加载 Skill 目录".to_owned(),
+                        args: json!({ "count": 2 }),
+                    },
+                    AgentToolCall {
+                        id: "call-search-notes".to_owned(),
+                        name: "search_notes".to_owned(),
+                        status: "completed".to_owned(),
+                        summary: "已检索到 2 条笔记".to_owned(),
+                        args: json!({ "query": "隐私边界" }),
+                    },
+                    AgentToolCall {
+                        id: "host-model-request".to_owned(),
+                        name: "model_request".to_owned(),
+                        status: "completed".to_owned(),
+                        summary: "模型请求完成".to_owned(),
+                        args: json!({ "model": "gpt-4o-mini" }),
+                    },
+                ]),
+                mentioned_file_ids: Vec::new(),
+                trace: vec![AgentTraceStep {
+                    id: "trace-search".to_owned(),
+                    step_type: "tool".to_owned(),
+                    timestamp: "刚刚".to_owned(),
+                    content: None,
+                    name: Some("search_notes".to_owned()),
+                    status: Some("completed".to_owned()),
+                    summary: Some("已检索到 2 条笔记".to_owned()),
+                    args: Some(json!({ "query": "隐私边界" })),
+                    result_preview: Some(
+                        r#"{"matches":[{"title":"隐私边界","score":0.9}]}"#.to_owned(),
+                    ),
+                    error: None,
+                    duration_ms: Some(12),
+                }],
+                turn_duration_ms: Some(1200),
+            },
+            history_test_message("user-current", "user", "继续刚才的检索", None, Vec::new()),
+        ];
+
+        let messages = build_model_messages(
+            &snapshot,
+            0,
+            &request,
+            &available_skills,
+            &[],
+            "user-current",
+            &[],
+        );
+        let assistant = messages
+            .iter()
+            .find(|message| message["role"] == "assistant")
+            .expect("history should include assistant tool call message");
+        let tool_calls = assistant["tool_calls"]
+            .as_array()
+            .expect("assistant history should include tool_calls");
+        let tool = messages
+            .iter()
+            .find(|message| message["role"] == "tool")
+            .expect("history should include tool result message");
+
+        assert_eq!(assistant["content"], "我先检索相关笔记。");
+        assert_eq!(tool_calls.len(), 1);
+        assert_eq!(tool_calls[0]["id"], "call-search-notes");
+        assert_eq!(tool_calls[0]["type"], "function");
+        assert_eq!(tool_calls[0]["function"]["name"], "search_notes");
+        assert!(tool_calls[0]["function"]["arguments"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("隐私边界"));
+        assert_eq!(tool["tool_call_id"], "call-search-notes");
+        assert!(tool["content"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("隐私边界"));
+        assert!(messages.iter().all(|message| {
+            message["tool_calls"]
+                .as_array()
+                .map(|tool_calls| {
+                    tool_calls.iter().all(|tool_call| {
+                        !matches!(
+                            tool_call["function"]["name"].as_str(),
+                            Some("skill_context" | "model_request")
+                        )
+                    })
+                })
+                .unwrap_or(true)
+        }));
+    }
+
+    /** 没有模型工具的 assistant 历史仍只发 role/content，避免凭空补 tool_calls。 */
+    #[test]
+    fn model_messages_without_model_tools_stay_content_only() {
+        let mut snapshot = runtime_test_snapshot("正文内容足够用于测试。".to_owned());
+        let request = runtime_test_request("ask", "继续");
+        let available_skills = crate::skills::built_in_skills();
+        snapshot.sessions[0].messages = vec![
+            history_test_message("user-old", "user", "你好", None, Vec::new()),
+            AgentMessage {
+                id: "assistant-old".to_owned(),
+                role: "assistant".to_owned(),
+                content: "这是普通回答。".to_owned(),
+                action: Some("ask".to_owned()),
+                citations: None,
+                tool_calls: Some(vec![AgentToolCall {
+                    id: "host-skill-context".to_owned(),
+                    name: "skill_context".to_owned(),
+                    status: "completed".to_owned(),
+                    summary: "已加载 Skill 目录".to_owned(),
+                    args: json!({ "count": 1 }),
+                }]),
+                mentioned_file_ids: Vec::new(),
+                trace: Vec::new(),
+                turn_duration_ms: None,
+            },
+            history_test_message("user-current", "user", "继续", None, Vec::new()),
+        ];
+
+        let messages = build_model_messages(
+            &snapshot,
+            0,
+            &request,
+            &available_skills,
+            &[],
+            "user-current",
+            &[],
+        );
+        let assistant = messages
+            .iter()
+            .find(|message| message["role"] == "assistant")
+            .expect("history should include assistant message");
+
+        assert_eq!(assistant["content"], "这是普通回答。");
+        assert!(assistant.get("tool_calls").is_none());
+        assert!(messages.iter().all(|message| message["role"] != "tool"));
+    }
+
+    /** 超长工具参数必须仍是合法 JSON，不能把 arguments 字符串从中间截断。 */
+    #[test]
+    fn model_messages_tool_arguments_remain_valid_json_when_truncated() {
+        let mut snapshot = runtime_test_snapshot("正文内容足够用于测试。".to_owned());
+        let request = runtime_test_request("rewrite", "继续改写");
+        let available_skills = crate::skills::built_in_skills();
+        let long_original = "旧段落内容".repeat(400);
+        snapshot.sessions[0].messages = vec![AgentMessage {
+            id: "assistant-old".to_owned(),
+            role: "assistant".to_owned(),
+            content: "准备替换这段。".to_owned(),
+            action: Some("rewrite".to_owned()),
+            citations: None,
+            tool_calls: Some(vec![AgentToolCall {
+                id: "call-propose".to_owned(),
+                name: "propose_file_change".to_owned(),
+                status: "completed".to_owned(),
+                summary: "已生成待确认 diff".to_owned(),
+                args: json!({
+                    "fileId": "note-a",
+                    "operation": "replace",
+                    "original": long_original,
+                    "next": "新段落"
+                }),
+            }]),
+            mentioned_file_ids: Vec::new(),
+            trace: Vec::new(),
+            turn_duration_ms: None,
+        }];
+
+        let messages = build_model_messages(
+            &snapshot,
+            0,
+            &request,
+            &available_skills,
+            &[],
+            "user-current",
+            &[],
+        );
+        let assistant = messages
+            .iter()
+            .find(|message| message["role"] == "assistant")
+            .expect("history should include assistant tool call message");
+        let arguments = assistant["tool_calls"][0]["function"]["arguments"]
+            .as_str()
+            .expect("tool arguments should be a JSON string");
+        let parsed: Value = serde_json::from_str(arguments)
+            .expect("truncated tool arguments must remain valid JSON");
+
+        assert_eq!(parsed["fileId"], "note-a");
+        assert_eq!(parsed["operation"], "replace");
+        assert!(
+            arguments.chars().count() <= MAX_HISTORY_MESSAGE_CHARS,
+            "tool arguments should stay within history budget, got {}",
+            arguments.chars().count()
+        );
+    }
+
+    /** 过程区没有 result_preview 时，tool 结果回退为 status + summary，保证协议完整。 */
+    #[test]
+    fn model_messages_tool_history_falls_back_to_status_and_summary() {
+        let mut snapshot = runtime_test_snapshot("正文内容足够用于测试。".to_owned());
+        let request = runtime_test_request("ask", "继续改写");
+        let available_skills = crate::skills::built_in_skills();
+        snapshot.sessions[0].messages = vec![AgentMessage {
+            id: "assistant-old".to_owned(),
+            role: "assistant".to_owned(),
+            content: String::new(),
+            action: Some("rewrite".to_owned()),
+            citations: None,
+            tool_calls: Some(vec![AgentToolCall {
+                id: "call-read-file".to_owned(),
+                name: "read_file".to_owned(),
+                status: "failed".to_owned(),
+                summary: "目标文件不在当前 scope 内".to_owned(),
+                args: json!({ "fileId": "note-missing" }),
+            }]),
+            mentioned_file_ids: Vec::new(),
+            trace: Vec::new(),
+            turn_duration_ms: None,
+        }];
+
+        let messages = build_model_messages(
+            &snapshot,
+            0,
+            &request,
+            &available_skills,
+            &[],
+            "user-current",
+            &[],
+        );
+        let assistant = messages
+            .iter()
+            .find(|message| message["role"] == "assistant")
+            .expect("history should include assistant tool call message");
+        let tool = messages
+            .iter()
+            .find(|message| message["role"] == "tool")
+            .expect("history should include tool result message");
+
+        assert!(assistant["content"].is_null());
+        assert_eq!(tool["tool_call_id"], "call-read-file");
+        assert!(tool["content"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("failed"));
+        assert!(tool["content"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("目标文件不在当前 scope 内"));
+    }
+
+    /** 未知窗口走 32k 默认；已知小窗口按比例收缩，大窗口有上限。 */
+    #[test]
+    fn history_budget_follows_model_context_length() {
+        let unknown = resolve_history_budget_chars(None);
+        let small = resolve_history_budget_chars(Some(4_096));
+        let large = resolve_history_budget_chars(Some(200_000));
+
+        assert_eq!(unknown, 25_600);
+        assert_eq!(small, MIN_KNOWN_HISTORY_BUDGET_CHARS);
+        assert_eq!(large, MAX_HISTORY_BUDGET_CHARS);
+        assert!(small < unknown);
+        assert!(unknown < large);
+    }
+
+    /** 短消息长会话应按窗口预算装入，而不是硬切最近 8 条。 */
+    #[test]
+    fn model_messages_keep_more_than_eight_short_history_turns() {
+        let mut snapshot = runtime_test_snapshot("正文内容足够用于测试。".to_owned());
+        let request = runtime_test_request("ask", "继续第 12 轮");
+        let available_skills = crate::skills::built_in_skills();
+        snapshot.sessions[0].messages = (0..12)
+            .flat_map(|index| {
+                vec![
+                    history_test_message(
+                        &format!("user-{index}"),
+                        "user",
+                        &format!("用户轮次 {index} 的目标"),
+                        None,
+                        Vec::new(),
+                    ),
+                    history_test_message(
+                        &format!("assistant-{index}"),
+                        "assistant",
+                        &format!("助手轮次 {index} 的回复"),
+                        None,
+                        Vec::new(),
+                    ),
+                ]
+            })
+            .collect();
+
+        let prompt = build_model_prompt(
+            &snapshot,
+            0,
+            &request,
+            &available_skills,
+            &[],
+            "user-11",
+            &[],
+            None,
+        );
+        let user_contents = prompt
+            .messages
+            .iter()
+            .filter(|message| message["role"] == "user")
+            .filter_map(|message| message["content"].as_str())
+            .collect::<Vec<_>>();
+
+        assert_eq!(prompt.history.included_session_messages, 24);
+        assert_eq!(prompt.history.dropped_session_messages, 0);
+        assert!(user_contents
+            .iter()
+            .any(|content| content.contains("用户轮次 0 的目标")));
+        assert!(user_contents
+            .iter()
+            .any(|content| content.contains("用户轮次 11 的目标")));
+        assert_eq!(user_contents.len(), 12);
+    }
+
+    /** 已知小窗口必须丢掉最早历史，但当前用户消息和最近一轮仍在。 */
+    #[test]
+    fn model_messages_drop_oldest_history_when_context_window_is_small() {
+        let mut snapshot = runtime_test_snapshot("正文内容足够用于测试。".to_owned());
+        let request = runtime_test_request("ask", "继续");
+        let available_skills = crate::skills::built_in_skills();
+        let bulky = "这段历史需要占用预算。".repeat(40);
+        snapshot.sessions[0].messages = (0..12)
+            .flat_map(|index| {
+                vec![
+                    history_test_message(
+                        &format!("user-{index}"),
+                        "user",
+                        &format!("用户 {index} {bulky}"),
+                        None,
+                        Vec::new(),
+                    ),
+                    history_test_message(
+                        &format!("assistant-{index}"),
+                        "assistant",
+                        &format!("助手 {index} {bulky}"),
+                        None,
+                        Vec::new(),
+                    ),
+                ]
+            })
+            .collect();
+
+        let prompt = build_model_prompt(
+            &snapshot,
+            0,
+            &request,
+            &available_skills,
+            &[],
+            "user-11",
+            &[],
+            Some(4_096),
+        );
+        let user_contents = prompt
+            .messages
+            .iter()
+            .filter(|message| message["role"] == "user")
+            .filter_map(|message| message["content"].as_str())
+            .collect::<Vec<_>>();
+
+        assert!(prompt.history.dropped_session_messages > 0);
+        assert!(prompt.history.included_session_messages >= MIN_RETAINED_SESSION_MESSAGES);
+        assert!(
+            prompt.history.used_chars <= prompt.history.budget_chars
+                || prompt.history.included_session_messages == MIN_RETAINED_SESSION_MESSAGES
+        );
+        assert!(user_contents
+            .iter()
+            .any(|content| content.contains("用户 11")));
+        assert!(user_contents
+            .iter()
+            .all(|content| !content.contains("用户 0 ")));
+    }
+
+    /** 温窗口的旧工具结果只保留 status/summary，热窗口仍回放 result_preview。 */
+    #[test]
+    fn model_messages_collapse_warm_tool_results_but_keep_hot_previews() {
+        let mut snapshot = runtime_test_snapshot("正文内容足够用于测试。".to_owned());
+        let request = runtime_test_request("ask", "继续");
+        let available_skills = crate::skills::built_in_skills();
+        let mut messages = vec![AgentMessage {
+            id: "assistant-old".to_owned(),
+            role: "assistant".to_owned(),
+            content: "先检索旧笔记。".to_owned(),
+            action: Some("ask".to_owned()),
+            citations: None,
+            tool_calls: Some(vec![AgentToolCall {
+                id: "call-search-old".to_owned(),
+                name: "search_notes".to_owned(),
+                status: "completed".to_owned(),
+                summary: "已检索到旧笔记".to_owned(),
+                args: json!({ "query": "旧笔记" }),
+            }]),
+            mentioned_file_ids: Vec::new(),
+            trace: vec![AgentTraceStep {
+                id: "trace-old".to_owned(),
+                step_type: "tool".to_owned(),
+                timestamp: "刚刚".to_owned(),
+                content: None,
+                name: Some("search_notes".to_owned()),
+                status: Some("completed".to_owned()),
+                summary: Some("已检索到旧笔记".to_owned()),
+                args: Some(json!({ "query": "旧笔记" })),
+                result_preview: Some(
+                    r#"{"matches":[{"title":"旧笔记预览不应进入温窗口"}]}"#.to_owned(),
+                ),
+                error: None,
+                duration_ms: Some(8),
+            }],
+            turn_duration_ms: Some(800),
+        }];
+        messages.extend((0..HOT_HISTORY_SESSION_MESSAGES).map(|index| {
+            history_test_message(
+                &format!("filler-{index}"),
+                if index % 2 == 0 { "user" } else { "assistant" },
+                &format!("填充消息 {index}"),
+                None,
+                Vec::new(),
+            )
+        }));
+        messages.push(history_test_message(
+            "user-current",
+            "user",
+            "继续",
+            None,
+            Vec::new(),
+        ));
+        snapshot.sessions[0].messages = messages;
+
+        let packed = build_model_prompt(
+            &snapshot,
+            0,
+            &request,
+            &available_skills,
+            &[],
+            "user-current",
+            &[],
+            None,
+        )
+        .messages;
+        let old_tool = packed
+            .iter()
+            .find(|message| message["tool_call_id"] == "call-search-old")
+            .expect("warm history should still replay the old tool message");
+
+        assert!(old_tool["content"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("已检索到旧笔记"));
+        assert!(!old_tool["content"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("旧笔记预览不应进入温窗口"));
+    }
+
+    /** 未总结内容被预算裁掉时，应触发自动整理，把丢掉的历史写入工作记忆。 */
+    #[test]
+    fn context_summary_auto_decision_triggers_when_unsummarized_history_is_dropped() {
+        let mut snapshot = runtime_test_snapshot("正文内容足够用于测试。".to_owned());
+        snapshot.sessions[0].messages = (0..12)
+            .map(|index| {
+                history_test_message(
+                    &format!("message-{index}"),
+                    "user",
+                    &format!("消息 {index}"),
+                    None,
+                    Vec::new(),
+                )
+            })
+            .collect();
+        snapshot.sessions[0].context_summary = Some(AgentContextSummary {
+            version: 1,
+            updated_at: "2026-07-08 10:00:00".to_owned(),
+            current_goal: Some("旧目标".to_owned()),
+            user_constraints: Vec::new(),
+            decisions: Vec::new(),
+            completed_work: Vec::new(),
+            pending_tasks: Vec::new(),
+            touched_notes: Vec::new(),
+            pending_change_summary: None,
+            open_questions: Vec::new(),
+            last_summarized_message_id: Some("message-1".to_owned()),
+            last_compacted_message_id: Some("message-1".to_owned()),
+        });
+
+        let decision = context_summary_auto_decision(
+            &snapshot.sessions[0],
+            1_000,
+            Some(&PackedHistoryStats {
+                included_session_messages: 4,
+                dropped_session_messages: 8,
+                budget_chars: 4_000,
+                used_chars: 3_900,
+            }),
+        );
+
+        assert!(decision.should_compact);
+        assert!(decision
+            .reasons
+            .contains(&"unsummarizedHistoryDropped".to_owned()));
+    }
+
+    /** 工作记忆请求必须带 json_schema，避免模型自由发挥后再靠 fence 抠 JSON。 */
+    #[test]
+    fn chat_completion_payload_includes_context_summary_json_schema() {
+        let messages = vec![json!({ "role": "system", "content": "只输出 JSON" })];
+        let payload = build_chat_completion_payload(
+            "gpt-4o-mini",
+            &messages,
+            None,
+            Some(&context_summary_response_format()),
+        );
+        let schema = &payload["response_format"];
+
+        assert_eq!(schema["type"], "json_schema");
+        assert_eq!(schema["json_schema"]["name"], "agent_context_summary");
+        assert_eq!(schema["json_schema"]["strict"], true);
+        assert_eq!(schema["json_schema"]["schema"]["type"], "object");
+        assert!(schema["json_schema"]["schema"]["required"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|field| field == "currentGoal"));
+        assert!(payload.get("tools").is_none());
+    }
+
+    /** 主 Agent loop 的 payload 不应误带 response_format，工具 schema 仍按原样发送。 */
+    #[test]
+    fn chat_completion_payload_keeps_tools_without_response_format() {
+        let tools = json!([{ "type": "function", "function": { "name": "search_notes" } }]);
+        let payload = build_chat_completion_payload(
+            "gpt-4o-mini",
+            &[json!({ "role": "user", "content": "检索" })],
+            Some(&tools),
+            None,
+        );
+
+        assert_eq!(payload["tool_choice"], "auto");
+        assert_eq!(payload["tools"], tools);
+        assert!(payload.get("response_format").is_none());
+    }
+
+    /** json_schema 成功时 content 仍是 JSON 字符串，解析层要直接读成工作记忆对象。 */
+    #[test]
+    fn parse_context_summary_response_reads_json_object_content() {
+        let response = json!({
+            "choices": [{
+                "message": {
+                    "content": "{\"version\":1,\"updatedAt\":\"2026-08-22 10:00:00\",\"currentGoal\":\"继续改写\",\"userConstraints\":[],\"decisions\":[],\"completedWork\":[\"已检索笔记\"],\"pendingTasks\":[],\"touchedNotes\":[],\"pendingChangeSummary\":null,\"openQuestions\":[],\"lastSummarizedMessageId\":\"assistant-old\",\"lastCompactedMessageId\":\"assistant-old\"}"
+                }
+            }]
+        });
+        let summary = parse_context_summary_response(response).expect("json content should parse");
+
+        assert_eq!(summary.current_goal.as_deref(), Some("继续改写"));
+        assert_eq!(summary.completed_work, vec!["已检索笔记".to_owned()]);
     }
 
     /** 已启用的跨会话记忆应作为独立 system 层注入，且位于项目指令之后、会话工作记忆之前。 */
@@ -3814,7 +4860,7 @@ mod tests {
     fn context_summary_auto_decision_reports_triggers() {
         let mut snapshot = runtime_test_snapshot("正文内容足够用于测试。".to_owned());
 
-        snapshot.sessions[0].messages = (0..18)
+        snapshot.sessions[0].messages = (0..30)
             .map(|index| AgentMessage {
                 id: format!("message-{index}"),
                 role: if index % 2 == 0 { "user" } else { "assistant" }.to_owned(),
@@ -3838,7 +4884,7 @@ mod tests {
             touched_notes: Vec::new(),
             pending_change_summary: None,
             open_questions: Vec::new(),
-            last_summarized_message_id: Some("message-17".to_owned()),
+            last_summarized_message_id: Some("message-29".to_owned()),
             last_compacted_message_id: Some("message-0".to_owned()),
         });
         snapshot.sessions[0].pending_change = Some(runtime_test_pending_change("pending"));
@@ -3846,6 +4892,7 @@ mod tests {
         let decision = context_summary_auto_decision(
             &snapshot.sessions[0],
             AUTO_COMPACT_PROMPT_CHAR_THRESHOLD + 1,
+            None,
         );
 
         assert!(decision.should_compact);
@@ -3858,7 +4905,7 @@ mod tests {
         assert!(decision
             .reasons
             .contains(&"pendingChangeChanged".to_owned()));
-        assert_eq!(decision.unsummarized_message_count, 17);
+        assert_eq!(decision.unsummarized_message_count, 29);
     }
 
     /** 增量 summary 请求从上次模型 compact 后截取消息，而不是被每轮确定性同步重置。 */
