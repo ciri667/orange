@@ -19,10 +19,10 @@ pub(crate) const MAX_READ_NOTE_CHARS: usize = 6000;
 const MAX_TREE_ITEMS: usize = 120;
 
 /** 会话历史检索最多返回的消息数量，避免旧对话一次性塞满模型上下文。 */
-const MAX_SESSION_CONTEXT_MESSAGES: usize = 8;
+const MAX_SESSION_CONTEXT_MESSAGES: usize = 24;
 
 /** 会话历史工具单条消息最多返回的字符数。 */
-const MAX_SESSION_CONTEXT_MESSAGE_CHARS: usize = 1200;
+const MAX_SESSION_CONTEXT_MESSAGE_CHARS: usize = 4000;
 
 /** 跨会话记忆工具最多返回的条目数量，避免一次工具结果挤占模型上下文。 */
 const MAX_KB_MEMORY_TOOL_ENTRIES: usize = 32;
@@ -696,7 +696,7 @@ impl AgentTool for SearchSessionMessagesTool {
     }
 
     fn description(&self) -> &'static str {
-        "Search messages in the current Agent session history when the user asks about earlier discussion."
+        "Search the full current Agent session history when the user asks about earlier discussion. Returns the most recent matching messages."
     }
 
     fn parameters(&self) -> Value {
@@ -721,7 +721,7 @@ impl AgentTool for ReadSessionContextTool {
     }
 
     fn description(&self) -> &'static str {
-        "Read bounded current-session chat history by messageId or 1-based startIndex/endIndex."
+        "Read current-session chat history by messageId or 1-based startIndex/endIndex. Older turns outside the live prompt can still be retrieved here."
     }
 
     fn parameters(&self) -> Value {
@@ -1405,7 +1405,7 @@ fn execute_search_session_messages(
     }
 
     let query_lower = query.to_lowercase();
-    let matches = session
+    let mut matches = session
         .messages
         .iter()
         .enumerate()
@@ -1414,7 +1414,6 @@ fn execute_search_session_messages(
                 .to_lowercase()
                 .contains(&query_lower)
         })
-        .take(MAX_SESSION_CONTEXT_MESSAGES)
         .map(|(index, message)| {
             json!({
                 "index": index + 1,
@@ -1425,12 +1424,17 @@ fn execute_search_session_messages(
             })
         })
         .collect::<Vec<_>>();
+    let truncated = matches.len() > MAX_SESSION_CONTEXT_MESSAGES;
+    if truncated {
+        let start = matches.len() - MAX_SESSION_CONTEXT_MESSAGES;
+        matches = matches.split_off(start);
+    }
     let match_count = matches.len();
 
     ToolExecutionResult {
         success: true,
         summary: format!("会话历史检索命中 {match_count} 条消息"),
-        payload: json!({ "matches": matches, "truncated": session.messages.len() > MAX_SESSION_CONTEXT_MESSAGES }),
+        payload: json!({ "matches": matches, "truncated": truncated, "maxReturned": MAX_SESSION_CONTEXT_MESSAGES }),
         citations: Vec::new(),
         audit_fragment: Some(format!(
             "search_session_messages query_chars={} match_count={}",
@@ -2399,7 +2403,7 @@ fn budget_citation(mut citation: Citation) -> Citation {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::domain::{FolderEntry, KnowledgeBase, Note, WorkspaceDocument};
+    use crate::domain::{AgentMessage, FolderEntry, KnowledgeBase, Note, WorkspaceDocument};
 
     /** 构造工具层测试使用的最小工作台快照。 */
     fn tool_test_snapshot(note_content: String) -> WorkspaceSnapshot {
@@ -3232,5 +3236,73 @@ mod tests {
 
         assert_eq!(outcome.call.status, "failed");
         assert!(context.snapshot.sessions[0].pending_change.is_none());
+    }
+
+    /** 会话历史检索应返回最近命中，而不是只看最早 8 条，truncated 也按命中数计算。 */
+    #[test]
+    fn search_session_messages_returns_recent_matches_beyond_eight() {
+        let registry = ToolRegistry::default();
+        let mut snapshot = tool_test_snapshot("正文内容足够用于测试。".to_owned());
+        snapshot.sessions[0].messages = (0..30)
+            .map(|index| AgentMessage {
+                id: format!("user-{index}"),
+                role: "user".to_owned(),
+                content: format!("讨论主题 命中 {index}"),
+                action: Some("ask".to_owned()),
+                citations: None,
+                tool_calls: None,
+                mentioned_file_ids: Vec::new(),
+                trace: Vec::new(),
+                turn_duration_ms: None,
+            })
+            .collect();
+        let request = tool_test_request("ask", "找之前的讨论");
+        let mut context = tool_test_context(&mut snapshot, &request);
+        let outcome = registry.execute_named(
+            &mut context,
+            "search_session_messages",
+            json!({ "query": "讨论主题" }),
+        );
+        let matches = outcome.payload["matches"].as_array().unwrap();
+
+        assert_eq!(outcome.call.status, "completed");
+        assert_eq!(matches.len(), MAX_SESSION_CONTEXT_MESSAGES);
+        assert_eq!(outcome.payload["truncated"], true);
+        assert_eq!(matches.first().unwrap()["id"].as_str(), Some("user-6"));
+        assert_eq!(matches.last().unwrap()["id"].as_str(), Some("user-29"));
+    }
+
+    /** read_session_context 一次最多返回提高后的条数上限，而不是旧的 8 条。 */
+    #[test]
+    fn read_session_context_can_return_more_than_eight_messages() {
+        let registry = ToolRegistry::default();
+        let mut snapshot = tool_test_snapshot("正文内容足够用于测试。".to_owned());
+        snapshot.sessions[0].messages = (0..16)
+            .map(|index| AgentMessage {
+                id: format!("user-{index}"),
+                role: "user".to_owned(),
+                content: format!("历史消息 {index}"),
+                action: Some("ask".to_owned()),
+                citations: None,
+                tool_calls: None,
+                mentioned_file_ids: Vec::new(),
+                trace: Vec::new(),
+                turn_duration_ms: None,
+            })
+            .collect();
+        let request = tool_test_request("ask", "回看历史");
+        let mut context = tool_test_context(&mut snapshot, &request);
+        let outcome = registry.execute_named(
+            &mut context,
+            "read_session_context",
+            json!({ "startIndex": 1, "endIndex": 16 }),
+        );
+        let messages = outcome.payload["messages"].as_array().unwrap();
+
+        assert_eq!(outcome.call.status, "completed");
+        assert_eq!(messages.len(), 16);
+        assert_eq!(outcome.payload["maxReturned"], MAX_SESSION_CONTEXT_MESSAGES);
+        assert_eq!(messages[0]["id"], "user-0");
+        assert_eq!(messages[15]["id"], "user-15");
     }
 }
