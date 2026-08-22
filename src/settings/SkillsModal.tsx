@@ -3,7 +3,10 @@ import type { FormEvent } from "react";
 import { useMemo, useState } from "react";
 import { Button } from "../shared/Button";
 import { ConfirmDialog, type ConfirmDialogConfig } from "../shared/ConfirmDialog";
+import { FilterChip } from "../shared/FilterChip";
+import { ListRow } from "../shared/ListRow";
 import { logError, logInfo } from "../shared/logger";
+import { ModalBackdrop, ModalHeader, ModalPanel } from "../shared/Modal";
 import { OverflowTooltipText } from "../shared/OverflowTooltipText";
 import type {
   AgentSkill,
@@ -308,15 +311,18 @@ export function SkillsModal({
   }
 
   return (
-    <div className="modal-backdrop" role="presentation" onMouseDown={onClose}>
-      <section className="skills-modal" aria-label="Skills 能力管理" onMouseDown={(event) => event.stopPropagation()}>
-        <header className="modal-header skills-modal-header">
-          <div>
+    <ModalBackdrop onClose={onClose} className="p-6">
+      <ModalPanel
+        className="h-[min(760px,calc(100vh-48px))] w-[min(940px,calc(100vw-48px))] grid-rows-[auto_minmax(0,1fr)] max-[980px]:w-[min(920px,calc(100vw-24px))] max-[760px]:h-auto max-[760px]:w-[min(100%,calc(100vw-20px))]"
+        aria-label="Skills 能力管理"
+      >
+        <ModalHeader>
+          <div className="min-w-0">
             <p className="section-label">Skills</p>
-            <h2>管理 Agent Skills</h2>
-            <span className="modal-subtitle">启用的 Skill 会作为能力说明进入 Agent 上下文。</span>
+            <h2 className="mt-1 mb-0 text-lg leading-tight text-ink-strong">管理 Agent Skills</h2>
+            <span className="mt-1 block text-xs text-ink-muted">启用的 Skill 会作为能力说明进入 Agent 上下文。</span>
           </div>
-          <div className="skills-modal-actions">
+          <div className="flex shrink-0 items-center gap-2">
             <Button variant="ghost" onClick={onOpenUserSkillsFolder} disabled={isBusy}>
               <FolderOpen size={14} />
               打开用户 Skills 文件夹
@@ -325,10 +331,10 @@ export function SkillsModal({
               <X size={17} />
             </Button>
           </div>
-        </header>
+        </ModalHeader>
 
-        <div className="skills-modal-body">
-          <aside className="skills-list-pane">
+        <div className="grid min-h-0 overflow-hidden grid-cols-[300px_minmax(0,1fr)] max-[980px]:grid-cols-[minmax(220px,280px)_minmax(0,1fr)] max-[760px]:grid-cols-1 max-[760px]:grid-rows-[minmax(180px,38%)_minmax(0,1fr)]">
+          <aside className="grid min-h-0 grid-rows-[auto_auto_auto_auto_auto_auto_minmax(0,1fr)] gap-2.5 overflow-hidden border-r border-border bg-warm-panel p-3.5 max-[760px]:border-r-0 max-[760px]:border-b">
             <div className="skills-overview" aria-label="Skills 摘要">
               <span>
                 <strong>{skillSummary.enabled}</strong>
@@ -347,27 +353,22 @@ export function SkillsModal({
               <Search size={15} />
               <input value={searchTerm} onChange={(event) => setSearchTerm(event.target.value)} placeholder="搜索 skill" />
             </div>
-            <div className="skill-source-filter" aria-label="Skill 来源筛选">
+            <div className="flex flex-wrap gap-1.5" aria-label="Skill 来源筛选">
               {(["all", "built-in", "custom"] as SkillSourceFilter[]).map((source) => (
-                <button
-                  className={sourceFilter === source ? "active" : ""}
-                  key={source}
-                  type="button"
-                  onClick={() => setSourceFilter(source)}
-                >
+                <FilterChip active={sourceFilter === source} key={source} onClick={() => setSourceFilter(source)}>
                   {sourceFilterLabel(source)}
-                  <span>{sourceCounts[source]}</span>
-                </button>
+                  <span className="text-[11px] text-ink-soft">{sourceCounts[source]}</span>
+                </FilterChip>
               ))}
             </div>
-            <div className="skill-tag-filter" aria-label="Skill 标签筛选">
-              <button className={!activeTag ? "active" : ""} type="button" onClick={() => setActiveTag("")}>
+            <div className="flex flex-wrap gap-1.5" aria-label="Skill 标签筛选">
+              <FilterChip active={!activeTag} onClick={() => setActiveTag("")}>
                 全部
-              </button>
+              </FilterChip>
               {availableTags.map((tag) => (
-                <button className={activeTag === tag ? "active" : ""} key={tag} type="button" onClick={() => setActiveTag(tag)}>
+                <FilterChip active={activeTag === tag} key={tag} onClick={() => setActiveTag(tag)}>
                   {tag}
-                </button>
+                </FilterChip>
               ))}
             </div>
             <Button variant="primary" size="compact" className="w-full" onClick={handleCreateSkill} disabled={isBusy}>
@@ -378,24 +379,37 @@ export function SkillsModal({
               <Download size={14} />
               安装 Skill
             </Button>
-            <div className="skills-list">
+            <div className="grid min-h-0 content-start gap-2 overflow-auto">
               {filteredSkills.map((skill) => (
-                <button
-                  className={`skill-row ${skill.id === selectedSkill?.id && !formDraft && !installDraft ? "active" : ""}`}
+                <ListRow
+                  className="grid grid-cols-[minmax(0,1fr)_auto] border-border-translucent bg-surface-translucent"
+                  active={skill.id === selectedSkill?.id && !formDraft && !installDraft}
                   key={skill.id}
-                  type="button"
                   onClick={() => {
                     setSelectedSkillId(skill.id);
                     setFormDraft(null);
                     setInstallDraft(null);
                   }}
                 >
-                  <span>
-                    <OverflowTooltipText as="strong" text={skill.displayName} logArea="skills_modal_row_name" />
-                    <OverflowTooltipText as="small" text={`${sourceLabel(skill.source)} · ${skillCompatibilityLabel(skill)}`} logArea="skills_modal_row_source" />
+                  <span className="min-w-0">
+                    <OverflowTooltipText as="strong" className="block truncate text-ink-strong" text={skill.displayName} logArea="skills_modal_row_name" />
+                    <OverflowTooltipText
+                      as="small"
+                      className="mt-[3px] block truncate text-xs text-ink-muted"
+                      text={`${sourceLabel(skill.source)} · ${skillCompatibilityLabel(skill)}`}
+                      logArea="skills_modal_row_source"
+                    />
                   </span>
-                  <em className={skill.enabled ? "enabled" : "disabled"}>{skill.enabled ? "启用" : "停用"}</em>
-                </button>
+                  <em
+                    className={
+                      skill.enabled
+                        ? "rounded-full bg-success-soft px-[7px] py-[3px] text-xs not-italic text-success"
+                        : "rounded-full bg-surface-muted px-[7px] py-[3px] text-xs not-italic text-ink-muted"
+                    }
+                  >
+                    {skill.enabled ? "启用" : "停用"}
+                  </em>
+                </ListRow>
               ))}
               {!filteredSkills.length && <p className="skills-empty">没有匹配的 skill。</p>}
             </div>
@@ -431,7 +445,7 @@ export function SkillsModal({
             )}
           </div>
         </div>
-      </section>
+      </ModalPanel>
       {pendingConfirmation && (
         <ConfirmDialog
           {...pendingConfirmation}
@@ -440,7 +454,7 @@ export function SkillsModal({
           onConfirm={() => void handleConfirmDialogConfirm()}
         />
       )}
-    </div>
+    </ModalBackdrop>
   );
 }
 
@@ -629,21 +643,21 @@ function SkillInstallForm({
           <span>第三方 skill 安装后默认停用。</span>
         </div>
       </div>
-      <div className="skill-install-source-tabs" aria-label="Skill 安装来源">
+      <div className="grid grid-cols-3 gap-2" aria-label="Skill 安装来源">
         {(["url", "localFolder", "localArchive"] as SkillInstallSourceType[]).map((sourceType) => {
           const SourceIcon = sourceType === "url" ? Link : sourceType === "localFolder" ? FolderOpen : Archive;
 
           return (
-            <button
-              className={draft.sourceType === sourceType ? "active" : ""}
+            <FilterChip
+              className="min-w-0 justify-center rounded-control p-2 font-bold"
+              active={draft.sourceType === sourceType}
               key={sourceType}
-              type="button"
               onClick={() => updateDraft("sourceType", sourceType)}
               disabled={isBusy}
             >
               <SourceIcon size={14} />
               {installSourceLabel(sourceType)}
-            </button>
+            </FilterChip>
           );
         })}
       </div>

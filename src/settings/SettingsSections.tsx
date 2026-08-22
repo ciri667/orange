@@ -14,6 +14,7 @@ import {
 import { useEffect, useState } from "react";
 import { Button } from "../shared/Button";
 import { ConfirmDialog } from "../shared/ConfirmDialog";
+import { listRowClassName } from "../shared/ListRow";
 import { OverflowTooltipText } from "../shared/OverflowTooltipText";
 import type {
   AgentMemoryEntry,
@@ -694,7 +695,13 @@ export function ImSettingsSection({
             const isSelected = selectedKnowledgeBaseIds.has(knowledgeBase.id);
 
             return (
-              <label className={isSelected ? "scope-option selected" : "scope-option"} key={knowledgeBase.id}>
+              <label
+                className={listRowClassName({
+                  active: isSelected,
+                  className: "scope-option border-border-translucent bg-surface-translucent",
+                })}
+                key={knowledgeBase.id}
+              >
                 <input
                   type="checkbox"
                   checked={isSelected}

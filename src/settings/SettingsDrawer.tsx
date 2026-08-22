@@ -14,7 +14,9 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { Button } from "../shared/Button";
 import { ConfirmDialog } from "../shared/ConfirmDialog";
 import { createLocalId, formatLocalDateTime } from "../shared/id";
+import { ListRow } from "../shared/ListRow";
 import { logDebug, logError, logInfo } from "../shared/logger";
+import { ModalBackdrop, ModalHeader } from "../shared/Modal";
 import { OverflowTooltipText } from "../shared/OverflowTooltipText";
 import type {
   AgentSkill,
@@ -883,17 +885,17 @@ export function SettingsDrawer({
             const SectionIcon = item.icon;
 
             return (
-              <button
-                className={`settings-nav-item ${activeSection === item.id ? "active" : ""}`}
+              <ListRow
+                className="grid grid-cols-[auto_minmax(0,1fr)_auto]"
+                active={activeSection === item.id}
                 key={item.id}
-                type="button"
                 aria-current={activeSection === item.id ? "page" : undefined}
                 onClick={() => handleActiveSectionChange(item.id)}
               >
-                <SectionIcon size={17} />
-                <span className="settings-nav-text">
-                  <OverflowTooltipText as="strong" text={item.label} logArea="settings_nav_label" />
-                  <OverflowTooltipText as="small" text={item.description} logArea="settings_nav_description" />
+                <SectionIcon size={17} className={activeSection === item.id ? "text-accent-strong" : "text-ink-muted"} />
+                <span className="min-w-0">
+                  <OverflowTooltipText as="strong" className="block truncate text-ink-strong" text={item.label} logArea="settings_nav_label" />
+                  <OverflowTooltipText as="small" className="block truncate text-xs text-ink-muted" text={item.description} logArea="settings_nav_description" />
                 </span>
                 <OverflowTooltipText
                   as="em"
@@ -901,7 +903,7 @@ export function SettingsDrawer({
                   text={item.meta}
                   logArea="settings_nav_meta"
                 />
-              </button>
+              </ListRow>
             );
           })}
         </div>
@@ -1037,20 +1039,24 @@ export function SettingsDrawer({
   }
 
   return (
-    <div className="settings-backdrop" role="presentation" onMouseDown={onClose}>
-      <aside className="settings-drawer" aria-label="设置" onMouseDown={(event) => event.stopPropagation()}>
-        <header className="settings-header">
-          <div>
+    <ModalBackdrop onClose={onClose} className="z-settings p-6 max-[760px]:p-2.5">
+      <aside
+        className="settings-drawer relative grid h-[min(820px,calc(100vh-40px))] w-[min(1120px,calc(100vw-40px))] min-h-0 isolate grid-rows-[auto_minmax(0,1fr)] overflow-hidden rounded-panel border border-border-translucent bg-surface-translucent-strong shadow-app max-[760px]:h-[calc(100vh-20px)] max-[760px]:w-[min(100%,calc(100vw-20px))]"
+        aria-label="设置"
+        onMouseDown={(event) => event.stopPropagation()}
+      >
+        <ModalHeader className="px-5 py-[18px]">
+          <div className="min-w-0">
             <p className="section-label">Settings</p>
-            <h2>设置工作台</h2>
+            <h2 className="mt-1 mb-0 text-xl leading-tight text-ink-strong">设置工作台</h2>
           </div>
           <Button variant="icon" title="关闭设置" onClick={onClose}>
             <X size={18} />
           </Button>
-        </header>
+        </ModalHeader>
 
-        <div className="settings-workbench">
-          <nav className="settings-sidebar" aria-label="设置项">
+        <div className="grid min-h-0 min-w-0 grid-cols-[260px_minmax(0,1fr)]">
+          <nav className="grid min-h-0 min-w-0 content-start gap-[18px] overflow-auto border-r border-border bg-warm-panel p-4" aria-label="设置项">
             <div className="settings-overview" aria-label="设置摘要">
               <strong>本地 Agent 环境</strong>
               <span>{settingsSummary.knowledgeBaseCount} 个资料库</span>
@@ -1089,7 +1095,7 @@ export function SettingsDrawer({
           />
         )}
       </aside>
-    </div>
+    </ModalBackdrop>
   );
 }
 

@@ -3,6 +3,8 @@ import { useEffect, useMemo, useState } from "react";
 import { buildMarkdownDiff } from "../diff/markdownDiff";
 import { Button } from "../shared/Button";
 import { ConfirmDialog, type ConfirmDialogConfig } from "../shared/ConfirmDialog";
+import { cn } from "../shared/cn";
+import { ModalBackdrop, ModalHeader, ModalPanel } from "../shared/Modal";
 import {
   clearDocumentHistory,
   loadDocumentHistory,
@@ -199,39 +201,41 @@ export function DocumentHistoryDialog({
 
   return (
     <>
-      <div className="modal-backdrop history-backdrop" role="presentation" onMouseDown={onClose}>
-        <section
-          className="history-dialog"
-          role="dialog"
-          aria-modal="true"
+      <ModalBackdrop onClose={onClose}>
+        <ModalPanel
+          className="h-[min(760px,calc(100vh-40px))] w-[min(980px,calc(100vw-40px))] grid-rows-[auto_minmax(0,1fr)_auto] max-[980px]:w-[min(920px,calc(100vw-24px))] max-[760px]:h-[calc(100vh-20px)] max-[760px]:w-[min(100%,calc(100vw-20px))]"
           aria-labelledby="history-dialog-title"
-          onMouseDown={(event) => event.stopPropagation()}
         >
-          <header className="history-dialog-header">
-            <div>
+          <ModalHeader className="px-4 py-3.5">
+            <div className="min-w-0">
               <p className="section-label">历史记录</p>
-              <h2 id="history-dialog-title">{title}</h2>
+              <h2 id="history-dialog-title" className="mt-1 mb-0 text-lg leading-tight text-ink-strong">
+                {title}
+              </h2>
             </div>
             <Button variant="icon" title="关闭历史记录" onClick={onClose} disabled={isWorking}>
               <X size={18} />
             </Button>
-          </header>
+          </ModalHeader>
 
-          <div className="history-dialog-body">
-            <aside className="history-version-list" aria-label="历史版本">
+          <div className="grid min-h-0 grid-cols-[260px_minmax(0,1fr)] max-[980px]:grid-cols-[220px_minmax(0,1fr)] max-[760px]:grid-cols-1 max-[760px]:grid-rows-[minmax(150px,32%)_minmax(0,1fr)]">
+            <aside className="min-h-0 overflow-auto border-r border-border bg-warm-panel max-[760px]:border-r-0 max-[760px]:border-b" aria-label="历史版本">
               {isLoading && <p className="history-empty">正在加载...</p>}
               {!isLoading && !entries.length && <p className="history-empty">暂无历史记录</p>}
               {entries.map((entry) => (
                 <button
-                  className={selectedDetail?.id === entry.id ? "active" : ""}
+                  className={cn(
+                    "grid w-full gap-1 border-0 border-b border-l-[3px] border-b-border-soft border-l-transparent bg-transparent px-3 py-[11px] text-left text-ink hover:border-l-accent hover:bg-accent-soft",
+                    selectedDetail?.id === entry.id && "border-l-accent bg-accent-soft",
+                  )}
                   key={entry.id}
                   type="button"
                   onClick={() => void handleSelectEntry(entry.id)}
                   disabled={isActionDisabled}
                 >
-                  <span>{entry.createdAt}</span>
-                  <strong>{formatHistorySource(entry.source)}</strong>
-                  <em>
+                  <span className="text-[13px] font-extrabold text-ink-strong">{entry.createdAt}</span>
+                  <strong className="text-xs text-accent-strong">{formatHistorySource(entry.source)}</strong>
+                  <em className="text-xs not-italic text-ink-muted">
                     {entry.lineCount} 行 · {formatBytes(entry.byteSize)}
                   </em>
                 </button>
@@ -287,7 +291,7 @@ export function DocumentHistoryDialog({
             </section>
           </div>
 
-          <footer className="history-dialog-actions">
+          <footer className="flex flex-wrap items-center justify-between gap-3 border-t border-border px-4 py-3.5 max-[760px]:flex-col-reverse max-[760px]:items-stretch">
             <Button variant="ghost" onClick={requestClear} disabled={isActionDisabled || !entries.length}>
               <Trash2 size={15} />
               清空当前文件历史
@@ -302,8 +306,8 @@ export function DocumentHistoryDialog({
               恢复此版本
             </Button>
           </footer>
-        </section>
-      </div>
+        </ModalPanel>
+      </ModalBackdrop>
       {confirmation && (
         <ConfirmDialog
           {...confirmation}
