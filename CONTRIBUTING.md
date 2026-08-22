@@ -33,7 +33,7 @@ npm run desktop:dev
 ## 提交 Pull Request
 
 1. 从最新默认分支创建一个聚焦的分支。
-2. 遵循现有代码风格：前端使用 TypeScript + React，Rust 代码通过 `rustfmt` 格式化。
+2. 遵循现有代码风格：前端使用 TypeScript + React，Rust 代码通过 `rustfmt` 格式化。新 UI 使用 Tailwind token（`bg-surface`、`text-ink`、`bg-accent` 等）、`cn()` 和 `<Button>`；不要引入 Preflight 或 Ant Design / MUI。TopBar、编辑器和 Agent 面板的布局仍走 `app.css`，不要整页重写。
 3. 为新增或调整的函数、类和核心变量补充清晰注释；复杂分支、循环、文件系统或 Tauri 调用请添加行内说明。未完成的工作请标记 `todo`。
 4. 为关键逻辑补充或更新测试；提交前运行与改动相关的验证。
 5. 在 PR 描述中说明改动内容、验证结果、关联 Issue，以及对本地文件、索引、模型请求、日志或写入确认流程的影响。

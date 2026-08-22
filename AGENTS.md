@@ -27,6 +27,8 @@
 
 Use TypeScript with React function components. Keep component filenames in `PascalCase.tsx`, utility modules in `camelCase.ts`, and Rust modules in `snake_case.rs`. Prefer explicit domain types from `src/shared/types.ts` and `src-tauri/src/domain.rs` over loose object shapes. Follow existing two-space indentation in frontend files and standard `rustfmt` formatting for Rust.
 
+Frontend styling is hybrid. Design tokens live in `src/styles/app.css` `:root` and are mapped in `src/styles/tailwind.css`. New UI should use Tailwind utilities plus `cn()` from `src/shared/cn.ts` and semantic tokens such as `bg-surface`, `text-ink`, and `bg-accent`. Action buttons use `<Button>` from `src/shared/Button.tsx`; dialogs use `ConfirmDialog` / `ModalBackdrop`. Do not import Tailwind Preflight. Keep utilities unlayered so they can override element rules such as `button { color: inherit }`. Layout chrome for TopBar, the editor, and the Agent panel still lives in `app.css`—do not rewrite those panels in one pass. Do not add Ant Design, MUI, or Bootstrap.
+
 Add clear comments for functions, classes, and core variables. Comment complex branches, loops, and Tauri or filesystem calls inline. Mark incomplete work with `todo` comments.
 
 ## Testing Guidelines
