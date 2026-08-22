@@ -1,0 +1,76 @@
+/**
+ * 橘记 Tailwind 入口。
+ *
+ * 只引入 theme + utilities，不引入 Preflight。
+ * utilities 故意不放进 @layer：才能压过 app.css 里 `button { color: inherit; font: inherit }`
+ * 这类元素选择器。app.css 在其后加载，同优先级的旧 class 仍然生效。
+ *
+ * 颜色 / 圆角 / 阴影 / 层级的唯一来源仍是 app.css 的 :root。
+ * 这里只把这些变量登记成 Tailwind token，供 bg-accent、text-ink 等使用。
+ *
+ * 新 UI 用这些 token 和 <Button>。
+ * TopBar、编辑器、Agent 面板的布局仍走 app.css，不要整页重写。
+ */
+@layer theme, base, components, utilities;
+
+@import "tailwindcss/theme.css" layer(theme);
+@import "tailwindcss/utilities.css";
+
+@source "../../src/**/*.{ts,tsx}";
+@source not "../../src-tauri";
+@source not "../../dist";
+
+@theme inline {
+  --font-sans:
+    Inter, "SF Pro Display", "SF Pro Text", -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  --font-mono: var(--mono-font);
+
+  --color-app: var(--app-bg);
+  --color-app-strong: var(--app-bg-strong);
+  --color-border: var(--border);
+  --color-border-strong: var(--border-strong);
+  --color-surface: var(--surface);
+  --color-surface-warm: var(--surface-warm);
+  --color-surface-muted: var(--surface-muted);
+  --color-surface-hover: var(--surface-hover);
+  --color-ink: var(--text);
+  --color-ink-strong: var(--text-strong);
+  --color-ink-muted: var(--text-muted);
+  --color-ink-soft: var(--text-soft);
+  --color-accent: var(--accent);
+  --color-accent-strong: var(--accent-strong);
+  --color-accent-soft: var(--accent-soft);
+  --color-agent: var(--agent);
+  --color-agent-strong: var(--agent-strong);
+  --color-agent-soft: var(--agent-soft);
+  --color-danger: var(--danger);
+  --color-danger-soft: var(--danger-soft);
+  --color-success: var(--success);
+  --color-success-soft: var(--success-soft);
+  --color-warning: var(--warning);
+  --color-warning-soft: var(--warning-soft);
+  --color-control: var(--control-bg);
+  --color-control-hover: var(--control-bg-hover);
+  --color-primary-border: var(--color-primary-border);
+  --color-primary-border-strong: var(--color-primary-border-strong);
+  --color-primary-wash: var(--color-primary-wash);
+  --color-primary-wash-strong: var(--color-primary-wash-strong);
+  --color-surface-translucent: var(--color-surface-translucent);
+  --color-surface-translucent-strong: var(--color-surface-translucent-strong);
+  --color-warm-panel: var(--color-warm-panel);
+  --color-border-translucent: var(--color-border-translucent);
+  --color-border-soft: var(--color-border-soft);
+
+  --radius-panel: var(--radius-panel);
+  --radius-control: var(--radius-control);
+  --radius-small: var(--radius-small);
+
+  --shadow-app: var(--shadow);
+  --shadow-app-soft: var(--shadow-soft);
+
+  --z-index-menu: var(--z-menu);
+  --z-index-agent-popover: var(--z-agent-popover);
+  --z-index-settings: var(--z-settings);
+  --z-index-modal: var(--z-modal);
+  --z-index-confirm: var(--z-confirm);
+}
