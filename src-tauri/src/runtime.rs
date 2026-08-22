@@ -19,8 +19,8 @@ use std::path::{Component, Path, PathBuf};
 use std::time::{Duration, Instant};
 use tauri::AppHandle;
 
-/** 未知模型窗口时按 32k tokens 估算，避免把未上报窗口的本地模型撑爆。 */
-const DEFAULT_MODEL_CONTEXT_TOKENS: u64 = 32_000;
+/** 未知模型窗口时按 256k tokens 估算。当前主流窗口普遍更大，256k 作为保守默认。 */
+const DEFAULT_MODEL_CONTEXT_TOKENS: u64 = 256_000;
 
 /** 会话历史最多占用模型窗口的比例；其余留给 system、工具 schema 和模型输出。 */
 const HISTORY_CONTEXT_WINDOW_RATIO: f64 = 0.40;
@@ -31,8 +31,8 @@ const CHARS_PER_TOKEN_ESTIMATE: u64 = 2;
 /** 未知窗口时的历史层下限，保证明显宽于旧的 8 条硬切。 */
 const MIN_HISTORY_BUDGET_CHARS: usize = 16_000;
 
-/** 历史层上限，即使 200k 窗口也不把整本会话无脑塞进去。 */
-const MAX_HISTORY_BUDGET_CHARS: usize = 96_000;
+/** 历史层上限，对齐 256k 保守窗口的 40% 份额，避免把整本会话无脑塞进去。 */
+const MAX_HISTORY_BUDGET_CHARS: usize = 204_800;
 
 /** 已知小窗口时允许的历史层下限，避免 8k 模型被下限抬爆。 */
 const MIN_KNOWN_HISTORY_BUDGET_CHARS: usize = 4_000;
@@ -1823,7 +1823,7 @@ fn session_history_model_messages(
     }
 }
 
-/** 根据模型 context_length 计算历史层字符预算；未知窗口走保守默认值。 */
+/** 根据模型 context_length 计算历史层字符预算；未知窗口走 256k 保守默认。 */
 fn resolve_history_budget_chars(model_context_length: Option<u64>) -> usize {
     let Some(tokens) = model_context_length.filter(|tokens| *tokens >= 1_024) else {
         let default_chars = (DEFAULT_MODEL_CONTEXT_TOKENS.saturating_mul(CHARS_PER_TOKEN_ESTIMATE)
@@ -4313,18 +4313,21 @@ mod tests {
             .contains("目标文件不在当前 scope 内"));
     }
 
-    /** 未知窗口走 32k 默认；已知小窗口按比例收缩，大窗口有上限。 */
+    /** 未知窗口走 256k 默认；已知中等窗口按比例装箱，更大窗口不超过 256k 对应的历史上限。 */
     #[test]
     fn history_budget_follows_model_context_length() {
         let unknown = resolve_history_budget_chars(None);
         let small = resolve_history_budget_chars(Some(4_096));
-        let large = resolve_history_budget_chars(Some(200_000));
+        let mid = resolve_history_budget_chars(Some(128_000));
+        let large = resolve_history_budget_chars(Some(500_000));
 
-        assert_eq!(unknown, 25_600);
+        assert_eq!(unknown, 204_800);
         assert_eq!(small, MIN_KNOWN_HISTORY_BUDGET_CHARS);
+        assert_eq!(mid, 102_400);
         assert_eq!(large, MAX_HISTORY_BUDGET_CHARS);
-        assert!(small < unknown);
-        assert!(unknown < large);
+        assert_eq!(unknown, MAX_HISTORY_BUDGET_CHARS);
+        assert!(small < mid);
+        assert!(mid < unknown);
     }
 
     /** 短消息长会话应按窗口预算装入，而不是硬切最近 8 条。 */
