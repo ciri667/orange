@@ -65,6 +65,165 @@ export function formatTurnDuration(durationMs: number): string {
   return `${seconds}s`;
 }
 
+/** 过程区长文本的截断标记，和后端 truncate_trace_text 保持一致。 */
+export const TRACE_TRUNCATION_MARK = "…[已截断]";
+
+/** 折叠行右侧的短类型标签，避免把英文工具名直接铺在稿纸上。 */
+const TOOL_KIND_LABELS: Partial<Record<AgentToolName, string>> = {
+  search_notes: "检索",
+  read_file: "读取",
+  read_document: "文档",
+  list_tree: "目录",
+  list_path: "浏览",
+  read_path: "读取",
+  get_current_file: "当前",
+  get_session_summary: "摘要",
+  search_session_messages: "会话",
+  read_session_context: "会话",
+  run_skill: "Skill",
+  create_folder: "建夹",
+  propose_file_change: "编辑",
+  create_file_draft: "新建",
+  suggest_organization: "整理",
+  review_change: "审阅",
+};
+
+/** 参数/结果字段的中文标签，未知键回退为原字段名。 */
+const TRACE_FIELD_LABELS: Record<string, string> = {
+  title: "标题",
+  targetPath: "路径",
+  path: "路径",
+  fileName: "文件名",
+  fileType: "类型",
+  query: "检索",
+  operation: "操作",
+  type: "动作",
+  status: "状态",
+  skillId: "Skill",
+  targetKind: "对象",
+  content: "正文",
+  next: "新稿",
+  original: "原文",
+  snippet: "摘录",
+  text: "文本",
+  body: "正文",
+  markdown: "正文",
+  contextSummary: "会话摘要",
+  citations: "命中",
+  notes: "笔记",
+  documents: "文档",
+  folders: "目录",
+  matches: "匹配",
+  messages: "消息",
+  edits: "多处编辑",
+  knowledgeBases: "知识库",
+  totalNotes: "笔记数",
+  totalDocuments: "文档数",
+  totalFiles: "文件数",
+  totalFolders: "目录数",
+  messageCount: "消息数",
+  hits: "命中数",
+  count: "数量",
+  truncated: "已截断",
+  name: "名称",
+  summary: "摘要",
+  diffStats: "变更",
+  fileTypeCounts: "类型分布",
+  knowledgeBaseId: "知识库",
+  fileId: "文件 ID",
+  noteId: "笔记 ID",
+  targetId: "目标 ID",
+  originalHash: "原文哈希",
+  contentHash: "内容哈希",
+  id: "ID",
+};
+
+/** 作为正文预览展示的长文本字段，不再丢进 JSON 黑盒。 */
+const BODY_FIELD_KEYS = new Set([
+  "content",
+  "next",
+  "original",
+  "snippet",
+  "text",
+  "body",
+  "markdown",
+  "contextSummary",
+]);
+
+/** 作为列表展示的数组字段。 */
+const LIST_FIELD_KEYS = new Set([
+  "citations",
+  "notes",
+  "documents",
+  "folders",
+  "matches",
+  "messages",
+  "edits",
+  "knowledgeBases",
+]);
+
+/** 默认收进「技术细节」的内部标识，避免 UUID 抢视线。 */
+const TECH_FIELD_KEYS = new Set([
+  "id",
+  "knowledgeBaseId",
+  "fileId",
+  "noteId",
+  "targetId",
+  "originalHash",
+  "contentHash",
+  "sessionId",
+  "liveMessageId",
+]);
+
+/** 工具结果里常见的单层包装，解开后才能读到标题和正文。 */
+const RESULT_WRAPPER_KEYS = ["change", "file", "document", "note", "suggestion", "payload"] as const;
+
+/** 截断 JSON 里仍值得尽力抽出的字段。 */
+const EXTRACTABLE_JSON_KEYS = [
+  "title",
+  "targetPath",
+  "path",
+  "fileType",
+  "query",
+  "operation",
+  "type",
+  "status",
+  "content",
+  "next",
+  "original",
+] as const;
+
+/** 元信息阅读顺序：先看标题和路径，再看类型与状态。 */
+const META_FIELD_ORDER = [
+  "title",
+  "query",
+  "targetPath",
+  "path",
+  "fileName",
+  "fileType",
+  "operation",
+  "status",
+  "diffStats",
+];
+
+/** 过程区展开后的结构化字段，按稿纸卡片而不是原始 JSON 渲染。 */
+export type TraceDetailFieldKind = "meta" | "body" | "list" | "tech";
+
+export interface TraceDetailField {
+  key: string;
+  label: string;
+  kind: TraceDetailFieldKind;
+  text: string;
+  truncated: boolean;
+  items?: string[];
+}
+
+export interface ToolTraceDetails {
+  kindLabel: string;
+  fields: TraceDetailField[];
+  hasDetails: boolean;
+}
+
 /** 把工具参数或结果格式化成过程区可展开的预览文本。 */
 export function formatTraceValue(value: unknown): string {
   if (typeof value === "string") {
@@ -76,6 +235,453 @@ export function formatTraceValue(value: unknown): string {
   } catch {
     return String(value);
   }
+}
+
+/** 折叠行右侧的中文类型胶囊，摘要已经足够时不再重复英文工具名。 */
+export function getToolKindLabel(name?: AgentToolName | string): string {
+  if (!name) {
+    return "工具";
+  }
+
+  return TOOL_KIND_LABELS[name as AgentToolName] ?? name;
+}
+
+/** 去掉截断标记，让正文预览按普通笔记片段展示。 */
+export function stripTraceTruncation(value: string): { text: string; truncated: boolean } {
+  if (value.endsWith(TRACE_TRUNCATION_MARK)) {
+    return {
+      text: value.slice(0, -TRACE_TRUNCATION_MARK.length),
+      truncated: true,
+    };
+  }
+
+  if (value.includes(TRACE_TRUNCATION_MARK)) {
+    return {
+      text: value.split(TRACE_TRUNCATION_MARK).join(""),
+      truncated: true,
+    };
+  }
+
+  return { text: value, truncated: false };
+}
+
+/** 把工具步骤的参数和结果收成稿纸卡片字段，重复正文只保留一份。 */
+export function buildToolTraceDetails(step: AgentTraceStep): ToolTraceDetails {
+  const fields: TraceDetailField[] = [];
+  const seenKeys = new Set<string>();
+  const seenBodies = new Set<string>();
+
+  ingestTraceRecord(asTraceRecord(step.args), fields, seenKeys, seenBodies);
+  ingestTraceRecord(asTraceRecord(parseTracePayload(step.resultPreview)), fields, seenKeys, seenBodies);
+
+  if (typeof step.resultPreview === "string" && step.resultPreview.trim() && !fields.length) {
+    const stripped = stripTraceTruncation(humanizeTraceText(step.resultPreview));
+    fields.push({
+      key: "result",
+      label: "结果",
+      kind: "body",
+      text: stripped.text.trim(),
+      truncated: stripped.truncated,
+    });
+  }
+
+  const kindLabel = getToolKindLabel(step.name);
+  const visibleFields = sortTraceFields(
+    fields.filter((field) => !(field.key === "type" && field.text === kindLabel)),
+  );
+
+  return {
+    kindLabel,
+    fields: visibleFields,
+    hasDetails: visibleFields.length > 0 || Boolean(step.error),
+  };
+}
+
+/** 元信息按阅读顺序排列，正文始终放在卡片底部。 */
+function sortTraceFields(fields: TraceDetailField[]): TraceDetailField[] {
+  const kindRank: Record<TraceDetailFieldKind, number> = {
+    meta: 0,
+    list: 1,
+    tech: 2,
+    body: 3,
+  };
+
+  return [...fields].sort((left, right) => {
+    const kindDelta = kindRank[left.kind] - kindRank[right.kind];
+    if (kindDelta !== 0) {
+      return kindDelta;
+    }
+
+    if (left.kind !== "meta") {
+      return 0;
+    }
+
+    const leftIndex = META_FIELD_ORDER.indexOf(left.key);
+    const rightIndex = META_FIELD_ORDER.indexOf(right.key);
+    return (leftIndex < 0 ? 50 : leftIndex) - (rightIndex < 0 ? 50 : rightIndex);
+  });
+}
+
+/** 尝试把结果预览解析成对象；截断 JSON 则尽力抽出标题、路径和正文。 */
+function parseTracePayload(raw?: string): unknown {
+  if (!raw?.trim()) {
+    return undefined;
+  }
+
+  const trimmed = raw.trim();
+  try {
+    return JSON.parse(trimmed);
+  } catch {
+    if (!trimmed.startsWith("{") && !trimmed.startsWith("[")) {
+      return trimmed;
+    }
+
+    const extracted: Record<string, unknown> = {};
+    for (const key of EXTRACTABLE_JSON_KEYS) {
+      const value = extractJsonStringField(trimmed, key);
+      if (value) {
+        extracted[key] = value;
+      }
+    }
+
+    return Object.keys(extracted).length ? extracted : trimmed;
+  }
+}
+
+/** 从可能被截断的 JSON 文本中抽出一个字符串字段，并还原换行。 */
+function extractJsonStringField(raw: string, key: string): string | undefined {
+  const marker = `"${key}"`;
+  const keyIndex = raw.indexOf(marker);
+  if (keyIndex < 0) {
+    return undefined;
+  }
+
+  const colon = raw.indexOf(":", keyIndex + marker.length);
+  if (colon < 0) {
+    return undefined;
+  }
+
+  const rest = raw.slice(colon + 1).trimStart();
+  if (!rest.startsWith('"')) {
+    const literal = rest.match(/^(true|false|null|-?\d+(?:\.\d+)?)/);
+    return literal?.[0];
+  }
+
+  let text = "";
+  for (let index = 1; index < rest.length; index += 1) {
+    const character = rest[index];
+    if (character === "\\") {
+      const next = rest[index + 1];
+      if (next === "n") {
+        text += "\n";
+      } else if (next === "t") {
+        text += "\t";
+      } else if (next === '"') {
+        text += '"';
+      } else if (next === "\\") {
+        text += "\\";
+      } else if (next) {
+        text += next;
+      }
+      index += 1;
+      continue;
+    }
+
+    if (character === '"') {
+      break;
+    }
+
+    text += character;
+  }
+
+  return text || undefined;
+}
+
+/** 把转义换行还原成可读正文，供 JSON 解析失败时的兜底预览使用。 */
+function humanizeTraceText(value: string): string {
+  return value
+    .replace(/\\n/g, "\n")
+    .replace(/\\t/g, "  ")
+    .replace(/\\"/g, '"')
+    .replace(/\\\\/g, "\\");
+}
+
+/** 把未知值收成可遍历对象，并解开 change/file 等单层包装。 */
+function asTraceRecord(value: unknown): Record<string, unknown> | undefined {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return undefined;
+  }
+
+  const record = value as Record<string, unknown>;
+  for (const wrapper of RESULT_WRAPPER_KEYS) {
+    const nested = record[wrapper];
+    if (nested && typeof nested === "object" && !Array.isArray(nested)) {
+      const rest = { ...record };
+      delete rest[wrapper];
+      return { ...rest, ...(nested as Record<string, unknown>) };
+    }
+  }
+
+  return record;
+}
+
+/** 按字段语义写入卡片：元信息、正文、列表或技术细节。 */
+function ingestTraceRecord(
+  record: Record<string, unknown> | undefined,
+  fields: TraceDetailField[],
+  seenKeys: Set<string>,
+  seenBodies: Set<string>,
+) {
+  if (!record) {
+    return;
+  }
+
+  for (const [key, value] of Object.entries(record)) {
+    ingestTraceValue(key, value, fields, seenKeys, seenBodies);
+  }
+}
+
+function ingestTraceValue(
+  key: string,
+  value: unknown,
+  fields: TraceDetailField[],
+  seenKeys: Set<string>,
+  seenBodies: Set<string>,
+) {
+  if (value == null || value === "" || key === "reviewComments" || key === "reviewState") {
+    return;
+  }
+
+  if (key === "truncated" && value === false) {
+    return;
+  }
+
+  if (key === "diffStats") {
+    const text = formatDiffStats(value);
+    if (text && !seenKeys.has(key)) {
+      seenKeys.add(key);
+      fields.push({ key, label: TRACE_FIELD_LABELS.diffStats, kind: "meta", text, truncated: false });
+    }
+    return;
+  }
+
+  if (key === "fileTypeCounts") {
+    const text = formatFileTypeCounts(value);
+    if (text && !seenKeys.has(key)) {
+      seenKeys.add(key);
+      fields.push({ key, label: TRACE_FIELD_LABELS.fileTypeCounts, kind: "meta", text, truncated: false });
+    }
+    return;
+  }
+
+  if (Array.isArray(value)) {
+    if (seenKeys.has(key) || value.length === 0) {
+      return;
+    }
+
+    seenKeys.add(key);
+    const items = value.map(listItemLabel).filter((item): item is string => Boolean(item));
+    if (!items.length) {
+      fields.push({
+        key,
+        label: fieldLabel(key),
+        kind: "meta",
+        text: `${value.length} 项`,
+        truncated: false,
+      });
+      return;
+    }
+
+    fields.push({
+      key,
+      label: fieldLabel(key),
+      kind: "list",
+      text: `${items.length} 项`,
+      truncated: items.length > 6,
+      items: items.slice(0, 6),
+    });
+    return;
+  }
+
+  if (typeof value === "object") {
+    const nested = value as Record<string, unknown>;
+    const entries = Object.entries(nested);
+    const allScalar = entries.every(([, child]) => child == null || ["string", "number", "boolean"].includes(typeof child));
+    if (allScalar && entries.length > 0 && entries.length <= 8) {
+      ingestTraceRecord(nested, fields, seenKeys, seenBodies);
+      return;
+    }
+
+    if (!seenKeys.has(key)) {
+      seenKeys.add(key);
+      fields.push({
+        key,
+        label: fieldLabel(key),
+        kind: "tech",
+        text: formatTraceValue(value),
+        truncated: false,
+      });
+    }
+    return;
+  }
+
+  const formatted = formatTraceFieldValue(key, value);
+  if (!formatted.text) {
+    return;
+  }
+
+  const kind = classifyTraceField(key, formatted.text, value);
+  if (kind === "body") {
+    const fingerprint = bodyFingerprint(formatted.text);
+    if (!fingerprint || isDuplicateBody(fingerprint, seenBodies)) {
+      return;
+    }
+    seenBodies.add(fingerprint);
+  } else if (seenKeys.has(key)) {
+    return;
+  }
+
+  seenKeys.add(key);
+  fields.push({
+    key,
+    label: fieldLabel(key),
+    kind,
+    text: formatted.text,
+    truncated: formatted.truncated,
+  });
+}
+
+function classifyTraceField(key: string, text: string, value: unknown): TraceDetailFieldKind {
+  if (TECH_FIELD_KEYS.has(key) || looksLikeIdentifier(key, value)) {
+    return "tech";
+  }
+
+  if (BODY_FIELD_KEYS.has(key) || (typeof value === "string" && text.includes("\n")) || text.length > 160) {
+    return "body";
+  }
+
+  if (LIST_FIELD_KEYS.has(key)) {
+    return "list";
+  }
+
+  return "meta";
+}
+
+function fieldLabel(key: string): string {
+  return TRACE_FIELD_LABELS[key] ?? key;
+}
+
+function formatTraceFieldValue(key: string, value: unknown): { text: string; truncated: boolean } {
+  if (typeof value === "boolean") {
+    return { text: value ? "是" : "否", truncated: false };
+  }
+
+  if (typeof value === "number") {
+    return { text: String(value), truncated: false };
+  }
+
+  if (typeof value !== "string") {
+    return { text: formatTraceValue(value), truncated: false };
+  }
+
+  const stripped = stripTraceTruncation(value);
+  let text = stripped.text.trim();
+
+  if (key === "fileType") {
+    text = formatFileType(text);
+  } else if (key === "operation") {
+    text = ({ replace: "替换", append: "追加", multi_replace: "多处替换" } as Record<string, string>)[text] ?? text;
+  } else if (key === "type") {
+    text = ({ create: "新建", rewrite: "改写", organize: "整理" } as Record<string, string>)[text] ?? text;
+  } else if (key === "targetKind") {
+    text = ({ note: "笔记", document: "文档", folder: "文件夹" } as Record<string, string>)[text] ?? text;
+  } else if (key === "status") {
+    text = ({ pending: "待确认", completed: "已完成", failed: "失败", running: "进行中" } as Record<string, string>)[text] ?? text;
+  }
+
+  return { text, truncated: stripped.truncated };
+}
+
+function formatFileType(value: string): string {
+  const labels: Record<string, string> = {
+    markdown: "Markdown",
+    md: "Markdown",
+    txt: "纯文本",
+    docx: "Word",
+    pdf: "PDF",
+    image: "图片",
+  };
+  return labels[value] ?? value;
+}
+
+function formatDiffStats(value: unknown): string | undefined {
+  if (!value || typeof value !== "object") {
+    return undefined;
+  }
+
+  const stats = value as Record<string, unknown>;
+  const added = stats.added ?? stats.insertions ?? stats.addedLines;
+  const removed = stats.removed ?? stats.deletions ?? stats.removedLines;
+  if (typeof added !== "number" && typeof removed !== "number") {
+    return undefined;
+  }
+
+  return `+${typeof added === "number" ? added : 0} / -${typeof removed === "number" ? removed : 0}`;
+}
+
+function formatFileTypeCounts(value: unknown): string | undefined {
+  if (!value || typeof value !== "object") {
+    return undefined;
+  }
+
+  const parts = Object.entries(value as Record<string, unknown>)
+    .filter(([, count]) => typeof count === "number" && count > 0)
+    .map(([type, count]) => `${formatFileType(type)} ${count}`);
+
+  return parts.length ? parts.join(" · ") : undefined;
+}
+
+function listItemLabel(item: unknown): string | undefined {
+  if (typeof item === "string") {
+    const stripped = stripTraceTruncation(item).text.trim();
+    return stripped || undefined;
+  }
+
+  if (!item || typeof item !== "object") {
+    return undefined;
+  }
+
+  const record = item as Record<string, unknown>;
+  for (const key of ["title", "path", "name", "query", "summary", "targetPath", "fileName"]) {
+    const value = record[key];
+    if (typeof value === "string" && value.trim()) {
+      return stripTraceTruncation(value).text.trim();
+    }
+  }
+
+  return undefined;
+}
+
+function looksLikeIdentifier(key: string, value: unknown): boolean {
+  if (/(^id$|Id$|Hash$|_id$)/.test(key)) {
+    return true;
+  }
+
+  return typeof value === "string" && /^[a-z]+-[0-9a-f-]{8,}$/i.test(value.trim());
+}
+
+function bodyFingerprint(text: string): string {
+  return text.replace(/\s+/g, " ").trim().slice(0, 240);
+}
+
+function isDuplicateBody(fingerprint: string, seenBodies: Set<string>): boolean {
+  for (const existing of seenBodies) {
+    if (existing.startsWith(fingerprint) || fingerprint.startsWith(existing)) {
+      return true;
+    }
+  }
+
+  return false;
 }
 
 /** 浏览器 mock 和旧消息回退：从扁平 toolCalls 生成用户可见轨迹。 */
