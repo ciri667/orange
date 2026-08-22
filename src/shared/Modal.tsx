@@ -30,6 +30,44 @@ export function ModalBackdrop({
   );
 }
 
+/** 大中型弹层面板，用于 Skills、历史、设置等工作台弹窗。 */
+export function ModalPanel({
+  children,
+  className,
+  "aria-label": ariaLabel,
+  "aria-labelledby": ariaLabelledBy,
+}: {
+  children: ReactNode;
+  className?: string;
+  "aria-label"?: string;
+  "aria-labelledby"?: string;
+}) {
+  return (
+    <section
+      className={cn(
+        "grid isolate min-h-0 overflow-hidden rounded-panel border border-border-translucent bg-surface shadow-app",
+        className,
+      )}
+      role="dialog"
+      aria-modal="true"
+      aria-label={ariaLabel}
+      aria-labelledby={ariaLabelledBy}
+      onMouseDown={(event) => event.stopPropagation()}
+    >
+      {children}
+    </section>
+  );
+}
+
+/** 弹层标题栏：左侧标题、右侧操作。 */
+export function ModalHeader({ children, className }: { children: ReactNode; className?: string }) {
+  return (
+    <header className={cn("flex items-start justify-between gap-4 border-b border-border bg-surface p-4", className)}>
+      {children}
+    </header>
+  );
+}
+
 /** 小型表单弹窗面板，用于重命名、新建文件等单字段对话框。 */
 export function ModalForm({
   children,

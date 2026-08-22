@@ -43,6 +43,7 @@ export const Button = forwardRef<HTMLButtonElement, ButtonProps>(function Button
         variantClassName[variant],
         size === "compact" && variant !== "icon" && "min-h-[34px]",
         size === "compact" && variant === "ghost" && "px-[9px] py-1.5 text-xs",
+        size === "compact" && variant === "icon" && "size-[26px] min-h-[26px]",
         tone === "danger" && variant === "primary" && "bg-danger text-white hover:enabled:bg-danger",
         tone === "danger" && variant !== "primary" && "text-danger",
         className,
