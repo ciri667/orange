@@ -13,10 +13,11 @@ import {
   Plus,
   Trash2,
 } from "lucide-react";
-import { useState } from "react";
+import { useState, type ComponentProps } from "react";
+import { Button } from "../shared/Button";
 import { logDebug } from "../shared/logger";
+import { Menu, MenuItem, MenuPanel, type MenuPanelPlacement } from "../shared/Menu";
 import { OverflowTooltipText } from "../shared/OverflowTooltipText";
-import { useDismissable } from "../shared/useDismissable";
 import type { FileTreeNode } from "../shared/types";
 
 /** 本地文件树组件，递归展示文件夹、Markdown、txt、docx、pdf 和图片文件。 */
@@ -104,7 +105,7 @@ export function FileTree({
           return (
             <li key={node.id}>
               <div
-                className={`file-tree-row folder ${node.isRoot ? "root-folder" : ""}`}
+                className={`file-tree-row group folder ${node.isRoot ? "root-folder" : ""}`}
                 style={{ paddingLeft: depth * 14 + 6 }}
               >
                 <button
@@ -122,6 +123,7 @@ export function FileTree({
                 <div className="file-tree-actions">
                   <CreateMenu
                     isOpen={openCreateMenuPath === node.path}
+                    placement={node.isRoot ? "bottom-end" : "top-end"}
                     onToggle={() => {
                       setOpenCreateMenuPath(openCreateMenuPath === node.path ? null : node.path);
                       setOpenFileActionPath(null);
@@ -180,7 +182,7 @@ export function FileTree({
         return (
           <li key={node.id}>
             <div
-              className={`file-tree-row file ${isActiveFile ? "active" : ""}`}
+              className={`file-tree-row group file ${isActiveFile ? "active" : ""}`}
               style={{ paddingLeft: depth * 14 + 28 }}
               role="treeitem"
               aria-selected={isActiveFile}
@@ -248,28 +250,28 @@ function EmptyFolderCreateHint({
       <p className="file-tree-empty">
         {isFiltered ? "没有匹配的支持文档" : "当前知识库还没有文件，可以在根目录新建。"}
       </p>
-      <div className="file-tree-empty-actions">
-        <button type="button" onClick={() => onCreateMarkdown(folderPath)}>
+      <div className="flex flex-wrap gap-1.5">
+        <Button variant="ghost" size="compact" onClick={() => onCreateMarkdown(folderPath)}>
           <FileText size={14} />
           新建 Markdown
-        </button>
-        <button type="button" onClick={() => onCreateText(folderPath)}>
+        </Button>
+        <Button variant="ghost" size="compact" onClick={() => onCreateText(folderPath)}>
           <FileType size={14} />
           新建 TXT
-        </button>
-        <button type="button" onClick={() => onCreateFolder(folderPath)}>
+        </Button>
+        <Button variant="ghost" size="compact" onClick={() => onCreateFolder(folderPath)}>
           <FolderPlus size={14} />
           新建目录
-        </button>
+        </Button>
       </div>
     </div>
   );
 }
 
-/** 文件夹行的「+」按钮与新建菜单。ref 与 hook 只覆盖按钮 + 菜单这个小范围，
- * 点击树内别处（其它文件夹 / 文件行）也视为外部点击而关闭，避免旧菜单残留。 */
+/** 文件夹行的「+」按钮与新建菜单。点击树内别处也会关闭，避免旧菜单残留。 */
 function CreateMenu({
   isOpen,
+  placement,
   onToggle,
   onClose,
   folderName,
@@ -279,6 +281,7 @@ function CreateMenu({
   onCreateFolder,
 }: {
   isOpen: boolean;
+  placement: MenuPanelPlacement;
   onToggle: () => void;
   onClose: () => void;
   folderName: string;
@@ -287,29 +290,21 @@ function CreateMenu({
   onCreateText: (parentPath: string) => void;
   onCreateFolder: (parentPath: string) => void;
 }) {
-  // ref 仅包住触发按钮与浮层，判定点外部（含树内其它行）即关闭。
-  const containerRef = useDismissable<HTMLDivElement>(isOpen, onClose);
-
   return (
-    <div ref={containerRef}>
-      <button
-        className="file-action-button"
-        type="button"
+    <Menu open={isOpen} onClose={onClose}>
+      <FileTreeMenuTrigger
+        isOpen={isOpen}
         aria-label={`在「${folderName}」中新建`}
-        aria-haspopup="menu"
-        aria-expanded={isOpen}
         onClick={(event) => {
           event.stopPropagation();
           onToggle();
         }}
       >
         <Plus size={14} />
-      </button>
+      </FileTreeMenuTrigger>
       {isOpen && (
-        <div className="create-action-menu" role="menu">
-          <button
-            type="button"
-            role="menuitem"
+        <MenuPanel placement={placement}>
+          <MenuItem
             onClick={() => {
               onClose();
               onCreateMarkdown(folderPath);
@@ -317,10 +312,8 @@ function CreateMenu({
           >
             <FileText size={14} />
             新建 Markdown
-          </button>
-          <button
-            type="button"
-            role="menuitem"
+          </MenuItem>
+          <MenuItem
             onClick={() => {
               onClose();
               onCreateText(folderPath);
@@ -328,10 +321,8 @@ function CreateMenu({
           >
             <FileType size={14} />
             新建 TXT
-          </button>
-          <button
-            type="button"
-            role="menuitem"
+          </MenuItem>
+          <MenuItem
             onClick={() => {
               onClose();
               onCreateFolder(folderPath);
@@ -339,14 +330,14 @@ function CreateMenu({
           >
             <FolderPlus size={14} />
             新建目录
-          </button>
-        </div>
+          </MenuItem>
+        </MenuPanel>
       )}
-    </div>
+    </Menu>
   );
 }
 
-/** 文件行的「更多操作」按钮与菜单。ref 覆盖按钮 + 菜单，点树内其它行也会关闭。 */
+/** 文件行的「更多操作」按钮与菜单。点树内其它行也会关闭。 */
 function FileActionMenu({
   isOpen,
   onToggle,
@@ -378,29 +369,22 @@ function FileActionMenu({
   onRenameDocument: (documentId: string) => void;
   onDeleteDocument: (documentId: string) => void;
 }) {
-  const containerRef = useDismissable<HTMLDivElement>(isOpen, onClose);
-
   return (
-    <div ref={containerRef}>
-      <button
-        className="file-action-button"
-        type="button"
+    <Menu open={isOpen} onClose={onClose}>
+      <FileTreeMenuTrigger
+        isOpen={isOpen}
         title="更多文件操作"
-        aria-haspopup="menu"
-        aria-expanded={isOpen}
         onClick={(event) => {
           event.stopPropagation();
           onToggle();
         }}
       >
         <MoreHorizontal size={14} />
-      </button>
+      </FileTreeMenuTrigger>
       {isOpen && (
-        <div className="file-action-menu" role="menu">
+        <MenuPanel placement="top-end">
           {canOpenHistory && (
-            <button
-              type="button"
-              role="menuitem"
+            <MenuItem
               onClick={() => {
                 onClose();
                 if (noteId) {
@@ -412,12 +396,10 @@ function FileActionMenu({
             >
               <History size={14} />
               历史记录
-            </button>
+            </MenuItem>
           )}
           {canRename && (
-            <button
-              type="button"
-              role="menuitem"
+            <MenuItem
               onClick={() => {
                 onClose();
                 if (noteId) {
@@ -429,13 +411,11 @@ function FileActionMenu({
             >
               <FilePenLine size={14} />
               重命名
-            </button>
+            </MenuItem>
           )}
           {canDelete && (
-            <button
-              className="danger"
-              type="button"
-              role="menuitem"
+            <MenuItem
+              tone="danger"
               onClick={() => {
                 onClose();
                 if (noteId) {
@@ -447,11 +427,35 @@ function FileActionMenu({
             >
               <Trash2 size={14} />
               删除
-            </button>
+            </MenuItem>
           )}
-        </div>
+        </MenuPanel>
       )}
-    </div>
+    </Menu>
+  );
+}
+
+/** 文件树行内的小图标触发器，默认半透明，悬停行或展开菜单时完全显示。 */
+function FileTreeMenuTrigger({
+  isOpen,
+  children,
+  ...props
+}: ComponentProps<typeof Button> & { isOpen: boolean }) {
+  return (
+    <Button
+      variant="icon"
+      size="compact"
+      aria-haspopup="menu"
+      aria-expanded={isOpen}
+      {...props}
+      className={
+        isOpen
+          ? "border-border-strong bg-surface-hover text-ink opacity-100"
+          : "border-transparent bg-transparent text-ink-soft opacity-[0.58] group-hover:opacity-100 hover:enabled:border-border-strong hover:enabled:bg-surface-hover hover:enabled:text-ink"
+      }
+    >
+      {children}
+    </Button>
   );
 }
 

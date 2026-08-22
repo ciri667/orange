@@ -10,6 +10,7 @@ import { DiffPanel } from "../diff/DiffPanel";
 import type { ReviewCommentDraft } from "../diff/DiffPanel";
 import { Button } from "../shared/Button";
 import { MarkdownLink } from "../shared/MarkdownLink";
+import { SegmentedControl, SegmentedControlItem } from "../shared/SegmentedControl";
 import type { ExportFormat, KnowledgeBase, MarkdownViewMode, Note, ProposedChange } from "../shared/types";
 import { EditorEmptyHeader, EditorFileHeader, EditorMetaStrip, EditorMoreActionMenu } from "./EditorFileChrome";
 import { LineNumberedTextarea } from "./LineNumberedTextarea";
@@ -108,17 +109,19 @@ export function EditorPane({
     return (
       <section className="editor-pane" aria-label="Markdown 编辑器">
         <EditorEmptyHeader pathLabel={knowledgeBase.name} pathLogArea="editor_empty_knowledge_base" title="暂无 Markdown 笔记" />
-        <div className="editor-empty-state">
+        <div className="grid min-h-0 place-content-center justify-items-center gap-2.5 rounded-panel border border-dashed border-border-strong bg-surface p-6 text-center text-ink-muted">
           {knowledgeBase.status === "error" ? (
             <>
-              <strong>当前知识库目录暂不可访问。</strong>
-              <span>{knowledgeBase.description}</span>
+              <strong className="text-base text-ink">当前知识库目录暂不可访问。</strong>
+              <span className="max-w-[420px] text-[13px] leading-[1.55]">{knowledgeBase.description}</span>
             </>
           ) : (
             <>
-              <strong>当前知识库还没有可编辑的 Markdown 文件。</strong>
-              <span>可以在当前知识库根目录直接新建文档，或在本地目录中添加文件后重新扫描。</span>
-              <div className="editor-empty-actions">
+              <strong className="text-base text-ink">当前知识库还没有可编辑的 Markdown 文件。</strong>
+              <span className="max-w-[420px] text-[13px] leading-[1.55]">
+                可以在当前知识库根目录直接新建文档，或在本地目录中添加文件后重新扫描。
+              </span>
+              <div className="mt-1.5 flex flex-wrap justify-center gap-2">
                 <Button variant="primary" size="compact" onClick={() => onCreateMarkdown("")}>
                   <FileText size={14} />
                   新建 Markdown
@@ -161,20 +164,19 @@ export function EditorPane({
         }}
         actions={
           <>
-          <div className="view-mode-toggle" aria-label="Markdown 视图模式">
+          <SegmentedControl aria-label="Markdown 视图模式">
             {MARKDOWN_VIEW_OPTIONS.map(({ mode, label, title, icon: Icon }) => (
-              <button
-                className={viewMode === mode ? "active" : ""}
+              <SegmentedControlItem
+                active={viewMode === mode}
                 key={mode}
-                type="button"
                 title={title}
                 onClick={() => onViewModeChange(mode)}
               >
                 <Icon size={15} />
                 <span>{label}</span>
-              </button>
+              </SegmentedControlItem>
             ))}
-          </div>
+          </SegmentedControl>
           <Button variant="text" onClick={onSaveNote} disabled={isBusy || !isDirty}>
             <Save size={16} />
             {isDirty ? "保存草稿" : "已保存"}

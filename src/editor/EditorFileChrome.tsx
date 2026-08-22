@@ -2,8 +2,8 @@ import { ChevronDown, FileDown, FilePenLine, History, MoreHorizontal, Trash2 } f
 import { useState, type ReactNode } from "react";
 import { Button } from "../shared/Button";
 import { logDebug } from "../shared/logger";
+import { Menu, MenuItem, MenuPanel } from "../shared/Menu";
 import { OverflowTooltipText } from "../shared/OverflowTooltipText";
-import { useDismissable } from "../shared/useDismissable";
 import type { ExportFormat } from "../shared/types";
 
 /** 编辑器头部标题区入参，统一 Markdown 和普通文档的路径/标题展示。 */
@@ -42,12 +42,12 @@ export function EditorFileHeader({
   actions?: ReactNode;
 }) {
   return (
-    <header className="editor-header">
-      <div>
-        <OverflowTooltipText as="p" className="path-label" text={title.pathLabel} logArea={title.pathLogArea} />
-        <OverflowTooltipText as="h2" text={title.title} logArea={title.titleLogArea} />
+    <header className="flex items-start justify-between gap-3">
+      <div className="min-w-0">
+        <OverflowTooltipText as="p" className="path-label truncate" text={title.pathLabel} logArea={title.pathLogArea} />
+        <OverflowTooltipText as="h2" className="mt-1 mb-0 truncate text-xl leading-tight text-ink-strong" text={title.title} logArea={title.titleLogArea} />
       </div>
-      <div className="editor-actions">{actions}</div>
+      <div className="flex min-w-0 flex-wrap items-center justify-end gap-[7px]">{actions}</div>
     </header>
   );
 }
@@ -63,12 +63,12 @@ export function EditorEmptyHeader({
   title: string;
 }) {
   return (
-    <header className="editor-header">
-      <div>
-        <OverflowTooltipText as="p" className="path-label" text={pathLabel} logArea={pathLogArea} />
-        <h2>{title}</h2>
+    <header className="flex items-start justify-between gap-3">
+      <div className="min-w-0">
+        <OverflowTooltipText as="p" className="path-label truncate" text={pathLabel} logArea={pathLogArea} />
+        <h2 className="mt-1 mb-0 truncate text-xl leading-tight text-ink-strong">{title}</h2>
       </div>
-      <div className="editor-actions" />
+      <div className="flex min-w-0 flex-wrap items-center justify-end gap-[7px]" />
     </header>
   );
 }
@@ -109,8 +109,11 @@ export function EditorMoreActionMenu({
   const [isExportMenuOpen, setIsExportMenuOpen] = useState(false);
   /** 更多菜单展开状态只影响当前头部，不进入工作台全局状态。 */
   const [isMoreMenuOpen, setIsMoreMenuOpen] = useState(false);
-  /** 点击菜单以外区域或按 Esc 时关闭菜单，和旧实现保持一致。 */
-  const moreMenuRef = useDismissable<HTMLDivElement>(isMoreMenuOpen, () => setIsMoreMenuOpen(false));
+  /** 关闭更多菜单时同步收起导出子菜单。 */
+  function handleMoreMenuClose() {
+    setIsMoreMenuOpen(false);
+    setIsExportMenuOpen(false);
+  }
 
   /** 切换低频操作菜单，并写入调用方指定的脱敏事件。 */
   function handleMoreMenuToggle() {
@@ -127,7 +130,7 @@ export function EditorMoreActionMenu({
   }
 
   return (
-    <div className="more-menu-wrapper" ref={moreMenuRef}>
+    <Menu open={isMoreMenuOpen} onClose={handleMoreMenuClose}>
       <Button
         variant="icon"
         title="更多文件操作"
@@ -139,10 +142,8 @@ export function EditorMoreActionMenu({
         <MoreHorizontal size={18} />
       </Button>
       {isMoreMenuOpen && (
-        <div className="more-action-menu" role="menu">
-          <button
-            type="button"
-            role="menuitem"
+        <MenuPanel placement="bottom-end" className="min-w-[172px]">
+          <MenuItem
             aria-haspopup="menu"
             aria-expanded={isExportMenuOpen}
             onClick={() => setIsExportMenuOpen((isOpen) => !isOpen)}
@@ -150,66 +151,57 @@ export function EditorMoreActionMenu({
             <FileDown size={14} />
             导出当前文件
             <ChevronDown size={13} />
-          </button>
+          </MenuItem>
           {isExportMenuOpen &&
             exportOptions.map((option) => (
-              <button
-                className="nested-menu-item"
+              <MenuItem
+                nested
                 key={option.format}
-                type="button"
-                role="menuitem"
                 onClick={() => {
-                  setIsExportMenuOpen(false);
-                  setIsMoreMenuOpen(false);
+                  handleMoreMenuClose();
                   void onExportFile(option.format);
                 }}
               >
                 <FileDown size={14} />
                 {option.label}
-              </button>
+              </MenuItem>
             ))}
           {onOpenHistory && (
-            <button
-              type="button"
-              role="menuitem"
+            <MenuItem
               onClick={() => {
-                setIsMoreMenuOpen(false);
+                handleMoreMenuClose();
                 onOpenHistory();
               }}
             >
               <History size={14} />
               历史记录
-            </button>
+            </MenuItem>
           )}
           {onRename && (
-            <button
-              type="button"
-              role="menuitem"
+            <MenuItem
               onClick={() => {
-                setIsMoreMenuOpen(false);
+                handleMoreMenuClose();
                 onRename();
               }}
             >
               <FilePenLine size={14} />
               重命名
-            </button>
+            </MenuItem>
           )}
           {onDelete && (
-            <button
-              className="danger"
-              type="button"
-              role="menuitem"
+            <MenuItem
+              tone="danger"
               onClick={() => {
-                setIsMoreMenuOpen(false);
+                handleMoreMenuClose();
                 onDelete();
               }}
             >
               <Trash2 size={14} />
               删除
-            </button>
+            </MenuItem>
           )}
-        </div>
+        </MenuPanel>
       )}
-    </div>
+    </Menu>
   );
 }

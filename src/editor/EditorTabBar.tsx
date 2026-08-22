@@ -1,5 +1,6 @@
 import { ChevronLeft, ChevronRight, FileImage, FileText, FileType2, NotebookPen, X } from "lucide-react";
 import { useCallback, useEffect, useId, useLayoutEffect, useRef, useState } from "react";
+import { cn } from "../shared/cn";
 import { logDebug, logInfo } from "../shared/logger";
 import type { DocumentFileType, EditorFileTab } from "../shared/types";
 
@@ -198,9 +199,12 @@ export function EditorTabBar({ tabs, activeTab, onSelect, onClose, onScroll }: E
   }
 
   return (
-    <div className="editor-tab-bar" aria-label="已打开文件">
+    <div
+      className="grid min-w-0 grid-cols-[auto_minmax(0,1fr)_auto] items-center gap-1.5 rounded-control border border-border-soft bg-surface-muted p-1 max-[900px]:gap-[3px] max-[900px]:p-[3px]"
+      aria-label="已打开文件"
+    >
       <button
-        className="editor-tab-scroll-button"
+        className="inline-flex size-[26px] shrink-0 items-center justify-center rounded-small border-0 bg-transparent p-0 text-ink-soft hover:enabled:bg-surface-hover hover:enabled:text-agent-strong disabled:opacity-[0.38]"
         type="button"
         aria-label="向左滚动文件标签"
         disabled={!canScrollLeft}
@@ -209,7 +213,7 @@ export function EditorTabBar({ tabs, activeTab, onSelect, onClose, onScroll }: E
         <ChevronLeft size={16} aria-hidden="true" />
       </button>
       <div
-        className="editor-tab-list"
+        className="flex min-w-0 gap-[3px] overflow-x-auto overflow-y-hidden scroll-smooth [scrollbar-width:none] [&::-webkit-scrollbar]:hidden"
         id={tabListId}
         ref={tabListRef}
         role="tablist"
@@ -222,9 +226,16 @@ export function EditorTabBar({ tabs, activeTab, onSelect, onClose, onScroll }: E
           const tabId = `${tabListId}-${index}`;
 
           return (
-            <div className={`editor-tab ${isActive ? "active" : ""}`} key={tabKey}>
+            <div
+              className={cn(
+                "flex min-h-[30px] min-w-0 max-w-[210px] shrink-0 items-center rounded-small border border-transparent bg-transparent text-xs text-ink-muted max-[900px]:max-w-[156px]",
+                "hover:bg-surface-hover hover:text-ink",
+                isActive && "border-primary-border bg-surface text-agent-strong shadow-[0_1px_2px_rgba(var(--primary-rgb),0.08)]",
+              )}
+              key={tabKey}
+            >
               <button
-                className="editor-tab-select"
+                className="inline-flex min-h-[30px] min-w-0 flex-1 items-center gap-1.5 border-0 bg-transparent py-0 pr-[3px] pl-2 text-left text-inherit"
                 id={tabId}
                 ref={(element) => {
                   if (element) {
@@ -243,11 +254,16 @@ export function EditorTabBar({ tabs, activeTab, onSelect, onClose, onScroll }: E
                 onKeyDown={(event) => handleTabKeyDown(event, index)}
               >
                 <TabFileIcon tab={tab} />
-                <span className="editor-tab-title">{tab.title}</span>
-                {tab.isDirty && <span className="editor-tab-dirty" aria-label="包含未保存的更改" />}
+                <span className="min-w-0 truncate">{tab.title}</span>
+                {tab.isDirty && (
+                  <span
+                    className="size-1.5 shrink-0 rounded-full bg-warning shadow-[0_0_0_2px_var(--warning-soft)]"
+                    aria-label="包含未保存的更改"
+                  />
+                )}
               </button>
               <button
-                className="editor-tab-close"
+                className="inline-flex size-[22px] shrink-0 items-center justify-center rounded-small border-0 bg-transparent p-0 text-ink-soft hover:bg-surface-hover hover:text-ink"
                 type="button"
                 aria-label={`关闭 ${tab.title}`}
                 title={`关闭 ${tab.title}`}
@@ -260,7 +276,7 @@ export function EditorTabBar({ tabs, activeTab, onSelect, onClose, onScroll }: E
         })}
       </div>
       <button
-        className="editor-tab-scroll-button"
+        className="inline-flex size-[26px] shrink-0 items-center justify-center rounded-small border-0 bg-transparent p-0 text-ink-soft hover:enabled:bg-surface-hover hover:enabled:text-agent-strong disabled:opacity-[0.38]"
         type="button"
         aria-label="向右滚动文件标签"
         disabled={!canScrollRight}
