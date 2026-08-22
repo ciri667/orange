@@ -127,15 +127,15 @@ export function AgentPanel({
 
   return (
     <aside ref={panelRef} className="agent-panel" aria-label="AI 协作区">
-      <header className="agent-header">
-        <div>
+      <header className="flex shrink-0 items-center justify-between gap-3">
+        <div className="min-w-0 flex-1">
           <p className="section-label">Agent</p>
-          <div className="agent-session-title">
-            <OverflowTooltipText as="h2" text={activeSession.title} logArea="agent_session_title" />
+          <div className="flex min-w-0 items-center gap-2">
+            <OverflowTooltipText as="h2" className="mt-1 mb-0 block truncate text-xl leading-[1.18] text-ink-strong" text={activeSession.title} logArea="agent_session_title" />
             {activeImSourceLabel && <span className="im-session-badge">{activeImSourceLabel}</span>}
           </div>
         </div>
-        <div className="agent-header-actions">
+        <div className="flex items-center gap-2">
           <Button variant="icon" title="收起 Agent 协作区" onClick={onCollapsePanel}>
             <PanelRightClose size={17} />
           </Button>

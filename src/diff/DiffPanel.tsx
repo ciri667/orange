@@ -87,13 +87,13 @@ export function DiffPanel({
 
   return (
     <aside className="diff-panel review-workbench" aria-label="Agent 变更审阅工作台">
-      <div className="diff-header review-header">
-        <div className="review-title-block">
+      <div className="flex items-center justify-between gap-3">
+        <div className="review-title-block min-w-0">
           <p className="section-label">{change.type === "create" ? "Agent 新建文件建议" : "Agent 文档变更审阅"}</p>
-          <OverflowTooltipText as="h3" text={change.title} logArea="diff_change_title" />
+          <OverflowTooltipText as="h3" className="mt-1 mb-0 text-xl leading-tight text-ink-strong" text={change.title} logArea="diff_change_title" />
           <OverflowTooltipText text={change.targetPath} logArea="diff_target_path" />
         </div>
-        <div className="diff-actions">
+        <div className="flex items-center gap-2">
           <Button variant="ghost" tone="danger" onClick={onReject} disabled={isBusy}>
             <X size={16} />
             拒绝写入

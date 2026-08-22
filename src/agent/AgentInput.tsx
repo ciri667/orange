@@ -1,4 +1,4 @@
-import { ArrowRight, BrainCircuit, FileText, Image, Sparkles, X } from "lucide-react";
+import { ArrowRight, BrainCircuit, FileText, Image, Sparkles } from "lucide-react";
 import {
   useMemo,
   useRef,
@@ -8,6 +8,7 @@ import {
   type KeyboardEventHandler,
 } from "react";
 import { Button } from "../shared/Button";
+import { Chip } from "../shared/Chip";
 import { logDebug } from "../shared/logger";
 import {
   FOLLOW_DEFAULT_MODEL_SELECTION,
@@ -580,28 +581,33 @@ export function AgentInput({
         <div className="agent-input-toolbar">
           <div className="agent-input-toolbar-start">
             {selectedExplicitSkillChips.length > 0 && (
-              <div className="selected-skill-chips" aria-label="本轮显式激活 Skills">
+              <div className="inline-flex min-w-0 max-w-full items-center gap-1.5 overflow-hidden" aria-label="本轮显式激活 Skills">
                 {selectedExplicitSkillChips.map((skill) => (
-                  <span className={`selected-skill-chip ${skill.source === "unknown" ? "missing" : ""}`} key={skill.id}>
+                  <Chip
+                    key={skill.id}
+                    missing={skill.source === "unknown"}
+                    removeLabel={`移除 ${skill.displayName}`}
+                    onRemove={() => handleRemoveExplicitSkill(skill.id)}
+                  >
                     <Sparkles size={12} />
                     <OverflowTooltipText text={skill.displayName} logArea="agent_selected_skill_chip" />
-                    <button type="button" aria-label={`移除 ${skill.displayName}`} onClick={() => handleRemoveExplicitSkill(skill.id)}>
-                      <X size={12} />
-                    </button>
-                  </span>
+                  </Chip>
                 ))}
               </div>
             )}
             {selectedMentionFileChips.length > 0 && (
-              <div className="selected-mention-file-chips" aria-label="本轮 @ 文件">
+              <div className="inline-flex min-w-0 max-w-full items-center gap-1.5 overflow-hidden" aria-label="本轮 @ 文件">
                 {selectedMentionFileChips.map((file) => (
-                  <span className={`selected-mention-file-chip ${file.relativePath ? "" : "missing"}`} key={file.id}>
+                  <Chip
+                    className="max-w-[170px]"
+                    key={file.id}
+                    missing={!file.relativePath}
+                    removeLabel={`移除 ${file.displayName}`}
+                    onRemove={() => handleRemoveMentionFile(file.id)}
+                  >
                     {file.kind === "image" ? <Image size={12} /> : <FileText size={12} />}
                     <OverflowTooltipText text={file.displayName} logArea="agent_mentioned_file_chip" />
-                    <button type="button" aria-label={`移除 ${file.displayName}`} onClick={() => handleRemoveMentionFile(file.id)}>
-                      <X size={12} />
-                    </button>
-                  </span>
+                  </Chip>
                 ))}
               </div>
             )}

@@ -4,8 +4,11 @@ import ReactMarkdown from "react-markdown";
 import rehypeSanitize from "rehype-sanitize";
 import remarkGfm from "remark-gfm";
 import { Button } from "../shared/Button";
+import { Chip } from "../shared/Chip";
+import { listRowClassName } from "../shared/ListRow";
 import { MarkdownLink } from "../shared/MarkdownLink";
 import { OverflowTooltipText } from "../shared/OverflowTooltipText";
+import { SegmentedControl, SegmentedControlItem } from "../shared/SegmentedControl";
 import {
   getScopeSummaryLabel,
   getImSessionRecentMessageLabel,
@@ -47,10 +50,10 @@ export function AgentSessionSummary({
 
   return (
     <div className="session-summary" aria-label="当前会话摘要">
-      <span className="agent-file-chip">
+      <Chip className="max-w-[54%] flex-1 rounded-full border-border bg-surface py-[5px] pr-[9px] pl-[9px] font-normal text-ink-muted">
         <FileText size={13} />
         <OverflowTooltipText text={currentFileLabel} logArea="agent_session_current_file_summary" />
-      </span>
+      </Chip>
       {isPendingWrite && (
         <OverflowTooltipText
           className="session-write-status pending"
@@ -99,7 +102,11 @@ export function AgentSecurityLevelControl({
       <span className="agent-security-level-label">
         <ShieldAlert size={13} />
       </span>
-      <div className="agent-security-level-options" role="radiogroup" aria-label="当前会话权限级别">
+      <SegmentedControl
+        className="ml-0 w-auto grid grid-cols-3 gap-px rounded-full"
+        role="radiogroup"
+        aria-label="当前会话权限级别"
+      >
         {([
           ["basic", true],
           ["advanced", agentSecurity.advancedExecutionEnabled],
@@ -108,9 +115,9 @@ export function AgentSecurityLevelControl({
           const copy = AGENT_SECURITY_LEVEL_COPY[level];
 
           return (
-            <button
-              className={activeSession.securityLevel === level ? "active" : ""}
-              type="button"
+            <SegmentedControlItem
+              className="min-h-[26px] rounded-full px-2 text-[11px] font-bold"
+              active={activeSession.securityLevel === level}
               role="radio"
               aria-checked={activeSession.securityLevel === level}
               aria-label={`${copy.label}权限。${copy.description}`}
@@ -120,10 +127,10 @@ export function AgentSecurityLevelControl({
               onClick={() => onSecurityLevelChange?.(level)}
             >
               {copy.label}
-            </button>
+            </SegmentedControlItem>
           );
         })}
-      </div>
+      </SegmentedControl>
     </div>
   );
 }
@@ -157,8 +164,14 @@ export function AgentSessionHistoryPopover({
       </div>
       <div className="session-list">
         {sessions.map((session) => (
-          <div className={`session-row ${session.id === activeSession.id ? "active" : ""}`} key={session.id}>
-            <button className="session-row-main" type="button" onClick={() => onSelectSession(session.id)}>
+          <div
+            className={listRowClassName({
+              active: session.id === activeSession.id,
+              className: "grid grid-cols-[minmax(0,1fr)_auto] border-border-translucent bg-surface-translucent p-1.5",
+            })}
+            key={session.id}
+          >
+            <button className="grid min-w-0 gap-1 p-1 text-left" type="button" onClick={() => onSelectSession(session.id)}>
               <span className="session-row-title">
                 <MessageSquareText size={14} />
                 <OverflowTooltipText as="strong" text={session.title} logArea="agent_session_history_title" />
@@ -408,7 +421,13 @@ export function AgentScopeSelector({
               const isSelected = selectedKnowledgeBaseSet.has(knowledgeBase.id) || isActiveKnowledgeBase;
 
               return (
-                <label className={`scope-option ${isSelected ? "selected" : ""}`} key={knowledgeBase.id}>
+                <label
+                  className={listRowClassName({
+                    active: isSelected,
+                    className: "scope-option border-border-translucent bg-surface-translucent",
+                  })}
+                  key={knowledgeBase.id}
+                >
                   <input
                     className="control-checkbox-input"
                     checked={isSelected}
