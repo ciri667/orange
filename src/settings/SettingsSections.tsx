@@ -1,7 +1,9 @@
 import {
+  Check,
   FolderOpen,
   KeyRound,
   MessageCircle,
+  Pencil,
   Plus,
   RotateCw,
   Save,
@@ -9,6 +11,7 @@ import {
   Sparkles,
   Star,
   Trash2,
+  X,
 } from "lucide-react";
 import { useEffect, useState } from "react";
 import { Button } from "../shared/Button";
@@ -145,6 +148,9 @@ export function ModelSettingsSection({
   onSaveApiKey,
   onRefreshProviderModels,
   onProviderModelEnabledChange,
+  onAddProviderModel,
+  onUpdateProviderModel,
+  onRemoveProviderModel,
 }: {
   settingsDraft: UserSettings;
   providerTemplates: ProviderTemplate[];
@@ -164,10 +170,11 @@ export function ModelSettingsSection({
   onSaveApiKey: (providerId: string) => void | Promise<void>;
   onRefreshProviderModels: (providerId: string) => void | Promise<void>;
   onProviderModelEnabledChange: (providerId: string, modelId: string, enabled: boolean) => void;
+  onAddProviderModel: (providerId: string, modelId: string, name: string) => string | null;
+  onUpdateProviderModel: (providerId: string, originalId: string, nextId: string, nextName: string) => string | null;
+  onRemoveProviderModel: (providerId: string, modelId: string) => string | null;
 }) {
   const providers = settingsDraft.modelConfig.providers;
-  /** 每个 provider 模型列表的本地搜索词，只影响当前设置页渲染，不进入持久化配置。 */
-  const [modelSearchByProvider, setModelSearchByProvider] = useState<Record<string, string>>({});
 
   return (
     <section className={settingsSectionClassName} aria-labelledby="model-settings-title">
@@ -222,12 +229,6 @@ export function ModelSettingsSection({
             const isDefault = provider.id === settingsDraft.modelConfig.defaultProviderId;
             const apiKeyDraft = apiKeyDraftByProvider[provider.id] ?? "";
             const enabledModels = provider.models.filter((model) => model.enabled);
-            const modelSearch = modelSearchByProvider[provider.id] ?? "";
-            const filteredModels = provider.models.filter((model) => {
-              const searchableText = [model.id, model.name, model.ownedBy ?? "", model.source].join(" ").toLowerCase();
-
-              return searchableText.includes(modelSearch.trim().toLowerCase());
-            });
             const selectableDefaultModels = enabledModels.some((model) => model.id === provider.model)
               ? enabledModels
               : provider.model
@@ -317,9 +318,10 @@ export function ModelSettingsSection({
                     ) : (
                       <input
                         className={fieldControlClassName}
-                        value={provider.model}
-                        onChange={(event) => onProviderFieldChange(provider.id, "model", event.target.value)}
-                        placeholder="gpt-4o-mini"
+                        value=""
+                        placeholder="请先在下方添加模型"
+                        disabled
+                        readOnly
                       />
                     )}
                   </label>
@@ -351,67 +353,14 @@ export function ModelSettingsSection({
                       </div>
                     </label>
                   )}
-                  {provider.models.length > 0 && (
-                    <div className="col-span-full grid gap-2.5 rounded-lg border border-border bg-white p-2.5">
-                      <div className="grid grid-cols-[minmax(0,1fr)_minmax(160px,240px)] items-end gap-2.5 max-[820px]:grid-cols-1">
-                        <div className="flex min-w-0 flex-wrap items-baseline gap-x-2 gap-y-1">
-                          <span className="text-xs font-bold text-[#24323c]">可用模型</span>
-                          <strong className="text-xs font-semibold text-ink-muted">
-                            已启用 {enabledModels.length}/{provider.models.length}
-                          </strong>
-                          {provider.modelsFetchedAt && <small className="basis-full text-xs font-normal text-ink-muted">上次获取：{provider.modelsFetchedAt}</small>}
-                        </div>
-                        <input
-                          className={fieldControlClassName}
-                          value={modelSearch}
-                          onChange={(event) =>
-                            setModelSearchByProvider((current) => ({
-                              ...current,
-                              [provider.id]: event.target.value,
-                            }))
-                          }
-                          placeholder="搜索模型"
-                        />
-                      </div>
-                      <div className="grid max-h-[260px] min-w-0 gap-1.5 overflow-auto pr-0.5">
-                        {filteredModels.length ? (
-                          filteredModels.map((model) => (
-                            <label
-                              className="relative flex min-w-0 flex-wrap items-center gap-x-2 gap-y-[7px] rounded-[7px] border border-border bg-[#fbfcfd] p-2 text-xs font-normal text-ink-muted"
-                              key={model.id}
-                            >
-                              <Checkbox
-                                checked={model.enabled}
-                                disabled={model.id === provider.model}
-                                onChange={(event) => onProviderModelEnabledChange(provider.id, model.id, event.target.checked)}
-                              />
-                              <span className="grid min-w-0 flex-[1_1_220px] gap-0.5">
-                                <OverflowTooltipText as="strong" className="truncate text-[13px] text-ink-strong" text={model.name || model.id} logArea="settings_model_name" />
-                                <OverflowTooltipText as="code" className="truncate font-mono text-[11px] text-ink-muted" text={model.id} logArea="settings_model_id" />
-                              </span>
-                              <span
-                                className={cn(
-                                  "inline-flex max-w-full items-center rounded-full px-[7px] py-[3px] text-[11px] font-bold",
-                                  model.source === "discovered" ? "bg-accent-soft text-accent" : "bg-[#f7f1e7] text-[#8a5b12]",
-                                )}
-                              >
-                                {model.source === "manual" ? "手动" : "发现"}
-                              </span>
-                              {model.contextLength ? <span className="inline-flex max-w-full items-center rounded-full bg-[#f4f6f8] px-[7px] py-[3px] text-[11px] font-bold">{model.contextLength.toLocaleString()} ctx</span> : null}
-                              {model.ownedBy ? <span className="inline-flex max-w-full items-center rounded-full bg-[#f4f6f8] px-[7px] py-[3px] text-[11px] font-bold">{model.ownedBy}</span> : null}
-                              {model.id === provider.model && (
-                                <span className="inline-flex items-center rounded-full border border-primary-border-strong bg-accent-soft px-[9px] py-1 text-xs font-bold text-accent-strong">
-                                  默认
-                                </span>
-                              )}
-                            </label>
-                          ))
-                        ) : (
-                          <p className="m-0 rounded-[7px] border border-dashed border-border bg-[#fbfcfd] p-2.5 text-[13px] text-ink-muted">没有匹配的模型。</p>
-                        )}
-                      </div>
-                    </div>
-                  )}
+                  <ProviderModelsPanel
+                    provider={provider}
+                    isBusy={isBusy}
+                    onModelEnabledChange={(modelId, enabled) => onProviderModelEnabledChange(provider.id, modelId, enabled)}
+                    onAddModel={(modelId, name) => onAddProviderModel(provider.id, modelId, name)}
+                    onUpdateModel={(originalId, nextId, nextName) => onUpdateProviderModel(provider.id, originalId, nextId, nextName)}
+                    onRemoveModel={(modelId) => onRemoveProviderModel(provider.id, modelId)}
+                  />
                 </div>
               </article>
             );
@@ -425,6 +374,273 @@ export function ModelSettingsSection({
         Agent 写入工具只能生成 diff；用户确认后才执行路径校验、hash 校验和原子写入。
       </SettingsPolicyRow>
     </section>
+  );
+}
+
+/** 单个 provider 的可用模型列表：发现的模型只启停，手动模型支持增删改。 */
+function ProviderModelsPanel({
+  provider,
+  isBusy,
+  onModelEnabledChange,
+  onAddModel,
+  onUpdateModel,
+  onRemoveModel,
+}: {
+  provider: LlmProviderConfig;
+  isBusy: boolean;
+  onModelEnabledChange: (modelId: string, enabled: boolean) => void;
+  onAddModel: (modelId: string, name: string) => string | null;
+  onUpdateModel: (originalId: string, nextId: string, nextName: string) => string | null;
+  onRemoveModel: (modelId: string) => string | null;
+}) {
+  const enabledCount = provider.models.filter((model) => model.enabled).length;
+  const [modelSearch, setModelSearch] = useState("");
+  const [addId, setAddId] = useState("");
+  const [addName, setAddName] = useState("");
+  const [editingId, setEditingId] = useState<string | null>(null);
+  const [editId, setEditId] = useState("");
+  const [editName, setEditName] = useState("");
+  const [notice, setNotice] = useState("");
+
+  const filteredModels = provider.models.filter((model) => {
+    const searchableText = [model.id, model.name, model.ownedBy ?? "", model.source].join(" ").toLowerCase();
+
+    return searchableText.includes(modelSearch.trim().toLowerCase());
+  });
+
+  /** 开始编辑一条手动模型，把当前 ID/显示名填进草稿。 */
+  function beginEdit(modelId: string, modelName: string) {
+    setEditingId(modelId);
+    setEditId(modelId);
+    setEditName(modelName);
+    setNotice("");
+  }
+
+  /** 提交新增手动模型；成功后清空输入，失败则展示原因。 */
+  function submitAdd() {
+    const error = onAddModel(addId, addName);
+
+    if (error) {
+      setNotice(error);
+      return;
+    }
+
+    setAddId("");
+    setAddName("");
+    setNotice("");
+  }
+
+  /** 提交手动模型的 ID/显示名修改。 */
+  function submitEdit() {
+    if (!editingId) {
+      return;
+    }
+
+    const error = onUpdateModel(editingId, editId, editName);
+
+    if (error) {
+      setNotice(error);
+      return;
+    }
+
+    setEditingId(null);
+    setNotice("");
+  }
+
+  /** 删除手动模型；默认模型会由上层拒绝并返回错误文案。 */
+  function submitRemove(modelId: string) {
+    const error = onRemoveModel(modelId);
+
+    if (error) {
+      setNotice(error);
+      return;
+    }
+
+    if (editingId === modelId) {
+      setEditingId(null);
+    }
+
+    setNotice("");
+  }
+
+  return (
+    <div className="col-span-full grid gap-2.5 rounded-lg border border-border bg-white p-2.5">
+      <div className="grid grid-cols-[minmax(0,1fr)_minmax(160px,240px)] items-end gap-2.5 max-[820px]:grid-cols-1">
+        <div className="flex min-w-0 flex-wrap items-baseline gap-x-2 gap-y-1">
+          <span className="text-xs font-bold text-[#24323c]">可用模型</span>
+          <strong className="text-xs font-semibold text-ink-muted">
+            已启用 {enabledCount}/{provider.models.length}
+          </strong>
+          {provider.modelsFetchedAt && <small className="basis-full text-xs font-normal text-ink-muted">上次获取：{provider.modelsFetchedAt}</small>}
+        </div>
+        <input
+          className={fieldControlClassName}
+          value={modelSearch}
+          onChange={(event) => setModelSearch(event.target.value)}
+          placeholder="搜索模型"
+        />
+      </div>
+      <div className="grid max-h-[260px] min-w-0 gap-1.5 overflow-auto pr-0.5">
+        {filteredModels.length ? (
+          filteredModels.map((model) => {
+            const isDefault = model.id === provider.model;
+            const isManual = model.source === "manual";
+            const isEditing = editingId === model.id;
+
+            return (
+              <div
+                className="relative flex min-w-0 flex-wrap items-center gap-x-2 gap-y-[7px] rounded-[7px] border border-border bg-[#fbfcfd] p-2 text-xs font-normal text-ink-muted"
+                key={model.id}
+              >
+                <label className="inline-flex items-center">
+                  <Checkbox
+                    checked={model.enabled}
+                    disabled={isDefault}
+                    onChange={(event) => onModelEnabledChange(model.id, event.target.checked)}
+                  />
+                </label>
+                {isEditing ? (
+                  <div className="grid min-w-0 flex-[1_1_220px] grid-cols-2 gap-1.5 max-[820px]:grid-cols-1">
+                    <input
+                      className={fieldControlClassName}
+                      value={editName}
+                      onChange={(event) => setEditName(event.target.value)}
+                      onKeyDown={(event) => {
+                        if (event.key === "Enter") {
+                          event.preventDefault();
+                          submitEdit();
+                        }
+                        if (event.key === "Escape") {
+                          setEditingId(null);
+                        }
+                      }}
+                      placeholder="显示名"
+                      aria-label="模型显示名"
+                    />
+                    <input
+                      className={cn(fieldControlClassName, "font-mono")}
+                      value={editId}
+                      onChange={(event) => setEditId(event.target.value)}
+                      onKeyDown={(event) => {
+                        if (event.key === "Enter") {
+                          event.preventDefault();
+                          submitEdit();
+                        }
+                        if (event.key === "Escape") {
+                          setEditingId(null);
+                        }
+                      }}
+                      placeholder="模型 ID"
+                      aria-label="模型 ID"
+                    />
+                  </div>
+                ) : (
+                  <span className="grid min-w-0 flex-[1_1_220px] gap-0.5">
+                    <OverflowTooltipText as="strong" className="truncate text-[13px] text-ink-strong" text={model.name || model.id} logArea="settings_model_name" />
+                    <OverflowTooltipText as="code" className="truncate font-mono text-[11px] text-ink-muted" text={model.id} logArea="settings_model_id" />
+                  </span>
+                )}
+                <span
+                  className={cn(
+                    "inline-flex max-w-full items-center rounded-full px-[7px] py-[3px] text-[11px] font-bold",
+                    model.source === "discovered" ? "bg-accent-soft text-accent" : "bg-[#f7f1e7] text-[#8a5b12]",
+                  )}
+                >
+                  {isManual ? "手动" : "发现"}
+                </span>
+                {model.contextLength ? <span className="inline-flex max-w-full items-center rounded-full bg-[#f4f6f8] px-[7px] py-[3px] text-[11px] font-bold">{model.contextLength.toLocaleString()} ctx</span> : null}
+                {model.ownedBy ? <span className="inline-flex max-w-full items-center rounded-full bg-[#f4f6f8] px-[7px] py-[3px] text-[11px] font-bold">{model.ownedBy}</span> : null}
+                {isDefault && (
+                  <span className="inline-flex items-center rounded-full border border-primary-border-strong bg-accent-soft px-[9px] py-1 text-xs font-bold text-accent-strong">
+                    默认
+                  </span>
+                )}
+                {isManual && (
+                  <div className="ml-auto flex items-center gap-1">
+                    {isEditing ? (
+                      <>
+                        <Button variant="icon" size="compact" title="保存模型" onClick={submitEdit} disabled={isBusy}>
+                          <Check size={13} />
+                        </Button>
+                        <Button variant="icon" size="compact" title="取消编辑" onClick={() => setEditingId(null)}>
+                          <X size={13} />
+                        </Button>
+                      </>
+                    ) : (
+                      <>
+                        <Button
+                          variant="icon"
+                          size="compact"
+                          title="编辑模型"
+                          onClick={() => beginEdit(model.id, model.name || model.id)}
+                          disabled={isBusy}
+                        >
+                          <Pencil size={13} />
+                        </Button>
+                        <Button
+                          variant="icon"
+                          size="compact"
+                          tone="danger"
+                          className={isDefault ? "opacity-40" : undefined}
+                          title={isDefault ? "默认模型不能删除，请先更换默认模型" : "删除模型"}
+                          onClick={() => submitRemove(model.id)}
+                          disabled={isBusy || isDefault}
+                        >
+                          <Trash2 size={13} />
+                        </Button>
+                      </>
+                    )}
+                  </div>
+                )}
+              </div>
+            );
+          })
+        ) : (
+          <p className="m-0 rounded-[7px] border border-dashed border-border bg-[#fbfcfd] p-2.5 text-[13px] text-ink-muted">
+            {provider.models.length ? "没有匹配的模型。" : "还没有模型。手动添加模型 ID，或点击「获取模型」。"}
+          </p>
+        )}
+      </div>
+      <div className="grid grid-cols-[minmax(0,1fr)_minmax(0,1fr)_auto] items-end gap-2 max-[820px]:grid-cols-1">
+        <label className={fieldLabelClassName}>
+          <span>模型 ID</span>
+          <input
+            className={cn(fieldControlClassName, "font-mono")}
+            value={addId}
+            onChange={(event) => setAddId(event.target.value)}
+            onKeyDown={(event) => {
+              if (event.key === "Enter") {
+                event.preventDefault();
+                submitAdd();
+              }
+            }}
+            placeholder="例如 glm-5.2"
+            disabled={isBusy}
+          />
+        </label>
+        <label className={fieldLabelClassName}>
+          <span>显示名（可选）</span>
+          <input
+            className={fieldControlClassName}
+            value={addName}
+            onChange={(event) => setAddName(event.target.value)}
+            onKeyDown={(event) => {
+              if (event.key === "Enter") {
+                event.preventDefault();
+                submitAdd();
+              }
+            }}
+            placeholder="和 ID 相同可留空"
+            disabled={isBusy}
+          />
+        </label>
+        <Button variant="ghost" size="compact" onClick={submitAdd} disabled={isBusy || !addId.trim()}>
+          <Plus size={13} />
+          添加模型
+        </Button>
+      </div>
+      {notice ? <p className="m-0 text-xs text-danger">{notice}</p> : null}
+    </div>
   );
 }
 

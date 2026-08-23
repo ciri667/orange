@@ -19,6 +19,12 @@ import { logDebug, logError, logInfo } from "../shared/logger";
 import { ModalBackdrop, ModalHeader } from "../shared/Modal";
 import { cn } from "../shared/cn";
 import { OverflowTooltipText } from "../shared/OverflowTooltipText";
+import {
+  addManualProviderModel,
+  removeManualProviderModel,
+  updateManualProviderModel,
+  type ProviderModelMutationResult,
+} from "../shared/providerModels";
 import { sectionLabelClassName } from "../shared/ui";
 import type {
   AgentSkill,
@@ -726,6 +732,96 @@ export function SettingsDrawer({
     }));
   }
 
+  /** 把手动模型增删改应用到草稿；失败时返回可展示文案，成功返回 null。 */
+  function applyProviderModelMutation(
+    providerId: string,
+    mutate: (provider: LlmProviderConfig) => ProviderModelMutationResult,
+  ) {
+    let error: string | null = null;
+
+    setSettingsDraft((currentSettings) => {
+      const provider = currentSettings.modelConfig.providers.find((item) => item.id === providerId);
+
+      if (!provider) {
+        error = "找不到要更新的 Provider。";
+        return currentSettings;
+      }
+
+      const result = mutate(provider);
+
+      if (!result.ok) {
+        error = result.error;
+        return currentSettings;
+      }
+
+      return {
+        ...currentSettings,
+        modelConfig: {
+          ...currentSettings.modelConfig,
+          providers: currentSettings.modelConfig.providers.map((item) =>
+            item.id === providerId ? result.provider : item,
+          ),
+        },
+      };
+    });
+
+    return error;
+  }
+
+  /** 向指定 provider 追加一条手动模型，供自定义兼容服务补模型 ID。 */
+  function addProviderModel(providerId: string, modelId: string, name: string) {
+    const error = applyProviderModelMutation(providerId, (provider) =>
+      addManualProviderModel(provider, modelId, name, formatLocalDateTime()),
+    );
+
+    if (!error) {
+      logInfo("设置页新增手动模型。", {
+        category: "settings",
+        event: "provider_model_add",
+        status: "completed",
+        metadata: { providerId, modelId: modelId.trim() },
+      });
+    }
+
+    return error;
+  }
+
+  /** 修改手动模型的 ID 或显示名；若改的是当前默认模型，会同步 provider.model。 */
+  function updateProviderModel(providerId: string, originalId: string, nextId: string, nextName: string) {
+    const error = applyProviderModelMutation(providerId, (provider) =>
+      updateManualProviderModel(provider, originalId, nextId, nextName, formatLocalDateTime()),
+    );
+
+    if (!error) {
+      logInfo("设置页更新手动模型。", {
+        category: "settings",
+        event: "provider_model_update",
+        status: "completed",
+        metadata: { providerId, originalId, modelId: nextId.trim() },
+      });
+    }
+
+    return error;
+  }
+
+  /** 从草稿中删除手动模型；默认模型和发现的模型不能删。 */
+  function removeProviderModel(providerId: string, modelId: string) {
+    const error = applyProviderModelMutation(providerId, (provider) =>
+      removeManualProviderModel(provider, modelId, formatLocalDateTime()),
+    );
+
+    if (!error) {
+      logInfo("设置页删除手动模型。", {
+        category: "settings",
+        event: "provider_model_remove",
+        status: "completed",
+        metadata: { providerId, modelId },
+      });
+    }
+
+    return error;
+  }
+
   /** 将草稿中某个 provider 设为默认 provider，未显式选择模型的请求会回退到它。 */
   function setDefaultProvider(providerId: string) {
     setSettingsDraft((currentSettings) => ({
@@ -961,6 +1057,9 @@ export function SettingsDrawer({
           onSaveApiKey={handleSaveApiKey}
           onRefreshProviderModels={handleRefreshProviderModels}
           onProviderModelEnabledChange={updateProviderModelEnabled}
+          onAddProviderModel={addProviderModel}
+          onUpdateProviderModel={updateProviderModel}
+          onRemoveProviderModel={removeProviderModel}
         />
       );
     }
