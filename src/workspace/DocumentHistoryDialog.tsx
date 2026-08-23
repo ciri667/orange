@@ -1,10 +1,18 @@
 import { History, RotateCcw, Trash2, X } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
 import { buildMarkdownDiff } from "../diff/markdownDiff";
+import {
+  diffGutterClassName,
+  diffHunkHeaderClassName,
+  diffLineGridClassName,
+  diffLineToneClassName,
+  unifiedDiffFileClassName,
+} from "../diff/diffStyles";
 import { Button } from "../shared/Button";
 import { ConfirmDialog, type ConfirmDialogConfig } from "../shared/ConfirmDialog";
 import { cn } from "../shared/cn";
 import { ModalBackdrop, ModalHeader, ModalPanel } from "../shared/Modal";
+import { sectionLabelClassName } from "../shared/ui";
 import {
   clearDocumentHistory,
   loadDocumentHistory,
@@ -208,7 +216,7 @@ export function DocumentHistoryDialog({
         >
           <ModalHeader className="px-4 py-3.5">
             <div className="min-w-0">
-              <p className="section-label">历史记录</p>
+              <p className={sectionLabelClassName}>历史记录</p>
               <h2 id="history-dialog-title" className="mt-1 mb-0 text-lg leading-tight text-ink-strong">
                 {title}
               </h2>
@@ -220,8 +228,8 @@ export function DocumentHistoryDialog({
 
           <div className="grid min-h-0 grid-cols-[260px_minmax(0,1fr)] max-[980px]:grid-cols-[220px_minmax(0,1fr)] max-[760px]:grid-cols-1 max-[760px]:grid-rows-[minmax(150px,32%)_minmax(0,1fr)]">
             <aside className="min-h-0 overflow-auto border-r border-border bg-warm-panel max-[760px]:border-r-0 max-[760px]:border-b" aria-label="历史版本">
-              {isLoading && <p className="history-empty">正在加载...</p>}
-              {!isLoading && !entries.length && <p className="history-empty">暂无历史记录</p>}
+              {isLoading && <p className="m-3 text-[13px] leading-normal text-ink-muted">正在加载...</p>}
+              {!isLoading && !entries.length && <p className="m-3 text-[13px] leading-normal text-ink-muted">暂无历史记录</p>}
               {entries.map((entry) => (
                 <button
                   className={cn(
@@ -242,42 +250,50 @@ export function DocumentHistoryDialog({
               ))}
             </aside>
 
-            <section className="history-preview" aria-label="恢复预览">
-              {errorMessage && <p className="history-message error">{errorMessage}</p>}
-              {isDirty && <p className="history-message warning">请先保存当前草稿后再恢复版本。</p>}
+            <section className="flex min-h-0 min-w-0 flex-col bg-surface" aria-label="恢复预览">
+              {errorMessage && (
+                <p className="m-3 rounded-[7px] border border-[rgba(var(--danger-rgb),0.26)] bg-danger-soft px-2.5 py-[9px] text-[13px] leading-normal text-danger">
+                  {errorMessage}
+                </p>
+              )}
+              {isDirty && (
+                <p className="m-3 rounded-[7px] border border-[rgba(var(--warning-rgb),0.28)] bg-warning-soft px-2.5 py-[9px] text-[13px] leading-normal text-warning">
+                  请先保存当前草稿后再恢复版本。
+                </p>
+              )}
               {selectedDetail && diff ? (
                 <>
-                  <div className="history-preview-toolbar">
-                    <span>
+                  <div className="flex shrink-0 items-center justify-between gap-3 border-b border-border px-3 py-[9px] text-xs font-extrabold text-ink-muted">
+                    <span className="inline-flex min-w-0 items-center gap-1.5">
                       <History size={14} />
                       {selectedDetail.createdAt}
                     </span>
-                    <span>
+                    <span className="inline-flex min-w-0 items-center gap-1.5">
                       +{diff.stats.addedLines} / -{diff.stats.removedLines}
                     </span>
                   </div>
-                  <div className="history-diff-scroll">
-                    <div className="unified-diff-file">
-                      <span>{"当前内容 -> 历史版本"}</span>
-                      <em>{formatHistorySource(selectedDetail.source)}</em>
+                  <div className="min-h-0 overflow-auto">
+                    <div className={unifiedDiffFileClassName}>
+                      <span className="min-w-0 truncate">{"当前内容 -> 历史版本"}</span>
+                      <em className="not-italic">{formatHistorySource(selectedDetail.source)}</em>
                     </div>
                     {diff.hunks.map((hunk) => (
-                      <div className="diff-hunk" key={hunk.id}>
-                        <div className="diff-hunk-header">
+                      <div className="border-b border-[#eef2f4]" key={hunk.id}>
+                        <div className={diffHunkHeaderClassName}>
                           <span>
                             @@ -{hunk.oldStart},{hunk.oldLines} +{hunk.newStart},{hunk.newLines} @@
                           </span>
                           {(hunk.hiddenBefore > 0 || hunk.hiddenAfter > 0) && (
-                            <em>折叠 {hunk.hiddenBefore + hunk.hiddenAfter} 行</em>
+                            <em className="ml-auto font-inherit not-italic text-ink-muted">折叠 {hunk.hiddenBefore + hunk.hiddenAfter} 行</em>
                           )}
                         </div>
-                        <div className="diff-lines">
+                        <div className="flex flex-col">
                           {hunk.lines.map((line) => (
-                            <div className={`diff-line ${getDiffLineClassName(line.kind)}`} key={line.id}>
-                              <span className="line-number old">{line.originalLineNumber ?? ""}</span>
-                              <span className="line-number new">{line.nextLineNumber ?? ""}</span>
-                              <span className="line-marker">{getDiffLineMarker(line.kind)}</span>
-                              <code>{line.text || " "}</code>
+                            <div className={cn(diffLineGridClassName, diffLineToneClassName(line.kind))} key={line.id}>
+                              <span className={cn(diffGutterClassName, "diff-line-number-old")}>{line.originalLineNumber ?? ""}</span>
+                              <span className={cn(diffGutterClassName, "diff-line-number-new")}>{line.nextLineNumber ?? ""}</span>
+                              <span className={cn(diffGutterClassName, "diff-line-marker justify-center px-0")}>{getDiffLineMarker(line.kind)}</span>
+                              <code className="min-w-0 px-2 py-0.5 whitespace-pre-wrap [overflow-wrap:anywhere]">{line.text || " "}</code>
                             </div>
                           ))}
                         </div>
@@ -286,7 +302,7 @@ export function DocumentHistoryDialog({
                   </div>
                 </>
               ) : (
-                !isLoading && <p className="history-empty">选择一个版本查看差异</p>
+                !isLoading && <p className="m-3 text-[13px] leading-normal text-ink-muted">选择一个版本查看差异</p>
               )}
             </section>
           </div>
@@ -348,18 +364,6 @@ function formatBytes(byteSize: number) {
 }
 
 /** 根据 diff 行类型选择已有审阅样式。 */
-function getDiffLineClassName(kind: "context" | "added" | "removed" | "placeholder") {
-  if (kind === "added") {
-    return "line-added";
-  }
-
-  if (kind === "removed") {
-    return "line-removed";
-  }
-
-  return "";
-}
-
 /** 根据 diff 行类型生成 unified diff 常见标记。 */
 function getDiffLineMarker(kind: "context" | "added" | "removed" | "placeholder") {
   if (kind === "added") {

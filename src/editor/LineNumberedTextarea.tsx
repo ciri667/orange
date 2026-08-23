@@ -7,6 +7,7 @@ import type {
   Ref,
   UIEventHandler,
 } from "react";
+import { cn } from "../shared/cn";
 import { logDebug, logWarn } from "../shared/logger";
 import { splitLogicalLines } from "./lineNumberUtils";
 
@@ -116,8 +117,17 @@ export const LineNumberedTextarea = forwardRef<HTMLTextAreaElement, LineNumbered
 
   const logicalLines = useMemo(() => splitLogicalLines(value), [value]);
   const digitCount = String(logicalLines.length).length;
-  const wrapperClassName = ["line-numbered-textarea", className].filter(Boolean).join(" ");
-  const textareaClassName = ["markdown-editor", "line-numbered-textarea-control", className].filter(Boolean).join(" ");
+  const wrapperClassName = cn(
+    "relative min-h-0 min-w-0 overflow-hidden rounded-panel border border-[rgba(230,224,214,0.92)] bg-surface",
+    "focus-within:border-[rgba(var(--primary-rgb),0.46)] focus-within:outline-[3px] focus-within:outline-[var(--control-ring)] focus-within:outline-offset-0",
+    fileType === "txt" && "[&_.line-number-gutter]:bg-surface-muted",
+    className,
+  );
+  const textareaClassName = cn(
+    "relative z-[1] h-full w-full min-h-0 resize-none overflow-auto border-0 bg-transparent p-5 font-mono text-sm leading-[1.74] text-ink outline-0 [scrollbar-gutter:stable]",
+    "pl-[calc(var(--line-number-gutter-width)+20px)]",
+    "focus-visible:outline-none",
+  );
   /** 行号 gutter 的宽度 token，随行数位数变化但不触发布局跳变。 */
   const gutterWidthToken = `max(48px, calc(${digitCount}ch + 28px))`;
   const wrapperStyle = { "--line-number-gutter-width": gutterWidthToken } as CSSProperties;
@@ -235,10 +245,14 @@ export const LineNumberedTextarea = forwardRef<HTMLTextAreaElement, LineNumbered
 
   return (
     <div className={wrapperClassName} style={wrapperStyle} data-file-type={fileType} data-gutter-width={gutterWidthToken}>
-      <div className="line-number-gutter" aria-hidden="true">
-        <div className="line-number-gutter-scroll" ref={gutterScrollRef}>
+      <div
+        className="line-number-gutter pointer-events-none absolute top-0 bottom-0 left-0 z-[2] overflow-hidden border-r border-[rgba(230,224,214,0.82)] bg-warm-panel font-mono text-sm leading-[1.74] text-ink-soft select-none"
+        style={{ width: "var(--line-number-gutter-width)" }}
+        aria-hidden="true"
+      >
+        <div className="py-5 pr-2.5 pl-0 will-change-transform" ref={gutterScrollRef}>
           {logicalLines.map((_line, index) => (
-            <div className="line-number-row" key={index} style={{ height: lineHeights[index] ?? lineHeight }}>
+            <div className="flex min-h-[1.72em] justify-end overflow-hidden tabular-nums" key={index} style={{ height: lineHeights[index] ?? lineHeight }}>
               {index + 1}
             </div>
           ))}
@@ -256,13 +270,13 @@ export const LineNumberedTextarea = forwardRef<HTMLTextAreaElement, LineNumbered
         aria-label={ariaLabel}
       />
       <div
-        className="line-number-measure"
+        className="pointer-events-none absolute top-0 font-mono text-sm leading-[1.74] text-transparent whitespace-pre-wrap [overflow-wrap:break-word]"
         ref={measureRef}
-        style={{ width: contentWidth || undefined }}
+        style={{ left: "calc(var(--line-number-gutter-width) + 20px)", width: contentWidth || undefined, visibility: "hidden" }}
         aria-hidden="true"
       >
         {logicalLines.map((line, index) => (
-          <div className="line-number-measure-row" key={index}>
+          <div className="min-h-[1.72em]" key={index}>
             {line || "\u00a0"}
           </div>
         ))}

@@ -9,7 +9,7 @@ import remarkGfm from "remark-gfm";
 import { DiffPanel } from "../diff/DiffPanel";
 import type { ReviewCommentDraft } from "../diff/DiffPanel";
 import { Button } from "../shared/Button";
-import { MarkdownLink } from "../shared/MarkdownLink";
+import { createMarkdownComponents, markdownPreviewClassName } from "../shared/markdown";
 import { SegmentedControl, SegmentedControlItem } from "../shared/SegmentedControl";
 import type { ExportFormat, KnowledgeBase, MarkdownViewMode, Note, ProposedChange } from "../shared/types";
 import { EditorEmptyHeader, EditorFileHeader, EditorMetaStrip, EditorMoreActionMenu } from "./EditorFileChrome";
@@ -210,7 +210,7 @@ export function EditorPane({
         ]}
       />
 
-      <div className={`editor-body mode-${viewMode}`}>
+      <div className={viewMode === "split" ? "grid min-h-0 min-w-0 gap-3 grid-cols-1 min-[761px]:grid-cols-2" : "grid min-h-0 min-w-0 gap-3 grid-cols-1"}>
         {shouldShowEditor && (
           <LineNumberedTextarea
             ref={editorRef}
@@ -273,20 +273,18 @@ function MarkdownPreview({
   const imageUrlTransform = createMarkdownPreviewUrlTransform(knowledgeBase, note);
 
   return (
-    <div className="markdown-preview" ref={previewRef} onScroll={onScroll} aria-label="Markdown 预览">
+    <div className={markdownPreviewClassName} ref={previewRef} onScroll={onScroll} aria-label="Markdown 预览">
       {content.trim() ? (
         <ReactMarkdown
           remarkPlugins={[remarkGfm]}
           rehypePlugins={[[rehypeSanitize, MARKDOWN_PREVIEW_SANITIZE_SCHEMA]]}
           urlTransform={imageUrlTransform}
-          components={{
-            a: (props) => <MarkdownLink {...props} source="editor_preview" />,
-          }}
+          components={createMarkdownComponents("editor_preview", "preview")}
         >
           {content}
         </ReactMarkdown>
       ) : (
-        <p className="markdown-preview-empty">空白笔记</p>
+        <p className="m-0 text-ink-muted">空白笔记</p>
       )}
     </div>
   );

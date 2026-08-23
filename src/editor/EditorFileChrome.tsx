@@ -1,6 +1,8 @@
 import { ChevronDown, FileDown, FilePenLine, History, MoreHorizontal, Trash2 } from "lucide-react";
 import { useState, type ReactNode } from "react";
 import { Button } from "../shared/Button";
+import { cn } from "../shared/cn";
+import { pathLabelClassName } from "../shared/ui";
 import { logDebug } from "../shared/logger";
 import { Menu, MenuItem, MenuPanel } from "../shared/Menu";
 import { OverflowTooltipText } from "../shared/OverflowTooltipText";
@@ -44,7 +46,7 @@ export function EditorFileHeader({
   return (
     <header className="flex items-start justify-between gap-3">
       <div className="min-w-0">
-        <OverflowTooltipText as="p" className="path-label truncate" text={title.pathLabel} logArea={title.pathLogArea} />
+        <OverflowTooltipText as="p" className={pathLabelClassName} text={title.pathLabel} logArea={title.pathLogArea} />
         <OverflowTooltipText as="h2" className="mt-1 mb-0 truncate text-xl leading-tight text-ink-strong" text={title.title} logArea={title.titleLogArea} />
       </div>
       <div className="flex min-w-0 flex-wrap items-center justify-end gap-[7px]">{actions}</div>
@@ -65,7 +67,7 @@ export function EditorEmptyHeader({
   return (
     <header className="flex items-start justify-between gap-3">
       <div className="min-w-0">
-        <OverflowTooltipText as="p" className="path-label truncate" text={pathLabel} logArea={pathLogArea} />
+        <OverflowTooltipText as="p" className={pathLabelClassName} text={pathLabel} logArea={pathLogArea} />
         <h2 className="mt-1 mb-0 truncate text-xl leading-tight text-ink-strong">{title}</h2>
       </div>
       <div className="flex min-w-0 flex-wrap items-center justify-end gap-[7px]" />
@@ -76,9 +78,16 @@ export function EditorEmptyHeader({
 /** 编辑器元信息条，复用保存状态、阅读统计和文档类型的紧凑展示。 */
 export function EditorMetaStrip({ items }: { items: EditorMetaItem[] }) {
   return (
-    <div className="meta-strip">
+    <div className="flex gap-2 overflow-x-auto text-xs text-ink-muted [scrollbar-width:none] [&::-webkit-scrollbar]:hidden">
       {items.map((item, index) => (
-        <span className={item.className} key={index}>
+        <span
+          className={cn(
+            "inline-flex shrink-0 items-center gap-1.5 rounded-full border border-[rgba(230,224,214,0.7)] bg-[rgba(251,250,247,0.72)] px-2 py-1",
+            item.className === "dirty-indicator" && "border-[rgba(var(--warning-rgb),0.28)] bg-warning-soft font-bold text-warning",
+            item.className !== "dirty-indicator" && item.className,
+          )}
+          key={index}
+        >
           {item.icon}
           {item.text}
         </span>

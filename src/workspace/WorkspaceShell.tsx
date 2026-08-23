@@ -11,6 +11,7 @@ import { BootCopy, BootErrorMessage, BootScreen, BootTitle } from "../shared/Boo
 import { Button } from "../shared/Button";
 import { ConfirmDialog, type ConfirmDialogConfig } from "../shared/ConfirmDialog";
 import { ModalBackdrop, ModalForm } from "../shared/Modal";
+import { fieldControlClassName, fieldLabelClassName, sectionLabelClassName } from "../shared/ui";
 import { buildMarkdownDiff } from "../diff/markdownDiff";
 import { createContentHash, createLocalId, formatLocalDateTime } from "../shared/id";
 import { logError, logInfo, logWarn } from "../shared/logger";
@@ -2702,12 +2703,13 @@ export function WorkspaceShell() {
             }}
           >
             <div>
-              <p className="section-label">{renameDialog.kind === "note" ? "Markdown 文件" : "TXT 文件"}</p>
+              <p className={sectionLabelClassName}>{renameDialog.kind === "note" ? "Markdown 文件" : "TXT 文件"}</p>
               <h2 className="mt-1 mb-0 text-lg leading-tight text-ink-strong [overflow-wrap:anywhere]">重命名</h2>
             </div>
-            <label className="rename-field">
+            <label className={fieldLabelClassName}>
               <span>文件名</span>
               <input
+                className={fieldControlClassName}
                 autoFocus
                 value={renameDialog.fileName}
                 onChange={(event) => setRenameDialog({ ...renameDialog, fileName: event.target.value })}
@@ -2735,14 +2737,15 @@ export function WorkspaceShell() {
             }}
           >
             <div>
-              <p className="section-label">{getCreateParentLabel(createDialog.parentPath)}</p>
+              <p className={sectionLabelClassName}>{getCreateParentLabel(createDialog.parentPath)}</p>
               <h2 className="mt-1 mb-0 text-lg leading-tight text-ink-strong [overflow-wrap:anywhere]">
                 {getCreateDialogTitle(createDialog.kind)}
               </h2>
             </div>
-            <label className="rename-field">
+            <label className={fieldLabelClassName}>
               <span>{createDialog.kind === "folder" ? "目录名" : "文件名"}</span>
               <input
+                className={fieldControlClassName}
                 autoFocus
                 value={createDialog.name}
                 onChange={(event) => setCreateDialog({ ...createDialog, name: event.target.value })}

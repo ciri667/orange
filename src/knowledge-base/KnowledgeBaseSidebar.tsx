@@ -1,8 +1,10 @@
 import { AlertCircle, BookOpen, Database, Loader2, Plus, RefreshCw, Search } from "lucide-react";
 import { FileTree } from "./FileTree";
 import { Button } from "../shared/Button";
+import { cn } from "../shared/cn";
 import { ListRow } from "../shared/ListRow";
 import { OverflowTooltipText } from "../shared/OverflowTooltipText";
+import { sectionLabelClassName } from "../shared/ui";
 import type { FileTreeNode, KnowledgeBase } from "../shared/types";
 
 /** 汇总当前资料库文档数量，用于侧栏标题中的低噪音概览。 */
@@ -91,7 +93,7 @@ export function KnowledgeBaseSidebar({
 
       <section className="grid gap-[7px]" aria-label="知识库切换">
         <div className="flex items-center justify-between gap-3">
-          <p className="section-label">Library</p>
+          <p className={sectionLabelClassName}>Library</p>
           <span className="text-xs text-ink-muted">本地优先</span>
         </div>
         {knowledgeBases.map((knowledgeBase) => {
@@ -120,8 +122,13 @@ export function KnowledgeBaseSidebar({
       </section>
 
       {(isBusy || notice) && (
-        <div className={`operation-notice ${notice.includes("失败") || notice.includes("阻止") ? "error" : ""}`}>
-          {isBusy && <Loader2 size={14} />}
+        <div
+          className={cn(
+            "flex items-center gap-2 rounded-control border border-primary-border bg-accent-soft px-2.5 py-[9px] text-xs leading-[1.45] text-accent-strong",
+            (notice.includes("失败") || notice.includes("阻止")) && "border-[rgba(var(--danger-rgb),0.26)] bg-danger-soft text-danger",
+          )}
+        >
+          {isBusy && <Loader2 size={14} className="shrink-0 animate-spin" />}
           <span>{busyLabel || notice}</span>
         </div>
       )}
@@ -137,9 +144,9 @@ export function KnowledgeBaseSidebar({
         />
       </label>
 
-      <div className="local-tree" aria-label="本地目录树">
+      <div className="flex min-h-0 min-w-0 flex-1 flex-col overflow-auto border-t border-[rgba(230,224,214,0.72)] pt-3 pr-0.5" aria-label="本地目录树">
         <div className="flex items-center justify-between gap-3">
-          <p className="section-label">Files</p>
+          <p className={sectionLabelClassName}>Files</p>
           <div className="inline-flex items-center gap-2">
             <span className="text-xs text-ink-muted">{activeKnowledgeBase.status === "error" ? "目录失效" : "支持文档"}</span>
             <Button
@@ -154,7 +161,7 @@ export function KnowledgeBaseSidebar({
             </Button>
           </div>
         </div>
-        <OverflowTooltipText as="p" className="root-path" text={activeKnowledgeBase.path} logArea="knowledge_base_root_path" />
+        <OverflowTooltipText as="p" className="my-1.5 mb-2 truncate text-[11px] text-ink-muted" text={activeKnowledgeBase.path} logArea="knowledge_base_root_path" />
         <ScanReportSummary knowledgeBase={activeKnowledgeBase} />
         <FileTree
           nodes={fileTree}
@@ -198,7 +205,7 @@ function ScanReportSummary({ knowledgeBase }: { knowledgeBase: KnowledgeBase }) 
   const report = knowledgeBase.scanReport;
 
   if (knowledgeBase.status === "error") {
-    return <p className="scan-summary error">{knowledgeBase.description}</p>;
+    return <p className="-mt-[3px] mb-2.5 text-xs leading-normal text-danger">{knowledgeBase.description}</p>;
   }
 
   if (!report) {
@@ -209,7 +216,7 @@ function ScanReportSummary({ knowledgeBase }: { knowledgeBase: KnowledgeBase }) 
   const errorText = report.failedFileCount ? `，${report.failedFileCount} 个读取失败` : "";
 
   return (
-    <p className={`scan-summary ${report.failedFileCount ? "warning" : ""}`}>
+    <p className={cn("-mt-[3px] mb-2.5 text-xs leading-normal text-ink-muted", report.failedFileCount && "text-warning")}>
       已扫描 {report.scannedFileCount} 个支持文档{errorText}
       {skippedText}
     </p>

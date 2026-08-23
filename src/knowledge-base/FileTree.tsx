@@ -15,10 +15,21 @@ import {
 } from "lucide-react";
 import { useState, type ComponentProps } from "react";
 import { Button } from "../shared/Button";
+import { cn } from "../shared/cn";
 import { logDebug } from "../shared/logger";
 import { Menu, MenuItem, MenuPanel, type MenuPanelPlacement } from "../shared/Menu";
 import { OverflowTooltipText } from "../shared/OverflowTooltipText";
 import type { FileTreeNode } from "../shared/types";
+
+/** 文件树行的共用外观；active 只用于当前打开的文件。 */
+function fileTreeRowClassName({ isRoot = false, isActive = false }: { isRoot?: boolean; isActive?: boolean } = {}) {
+  return cn(
+    "group relative flex min-h-8 min-w-0 w-full items-center gap-[7px] overflow-visible rounded-control border border-transparent bg-transparent pr-2 text-left text-ink",
+    !isActive && "hover:bg-surface-hover",
+    isRoot && "border-border-translucent bg-warm-panel",
+    isActive && "border-primary-border bg-primary-wash text-agent-strong",
+  );
+}
 
 /** 本地文件树组件，递归展示文件夹、Markdown、txt、docx、pdf 和图片文件。 */
 export function FileTree({
@@ -96,7 +107,7 @@ export function FileTree({
   }
 
   return (
-    <ul className={`file-tree-list ${depth === 0 ? "root" : ""}`} role={depth === 0 ? "tree" : "group"}>
+    <ul className="m-0 min-w-0 list-none p-0" role={depth === 0 ? "tree" : "group"}>
       {nodes.map((node) => {
         const isCollapsed = collapsedFolderPaths.has(node.path);
 
@@ -104,12 +115,9 @@ export function FileTree({
         if (node.type === "folder") {
           return (
             <li key={node.id}>
-              <div
-                className={`file-tree-row group folder ${node.isRoot ? "root-folder" : ""}`}
-                style={{ paddingLeft: depth * 14 + 6 }}
-              >
+              <div className={fileTreeRowClassName({ isRoot: Boolean(node.isRoot) })} style={{ paddingLeft: depth * 14 + 6 }}>
                 <button
-                  className="file-tree-open-button"
+                  className="inline-flex min-h-7 min-w-0 flex-1 items-center gap-[7px] border-0 bg-transparent p-0 text-left text-inherit"
                   type="button"
                   aria-expanded={!isCollapsed}
                   aria-label={`${isCollapsed ? "展开" : "收起"} ${node.name}`}
@@ -117,10 +125,10 @@ export function FileTree({
                 >
                   {isCollapsed ? <ChevronRight size={14} /> : <ChevronDown size={14} />}
                   <FolderOpen size={15} />
-                  <OverflowTooltipText className="file-tree-name" text={node.name} logArea="file_tree_folder" />
+                  <OverflowTooltipText className="min-w-0 flex-1 truncate" text={node.name} logArea="file_tree_folder" />
                 </button>
-                <span className="file-tree-count">{node.children.length}</span>
-                <div className="file-tree-actions">
+                <span className="text-[11px] text-ink-soft">{node.children.length}</span>
+                <div className="relative inline-flex shrink-0 overflow-visible">
                   <CreateMenu
                     isOpen={openCreateMenuPath === node.path}
                     placement={node.isRoot ? "bottom-end" : "top-end"}
@@ -182,13 +190,13 @@ export function FileTree({
         return (
           <li key={node.id}>
             <div
-              className={`file-tree-row group file ${isActiveFile ? "active" : ""}`}
+              className={fileTreeRowClassName({ isActive: isActiveFile })}
               style={{ paddingLeft: depth * 14 + 28 }}
               role="treeitem"
               aria-selected={isActiveFile}
             >
               <button
-                className="file-tree-open-button"
+                className="inline-flex min-h-7 min-w-0 flex-1 items-center gap-[7px] border-0 bg-transparent p-0 text-left text-inherit"
                 type="button"
                 aria-label={`打开 ${node.name}`}
                 onClick={() => {
@@ -200,11 +208,13 @@ export function FileTree({
                 }}
               >
                 <FileTreeIcon node={node} />
-                <OverflowTooltipText className="file-tree-name" text={node.name} logArea="file_tree_file" />
-                <span className="file-tree-type">{formatFileTreeTypeLabel(node)}</span>
+                <OverflowTooltipText className="min-w-0 flex-1 truncate" text={node.name} logArea="file_tree_file" />
+                <span className="shrink-0 rounded-full bg-[rgba(241,238,232,0.9)] px-[5px] py-px text-[10px] font-bold text-ink-soft">
+                  {formatFileTreeTypeLabel(node)}
+                </span>
               </button>
               {(canOpenHistory || canRename || canDelete) && (
-                <div className="file-tree-actions">
+                <div className="relative inline-flex shrink-0 overflow-visible">
                   <FileActionMenu
                     isOpen={openFileActionPath === node.path}
                     onToggle={() => handleToggleFileActionMenu(node)}
@@ -246,8 +256,8 @@ function EmptyFolderCreateHint({
   onCreateFolder: (parentPath: string) => void;
 }) {
   return (
-    <div className="file-tree-empty-create">
-      <p className="file-tree-empty">
+    <div className="mx-1 my-2 rounded-lg border border-dashed border-border bg-surface-translucent p-3">
+      <p className="mb-2.5 mt-0 text-[13px] text-ink-muted">
         {isFiltered ? "没有匹配的支持文档" : "当前知识库还没有文件，可以在根目录新建。"}
       </p>
       <div className="flex flex-wrap gap-1.5">

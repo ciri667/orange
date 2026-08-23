@@ -159,7 +159,6 @@ export function DocumentPane({
 
       {isTextDocument ? (
         <LineNumberedTextarea
-          className="plain-text-editor"
           fileType="txt"
           value={content}
           onChange={(event) => onContentChange(event.target.value)}
@@ -198,26 +197,30 @@ function DocumentPreviewView({
   isPreviewLoading: boolean;
 }) {
   if (isPreviewLoading) {
-    return <div className="document-preview-state">正在加载预览...</div>;
+    return <div className="grid min-h-0 min-w-0 place-items-center rounded-panel border border-dashed border-border-strong bg-surface p-6 text-center text-[13px] leading-[1.55] text-ink-muted">正在加载预览...</div>;
   }
 
   if (previewError) {
-    return <div className="document-preview-state error">{previewError}</div>;
+    return <div className="grid min-h-0 min-w-0 place-items-center rounded-panel border border-dashed border-[rgba(var(--danger-rgb),0.28)] bg-danger-soft p-6 text-center text-[13px] leading-[1.55] text-danger">{previewError}</div>;
   }
 
   if (document.fileType === "pdf") {
     const assetUrl = createDocumentAssetUrl(preview?.assetPath);
 
     return (
-      <div className="document-pdf-preview-stack" aria-label="PDF 预览">
-        {assetUrl ? <iframe className="document-pdf-preview" title={document.title} src={assetUrl} /> : <div className="document-preview-state">当前环境无法内嵌 PDF 预览。</div>}
+      <div className="grid min-h-0 gap-3" aria-label="PDF 预览">
+        {assetUrl ? (
+          <iframe className="h-full min-h-0 w-full min-w-0 overflow-hidden rounded-panel border border-[rgba(230,224,214,0.92)] bg-surface" title={document.title} src={assetUrl} />
+        ) : (
+          <div className="grid min-h-0 min-w-0 place-items-center rounded-panel border border-dashed border-border-strong bg-surface p-6 text-center text-[13px] leading-[1.55] text-ink-muted">当前环境无法内嵌 PDF 预览。</div>
+        )}
         {!!preview?.blocks?.length && (
-          <details className="document-extracted-text">
-            <summary>查看可提取文本（{preview.blocks.length} 页）</summary>
+          <details className="max-h-[280px] overflow-auto rounded-lg border border-border bg-surface-muted p-3">
+            <summary className="cursor-pointer font-semibold">查看可提取文本（{preview.blocks.length} 页）</summary>
             {preview.blocks.map((block, index) => (
-              <section key={`pdf-${index}`}>
+              <section className="mt-3" key={`pdf-${index}`}>
                 <strong>{block.page ? `第 ${block.page} 页` : `片段 ${index + 1}`}</strong>
-                <p>{block.text}</p>
+                <p className="whitespace-pre-wrap">{block.text}</p>
               </section>
             ))}
           </details>
@@ -230,8 +233,9 @@ function DocumentPreviewView({
     const assetUrl = createDocumentAssetUrl(preview?.assetPath);
 
     return assetUrl ? (
-      <div className="document-image-preview" aria-label="图片预览">
+      <div className="grid min-h-0 min-w-0 place-items-center overflow-auto rounded-panel border border-[rgba(230,224,214,0.92)] bg-surface p-[22px]" aria-label="图片预览">
         <img
+          className="block max-h-full max-w-full object-contain"
           src={assetUrl}
           alt={document.title}
           onLoad={(event) => {
@@ -262,7 +266,7 @@ function DocumentPreviewView({
         />
       </div>
     ) : (
-      <div className="document-preview-state">当前环境无法内嵌图片预览。</div>
+      <div className="grid min-h-0 min-w-0 place-items-center rounded-panel border border-dashed border-border-strong bg-surface p-6 text-center text-[13px] leading-[1.55] text-ink-muted">当前环境无法内嵌图片预览。</div>
     );
   }
 
@@ -270,21 +274,21 @@ function DocumentPreviewView({
     const blocks = preview?.blocks ?? [];
 
     return (
-      <div className="document-docx-preview" aria-label="DOCX 预览">
+      <div className="min-h-0 min-w-0 overflow-auto rounded-panel border border-[rgba(230,224,214,0.92)] bg-surface p-[22px] text-sm leading-[1.76] text-ink [scrollbar-gutter:stable] [&>:last-child]:mb-0" aria-label="DOCX 预览">
         {blocks.map((block, index) =>
           block.type === "heading" ? (
-            <h3 key={`${block.type}-${index}`}>{block.text}</h3>
+            <h3 className="mb-3 mt-0 text-[19px] leading-[1.35] text-ink-strong" key={`${block.type}-${index}`}>{block.text}</h3>
           ) : block.type === "table" ? (
-            <pre key={`${block.type}-${index}`} className="document-docx-table">{block.text}</pre>
+            <pre className="whitespace-pre-wrap font-[inherit]" key={`${block.type}-${index}`}>{block.text}</pre>
           ) : (
-            <p key={`${block.type}-${index}`}>{block.text}</p>
+            <p className="mb-3 mt-0 whitespace-pre-wrap" key={`${block.type}-${index}`}>{block.text}</p>
           ),
         )}
       </div>
     );
   }
 
-  return <div className="document-preview-state">该文档类型暂不支持预览。</div>;
+  return <div className="grid min-h-0 min-w-0 place-items-center rounded-panel border border-dashed border-border-strong bg-surface p-6 text-center text-[13px] leading-[1.55] text-ink-muted">该文档类型暂不支持预览。</div>;
 }
 
 /** 把文档类型转换成界面短标签。 */
