@@ -1,4 +1,4 @@
-import type { AgentSession, LlmProviderConfig, LlmProviderModel, ModelConfig } from "./types";
+import type { LlmProviderConfig, LlmProviderModel } from "./types";
 
 /** 会话/本轮模型选择器统一使用的“跟随默认”占位值，不写入具体 providerId 或 modelId。 */
 export const FOLLOW_DEFAULT_MODEL_SELECTION = "";
@@ -58,15 +58,4 @@ export function getProviderModelLabel(provider: LlmProviderConfig, modelId = pro
 /** 生成用户可读的 provider/model 标签，供摘要条和选择器选项共用。 */
 export function getProviderModelSelectionLabel(provider: LlmProviderConfig, modelId = provider.model) {
   return `${provider.name} / ${getProviderModelLabel(provider, modelId)}`;
-}
-
-/** 解析会话默认模型的展示标签；无会话覆盖时回退全局默认 provider.model。 */
-export function getSessionModelLabel(session: AgentSession, modelConfig: ModelConfig) {
-  const sessionProvider = session.modelProviderId
-    ? modelConfig.providers.find((provider) => provider.id === session.modelProviderId)
-    : undefined;
-  const defaultProvider = modelConfig.providers.find((provider) => provider.id === modelConfig.defaultProviderId);
-  const provider = sessionProvider ?? defaultProvider;
-
-  return provider ? getProviderModelSelectionLabel(provider, sessionProvider ? session.modelId || provider.model : provider.model) : "模型未配置";
 }

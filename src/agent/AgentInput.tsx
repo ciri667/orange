@@ -11,17 +11,12 @@ import { Button } from "../shared/Button";
 import { Chip } from "../shared/Chip";
 import { cn } from "../shared/cn";
 import { logDebug } from "../shared/logger";
-import {
-  FOLLOW_DEFAULT_MODEL_SELECTION,
-  getProviderModelSelectionLabel,
-} from "../shared/modelSelection";
+import { getProviderModelSelectionLabel } from "../shared/modelSelection";
 import { ModelCascadeSelector } from "../shared/ModelCascadeSelector";
 import { OverflowTooltipText } from "../shared/OverflowTooltipText";
 import type { AgentSecuritySettings, AgentSession, AgentSkill, ModelConfig } from "../shared/types";
 import { AgentSecurityLevelControl } from "./AgentPanelSections";
 
-/** 兼容旧组件导入的“跟随默认”占位值，实际定义集中在 shared/modelSelection。 */
-export const FOLLOW_DEFAULT_VALUE = FOLLOW_DEFAULT_MODEL_SELECTION;
 /** 输入法结束组词后的短保护窗口；部分中文输入法会先触发 compositionend，再派发 Enter keydown。 */
 const PROMPT_IME_ENTER_GUARD_MS = 150;
 /** v1 每轮最多显式激活 3 个 Skill，避免用户误选过多 instructions 挤占上下文。 */
