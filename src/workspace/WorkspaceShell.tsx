@@ -11,6 +11,7 @@ import { BootCopy, BootErrorMessage, BootScreen, BootTitle } from "../shared/Boo
 import { Button } from "../shared/Button";
 import { ConfirmDialog, type ConfirmDialogConfig } from "../shared/ConfirmDialog";
 import { ModalBackdrop, ModalForm } from "../shared/Modal";
+import { OperationNotice } from "../shared/OperationNotice";
 import { fieldControlClassName, fieldLabelClassName, sectionLabelClassName } from "../shared/ui";
 import { buildMarkdownDiff } from "../diff/markdownDiff";
 import { createContentHash, createLocalId, formatLocalDateTime } from "../shared/id";
@@ -610,11 +611,7 @@ export function WorkspaceShell() {
         </div>
         <BootTitle>连接一个支持文档目录，开始使用知识库 Agent 助手。</BootTitle>
         <BootCopy>目录树会展示 Markdown、TXT、DOCX、PDF 和图片；Agent 写入仍只作用于确认后的 Markdown diff。</BootCopy>
-        {(busyLabel || notice) && (
-          <p className={`operation-notice ${notice.includes("失败") || notice.includes("阻止") ? "error" : ""}`}>
-            {busyLabel || notice}
-          </p>
-        )}
+        <OperationNotice className="max-w-[620px]" isBusy={isBusy} busyLabel={busyLabel} notice={notice} />
         <Button variant="primary" onClick={handleAddKnowledgeBase} disabled={isBusy}>
           添加第一个知识库
         </Button>

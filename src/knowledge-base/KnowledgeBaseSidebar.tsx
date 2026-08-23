@@ -1,8 +1,9 @@
-import { AlertCircle, BookOpen, Database, Loader2, Plus, RefreshCw, Search } from "lucide-react";
+import { AlertCircle, BookOpen, Database, Plus, RefreshCw, Search } from "lucide-react";
 import { FileTree } from "./FileTree";
 import { Button } from "../shared/Button";
 import { cn } from "../shared/cn";
 import { ListRow } from "../shared/ListRow";
+import { OperationNotice } from "../shared/OperationNotice";
 import { OverflowTooltipText } from "../shared/OverflowTooltipText";
 import { sectionLabelClassName } from "../shared/ui";
 import type { FileTreeNode, KnowledgeBase } from "../shared/types";
@@ -121,17 +122,7 @@ export function KnowledgeBaseSidebar({
         </Button>
       </section>
 
-      {(isBusy || notice) && (
-        <div
-          className={cn(
-            "flex items-center gap-2 rounded-control border border-primary-border bg-accent-soft px-2.5 py-[9px] text-xs leading-[1.45] text-accent-strong",
-            (notice.includes("失败") || notice.includes("阻止")) && "border-[rgba(var(--danger-rgb),0.26)] bg-danger-soft text-danger",
-          )}
-        >
-          {isBusy && <Loader2 size={14} className="shrink-0 animate-spin" />}
-          <span>{busyLabel || notice}</span>
-        </div>
-      )}
+      <OperationNotice isBusy={isBusy} busyLabel={busyLabel} notice={notice} />
 
       <label className="flex min-h-[38px] items-center gap-2 rounded-control border border-border-translucent bg-surface-translucent px-2.5 text-ink-muted">
         <Search size={16} />
