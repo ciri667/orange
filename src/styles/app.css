@@ -40,7 +40,6 @@
   --shadow: 0 18px 42px rgba(47, 39, 29, 0.12);
   --shadow-soft: 0 10px 24px rgba(47, 39, 29, 0.08);
   --mono-font: "SF Mono", "JetBrains Mono", "Roboto Mono", ui-monospace, monospace;
-  --motion-fast: 160ms ease;
   --z-menu: 120;
   --z-agent-popover: 180;
   --z-settings: 320;
@@ -167,12 +166,6 @@ select:focus-visible,
   overflow-wrap: anywhere;
   pointer-events: none;
   white-space: normal;
-}
-
-@keyframes spin {
-  to {
-    transform: rotate(360deg);
-  }
 }
 
 .app-shell {
