@@ -17,7 +17,9 @@ import { createLocalId, formatLocalDateTime } from "../shared/id";
 import { ListRow } from "../shared/ListRow";
 import { logDebug, logError, logInfo } from "../shared/logger";
 import { ModalBackdrop, ModalHeader } from "../shared/Modal";
+import { cn } from "../shared/cn";
 import { OverflowTooltipText } from "../shared/OverflowTooltipText";
+import { sectionLabelClassName } from "../shared/ui";
 import type {
   AgentSkill,
   AppEventLog,
@@ -878,9 +880,9 @@ export function SettingsDrawer({
     const groupItems = settingsNavItems.filter((item) => item.group === group);
 
     return (
-      <div className="settings-nav-group" key={group}>
-        <p className="settings-nav-group-label">{group}</p>
-        <div className="settings-nav-items">
+      <div className="grid gap-2 max-[1100px]:min-w-0 max-[1100px]:shrink-0" key={group}>
+        <p className={sectionLabelClassName}>{group}</p>
+        <div className="grid gap-[7px] max-[1100px]:flex max-[1100px]:gap-2">
           {groupItems.map((item) => {
             const SectionIcon = item.icon;
 
@@ -899,7 +901,11 @@ export function SettingsDrawer({
                 </span>
                 <OverflowTooltipText
                   as="em"
-                  className={`settings-nav-meta ${item.tone ?? "neutral"}`}
+                  className={cn(
+                    "whitespace-nowrap rounded-full border border-[rgba(230,224,214,0.78)] bg-surface-muted px-[7px] py-[3px] text-[11px] not-italic text-ink-muted",
+                    item.tone === "success" && "bg-success-soft text-success",
+                    item.tone === "warning" && "border-[rgba(var(--warning-rgb),0.28)] bg-warning-soft text-warning",
+                  )}
                   text={item.meta}
                   logArea="settings_nav_meta"
                 />
@@ -1047,7 +1053,7 @@ export function SettingsDrawer({
       >
         <ModalHeader className="px-5 py-[18px]">
           <div className="min-w-0">
-            <p className="section-label">Settings</p>
+            <p className={sectionLabelClassName}>Settings</p>
             <h2 className="mt-1 mb-0 text-xl leading-tight text-ink-strong">设置工作台</h2>
           </div>
           <Button variant="icon" title="关闭设置" onClick={onClose}>
@@ -1057,16 +1063,16 @@ export function SettingsDrawer({
 
         <div className="grid min-h-0 min-w-0 grid-cols-[260px_minmax(0,1fr)]">
           <nav className="grid min-h-0 min-w-0 content-start gap-[18px] overflow-auto border-r border-border bg-warm-panel p-4" aria-label="设置项">
-            <div className="settings-overview" aria-label="设置摘要">
-              <strong>本地 Agent 环境</strong>
+            <div className="grid gap-[7px] rounded-control border border-border-translucent bg-surface-translucent p-2.5 text-xs text-ink-muted" aria-label="设置摘要">
+              <strong className="text-[13px] text-ink-strong">本地 Agent 环境</strong>
               <span>{settingsSummary.knowledgeBaseCount} 个资料库</span>
               <span>{settingsSummary.providerCount} 个模型 Provider</span>
               <span>{settingsSummary.enabledSkillCount} 个 Skill 启用</span>
-              {settingsSummary.errorLogCount > 0 && <em>{settingsSummary.errorLogCount} 条错误日志</em>}
+              {settingsSummary.errorLogCount > 0 && <em className="not-italic text-danger">{settingsSummary.errorLogCount} 条错误日志</em>}
             </div>
             {SETTINGS_SECTION_GROUPS.map((group) => renderNavigationGroup(group))}
           </nav>
-          <main className="settings-content" aria-label="设置主要内容">
+          <main className="min-h-0 min-w-0 overflow-auto bg-surface p-5 max-[1100px]:p-4 max-[760px]:p-4" aria-label="设置主要内容">
             {renderActiveSection()}
           </main>
         </div>

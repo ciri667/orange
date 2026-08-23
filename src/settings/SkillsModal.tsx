@@ -2,12 +2,15 @@ import { Archive, Download, Edit3, FolderOpen, Link, Plus, Save, Search, Trash2,
 import type { FormEvent } from "react";
 import { useMemo, useState } from "react";
 import { Button } from "../shared/Button";
+import { cn } from "../shared/cn";
 import { ConfirmDialog, type ConfirmDialogConfig } from "../shared/ConfirmDialog";
 import { FilterChip } from "../shared/FilterChip";
 import { ListRow } from "../shared/ListRow";
 import { logError, logInfo } from "../shared/logger";
 import { ModalBackdrop, ModalHeader, ModalPanel } from "../shared/Modal";
 import { OverflowTooltipText } from "../shared/OverflowTooltipText";
+import { ToggleRow } from "../shared/ToggleRow";
+import { fieldControlClassName, fieldLabelClassName, fieldTextareaClassName, sectionLabelClassName } from "../shared/ui";
 import type {
   AgentSkill,
   AgentSkillSource,
@@ -318,7 +321,7 @@ export function SkillsModal({
       >
         <ModalHeader>
           <div className="min-w-0">
-            <p className="section-label">Skills</p>
+            <p className={sectionLabelClassName}>Skills</p>
             <h2 className="mt-1 mb-0 text-lg leading-tight text-ink-strong">管理 Agent Skills</h2>
             <span className="mt-1 block text-xs text-ink-muted">启用的 Skill 会作为能力说明进入 Agent 上下文。</span>
           </div>
@@ -335,23 +338,23 @@ export function SkillsModal({
 
         <div className="grid min-h-0 overflow-hidden grid-cols-[300px_minmax(0,1fr)] max-[980px]:grid-cols-[minmax(220px,280px)_minmax(0,1fr)] max-[760px]:grid-cols-1 max-[760px]:grid-rows-[minmax(180px,38%)_minmax(0,1fr)]">
           <aside className="grid min-h-0 grid-rows-[auto_auto_auto_auto_auto_auto_minmax(0,1fr)] gap-2.5 overflow-hidden border-r border-border bg-warm-panel p-3.5 max-[760px]:border-r-0 max-[760px]:border-b">
-            <div className="skills-overview" aria-label="Skills 摘要">
-              <span>
-                <strong>{skillSummary.enabled}</strong>
+            <div className="grid grid-cols-3 gap-[7px] rounded-control border border-border-translucent bg-surface-translucent p-2.5 text-xs text-ink-muted" aria-label="Skills 摘要">
+              <span className="grid gap-0.5 text-center">
+                <strong className="text-base text-ink-strong">{skillSummary.enabled}</strong>
                 启用
               </span>
-              <span>
-                <strong>{skillSummary.builtIn}</strong>
+              <span className="grid gap-0.5 text-center">
+                <strong className="text-base text-ink-strong">{skillSummary.builtIn}</strong>
                 内置
               </span>
-              <span>
-                <strong>{skillSummary.custom}</strong>
+              <span className="grid gap-0.5 text-center">
+                <strong className="text-base text-ink-strong">{skillSummary.custom}</strong>
                 自定义
               </span>
             </div>
-            <div className="skills-search">
+            <div className="flex items-center gap-[7px] rounded-[7px] border border-border bg-surface-translucent px-[9px] text-ink-muted">
               <Search size={15} />
-              <input value={searchTerm} onChange={(event) => setSearchTerm(event.target.value)} placeholder="搜索 skill" />
+              <input className="min-h-[34px] w-full border-0 bg-transparent outline-0" value={searchTerm} onChange={(event) => setSearchTerm(event.target.value)} placeholder="搜索 skill" />
             </div>
             <div className="flex flex-wrap gap-1.5" aria-label="Skill 来源筛选">
               {(["all", "built-in", "custom"] as SkillSourceFilter[]).map((source) => (
@@ -411,11 +414,11 @@ export function SkillsModal({
                   </em>
                 </ListRow>
               ))}
-              {!filteredSkills.length && <p className="skills-empty">没有匹配的 skill。</p>}
+              {!filteredSkills.length && <p className="m-0 text-[13px] text-ink-muted">没有匹配的 skill。</p>}
             </div>
           </aside>
 
-          <div className="skill-detail-pane">
+          <div className="min-h-0 min-w-0 overflow-auto bg-surface p-4">
             {installDraft ? (
               <SkillInstallForm
                 draft={installDraft}
@@ -441,7 +444,7 @@ export function SkillsModal({
                 onDeleteSkill={handleDeleteSkill}
               />
             ) : (
-              <p className="skills-empty">请选择一个 skill。</p>
+              <p className="m-0 text-[13px] text-ink-muted">请选择一个 skill。</p>
             )}
           </div>
         </div>
@@ -473,14 +476,14 @@ function SkillDetail({
   onDeleteSkill: (skill: AgentSkill) => Promise<void> | void;
 }) {
   return (
-    <article className="skill-detail">
-      <div className="skill-detail-header">
-        <div>
-          <p className="section-label">{sourceHeading(skill)}</p>
-          <OverflowTooltipText as="h3" text={skill.displayName} logArea="skills_modal_detail_name" />
-          <OverflowTooltipText text={skill.name} logArea="skills_modal_detail_id" />
+    <article className="grid gap-3.5">
+      <div className="flex items-start justify-between gap-3 max-[760px]:items-start">
+        <div className="min-w-0">
+          <p className={sectionLabelClassName}>{sourceHeading(skill)}</p>
+          <OverflowTooltipText as="h3" className="mt-1 mb-0 text-xl leading-tight text-ink-strong [overflow-wrap:anywhere]" text={skill.displayName} logArea="skills_modal_detail_name" />
+          <OverflowTooltipText className="mt-[3px] block text-xs text-ink-muted" text={skill.name} logArea="skills_modal_detail_id" />
         </div>
-        <div className="skill-detail-actions">
+        <div className="flex min-w-0 flex-wrap items-center gap-2">
           {isUserManagedSkill(skill) && (
             <Button variant="ghost" onClick={() => onEditSkill(skill)} disabled={isBusy}>
               <Edit3 size={14} />
@@ -495,48 +498,46 @@ function SkillDetail({
           )}
         </div>
       </div>
-      <p>{skill.description}</p>
+      <p className="m-0 text-sm leading-[1.6] text-[#24323c]">{skill.description}</p>
       {skill.source === "custom" && (
-        <section className="skill-path-block">
-          <h4>SKILL.md 路径</h4>
-          <OverflowTooltipText as="code" text={skill.path ?? skill.relativePath ?? "未返回路径"} logArea="skills_modal_detail_path" />
+        <section className="grid gap-2 rounded-[7px] border border-border-translucent bg-warm-panel p-2.5">
+          <h4 className="m-0 text-[13px] text-ink-strong">SKILL.md 路径</h4>
+          <OverflowTooltipText as="code" className="[overflow-wrap:anywhere] font-mono text-xs leading-[1.45] text-ink-muted [word-break:break-word]" text={skill.path ?? skill.relativePath ?? "未返回路径"} logArea="skills_modal_detail_path" />
         </section>
       )}
-      <section className="skill-runtime-block">
-        <h4>运行兼容性</h4>
-        <div className={`skill-runtime-status ${skill.compatibility?.status ?? "instruction-only"}`}>
+      <section className="grid gap-2">
+        <h4 className="m-0 text-[13px] text-ink-strong">运行兼容性</h4>
+        <div
+          className={cn(
+            "flex items-center justify-between gap-3 rounded-md border border-border bg-surface-warm px-3 py-2.5",
+            skill.compatibility?.status === "ready" && "[&_strong]:text-success",
+            (skill.compatibility?.status === "missing-runtime" || skill.compatibility?.status === "partial" || skill.compatibility?.status === "unsupported") && "[&_strong]:text-warning",
+          )}
+        >
           <strong>{skillCompatibilityLabel(skill)}</strong>
-          <span>{skillRuntimeMessage(skill)}</span>
+          <span className="text-right text-xs text-ink-muted">{skillRuntimeMessage(skill)}</span>
         </div>
         {skill.runtimeManifest && (
-          <dl>
-            <div><dt>运行时</dt><dd>{skill.runtimeManifest.runtime}</dd></div>
-            <div><dt>入口</dt><dd><code>{skill.runtimeManifest.entry}</code></dd></div>
-            <div><dt>网络</dt><dd>{skill.runtimeManifest.networkDomains.length ? skill.runtimeManifest.networkDomains.join(", ") : "关闭"}</dd></div>
+          <dl className="m-0">
+            <div className="grid grid-cols-[72px_minmax(0,1fr)] gap-2 py-[3px]"><dt className="m-0 min-w-0">运行时</dt><dd className="m-0 min-w-0">{skill.runtimeManifest.runtime}</dd></div>
+            <div className="grid grid-cols-[72px_minmax(0,1fr)] gap-2 py-[3px]"><dt className="m-0 min-w-0">入口</dt><dd className="m-0 min-w-0"><code className="[overflow-wrap:anywhere]">{skill.runtimeManifest.entry}</code></dd></div>
+            <div className="grid grid-cols-[72px_minmax(0,1fr)] gap-2 py-[3px]"><dt className="m-0 min-w-0">网络</dt><dd className="m-0 min-w-0">{skill.runtimeManifest.networkDomains.length ? skill.runtimeManifest.networkDomains.join(", ") : "关闭"}</dd></div>
           </dl>
         )}
       </section>
-      <div className="skill-switches">
-        <label className="toggle-row">
-          <input
-            className="control-checkbox-input"
-            checked={skill.enabled}
-            onChange={(event) => onToggleSkill(skill.id, event.target.checked)}
-            type="checkbox"
-            disabled={isBusy}
-          />
-          <span className="control-checkbox" aria-hidden="true" />
-          <span>启用 Skill</span>
-        </label>
+      <div className="flex flex-wrap items-center gap-2">
+        <ToggleRow checked={skill.enabled} disabled={isBusy} onChange={(checked) => onToggleSkill(skill.id, checked)}>
+          启用 Skill
+        </ToggleRow>
       </div>
-      <div className="skill-tags">
+      <div className="flex flex-wrap gap-1.5">
         {skill.tags.map((tag) => (
-          <OverflowTooltipText key={tag} text={tag} logArea="skills_modal_detail_tag" />
+          <OverflowTooltipText key={tag} className="rounded-full border border-[rgba(230,224,214,0.78)] bg-white/60 px-2 py-1 text-xs text-ink-muted" text={tag} logArea="skills_modal_detail_tag" />
         ))}
       </div>
-      <section className="skill-instructions">
-        <h4>执行说明</h4>
-        <p>{skill.instructions}</p>
+      <section className="rounded-[7px] border border-border-translucent bg-warm-panel p-3">
+        <h4 className="mb-2 mt-0 text-[13px] text-ink-strong">执行说明</h4>
+        <p className="m-0 whitespace-pre-wrap text-[13px] leading-[1.6] text-[#24323c]">{skill.instructions}</p>
       </section>
     </article>
   );
@@ -635,12 +636,12 @@ function SkillInstallForm({
   }
 
   return (
-    <form className="skill-form skill-install-form" onSubmit={onSubmit}>
-      <div className="skill-detail-header">
-        <div>
-          <p className="section-label">Install Skill</p>
-          <h3>安装 Skill</h3>
-          <span>第三方 skill 安装后默认停用。</span>
+    <form className="grid gap-3.5" onSubmit={onSubmit}>
+      <div className="flex items-start justify-between gap-3">
+        <div className="min-w-0">
+          <p className={sectionLabelClassName}>Install Skill</p>
+          <h3 className="mt-1 mb-0 text-xl leading-tight text-ink-strong">安装 Skill</h3>
+          <span className="mt-[3px] block text-xs text-ink-muted">第三方 skill 安装后默认停用。</span>
         </div>
       </div>
       <div className="grid grid-cols-3 gap-2" aria-label="Skill 安装来源">
@@ -661,40 +662,24 @@ function SkillInstallForm({
           );
         })}
       </div>
-      <label>
+      <label className={fieldLabelClassName}>
         <span>{draft.sourceType === "url" ? "安装 URL" : "本地来源"}</span>
-        <input value={draft.source} onChange={(event) => updateDraft("source", event.target.value)} placeholder={sourcePlaceholder} />
+        <input className={fieldControlClassName} value={draft.source} onChange={(event) => updateDraft("source", event.target.value)} placeholder={sourcePlaceholder} />
       </label>
-      <p className="skill-install-help">{sourceHelp}</p>
-      <div className="skill-switches">
-        <label className="toggle-row">
-          <input
-            className="control-checkbox-input"
-            checked={draft.enableAfterInstall}
-            onChange={(event) => updateDraft("enableAfterInstall", event.target.checked)}
-            type="checkbox"
-            disabled={isBusy}
-          />
-          <span className="control-checkbox" aria-hidden="true" />
-          <span>安装后启用</span>
-        </label>
-        <label className="toggle-row">
-          <input
-            className="control-checkbox-input"
-            checked={draft.replaceExisting}
-            onChange={(event) => updateDraft("replaceExisting", event.target.checked)}
-            type="checkbox"
-            disabled={isBusy}
-          />
-          <span className="control-checkbox" aria-hidden="true" />
-          <span>替换同名 Skill</span>
-        </label>
+      <p className="-mt-1.5 mb-0 text-xs leading-normal text-ink-muted">{sourceHelp}</p>
+      <div className="flex flex-wrap items-center gap-2">
+        <ToggleRow checked={draft.enableAfterInstall} disabled={isBusy} onChange={(checked) => updateDraft("enableAfterInstall", checked)}>
+          安装后启用
+        </ToggleRow>
+        <ToggleRow checked={draft.replaceExisting} disabled={isBusy} onChange={(checked) => updateDraft("replaceExisting", checked)}>
+          替换同名 Skill
+        </ToggleRow>
       </div>
-      <section className="skill-install-safety">
-        <h4>安装边界</h4>
-        <p>安装只复制 Skill 包；脚本必须声明 orange-runtime.yaml，并在进阶权限下审批后隔离执行。</p>
+      <section className="grid gap-1.5 rounded-[7px] border border-border-translucent bg-warm-panel p-2.5">
+        <h4 className="m-0 text-[13px] text-ink-strong">安装边界</h4>
+        <p className="m-0 text-xs leading-[1.55] text-ink-muted">安装只复制 Skill 包；脚本必须声明 orange-runtime.yaml，并在进阶权限下审批后隔离执行。</p>
       </section>
-      <div className="modal-actions">
+      <div className="flex min-w-0 flex-wrap justify-end gap-2">
         <Button variant="ghost" onClick={onCancel} disabled={isBusy}>
           取消
         </Button>
@@ -738,46 +723,39 @@ function SkillForm({
   }
 
   return (
-    <form className="skill-form" onSubmit={onSubmit}>
-      <div className="skill-detail-header">
-        <div>
-          <p className="section-label">User Skill</p>
-          <h3>{draft.id ? "编辑 Skill 文件" : "新建 Skill 文件"}</h3>
+    <form className="grid gap-3.5" onSubmit={onSubmit}>
+      <div className="flex items-start justify-between gap-3">
+        <div className="min-w-0">
+          <p className={sectionLabelClassName}>User Skill</p>
+          <h3 className="mt-1 mb-0 text-xl leading-tight text-ink-strong">{draft.id ? "编辑 Skill 文件" : "新建 Skill 文件"}</h3>
         </div>
       </div>
-      <label>
+      <label className={fieldLabelClassName}>
         <span>显示名称</span>
-        <input value={draft.displayName} onChange={(event) => updateDraft("displayName", event.target.value)} />
+        <input className={fieldControlClassName} value={draft.displayName} onChange={(event) => updateDraft("displayName", event.target.value)} />
       </label>
-      <label>
+      <label className={fieldLabelClassName}>
         <span>标识 name</span>
-        <input value={draft.name} onChange={(event) => updateDraft("name", event.target.value)} placeholder="my-custom-skill" />
+        <input className={fieldControlClassName} value={draft.name} onChange={(event) => updateDraft("name", event.target.value)} placeholder="my-custom-skill" />
       </label>
-      <label>
+      <label className={fieldLabelClassName}>
         <span>描述</span>
-        <input value={draft.description} onChange={(event) => updateDraft("description", event.target.value)} />
+        <input className={fieldControlClassName} value={draft.description} onChange={(event) => updateDraft("description", event.target.value)} />
       </label>
-      <label>
+      <label className={fieldLabelClassName}>
         <span>执行说明</span>
-        <textarea value={draft.instructions} onChange={(event) => updateDraft("instructions", event.target.value)} />
+        <textarea className={cn(fieldTextareaClassName, "min-h-[140px]")} value={draft.instructions} onChange={(event) => updateDraft("instructions", event.target.value)} />
       </label>
-      <label>
+      <label className={fieldLabelClassName}>
         <span>标签</span>
-        <input value={draft.tagsText} onChange={(event) => updateDraft("tagsText", event.target.value)} placeholder="写作, 研究" />
+        <input className={fieldControlClassName} value={draft.tagsText} onChange={(event) => updateDraft("tagsText", event.target.value)} placeholder="写作, 研究" />
       </label>
-      <div className="skill-switches">
-        <label className="toggle-row">
-          <input
-            className="control-checkbox-input"
-            checked={draft.enabled}
-            onChange={(event) => updateDraft("enabled", event.target.checked)}
-            type="checkbox"
-          />
-          <span className="control-checkbox" aria-hidden="true" />
-          <span>启用</span>
-        </label>
+      <div className="flex flex-wrap items-center gap-2">
+        <ToggleRow checked={draft.enabled} onChange={(checked) => updateDraft("enabled", checked)}>
+          启用
+        </ToggleRow>
       </div>
-      <div className="modal-actions">
+      <div className="flex min-w-0 flex-wrap justify-end gap-2">
         <Button variant="ghost" onClick={onCancel} disabled={isBusy}>
           取消
         </Button>
