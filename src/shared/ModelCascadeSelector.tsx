@@ -10,6 +10,7 @@ import {
   getProviderModelSelectionLabel,
   getSelectableModels,
 } from "./modelSelection";
+import { cn } from "./cn";
 import { OverflowTooltipText } from "./OverflowTooltipText";
 import type { LlmProviderConfig } from "./types";
 import { useDismissable } from "./useDismissable";
@@ -203,10 +204,19 @@ export function ModelCascadeSelector({
   }
 
   return (
-    <div ref={wrapperRef} className={`model-cascade ${variant} ${className}`} data-open={isOpen || undefined}>
+    <div
+      ref={wrapperRef}
+      className={cn("relative min-w-0", variant === "inline" ? "flex-1" : "w-full", className)}
+      data-open={isOpen || undefined}
+    >
       <button
         ref={triggerRef}
-        className="model-cascade-trigger"
+        className={cn(
+          "inline-flex w-full min-w-0 items-center justify-between gap-1.5 border-0 bg-transparent text-left font-bold focus-visible:outline-[3px] focus-visible:outline-[var(--control-ring)] focus-visible:outline-offset-2",
+          variant === "inline"
+            ? "min-h-7 rounded-full px-0 py-[3px] text-xs text-[#24323c]"
+            : "min-h-[var(--control-height)] rounded-control border border-border bg-white px-[11px] py-0 text-[13px] font-medium text-ink",
+        )}
         type="button"
         aria-haspopup="menu"
         aria-expanded={isOpen}
@@ -214,30 +224,33 @@ export function ModelCascadeSelector({
         disabled={disabled}
         onClick={handleToggleOpen}
       >
-        <OverflowTooltipText as="span" text={triggerLabel} logArea={`${logArea}_trigger`} />
-        <ChevronDown size={13} />
+        <OverflowTooltipText as="span" className="min-w-0 truncate" text={triggerLabel} logArea={`${logArea}_trigger`} />
+        <ChevronDown size={13} className="shrink-0 text-ink-muted" />
       </button>
       {isOpen &&
         createPortal(
           <div
             ref={menuRef}
-            className="model-cascade-menu"
+            className="fixed z-[calc(var(--z-agent-popover,180)+10)] grid min-h-[230px] w-[min(540px,calc(100vw-32px))] max-h-[min(390px,70vh)] grid-cols-[minmax(170px,0.92fr)_minmax(230px,1.18fr)] overflow-hidden rounded-[14px] border border-border bg-white/98 shadow-[0_22px_54px_rgba(31,36,48,0.18)]"
             role="menu"
             aria-label={ariaLabel}
             style={menuStyle ?? { visibility: "hidden" }}
           >
-            <div className="model-cascade-provider-list" role="group" aria-label="Provider">
+            <div className="grid min-w-0 content-start overflow-auto border-r border-border bg-[#fbfaf7] p-2.5" role="group" aria-label="Provider">
               <button
-                className={`model-cascade-provider-row default ${value === FOLLOW_DEFAULT_MODEL_SELECTION ? "selected" : ""}`}
+                className={cn(
+                  "flex min-w-0 items-center justify-between gap-2.5 rounded-[10px] border-0 bg-transparent px-2.5 py-[9px] text-left text-ink hover:bg-surface-muted focus-visible:bg-surface-muted focus-visible:outline-none",
+                  value === FOLLOW_DEFAULT_MODEL_SELECTION && "text-ink-strong",
+                )}
                 type="button"
                 role="menuitemradio"
                 aria-checked={value === FOLLOW_DEFAULT_MODEL_SELECTION}
                 onClick={() => handleSelect(FOLLOW_DEFAULT_MODEL_SELECTION)}
               >
-                <span>
-                  <OverflowTooltipText text={defaultLabel} logArea={`${logArea}_default`} />
+                <span className="grid min-w-0 gap-0.5">
+                  <OverflowTooltipText className="min-w-0 truncate" text={defaultLabel} logArea={`${logArea}_default`} />
                 </span>
-                {value === FOLLOW_DEFAULT_MODEL_SELECTION && <Check size={15} />}
+                {value === FOLLOW_DEFAULT_MODEL_SELECTION && <Check size={15} className="shrink-0 text-ink-muted" />}
               </button>
               {groups.map((group) => {
                 const isActive = activeGroup?.provider.id === group.provider.id;
@@ -245,24 +258,28 @@ export function ModelCascadeSelector({
 
                 return (
                   <button
-                    className={`model-cascade-provider-row ${isActive ? "active" : ""} ${isSelectedProvider ? "selected" : ""}`}
+                    className={cn(
+                      "flex min-w-0 items-center justify-between gap-2.5 rounded-[10px] border-0 bg-transparent px-2.5 py-[9px] text-left text-ink hover:bg-surface-muted focus-visible:bg-surface-muted focus-visible:outline-none",
+                      isActive && "bg-surface-muted",
+                      isSelectedProvider && "text-ink-strong",
+                    )}
                     key={group.provider.id}
                     type="button"
                     role="menuitem"
                     onFocus={() => setActiveProviderId(group.provider.id)}
                     onMouseEnter={() => setActiveProviderId(group.provider.id)}
                   >
-                    <span>
-                      <OverflowTooltipText as="strong" text={group.provider.name} logArea={`${logArea}_provider_name`} />
-                      <small>{group.models.length} 个模型</small>
+                    <span className="grid min-w-0 gap-0.5">
+                      <OverflowTooltipText as="strong" className="min-w-0 truncate text-sm font-bold" text={group.provider.name} logArea={`${logArea}_provider_name`} />
+                      <small className="min-w-0 truncate text-[11px] font-medium text-ink-muted">{group.models.length} 个模型</small>
                     </span>
-                    <ChevronRight size={15} />
+                    <ChevronRight size={15} className="shrink-0 text-ink-muted" />
                   </button>
                 );
               })}
             </div>
-            <div className="model-cascade-model-list" role="group" aria-label="模型">
-              <div className="model-cascade-list-heading">模型</div>
+            <div className="grid min-w-0 content-start overflow-auto bg-white p-2.5" role="group" aria-label="模型">
+              <div className="px-2.5 pt-[7px] pb-1.5 text-xs font-bold text-ink-muted">模型</div>
               {activeGroup ? (
                 activeGroup.models.map((model) => {
                   const selection = encodeModelSelection(activeGroup.provider.id, model.id);
@@ -272,25 +289,28 @@ export function ModelCascadeSelector({
 
                   return (
                     <button
-                      className={`model-cascade-model-row ${isSelected ? "selected" : ""}`}
+                      className={cn(
+                        "flex min-w-0 items-center justify-between gap-2.5 rounded-[10px] border-0 bg-transparent px-2.5 py-[9px] text-left text-ink hover:bg-surface-muted focus-visible:bg-surface-muted focus-visible:outline-none",
+                        isSelected && "text-ink-strong",
+                      )}
                       key={`${activeGroup.provider.id}:${model.id}`}
                       type="button"
                       role="menuitemradio"
                       aria-checked={isSelected}
                       onClick={() => handleSelect(selection, activeGroup.provider.id, model.id)}
                     >
-                      <span>
-                        <OverflowTooltipText as="strong" text={modelLabel} logArea={`${logArea}_model_name`} />
+                      <span className="grid min-w-0 gap-0.5">
+                        <OverflowTooltipText as="strong" className="min-w-0 truncate text-sm font-bold" text={modelLabel} logArea={`${logArea}_model_name`} />
                         {shouldShowModelId && (
-                          <OverflowTooltipText as="small" text={model.id} logArea={`${logArea}_model_id`} />
+                          <OverflowTooltipText as="small" className="min-w-0 truncate text-[11px] font-medium text-ink-muted" text={model.id} logArea={`${logArea}_model_id`} />
                         )}
                       </span>
-                      {isSelected && <Check size={15} />}
+                      {isSelected && <Check size={15} className="shrink-0 text-ink-muted" />}
                     </button>
                   );
                 })
               ) : (
-                <div className="model-cascade-empty">暂无可选模型</div>
+                <div className="p-2.5 text-xs text-ink-muted">暂无可选模型</div>
               )}
             </div>
           </div>,

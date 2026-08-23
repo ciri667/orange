@@ -113,7 +113,7 @@ export function ConfirmDialog({
             <ToneIcon size={18} />
           </span>
           <div>
-            <p className="section-label">{toneLabel}</p>
+            <p className="m-0 text-[11px] font-[750] tracking-[0.02em] uppercase text-ink-soft">{toneLabel}</p>
             <h2 id={titleId} className="mt-1 mb-0 text-lg leading-tight text-ink-strong">
               {title}
             </h2>
