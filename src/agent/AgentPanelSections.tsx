@@ -1,14 +1,17 @@
-import { Check, Database, FileText, Layers3, MessageSquareText, ShieldAlert, Sparkles, Trash2, X } from "lucide-react";
+import { Database, FileText, Layers3, MessageSquareText, ShieldAlert, Sparkles, Trash2, X } from "lucide-react";
 import { useEffect, useRef } from "react";
 import ReactMarkdown from "react-markdown";
 import rehypeSanitize from "rehype-sanitize";
 import remarkGfm from "remark-gfm";
 import { Button } from "../shared/Button";
+import { Checkbox } from "../shared/Checkbox";
 import { Chip } from "../shared/Chip";
+import { cn } from "../shared/cn";
 import { listRowClassName } from "../shared/ListRow";
-import { MarkdownLink } from "../shared/MarkdownLink";
+import { createMarkdownComponents, markdownMessageClassName } from "../shared/markdown";
 import { OverflowTooltipText } from "../shared/OverflowTooltipText";
 import { SegmentedControl, SegmentedControlItem } from "../shared/SegmentedControl";
+import { agentPopoverClassName, popoverHeaderClassName, sectionLabelClassName } from "../shared/ui";
 import {
   getScopeSummaryLabel,
   getImSessionRecentMessageLabel,
@@ -49,14 +52,14 @@ export function AgentSessionSummary({
   const isPendingWrite = activeSession.pendingChange?.status === "pending";
 
   return (
-    <div className="session-summary" aria-label="当前会话摘要">
+    <div className="flex min-h-0 min-w-0 flex-1 flex-nowrap items-center gap-1.5 overflow-hidden" aria-label="当前会话摘要">
       <Chip className="max-w-[54%] flex-1 rounded-full border-border bg-surface py-[5px] pr-[9px] pl-[9px] font-normal text-ink-muted">
         <FileText size={13} />
         <OverflowTooltipText text={currentFileLabel} logArea="agent_session_current_file_summary" />
       </Chip>
       {isPendingWrite && (
         <OverflowTooltipText
-          className="session-write-status pending"
+          className="shrink-0 rounded-control border border-[rgba(var(--danger-rgb),0.26)] bg-danger-soft px-1.5 py-0.5 text-xs text-danger"
           text="待确认 diff"
           logArea="agent_session_write_status"
         />
@@ -98,8 +101,8 @@ export function AgentSecurityLevelControl({
   }
 
   return (
-    <div className="agent-security-level-control" aria-label="当前会话权限">
-      <span className="agent-security-level-label">
+    <div className="inline-flex min-w-0 shrink items-center gap-1 bg-transparent p-0 text-xs text-agent-strong" aria-label="当前会话权限">
+      <span className="inline-flex shrink-0 items-center text-ink-muted">
         <ShieldAlert size={13} />
       </span>
       <SegmentedControl
@@ -152,17 +155,17 @@ export function AgentSessionHistoryPopover({
   onDeleteSession: (sessionId: string) => void;
 }) {
   return (
-    <section className="session-popover" aria-label="会话历史">
-      <div className="popover-header">
+    <section className={agentPopoverClassName} aria-label="会话历史">
+      <div className={popoverHeaderClassName}>
         <div>
-          <p className="section-label">Sessions</p>
-          <h3>会话历史</h3>
+          <p className={sectionLabelClassName}>Sessions</p>
+          <h3 className="m-0 text-lg text-ink-strong">会话历史</h3>
         </div>
         <Button variant="icon" title="关闭会话历史" onClick={onToggleSessionList}>
           <X size={15} />
         </Button>
       </div>
-      <div className="session-list">
+      <div className="mt-3 grid content-start gap-2 overflow-auto pr-0.5">
         {sessions.map((session) => (
           <div
             className={listRowClassName({
@@ -172,43 +175,51 @@ export function AgentSessionHistoryPopover({
             key={session.id}
           >
             <button className="grid min-w-0 gap-1 p-1 text-left" type="button" onClick={() => onSelectSession(session.id)}>
-              <span className="session-row-title">
-                <MessageSquareText size={14} />
-                <OverflowTooltipText as="strong" text={session.title} logArea="agent_session_history_title" />
+              <span className="flex min-w-0 items-center gap-1.5">
+                <MessageSquareText size={14} className="shrink-0" />
+                <OverflowTooltipText as="strong" className="min-w-0 truncate text-ink-strong" text={session.title} logArea="agent_session_history_title" />
               </span>
-              <span className="session-row-meta">
+              <span className="grid min-w-0 grid-cols-[minmax(0,max-content)_minmax(0,1fr)] items-center gap-x-1.5 gap-y-[3px] text-xs text-ink-muted">
                 {session.imIdentity ? (
-                  <span className="im-session-badge">{getImSessionSourceLabel(session)}</span>
+                  <span className="max-w-full shrink-0 truncate rounded-full border border-primary-border bg-accent-soft px-1.5 py-px text-[11px] font-semibold leading-[1.4] text-accent-strong">
+                    {getImSessionSourceLabel(session)}
+                  </span>
                 ) : (
-                  <OverflowTooltipText text={getSessionTypeLabel(session.type)} logArea="agent_session_history_type" />
+                  <OverflowTooltipText className="min-w-0 truncate leading-[1.35]" text={getSessionTypeLabel(session.type)} logArea="agent_session_history_type" />
                 )}
-                <OverflowTooltipText text={getSessionKnowledgeBaseLabel(session, knowledgeBases)} logArea="agent_session_history_scope" />
+                <OverflowTooltipText className="min-w-0 truncate leading-[1.35]" text={getSessionKnowledgeBaseLabel(session, knowledgeBases)} logArea="agent_session_history_scope" />
                 {getImSessionRecentMessageLabel(session) && (
                   <OverflowTooltipText
-                    className="session-row-recent-message"
+                    className="col-span-full min-w-0 truncate"
                     text={getImSessionRecentMessageLabel(session)}
                     logArea="agent_session_history_recent_message"
                   />
                 )}
                 <OverflowTooltipText
                   as="time"
+                  className="col-span-full min-w-0 truncate leading-[1.35]"
                   dateTime={session.createdAt}
                   text={`创建：${session.createdAt}`}
                   logArea="agent_session_history_created_at"
                 />
                 <OverflowTooltipText
                   as="time"
+                  className="col-span-full min-w-0 truncate leading-[1.35]"
                   dateTime={session.updatedAt}
                   text={`最近：${session.updatedAt}`}
                   logArea="agent_session_history_updated_at"
                 />
               </span>
-              {session.pendingChange?.status === "pending" && <span className="session-pending">待确认 diff</span>}
+              {session.pendingChange?.status === "pending" && (
+                <span className="rounded-control border border-[rgba(var(--danger-rgb),0.26)] bg-danger-soft px-1.5 py-0.5 text-xs text-danger">
+                  待确认 diff
+                </span>
+              )}
             </button>
             <Button
               variant="icon"
               tone="danger"
-              className="session-delete-button"
+              className="size-[30px] min-h-[30px] shrink-0"
               title="删除会话"
               onClick={() => onDeleteSession(session.id)}
             >
@@ -264,13 +275,13 @@ export function AgentSessionContextPopover({
     : "未整理";
 
   return (
-    <section className="context-popover" aria-label="会话上下文">
-      <div className="popover-header">
+    <section className={agentPopoverClassName} aria-label="会话上下文">
+      <div className={popoverHeaderClassName}>
         <div>
-          <p className="section-label">Context</p>
-          <h3>上下文</h3>
+          <p className={sectionLabelClassName}>Context</p>
+          <h3 className="m-0 text-lg text-ink-strong">上下文</h3>
         </div>
-        <div className="popover-header-actions">
+        <div className="inline-flex items-center gap-2 text-xs text-ink-muted">
           <Button variant="icon" title="整理上下文" onClick={onCompactAgentContext} disabled={isBusy}>
             <Sparkles size={15} />
           </Button>
@@ -279,43 +290,45 @@ export function AgentSessionContextPopover({
           </Button>
         </div>
       </div>
-      <div className="context-popover-body">
-        <div className="context-matrix">
-          <div>
-            <span>工具检索范围</span>
+      <div className="overflow-auto pr-0.5">
+        <div className="mt-3 grid grid-cols-2 gap-2">
+          <div className="rounded-control border border-border-translucent bg-surface-translucent p-[9px]">
+            <span className="text-xs text-ink-muted">工具检索范围</span>
             <OverflowTooltipText
               as="strong"
+              className="mt-1 block text-[13px] text-ink-strong"
               text={getSessionKnowledgeBaseLabel(activeSession, knowledgeBases)}
               logArea="agent_context_scope"
             />
           </div>
-          <div>
-            <span>当前文件</span>
-            <OverflowTooltipText as="strong" text={currentFileLabel} logArea="agent_context_current_file" />
+          <div className="rounded-control border border-border-translucent bg-surface-translucent p-[9px]">
+            <span className="text-xs text-ink-muted">当前文件</span>
+            <OverflowTooltipText as="strong" className="mt-1 block text-[13px] text-ink-strong" text={currentFileLabel} logArea="agent_context_current_file" />
           </div>
-          <div>
-            <span>会话恢复笔记</span>
+          <div className="rounded-control border border-border-translucent bg-surface-translucent p-[9px]">
+            <span className="text-xs text-ink-muted">会话恢复笔记</span>
             <OverflowTooltipText
               as="strong"
+              className="mt-1 block text-[13px] text-ink-strong"
               text={getSessionRecoveryNoteLabel(activeSession, notes)}
               logArea="agent_context_session_recovery_note"
             />
           </div>
-          <div>
-            <span>消息</span>
-            <strong>{activeSession.messages.length} 条</strong>
+          <div className="rounded-control border border-border-translucent bg-surface-translucent p-[9px]">
+            <span className="text-xs text-ink-muted">消息</span>
+            <strong className="mt-1 block text-[13px] text-ink-strong">{activeSession.messages.length} 条</strong>
           </div>
-          <div>
-            <span>写入</span>
-            <strong>{writeStatus}</strong>
+          <div className="rounded-control border border-border-translucent bg-surface-translucent p-[9px]">
+            <span className="text-xs text-ink-muted">写入</span>
+            <strong className="mt-1 block text-[13px] text-ink-strong">{writeStatus}</strong>
           </div>
-          <div>
-            <span>工作记忆</span>
-            <strong>{memoryStatus}</strong>
+          <div className="rounded-control border border-border-translucent bg-surface-translucent p-[9px]">
+            <span className="text-xs text-ink-muted">工作记忆</span>
+            <strong className="mt-1 block text-[13px] text-ink-strong">{memoryStatus}</strong>
           </div>
         </div>
         {modelConfig.enabled && (
-          <label className="context-model-select">
+          <label className="mt-2.5 grid gap-1.5 text-xs font-bold text-ink-muted">
             <span>会话默认模型</span>
             <ModelCascadeSelector
               value={sessionModelSelection}
@@ -328,7 +341,7 @@ export function AgentSessionContextPopover({
             />
           </label>
         )}
-        <p className="context-note">
+        <p className="text-xs text-ink-muted">
           当前文件是本轮默认编辑目标；会话恢复笔记只用于恢复旧会话位置。Agent 会按模型窗口装入尽量多的最近对话，更早内容进入工作记忆，也可按需检索会话历史和其他文件。
         </p>
       </div>
@@ -388,25 +401,28 @@ export function AgentScopeSelector({
   return (
     <>
       <button
-        className={`scope-selector ${selectedKnowledgeBaseIds.length > 1 ? "active" : ""}`}
+        className={cn(
+          "inline-flex w-auto max-w-[46%] min-w-0 cursor-pointer items-center gap-1.5 rounded-full border border-border-translucent bg-surface-translucent px-[9px] py-[5px] text-left text-ink",
+          (selectedKnowledgeBaseIds.length > 1 || isScopeSelectorOpen) && "border-primary-border bg-primary-wash",
+        )}
         type="button"
         title="编辑工具范围"
         aria-label="工具范围"
         aria-expanded={isScopeSelectorOpen}
         onClick={onToggleScopeSelector}
       >
-        <Layers3 size={14} />
-        <OverflowTooltipText text={selectedScopeLabel} logArea="agent_scope_selector_summary" />
+        <Layers3 size={14} className="shrink-0 text-agent" />
+        <OverflowTooltipText className="min-w-0 truncate text-xs" text={selectedScopeLabel} logArea="agent_scope_selector_summary" />
       </button>
 
       {isScopeSelectorOpen && (
-        <section className="scope-popover" aria-label="选择检索知识库">
-          <div className="popover-header">
+        <section className={agentPopoverClassName} aria-label="选择检索知识库">
+          <div className={popoverHeaderClassName}>
             <div>
-              <p className="section-label">Scope</p>
-              <h3>选择工具可访问知识库</h3>
+              <p className={sectionLabelClassName}>Scope</p>
+              <h3 className="m-0 text-lg text-ink-strong">选择工具可访问知识库</h3>
             </div>
-            <div className="popover-header-actions">
+            <div className="inline-flex items-center gap-2 text-xs text-ink-muted">
               <span>
                 {selectedKnowledgeBaseIds.length} / {knowledgeBases.length}
               </span>
@@ -415,7 +431,7 @@ export function AgentScopeSelector({
               </Button>
             </div>
           </div>
-          <div className="scope-option-list">
+          <div className="mt-3 grid content-start gap-2 overflow-auto pr-0.5">
             {knowledgeBases.map((knowledgeBase) => {
               const isActiveKnowledgeBase = knowledgeBase.id === activeKnowledgeBase.id;
               const isSelected = selectedKnowledgeBaseSet.has(knowledgeBase.id) || isActiveKnowledgeBase;
@@ -424,22 +440,20 @@ export function AgentScopeSelector({
                 <label
                   className={listRowClassName({
                     active: isSelected,
-                    className: "scope-option border-border-translucent bg-surface-translucent",
+                    className: "relative border-border-translucent bg-surface-translucent",
                   })}
                   key={knowledgeBase.id}
                 >
-                  <input
-                    className="control-checkbox-input"
+                  <Checkbox
                     checked={isSelected}
                     disabled={isActiveKnowledgeBase}
                     onChange={() => onToggleScopeKnowledgeBase(knowledgeBase.id)}
-                    type="checkbox"
                   />
-                  <span className="scope-check">{isSelected && <Check size={12} />}</span>
                   <Database size={15} />
-                  <span className="scope-option-copy">
-                    <OverflowTooltipText as="strong" text={knowledgeBase.name} logArea="agent_scope_option_name" />
+                  <span className="min-w-0">
+                    <OverflowTooltipText as="strong" className="block truncate text-ink-strong" text={knowledgeBase.name} logArea="agent_scope_option_name" />
                     <OverflowTooltipText
+                      className="mt-[3px] block truncate text-xs text-ink-muted"
                       text={isActiveKnowledgeBase ? "当前激活，默认选中" : knowledgeBase.path}
                       logArea="agent_scope_option_detail"
                     />
@@ -477,12 +491,12 @@ export function AgentMessageList({
   }, [activeSession.messages.length, liveTurn?.steps.length, liveTurn?.content, liveTurn?.status]);
 
   return (
-    <div className="message-list" aria-live="polite" ref={listRef}>
+    <div className="min-h-0 flex-1 overflow-auto pr-0.5" aria-live="polite" ref={listRef}>
       {activeSession.messages.length === 0 && !showLiveTurn && (
-        <div className="message-list-empty">
-          <Sparkles size={16} />
-          <p>从下面开始提问</p>
-          <span>@ 引用当前库里的文件，/ 选择本轮 Skill</span>
+        <div className="grid min-h-full place-content-center justify-items-center gap-1.5 px-3 py-6 text-center text-ink-muted">
+          <Sparkles size={16} className="text-agent opacity-70" />
+          <p className="m-0 text-[13px] font-[650] text-ink">从下面开始提问</p>
+          <span className="text-xs leading-[1.45]">@ 引用当前库里的文件，/ 选择本轮 Skill</span>
         </div>
       )}
       {activeSession.messages.map((message) => (
@@ -526,15 +540,26 @@ function AgentMessageItem({
     (Boolean(message.trace?.length) || liveStatus === "running" || liveStatus === "failed");
 
   return (
-    <article className={`message ${message.role}`}>
-      <div className="message-role">
+    <article
+      className={cn(
+        "min-w-0 rounded-xl border border-transparent bg-surface-translucent px-3 py-2.5 [&+&]:mt-2.5",
+        message.role === "user" && "ml-[18px] bg-primary-wash text-agent-strong",
+        message.role === "assistant" && "mr-2.5",
+      )}
+    >
+      <div className={cn("flex items-center gap-1.5 text-xs font-bold text-ink-muted", message.role === "assistant" && "[&_svg]:text-agent")}>
         {message.role === "assistant" ? <Sparkles size={14} /> : <MessageSquareText size={14} />}
         <span>{message.role === "assistant" ? "橘记 Agent" : "你"}</span>
       </div>
       {message.mentionedFileIds?.length ? (
-        <div className="message-mentioned-files" aria-label="本轮 @ 文件">
+        <div className="my-2 flex flex-wrap gap-[5px]" aria-label="本轮 @ 文件">
           {message.mentionedFileIds.map((fileId) => (
-            <span key={fileId}>{getMentionedFileLabel(fileId, notes, documents)}</span>
+            <span
+              key={fileId}
+              className="max-w-[180px] truncate rounded-full border border-primary-border bg-primary-wash px-[7px] py-[3px] text-[11px] font-bold text-agent-strong"
+            >
+              {getMentionedFileLabel(fileId, notes, documents)}
+            </span>
           ))}
         </div>
       ) : null}
@@ -560,13 +585,11 @@ function getMentionedFileLabel(fileId: string, notes: Note[], documents: Workspa
 /** 安全渲染 Agent 对话中的 GFM Markdown，避免模型内容中的 HTML 被直接执行。 */
 function MessageMarkdown({ content }: { content: string }) {
   return (
-    <div className="message-markdown">
+    <div className={markdownMessageClassName}>
       <ReactMarkdown
         remarkPlugins={[remarkGfm]}
         rehypePlugins={[rehypeSanitize]}
-        components={{
-          a: (props) => <MarkdownLink {...props} source="agent_message" />,
-        }}
+        components={createMarkdownComponents("agent_message", "message")}
       >
         {content}
       </ReactMarkdown>

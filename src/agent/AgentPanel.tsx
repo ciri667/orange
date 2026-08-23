@@ -1,7 +1,9 @@
 import { History, Book, PanelRightClose, Play, Plus, ShieldAlert, X } from "lucide-react";
 import { useRef } from "react";
 import { Button } from "../shared/Button";
+import { Checkbox } from "../shared/Checkbox";
 import { OverflowTooltipText } from "../shared/OverflowTooltipText";
+import { sectionLabelClassName } from "../shared/ui";
 import { getImSessionSourceLabel } from "../shared/selectors";
 import { useDismissable } from "../shared/useDismissable";
 import type {
@@ -129,10 +131,14 @@ export function AgentPanel({
     <aside ref={panelRef} className="agent-panel" aria-label="AI 协作区">
       <header className="flex shrink-0 items-center justify-between gap-3">
         <div className="min-w-0 flex-1">
-          <p className="section-label">Agent</p>
+          <p className={sectionLabelClassName}>Agent</p>
           <div className="flex min-w-0 items-center gap-2">
             <OverflowTooltipText as="h2" className="mt-1 mb-0 block truncate text-xl leading-[1.18] text-ink-strong" text={activeSession.title} logArea="agent_session_title" />
-            {activeImSourceLabel && <span className="im-session-badge">{activeImSourceLabel}</span>}
+            {activeImSourceLabel && (
+              <span className="max-w-full shrink-0 truncate rounded-full border border-primary-border bg-accent-soft px-1.5 py-px text-[11px] font-semibold leading-[1.4] text-accent-strong">
+                {activeImSourceLabel}
+              </span>
+            )}
           </div>
         </div>
         <div className="flex items-center gap-2">
@@ -151,7 +157,7 @@ export function AgentPanel({
         </div>
       </header>
 
-      <div className="agent-context-bar" aria-label="当前会话上下文">
+      <div className="flex min-w-0 shrink-0 items-center gap-1.5" aria-label="当前会话上下文">
         <AgentScopeSelector
           activeSession={activeSession}
           activeKnowledgeBase={activeKnowledgeBase}
@@ -199,20 +205,20 @@ export function AgentPanel({
       />
 
       {activeSession.pendingExecution?.status === "pending" && (
-        <section className="agent-execution-approval" aria-label="待确认 Skill 执行">
-          <div className="agent-execution-heading">
+        <section className="mx-3 my-2 shrink-0 rounded-md border border-border-strong bg-surface-warm p-3" aria-label="待确认 Skill 执行">
+          <div className="flex items-center gap-2">
             <ShieldAlert size={16} />
-            <div>
+            <div className="grid min-w-0 gap-[3px]">
               <strong>{activeSession.pendingExecution.skillName}</strong>
-              <span>{activeSession.pendingExecution.commandPreview}</span>
+              <span className="text-xs text-ink-muted">{activeSession.pendingExecution.commandPreview}</span>
             </div>
           </div>
-          <dl>
-            <div><dt>范围</dt><dd>{activeSession.pendingExecution.knowledgeBaseIds.length} 个知识库副本</dd></div>
-            <div><dt>网络</dt><dd>{activeSession.pendingExecution.networkDomains.length ? "已声明" : "关闭"}</dd></div>
-            <div><dt>凭证</dt><dd>{activeSession.pendingExecution.credentialAliases.length ? "已声明" : "不注入"}</dd></div>
+          <dl className="my-2.5">
+            <div className="flex items-center justify-between gap-3 py-[3px]"><dt className="m-0">范围</dt><dd className="m-0 text-xs text-ink-muted">{activeSession.pendingExecution.knowledgeBaseIds.length} 个知识库副本</dd></div>
+            <div className="flex items-center justify-between gap-3 py-[3px]"><dt className="m-0">网络</dt><dd className="m-0 text-xs text-ink-muted">{activeSession.pendingExecution.networkDomains.length ? "已声明" : "关闭"}</dd></div>
+            <div className="flex items-center justify-between gap-3 py-[3px]"><dt className="m-0">凭证</dt><dd className="m-0 text-xs text-ink-muted">{activeSession.pendingExecution.credentialAliases.length ? "已声明" : "不注入"}</dd></div>
           </dl>
-          <div className="agent-execution-actions">
+          <div className="flex items-center justify-end gap-2">
             <Button variant="ghost" size="compact" tone="danger" onClick={onRejectExecution} disabled={isBusy}>
               <X size={14} />
               拒绝
@@ -227,28 +233,27 @@ export function AgentPanel({
 
       {activeSession.pendingChangeSet?.status === "pending" && (
         <section
-          className="agent-change-set-summary"
+          className="mx-3 my-2 shrink-0 rounded-md border border-border-strong bg-surface-warm p-3"
           aria-label={activeSession.pendingChangeSet.executionId === "agent-direct" ? "Agent 文件变更集" : "Skill 文件变更集"}
         >
           <strong>{activeSession.pendingChangeSet.summary}</strong>
-          <ul>
+          <ul className="mt-2 mb-0 list-none p-0">
             {activeSession.pendingChangeSet.operations.slice(0, 8).map((operation) => (
-              <li key={operation.id}>
-                <input
-                  className="control-checkbox-input"
-                  type="checkbox"
+              <li className="relative flex min-w-0 items-center gap-2 py-[3px]" key={operation.id}>
+                <Checkbox
                   checked={operation.selected}
                   onChange={(event) => onToggleChangeOperation(operation.id, event.target.checked)}
                   aria-label={`${operation.selected ? "取消选择" : "选择"} ${operation.targetPath}`}
                 />
-                <span className="control-checkbox" aria-hidden="true" />
-                <span>{operation.operation}</span>
-                <code>{operation.targetPath}</code>
+                <span className="w-12 shrink-0 text-[11px] uppercase text-accent">{operation.operation}</span>
+                <code className="min-w-0 truncate">{operation.targetPath}</code>
               </li>
             ))}
           </ul>
-          {activeSession.pendingChangeSet.operations.length > 8 && <p>另有 {activeSession.pendingChangeSet.operations.length - 8} 项。</p>}
-          <div className="agent-execution-actions">
+          {activeSession.pendingChangeSet.operations.length > 8 && (
+            <p className="text-xs text-ink-muted">另有 {activeSession.pendingChangeSet.operations.length - 8} 项。</p>
+          )}
+          <div className="flex items-center justify-end gap-2">
             <Button variant="ghost" size="compact" tone="danger" onClick={onRejectChangeSet} disabled={isBusy}>
               <X size={14} />
               全部拒绝

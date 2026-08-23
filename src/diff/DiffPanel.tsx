@@ -1,7 +1,16 @@
 import { Check, ChevronDown, ChevronRight, MessageSquarePlus, SendHorizontal, X } from "lucide-react";
 import { useMemo, useState } from "react";
 import { Button } from "../shared/Button";
+import { cn } from "../shared/cn";
 import { OverflowTooltipText } from "../shared/OverflowTooltipText";
+import { fieldTextareaClassName, sectionLabelClassName } from "../shared/ui";
+import {
+  diffGutterClassName,
+  diffHunkHeaderClassName,
+  diffLineGridClassName,
+  diffLineToneClassName,
+  unifiedDiffFileClassName,
+} from "./diffStyles";
 import type { ProposedChange, ReviewComment } from "../shared/types";
 import { buildMarkdownDiff } from "./markdownDiff";
 import type { MarkdownDiffHunk, MarkdownDiffLine } from "./markdownDiff";
@@ -86,10 +95,10 @@ export function DiffPanel({
   }
 
   return (
-    <aside className="diff-panel review-workbench" aria-label="Agent 变更审阅工作台">
+    <aside className="flex max-h-[min(620px,55vh)] min-h-80 flex-col overflow-hidden rounded-panel border border-primary-border bg-[#f9f9f6]" aria-label="Agent 变更审阅工作台">
       <div className="flex items-center justify-between gap-3">
-        <div className="review-title-block min-w-0">
-          <p className="section-label">{change.type === "create" ? "Agent 新建文件建议" : "Agent 文档变更审阅"}</p>
+        <div className="min-w-0">
+          <p className={sectionLabelClassName}>{change.type === "create" ? "Agent 新建文件建议" : "Agent 文档变更审阅"}</p>
           <OverflowTooltipText as="h3" className="mt-1 mb-0 text-xl leading-tight text-ink-strong" text={change.title} logArea="diff_change_title" />
           <OverflowTooltipText text={change.targetPath} logArea="diff_target_path" />
         </div>
@@ -105,27 +114,27 @@ export function DiffPanel({
         </div>
       </div>
 
-      <div className="review-trust-strip" aria-label="Agent 写入确认状态">
-        <strong>写入前检查</strong>
-        <span>{changedLineCount} 行变更</span>
-        <span>{draftCommentCount ? `${draftCommentCount} 条反馈待发送` : "可直接确认或评论"}</span>
-        <span>路径与 hash 会在确认时校验</span>
+      <div className="flex flex-wrap gap-[7px] rounded-control border border-primary-border bg-primary-wash px-2.5 py-2 text-xs text-ink-muted" aria-label="Agent 写入确认状态">
+        <strong className="text-agent-strong">写入前检查</strong>
+        <span className="border-l border-[rgba(59,92,204,0.16)] pl-2">{changedLineCount} 行变更</span>
+        <span className="border-l border-[rgba(59,92,204,0.16)] pl-2">{draftCommentCount ? `${draftCommentCount} 条反馈待发送` : "可直接确认或评论"}</span>
+        <span className="border-l border-[rgba(59,92,204,0.16)] pl-2">路径与 hash 会在确认时校验</span>
       </div>
 
-      <div className="review-summary" aria-label="变更摘要">
-        <span className="review-stat added">+{diff.stats.addedLines}</span>
-        <span className="review-stat removed">-{diff.stats.removedLines}</span>
+      <div className="flex shrink-0 flex-wrap gap-2 border-y border-[rgba(230,224,214,0.86)] px-3.5 py-2 text-xs text-ink-muted" aria-label="变更摘要">
+        <span className="font-extrabold text-success">+{diff.stats.addedLines}</span>
+        <span className="font-extrabold text-danger">-{diff.stats.removedLines}</span>
         <span>{diff.stats.hunkCount} 个变更区域</span>
         <span>{formatOperationLabel(change.operation)}</span>
         <span>{diff.stats.originalLineCount} 行 → {diff.stats.nextLineCount} 行</span>
         <span>hash 校验会在确认写入时执行</span>
       </div>
 
-      <div className="review-body">
-        <div className="unified-diff" aria-label="文本文件行级 diff">
-          <div className="unified-diff-file">
-            <OverflowTooltipText text={change.targetPath} logArea="diff_file_path" />
-            <span>{change.fileType === "txt" ? "TXT" : "Markdown"} · {change.type === "create" ? "new file" : "pending"}</span>
+      <div className="grid min-h-0 grid-cols-[minmax(0,1fr)_minmax(250px,30%)] max-[1100px]:grid-cols-1">
+        <div className="min-w-0 overflow-auto border-r border-[rgba(230,224,214,0.86)] bg-surface max-[1100px]:border-r-0 max-[1100px]:border-b" aria-label="文本文件行级 diff">
+          <div className={unifiedDiffFileClassName}>
+            <OverflowTooltipText className="min-w-0 truncate" text={change.targetPath} logArea="diff_file_path" />
+            <span className="min-w-0 truncate">{change.fileType === "txt" ? "TXT" : "Markdown"} · {change.type === "create" ? "new file" : "pending"}</span>
           </div>
           {diff.hunks.map((hunk) => (
             <DiffHunkView
@@ -140,13 +149,14 @@ export function DiffPanel({
           ))}
         </div>
 
-        <aside className="review-sidebar" aria-label="审阅评论">
-          <div className="review-comment-composer">
+        <aside className="flex min-w-0 flex-col gap-2.5 overflow-auto bg-warm-panel p-3 max-[1100px]:max-h-[230px]" aria-label="审阅评论">
+          <div className="flex min-w-0 flex-col gap-2">
             <div>
-              <p className="section-label">行评论</p>
-              <strong>{selectedLine ? formatLineLabel(selectedLine.side, selectedLine.lineNumber) : "选择一行变更"}</strong>
+              <p className={sectionLabelClassName}>行评论</p>
+              <strong className="text-[13px] text-ink-strong">{selectedLine ? formatLineLabel(selectedLine.side, selectedLine.lineNumber) : "选择一行变更"}</strong>
             </div>
             <textarea
+              className={cn(fieldTextareaClassName, "min-h-[86px]")}
               value={commentBody}
               onChange={(event) => setCommentBody(event.target.value)}
               placeholder="写下给 Agent 的具体修改意见"
@@ -158,20 +168,26 @@ export function DiffPanel({
             </Button>
           </div>
 
-          <div className="review-comment-list">
-            <div className="review-comment-list-header">
-              <p className="section-label">评论</p>
-              <span>{draftCommentCount} 条待发送，{submittedCommentCount} 条已发送</span>
+          <div className="flex min-w-0 flex-col gap-2">
+            <div>
+              <p className={sectionLabelClassName}>评论</p>
+              <span className="mt-[5px] block text-xs text-ink-muted">{draftCommentCount} 条待发送，{submittedCommentCount} 条已发送</span>
             </div>
             {comments.length ? (
               comments.map((comment) => (
-                <article className={`review-comment status-${comment.status}`} key={comment.id}>
-                  <span>{formatLineLabel(comment.lineSide, comment.lineNumber)}</span>
-                  <p>{comment.body}</p>
+                <article
+                  className={cn(
+                    "rounded-control border border-border bg-surface p-2",
+                    comment.status === "submitted" && "border-[#c6d7d5] bg-[#f5fbfa]",
+                  )}
+                  key={comment.id}
+                >
+                  <span className="text-[11px] font-extrabold text-ink-muted">{formatLineLabel(comment.lineSide, comment.lineNumber)}</span>
+                  <p className="mt-1 mb-0 text-xs leading-normal text-[#24323c] [overflow-wrap:anywhere]">{comment.body}</p>
                 </article>
               ))
             ) : (
-              <p className="review-comment-empty">点击变更行后添加具体反馈。</p>
+              <p className="mt-1 mb-0 text-xs leading-normal text-ink-muted [overflow-wrap:anywhere]">点击变更行后添加具体反馈。</p>
             )}
           </div>
 
@@ -210,16 +226,20 @@ function DiffHunkView({
   ).length;
 
   return (
-    <section className="diff-hunk">
-      <button className="diff-hunk-header" type="button" onClick={onToggle}>
+    <section className="border-b border-[#eef2f4]">
+      <button
+        className={diffHunkHeaderClassName}
+        type="button"
+        onClick={onToggle}
+      >
         {isCollapsed ? <ChevronRight size={14} /> : <ChevronDown size={14} />}
         <span>
           @@ -{hunk.oldStart || 0},{hunk.oldLines} +{hunk.newStart || 0},{hunk.newLines} @@
         </span>
-        {hunkCommentCount > 0 && <em>{hunkCommentCount} 条评论</em>}
+        {hunkCommentCount > 0 && <em className="ml-auto font-inherit not-italic text-ink-muted">{hunkCommentCount} 条评论</em>}
       </button>
       {!isCollapsed && (
-        <div className="diff-lines">
+        <div className="flex flex-col">
           {hunk.hiddenBefore > 0 && <DiffPlaceholderLine hiddenCount={hunk.hiddenBefore} />}
           {hunk.lines.map((line) => (
             <DiffLineView
@@ -257,17 +277,27 @@ function DiffLineView({
 
   return (
     <button
-      className={`diff-line line-${line.kind}${isSelected ? " selected" : ""}`}
+      className={cn(
+        diffLineGridClassName,
+        "border-0 text-left disabled:cursor-default disabled:opacity-100",
+        diffLineToneClassName(line.kind),
+        isSelected && "border-l-agent bg-primary-wash",
+        Boolean(anchor) && "enabled:hover:border-l-agent enabled:hover:bg-primary-wash",
+      )}
       type="button"
       onClick={onSelect}
       disabled={!anchor}
       title={anchor ? "添加行评论" : undefined}
     >
-      <span className="line-number old">{line.originalLineNumber ?? ""}</span>
-      <span className="line-number new">{line.nextLineNumber ?? ""}</span>
-      <span className="line-marker">{marker}</span>
-      <code>{line.text || " "}</code>
-      {commentCount > 0 && <span className="line-comment-count">{commentCount}</span>}
+      <span className={cn(diffGutterClassName, "diff-line-number-old")}>{line.originalLineNumber ?? ""}</span>
+      <span className={cn(diffGutterClassName, "diff-line-number-new")}>{line.nextLineNumber ?? ""}</span>
+      <span className={cn(diffGutterClassName, "diff-line-marker justify-center px-0")}>{marker}</span>
+      <code className="min-w-0 px-2 py-0.5 whitespace-pre-wrap [overflow-wrap:anywhere]">{line.text || " "}</code>
+      {commentCount > 0 && (
+        <span className="mr-2 self-center rounded-full border border-[#c6d7d5] bg-white px-[7px] font-sans text-[11px] font-extrabold text-accent-strong">
+          {commentCount}
+        </span>
+      )}
     </button>
   );
 }
@@ -275,11 +305,11 @@ function DiffLineView({
 /** 折叠占位行只显示隐藏数量，不泄露正文内容。 */
 function DiffPlaceholderLine({ hiddenCount }: { hiddenCount: number }) {
   return (
-    <div className="diff-line line-placeholder">
-      <span className="line-number old">…</span>
-      <span className="line-number new">…</span>
-      <span className="line-marker"> </span>
-      <code>隐藏 {hiddenCount} 行未变更内容</code>
+    <div className={cn(diffLineGridClassName, diffLineToneClassName("placeholder"))}>
+      <span className={diffGutterClassName}>…</span>
+      <span className={diffGutterClassName}>…</span>
+      <span className={cn(diffGutterClassName, "justify-center px-0")}> </span>
+      <code className="min-w-0 px-2 py-0.5 whitespace-pre-wrap [overflow-wrap:anywhere]">隐藏 {hiddenCount} 行未变更内容</code>
     </div>
   );
 }

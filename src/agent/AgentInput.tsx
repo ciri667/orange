@@ -9,6 +9,7 @@ import {
 } from "react";
 import { Button } from "../shared/Button";
 import { Chip } from "../shared/Chip";
+import { cn } from "../shared/cn";
 import { logDebug } from "../shared/logger";
 import {
   FOLLOW_DEFAULT_MODEL_SELECTION,
@@ -576,10 +577,10 @@ export function AgentInput({
   };
 
   return (
-    <footer className="agent-input">
+    <footer className="flex min-w-0 shrink-0 flex-col gap-1 rounded-2xl border border-border-translucent bg-surface-translucent px-2.5 py-2 pr-2 shadow-[0_8px_20px_rgba(47,39,29,0.05)]">
       {hasComposerChips && (
-        <div className="agent-input-toolbar">
-          <div className="agent-input-toolbar-start">
+        <div className="flex min-w-0 items-center justify-start gap-2 px-0.5 pt-0.5 max-[760px]:items-start">
+          <div className="inline-flex min-w-0 items-center gap-[7px] max-[760px]:flex-wrap">
             {selectedExplicitSkillChips.length > 0 && (
               <div className="inline-flex min-w-0 max-w-full items-center gap-1.5 overflow-hidden" aria-label="本轮显式激活 Skills">
                 {selectedExplicitSkillChips.map((skill) => (
@@ -614,13 +615,20 @@ export function AgentInput({
           </div>
         </div>
       )}
-      <div className="agent-input-main">
+      <div className="relative min-w-0">
         {shouldShowMentionFilePicker && (
-          <div className="mention-file-picker-popover" role="listbox" aria-label="选择本轮 @ 文件">
+          <div
+            className="absolute right-0 bottom-[calc(100%+8px)] left-0 z-[6] grid max-h-[252px] gap-1 overflow-auto rounded-lg border border-primary-border-strong bg-surface p-1.5 shadow-[0_18px_40px_rgba(var(--ink-rgb),0.16)]"
+            role="listbox"
+            aria-label="选择本轮 @ 文件"
+          >
             {selectableMentionFiles.length ? (
               selectableMentionFiles.map((file, index) => (
                 <button
-                  className={`mention-file-picker-option ${index === activeMentionFilePickerIndex ? "active" : ""}`}
+                  className={cn(
+                    "grid min-w-0 cursor-pointer grid-cols-[auto_minmax(0,1fr)_auto] items-center gap-[9px] rounded-md border border-transparent bg-transparent p-2 text-left text-ink",
+                    index === activeMentionFilePickerIndex && "border-primary-border bg-primary-wash",
+                  )}
                   key={file.id}
                   type="button"
                   role="option"
@@ -628,25 +636,32 @@ export function AgentInput({
                   onMouseDown={(event) => event.preventDefault()}
                   onClick={() => handleSelectMentionFile(file)}
                 >
-                  {file.kind === "image" ? <Image size={15} /> : <FileText size={15} />}
-                  <span>
-                    <OverflowTooltipText as="strong" text={file.displayName} logArea="agent_mentioned_file_picker_name" />
-                    <OverflowTooltipText as="small" text={file.relativePath} logArea="agent_mentioned_file_picker_path" />
+                  {file.kind === "image" ? <Image size={15} className="text-ink-muted" /> : <FileText size={15} className="text-ink-muted" />}
+                  <span className="grid min-w-0 gap-0.5">
+                    <OverflowTooltipText as="strong" className="min-w-0 truncate" text={file.displayName} logArea="agent_mentioned_file_picker_name" />
+                    <OverflowTooltipText as="small" className="min-w-0 truncate text-xs text-ink-muted" text={file.relativePath} logArea="agent_mentioned_file_picker_path" />
                   </span>
-                  {file.kind && <em>{file.kind}</em>}
+                  {file.kind && <em className="text-xs not-italic font-bold text-ink-muted">{file.kind}</em>}
                 </button>
               ))
             ) : (
-              <div className="mention-file-picker-empty">没有匹配的已授权文件</div>
+              <div className="p-2.5 text-center text-xs text-ink-muted">没有匹配的已授权文件</div>
             )}
           </div>
         )}
         {shouldShowSkillPicker && (
-          <div className="skill-picker-popover" role="listbox" aria-label="选择本轮显式 Skill">
+          <div
+            className="absolute right-0 bottom-[calc(100%+8px)] left-0 z-[6] grid max-h-[252px] gap-1 overflow-auto rounded-lg border border-primary-border-strong bg-surface p-1.5 shadow-[0_18px_40px_rgba(var(--ink-rgb),0.16)]"
+            role="listbox"
+            aria-label="选择本轮显式 Skill"
+          >
             {selectableSkills.length ? (
               selectableSkills.map((skill, index) => (
                 <button
-                  className={`skill-picker-option ${index === activeSkillPickerIndex ? "active" : ""}`}
+                  className={cn(
+                    "flex min-w-0 cursor-pointer items-center justify-between gap-2.5 rounded-md border border-transparent bg-transparent p-2 text-left text-ink",
+                    index === activeSkillPickerIndex && "border-primary-border bg-primary-wash",
+                  )}
                   key={skill.id}
                   type="button"
                   role="option"
@@ -654,19 +669,20 @@ export function AgentInput({
                   onMouseDown={(event) => event.preventDefault()}
                   onClick={() => handleSelectExplicitSkill(skill)}
                 >
-                  <span>
-                    <OverflowTooltipText as="strong" text={skill.displayName} logArea="agent_skill_picker_name" />
-                    <OverflowTooltipText as="small" text={skill.name} logArea="agent_skill_picker_id" />
+                  <span className="grid min-w-0 gap-0.5">
+                    <OverflowTooltipText as="strong" className="min-w-0 truncate" text={skill.displayName} logArea="agent_skill_picker_name" />
+                    <OverflowTooltipText as="small" className="min-w-0 truncate text-xs text-ink-muted" text={skill.name} logArea="agent_skill_picker_id" />
                   </span>
-                  <em>{skill.source === "built-in" ? "内置" : "自定义"}</em>
+                  <em className="shrink-0 text-xs not-italic font-bold text-ink-muted">{skill.source === "built-in" ? "内置" : "自定义"}</em>
                 </button>
               ))
             ) : (
-              <div className="skill-picker-empty">没有匹配的已启用 Skill</div>
+              <div className="p-2.5 text-center text-xs text-ink-muted">没有匹配的已启用 Skill</div>
             )}
           </div>
         )}
         <textarea
+          className="min-h-14 w-full resize-none rounded-control border-0 bg-transparent p-1.5 pt-1.5 text-ink leading-normal outline-none focus-visible:outline-none"
           ref={promptTextareaRef}
           value={prompt}
           onChange={handlePromptChange}
@@ -681,7 +697,7 @@ export function AgentInput({
           disabled={isBusy}
         />
       </div>
-      <div className="agent-input-footer">
+      <div className="flex min-w-0 items-center gap-2 pt-0.5">
         {!activeSession.imIdentity && (
           <AgentSecurityLevelControl
             activeSession={activeSession}
@@ -691,7 +707,7 @@ export function AgentInput({
           />
         )}
         {modelConfig.enabled && enabledProviders.length > 0 && (
-          <div className="turn-model-select" aria-label="本轮使用的模型">
+          <div className="ml-auto inline-flex min-w-0 max-w-[42%] items-center gap-1.5 rounded-full border-0 bg-transparent px-1.5 py-0.5 text-ink max-[760px]:max-w-full" aria-label="本轮使用的模型">
             <BrainCircuit size={14} />
             <ModelCascadeSelector
               value={turnModelSelection}
@@ -707,7 +723,7 @@ export function AgentInput({
         <Button
           variant="primary"
           size="compact"
-          className="agent-send-button"
+          className="inline-grid size-[34px] min-h-[34px] min-w-[34px] shrink-0 place-items-center rounded-full border-transparent bg-agent p-0 hover:enabled:bg-agent-strong disabled:opacity-[0.38]"
           title="发送"
           aria-label="发送"
           onClick={onSubmitPrompt}
