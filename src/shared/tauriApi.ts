@@ -2496,27 +2496,57 @@ function createBrowserDiscoveredModels(provider: LlmProviderConfig): LlmProvider
   }));
 }
 
-/** 浏览器开发态模型合并逻辑，保留现有启用状态并确保默认模型可用。 */
+/** 浏览器开发态模型合并逻辑，对齐桌面端：保留启用状态，并留下远端没返回的手动模型。 */
 function mergeBrowserProviderModels(
   provider: LlmProviderConfig,
   discoveredModels: LlmProviderModel[],
   fetchedAt: string,
 ): LlmProviderModel[] {
   const existingById = new Map(provider.models.map((model) => [model.id, model]));
-  const mergedModels = discoveredModels.map((model) => ({
-    ...model,
-    enabled: existingById.get(model.id)?.enabled ?? model.id === provider.model,
-    updatedAt: fetchedAt,
-  }));
+  const seenModelIds = new Set<string>();
+  const mergedModels: LlmProviderModel[] = [];
 
-  if (provider.model.trim() && !mergedModels.some((model) => model.id === provider.model)) {
-    mergedModels.unshift({
-      id: provider.model,
-      name: provider.model,
-      enabled: true,
-      source: "manual",
+  for (const discoveredModel of discoveredModels) {
+    const modelId = discoveredModel.id.trim();
+
+    if (!modelId || seenModelIds.has(modelId)) {
+      continue;
+    }
+
+    seenModelIds.add(modelId);
+    mergedModels.push({
+      ...discoveredModel,
+      id: modelId,
+      name: discoveredModel.name.trim() || modelId,
+      enabled: existingById.get(modelId)?.enabled ?? false,
+      source: "discovered",
       updatedAt: fetchedAt,
     });
+  }
+
+  for (const existingModel of provider.models) {
+    if (existingModel.source !== "manual" || seenModelIds.has(existingModel.id)) {
+      continue;
+    }
+
+    seenModelIds.add(existingModel.id);
+    mergedModels.push(existingModel);
+  }
+
+  const defaultModelId = provider.model.trim();
+
+  if (defaultModelId && !mergedModels.some((model) => model.id === defaultModelId)) {
+    mergedModels.push({
+      id: defaultModelId,
+      name: defaultModelId,
+      enabled: true,
+      source: "manual",
+      updatedAt: provider.updatedAt,
+    });
+  }
+
+  if (defaultModelId) {
+    return mergedModels.map((model) => (model.id === defaultModelId ? { ...model, enabled: true } : model));
   }
 
   if (!mergedModels.some((model) => model.enabled) && mergedModels[0]) {

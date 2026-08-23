@@ -355,6 +355,19 @@ pub fn merge_discovered_models(
         merged_models.push(discovered_model);
     }
 
+    // 远端目录未返回的手动模型要按原顺序保留，否则自定义 provider 手填的额外模型会被「获取模型」清掉。
+    for existing_model in &provider.models {
+        if existing_model.source != MODEL_SOURCE_MANUAL {
+            continue;
+        }
+        if seen_model_ids.contains(&existing_model.id) {
+            continue;
+        }
+
+        seen_model_ids.insert(existing_model.id.clone());
+        merged_models.push(existing_model.clone());
+    }
+
     provider.models = merged_models;
     provider.models_fetched_at = Some(fetched_at.to_owned());
     normalize_provider_models(provider);
@@ -1018,6 +1031,65 @@ mod tests {
         assert!(manual_model.enabled);
         assert_eq!(manual_model.source, MODEL_SOURCE_MANUAL);
         assert!(!remote_model.enabled);
+    }
+
+    /** 「获取模型」必须保留所有未出现在远端目录中的手动模型，而不是只保住默认模型。 */
+    #[test]
+    fn merge_discovered_models_keeps_all_manual_models_missing_from_response() {
+        let mut provider = test_provider("provider-a", true);
+
+        provider.model = "manual-default".to_owned();
+        provider.models = vec![
+            test_provider_model("manual-default", true, MODEL_SOURCE_MANUAL),
+            test_provider_model("manual-extra", true, MODEL_SOURCE_MANUAL),
+            test_provider_model("remote-keep", true, MODEL_SOURCE_DISCOVERED),
+            test_provider_model("stale-discovered", true, MODEL_SOURCE_DISCOVERED),
+        ];
+
+        merge_discovered_models(
+            &mut provider,
+            vec![
+                test_provider_model("remote-keep", false, MODEL_SOURCE_DISCOVERED),
+                test_provider_model("remote-new", false, MODEL_SOURCE_DISCOVERED),
+            ],
+            "现在",
+        );
+
+        let model_ids: Vec<&str> = provider.models.iter().map(|model| model.id.as_str()).collect();
+        assert_eq!(
+            model_ids,
+            vec![
+                "remote-keep",
+                "remote-new",
+                "manual-default",
+                "manual-extra",
+            ]
+        );
+
+        let extra = provider
+            .models
+            .iter()
+            .find(|model| model.id == "manual-extra")
+            .unwrap();
+        assert!(extra.enabled);
+        assert_eq!(extra.source, MODEL_SOURCE_MANUAL);
+        assert_eq!(extra.updated_at, "之前");
+
+        let remote_keep = provider
+            .models
+            .iter()
+            .find(|model| model.id == "remote-keep")
+            .unwrap();
+        assert!(remote_keep.enabled);
+        assert_eq!(remote_keep.source, MODEL_SOURCE_DISCOVERED);
+        assert_eq!(remote_keep.updated_at, "现在");
+
+        let remote_new = provider
+            .models
+            .iter()
+            .find(|model| model.id == "remote-new")
+            .unwrap();
+        assert!(!remote_new.enabled);
     }
 
     /** 具体模型选择优先级固定为本轮 provider+model > 会话默认 provider+model > 全局默认 provider.model。 */
