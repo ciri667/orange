@@ -307,6 +307,9 @@ mod tests {
             assert!(!is_user_visible_tool(name), "{name} should stay hidden");
         }
 
+        assert!(is_user_visible_tool("search"));
+        assert!(is_user_visible_tool("read"));
+        assert!(is_user_visible_tool("edit"));
         assert!(is_user_visible_tool("search_notes"));
         assert!(is_user_visible_tool("read_file"));
         assert!(is_user_visible_tool("propose_file_change"));

@@ -408,7 +408,7 @@ const browserBuiltInSkills: AgentSkill[] = [
     displayName: "知识库研究",
     description: "基于已选知识库发现支持文档、检索和阅读 Markdown 笔记，并给出带引用的回答。",
     instructions:
-      "当用户要求查找、总结、对比或引用本地知识库时，先调用 list_tree、search_notes 或 read_file 获取依据。search_notes 只覆盖 Markdown；read_file 可读取授权范围内的 Markdown/TXT，TXT 不产生知识库引用。",
+      "当用户要求查找、总结、对比或引用本地知识库时，先调用 list、search 或 read 获取依据。search 只覆盖 Markdown；read 可读取授权范围内的 Markdown/TXT，省略 fileId 时读取当前文件；TXT 不产生知识库引用。DOCX/PDF 也用 read 只读抽取。",
     tags: ["研究", "检索", "引用"],
     enabled: true,
     source: "built-in",
@@ -421,7 +421,7 @@ const browserBuiltInSkills: AgentSkill[] = [
     displayName: "笔记改写",
     description: "改写当前笔记内容，并通过待确认 diff 交给用户决定是否写入。",
     instructions:
-      "当用户要求润色、改写、压缩、扩写、多处编辑或文末追加 Markdown/TXT 时，先用 read_file 或 get_current_file 读取目标。只能调用 propose_file_change 生成待确认 diff；TXT 必须保持纯文本。局部改写用 replace，追加用 append，多处编辑用 multi_replace 和 edits。",
+      "当用户要求润色、改写、压缩、扩写、多处编辑或文末追加 Markdown/TXT 时，先用 read 读取目标（可省略 fileId 以读当前文件）。只能调用 edit 生成待确认 diff；TXT 必须保持纯文本。局部改写用 replace，追加用 append，多处编辑用 multi_replace 和 edits。",
     tags: ["写作", "改写", "diff"],
     enabled: true,
     source: "built-in",
@@ -434,7 +434,7 @@ const browserBuiltInSkills: AgentSkill[] = [
     displayName: "上下文草稿",
     description: "基于已选 scope 创建新的 Markdown 草稿，写入前仍需用户确认。",
     instructions:
-      "当用户要求生成新笔记、TXT、清单、总结稿或草稿时，可以先检索或读取相关文件，再调用 create_file_draft。目标路径必须在当前会话允许的知识库内，fileType 必须为 markdown 或 txt 且扩展名匹配；TXT 正文是纯文本。",
+      "当用户要求生成新笔记、TXT、清单、总结稿或草稿时，可以先检索或读取相关文件，再调用 write。目标路径必须在当前会话允许的知识库内，fileType 必须为 markdown 或 txt 且扩展名匹配；TXT 正文是纯文本。",
     tags: ["草稿", "生成", "Markdown"],
     enabled: true,
     source: "built-in",
@@ -447,7 +447,7 @@ const browserBuiltInSkills: AgentSkill[] = [
     displayName: "知识整理",
     description: "给出标签、标题、目录、支持文档和关联笔记建议，不直接移动或改写文件。",
     instructions:
-      "当用户要求整理知识库、补标签、规划目录或建立关联时，优先调用 list_tree 获取目录、Markdown 笔记和已支持普通文档结构；需要正文依据时再调用 search_notes 或 read_note 读取 Markdown 笔记，然后调用 suggest_organization 输出建议。该 skill 不执行文件移动或直接写入。",
+      "当用户要求整理知识库、补标签、规划目录或建立关联时，优先调用 list 获取目录、Markdown 笔记和已支持普通文档结构；需要正文依据时再调用 search 或 read 读取 Markdown 笔记，然后直接在回复中给出建议。该 skill 不执行文件移动或直接写入；若要落盘请调用 edit 或 write。",
     tags: ["整理", "标签", "目录"],
     enabled: true,
     source: "built-in",

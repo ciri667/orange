@@ -3699,7 +3699,9 @@ pub fn search_notes(
     snapshot: &WorkspaceSnapshot,
     knowledge_base_ids: &[String],
     prompt: &str,
+    limit: usize,
 ) -> Result<Vec<crate::domain::Citation>, String> {
+    let limit = limit.max(1);
     let selected_ids: HashSet<&str> = knowledge_base_ids.iter().map(String::as_str).collect();
 
     if selected_ids.is_empty() {
@@ -3719,13 +3721,13 @@ pub fn search_notes(
             citations.push(citation);
         }
 
-        if citations.len() >= 4 {
+        if citations.len() >= limit {
             break;
         }
     }
 
     citations.sort_by(|left, right| right.score.total_cmp(&left.score));
-    citations.truncate(4);
+    citations.truncate(limit);
 
     Ok(citations)
 }

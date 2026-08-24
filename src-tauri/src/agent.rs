@@ -38,7 +38,7 @@ pub fn run_agent_turn(
             &mut snapshot,
             session_index,
             &request,
-            "search_notes",
+            "search",
             json!({ "query": request.prompt }),
         );
         let first_note_id = search_outcome
@@ -56,30 +56,13 @@ pub fn run_agent_turn(
                 &mut snapshot,
                 session_index,
                 &request,
-                "read_file",
+                "read",
                 json!({ "fileId": note_id }),
             );
 
             citations.extend(read_outcome.citations);
             tool_calls.push(read_outcome.call);
         }
-    }
-
-    if request.action == "organize" {
-        let organize_outcome = execute_local_tool(
-            &registry,
-            app,
-            &mut snapshot,
-            session_index,
-            &request,
-            "suggest_organization",
-            json!({
-                "noteId": request.active_note_id,
-                "suggestion": "建议先补充稳定标签、标题层级、来源说明和相关链接；该本地兜底不会移动或改写文件。"
-            }),
-        );
-
-        tool_calls.push(organize_outcome.call);
     }
 
     let content = build_local_response(&request, &citations, &tool_calls);
@@ -144,10 +127,15 @@ fn build_local_response(
 ) -> String {
     let has_failed_search = tool_calls
         .iter()
-        .any(|tool_call| tool_call.name == "search_notes" && tool_call.status == "failed");
+        .any(|tool_call| tool_call.name == "search" && tool_call.status == "failed");
+
+    if request.action == "organize" {
+        return "当前运行在本地规则兜底模式。整理建议请启用模型后由 Agent 直接给出；若要落盘请让模型调用 edit 或 write。确认前不会修改本地文件。"
+            .to_owned();
+    }
 
     if matches!(request.action.as_str(), "rewrite" | "create") {
-        return "当前运行在本地规则兜底模式，我不会根据固定 action 自动生成写入 diff。需要写入时请启用模型，让 Agent 显式调用 propose_file_change 或 create_file_draft 工具；确认前不会修改本地文件。"
+        return "当前运行在本地规则兜底模式，我不会根据固定 action 自动生成写入 diff。需要写入时请启用模型，让 Agent 显式调用 edit 或 write 工具；确认前不会修改本地文件。"
             .to_owned();
     }
 
@@ -253,7 +241,7 @@ fn deduplicate_citations(citations: Vec<Citation>) -> Vec<Citation> {
     let mut next_citations = Vec::new();
 
     for citation in citations {
-        // search_notes 与 read_note 可能命中同一笔记，前端引用列表只需要展示一次。
+        // search 与 read 可能命中同一笔记，前端引用列表只需要展示一次。
         if seen_note_ids.insert(citation.note_id.clone()) {
             next_citations.push(citation);
         }

@@ -9,11 +9,41 @@ const HIDDEN_TOOL_NAMES = new Set<AgentToolName>([
   "local_rule_agent",
 ]);
 
+/** 历史工具名收到闭集短名，供图标和标签复用。 */
+const CANONICAL_TOOL_NAMES: Partial<Record<string, AgentToolName>> = {
+  search_notes: "search",
+  read_file: "read",
+  read_note: "read",
+  read_document: "read",
+  get_current_file: "read",
+  list_tree: "list",
+  propose_file_change: "edit",
+  propose_note_change: "edit",
+  create_file_draft: "write",
+  create_note_draft: "write",
+  create_folder: "write",
+  list_path: "list",
+  read_path: "read",
+  run_skill: "run",
+};
+
+/** 把持久化轨迹里的旧工具名收成闭集短名。 */
+export function canonicalToolName(name?: string): string {
+  if (!name) {
+    return "";
+  }
+
+  return CANONICAL_TOOL_NAMES[name] ?? name;
+}
+
 /** 工具折叠标题的中文别名，摘要缺失时作为兜底。 */
-const TOOL_LABELS: Partial<Record<AgentToolName, string>> = {
+const TOOL_LABELS: Partial<Record<string, string>> = {
+  search: "搜索笔记",
   search_notes: "搜索笔记",
+  read: "读取文件",
   read_file: "读取文件",
   read_document: "读取文档",
+  list: "查看目录",
   list_tree: "查看目录",
   list_path: "查看路径",
   read_path: "读取路径",
@@ -21,9 +51,12 @@ const TOOL_LABELS: Partial<Record<AgentToolName, string>> = {
   get_session_summary: "读取会话摘要",
   search_session_messages: "搜索会话消息",
   read_session_context: "读取会话上下文",
+  run: "运行 Skill",
   run_skill: "运行 Skill",
   create_folder: "创建文件夹",
+  edit: "编辑了文件",
   propose_file_change: "编辑了文件",
+  write: "创建文件草稿",
   create_file_draft: "创建文件草稿",
   suggest_organization: "生成整理建议",
   review_change: "审阅变更",
@@ -40,8 +73,9 @@ export function getToolTraceLabel(step: AgentTraceStep): string {
     return step.summary.trim();
   }
 
-  if (step.name && TOOL_LABELS[step.name]) {
-    return TOOL_LABELS[step.name] ?? step.name;
+  if (step.name) {
+    const canonical = canonicalToolName(step.name);
+    return TOOL_LABELS[canonical] ?? TOOL_LABELS[step.name] ?? step.name;
   }
 
   return step.name ?? "工具调用";
@@ -69,10 +103,13 @@ export function formatTurnDuration(durationMs: number): string {
 export const TRACE_TRUNCATION_MARK = "…[已截断]";
 
 /** 折叠行右侧的短类型标签，避免把英文工具名直接铺在稿纸上。 */
-const TOOL_KIND_LABELS: Partial<Record<AgentToolName, string>> = {
+const TOOL_KIND_LABELS: Partial<Record<string, string>> = {
+  search: "检索",
   search_notes: "检索",
+  read: "读取",
   read_file: "读取",
   read_document: "文档",
+  list: "目录",
   list_tree: "目录",
   list_path: "浏览",
   read_path: "读取",
@@ -80,9 +117,12 @@ const TOOL_KIND_LABELS: Partial<Record<AgentToolName, string>> = {
   get_session_summary: "摘要",
   search_session_messages: "会话",
   read_session_context: "会话",
+  run: "Skill",
   run_skill: "Skill",
   create_folder: "建夹",
+  edit: "编辑",
   propose_file_change: "编辑",
+  write: "新建",
   create_file_draft: "新建",
   suggest_organization: "整理",
   review_change: "审阅",
@@ -243,7 +283,8 @@ export function getToolKindLabel(name?: AgentToolName | string): string {
     return "工具";
   }
 
-  return TOOL_KIND_LABELS[name as AgentToolName] ?? name;
+  const canonical = canonicalToolName(name);
+  return TOOL_KIND_LABELS[canonical] ?? TOOL_KIND_LABELS[name] ?? name;
 }
 
 /** 去掉截断标记，让正文预览按普通笔记片段展示。 */

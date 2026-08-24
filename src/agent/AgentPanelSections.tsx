@@ -72,15 +72,15 @@ export function AgentSessionSummary({
 export const AGENT_SECURITY_LEVEL_COPY = {
   basic: {
     label: "基础",
-    description: "Agent只在选中的知识库文档里工作。",
+    description: "只在选中的知识库里工作，写入需确认。",
   },
   advanced: {
     label: "进阶",
-    description: "Agent可以做更多事，仍需手动确认。",
+    description: "可整理目录并运行 Skill，落盘前仍确认。",
   },
   autonomous: {
     label: "完全",
-    description: "可不受限制地访问你的电脑上任何文件。",
+    description: "可在合规路径上读列，校验通过后可自动落盘；不是整台电脑。",
   },
 } as const;
 

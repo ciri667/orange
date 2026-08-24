@@ -2423,10 +2423,10 @@ export function WorkspaceShell() {
         commitSnapshot(await saveSession(nextSnapshot, nextSession));
         setNotice(
           securityLevel === "basic"
-            ? "已切回基础权限：关键写入需要你确认。"
+            ? "已切回基础权限：只在选中的知识库里工作，写入需要你确认。"
             : securityLevel === "advanced"
-              ? "已切换到进阶权限：Agent 可以做更多事，落盘前仍需确认。"
-              : "已切换到完全权限：校验通过后 Agent 将连续执行并自动落盘。",
+              ? "已切换到进阶权限：可整理目录并运行 Skill，落盘前仍需确认。"
+              : "已切换到完全权限：可在合规路径上读列，校验通过后可自动落盘；不是整台电脑。",
         );
       } catch (error) {
         setNotice(error instanceof Error ? error.message : String(error));
@@ -2439,7 +2439,7 @@ export function WorkspaceShell() {
       requestConfirmation(
         {
           title: "切换到完全权限",
-          message: "完全权限意味着你把连续执行权交给 Agent，好让模型一次把任务做完。校验通过的写入会自动落盘；已授权的 Skill 可连续运行；也可以在知识库之外的合规路径上列表、读取和创建文件夹。系统保护目录和隔离边界仍然生效。",
+          message: "完全权限意味着你把连续执行权交给 Agent，好让模型一次把任务做完。校验通过的知识库文本写入会自动落盘；已授权的 Skill 可连续运行；也可以在知识库之外的合规路径上用同一套 list / read / write。这不是整台电脑：系统保护目录和隔离边界仍然生效。",
           confirmLabel: "切换到完全权限",
           tone: "default",
         },

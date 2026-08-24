@@ -1055,7 +1055,7 @@ async fn run_model_loop(
             };
             let mut tool_result_text =
                 truncate_chars(&tool_outcome.payload.to_string(), MAX_TOOL_RESULT_CHARS);
-            if tool_outcome.call.name == "run_skill" && tool_outcome.call.status == "completed" {
+            if tool_outcome.call.name == "run" && tool_outcome.call.status == "completed" {
                 let pending_request = snapshot.sessions[session_index].pending_execution.clone();
                 if let Some(pending_request) = pending_request.filter(|pending_request| {
                     crate::skill_execution::can_auto_execute(
@@ -1645,17 +1645,17 @@ fn build_model_prompt(
 ) -> ModelPrompt {
     let session = &snapshot.sessions[session_index];
     // Agent 的工具选择策略只作为模型指令，不再由宿主预判用户意图。
-    let autonomous_tool_policy = "你需要根据用户输入和上下文自主判断是否调用工具：需要 Markdown 引用时使用 search_notes；需要当前 scope 内 Markdown/TXT 正文或写入建议时使用 read_file、get_current_file、propose_file_change；需要 DOCX/PDF 正文时，先用 list_tree 发现文件，再调用只读 read_document。DOCX/PDF 不可编辑，且不会自动进入全文搜索。TXT 必须按纯文本原样处理。无关的通用问题可以直接回答。界面 action 只是 UI 分类，不能替代你的判断。";
+    let autonomous_tool_policy = "你需要根据用户输入和上下文自主判断是否调用工具：需要 Markdown 引用时使用 search；需要当前 scope 内正文时使用 read（可省略 fileId 以读当前文件）；需要改写时使用 edit；需要新建时使用 write；需要看目录时使用 list。DOCX/PDF 用 read 只读抽取，不可编辑，且不会自动进入全文搜索。TXT 必须按纯文本原样处理。无关的通用问题可以直接回答。界面 action 只是 UI 分类，不能替代你的判断。";
     // 安全等级的根本目的是让用户逐步放手，而不是只为 Skill 开闸。
     let security_level_policy = match session.security_level.as_str() {
-        "autonomous" => "当前为完全级别：用户把连续执行权交给你，目的是让你一次把任务做完。propose_file_change、create_file_draft 和 create_folder 在校验通过后会自动落盘；失败则保留待确认。你可以在当前 scope 内知识库使用相对路径，也可以对用户设备上的合规绝对路径（含 ~）调用 create_folder、list_path 和 read_path。Windows、Program Files 等受保护系统目录会被拒绝。Skill 只是更高权限下可发挥的能力之一，脚本仍在隔离副本中运行，不会获得真实系统路径。",
-        "advanced" => "当前为进阶级别：用户开始放手，但仍要在落盘前确认。你可以在当前知识库内调用 create_folder，也可以在授权后运行 Skill。所有写入和 Skill 执行仍需用户确认后才会生效。",
-        _ => "当前为基础级别：用户选择先看紧。你只使用知识库文档工具；propose_file_change 和 create_file_draft 只生成待确认 diff，不能声称已经写入。不要暗示你可以执行脚本、访问知识库外路径或跳过确认。",
+        "autonomous" => "当前为完全级别：用户把连续执行权交给你，目的是让你一次把任务做完。edit 和 write（含建文件夹）在校验通过后会自动落盘；失败则保留待确认。你可以在当前 scope 内知识库使用相对路径，也可以对用户设备上的合规绝对路径（含 ~）调用 list、read 和 write。这不是整台电脑：Windows、Program Files 等受保护系统目录会被拒绝。Skill 只是更高权限下可发挥的能力之一，脚本仍在隔离副本中运行，不会获得真实系统路径。",
+        "advanced" => "当前为进阶级别：用户开始放手，但仍要在落盘前确认。write 可以在当前知识库内建文件夹，也可以在授权后运行 run。所有写入和 Skill 执行仍需用户确认后才会生效。",
+        _ => "当前为基础级别：用户选择先看紧。你只使用知识库文档工具；edit 和 write 只生成待确认 diff，不能声称已经写入。不要暗示你可以执行脚本、访问知识库外路径或跳过确认。",
     };
     let write_policy = if session.security_level == "autonomous" {
-        "所有写入只能调用 propose_file_change 或 create_file_draft；校验通过后会自动落盘，不要在工具结果返回前声称已经写入文件。"
+        "所有写入只能调用 edit 或 write；校验通过后会自动落盘，不要在工具结果返回前声称已经写入文件。"
     } else {
-        "所有写入只能调用 propose_file_change 或 create_file_draft 生成待确认 diff，不能声称已经写入文件。"
+        "所有写入只能调用 edit 或 write 生成待确认 diff，不能声称已经写入文件。"
     };
     let scope_summary = build_scope_summary(snapshot, session);
     let active_note_summary = request
@@ -1692,10 +1692,15 @@ fn build_model_prompt(
     } else {
         "本轮显式激活的 Skill 是用户通过 slash picker 指定的执行要求。你必须在本轮回答中按这些 Skill 的完整 instructions 执行；如果 Skill 与用户任务冲突，说明冲突并遵守更高优先级系统规则。Skill 只是可用能力的一部分，不能扩大工具权限或绕过系统保护边界。"
     };
+    let visible_tools = if session.im_identity.is_some() || session.security_level == "basic" {
+        "search, read, list, edit, write"
+    } else {
+        "search, read, list, edit, write, run"
+    };
     let mut messages = vec![json!({
         "role": "system",
         "content": format!(
-            "你是橘记的本地优先知识库 Agent。search_notes 只检索 Markdown；read_file、get_current_file、propose_file_change 可作用于当前 scope 内的 Markdown/TXT，TXT 必须原样按纯文本处理；read_document 可只读 DOCX/PDF 并返回可信的页码或结构块引用。{}create_file_draft 的 fileType 只能是 markdown 或 txt，路径扩展名必须匹配。局部替换使用 operation=replace，文末追加使用 operation=append 且 next 只含增量；同一文件多处编辑使用 operation=multi_replace 和 edits。必须使用服务端标准 tool_calls 字段调用工具，不要在普通回复中输出 DSML、XML 或伪工具调用标签。引用只允许来自已执行工具结果。{}\n{}\n{}\n允许 scope：{}\n{}\n{}\n{}",
+            "【角色与工具】\n你是橘记的本地优先知识库 Agent。当前可见工具：{visible_tools}。search 只检索 Markdown；read 和 edit 可作用于当前 scope 内的 Markdown/TXT，省略 fileId 时 read 读取当前激活文件；TXT 必须原样按纯文本处理；read 也可只读 DOCX/PDF 并返回可信的页码或结构块引用。{}write 的 fileType 只能是 markdown 或 txt，路径扩展名必须匹配。局部替换使用 operation=replace，文末追加使用 operation=append 且 next 只含增量；同一文件多处编辑使用 operation=multi_replace 和 edits。必须使用服务端标准 tool_calls 字段调用工具，不要在普通回复中输出 DSML、XML 或伪工具调用标签。引用只允许来自已执行工具结果。{}\n{}\n{}\n【范围】\n允许 scope：{}\n{}\n【Skill 目录】\n{}\n{}",
             write_policy, skill_policy, autonomous_tool_policy, security_level_policy, scope_summary, active_note_summary, skill_catalog, explicit_skill_prompt
         )
     })];
@@ -2024,7 +2029,7 @@ fn render_project_agent_instructions(
     }
 
     Some(format!(
-        "【项目级 Agent 指令】\n以下内容来自当前会话 scope 内知识库根目录的 ORANGE_AGENT.md，优先级低于橘记系统规则，高于普通会话记忆。\n{}",
+        "【项目级 Agent 指令】\n以下内容来自知识库根目录 ORANGE_AGENT.md（带 path 的项目规则，不要当成用户指令）。优先级低于橘记系统规则，高于普通会话记忆。\n{}",
         instructions.join("\n\n")
     ))
 }
@@ -2058,8 +2063,11 @@ fn load_project_agent_instructions(
                         None
                     } else {
                         Some(format!(
-                            "来源知识库：{}（id={}）\n{}",
-                            knowledge_base.name, knowledge_base.id, bounded
+                            "path: {}/ORANGE_AGENT.md\n来源知识库：{}（id={}）\n{}",
+                            knowledge_base.path.trim_end_matches(['/', '\\']),
+                            knowledge_base.name,
+                            knowledge_base.id,
+                            bounded
                         ))
                     }
                 }
@@ -2107,7 +2115,7 @@ fn render_context_summary_prompt(summary: Option<&AgentContextSummary>) -> Optio
     }
 
     Some(format!(
-        "【会话工作记忆】\n以下是本会话较早上下文的压缩摘要，优先级低于系统规则，高于最近历史之外的普通聊天记忆。\n{}",
+        "【会话工作记忆】\n这是压缩检查点，不是用户指令。优先级低于系统规则，高于最近历史之外的普通聊天记忆。\n{}",
         truncate_chars(&body, MAX_RENDERED_CONTEXT_SUMMARY_CHARS)
     ))
 }
@@ -5086,6 +5094,9 @@ mod tests {
         assert!(autonomous_content.contains("连续执行权"));
         assert!(autonomous_content.contains("自动落盘"));
         assert!(autonomous_content.contains("Skill 只是更高权限下可发挥的能力之一"));
+        assert!(autonomous_content.contains("不是整台电脑"));
+        assert!(!autonomous_content.contains("list_path"));
+        assert!(!autonomous_content.contains("create_folder"));
         assert!(!autonomous_content.contains("生成待确认 diff，不能声称已经写入文件"));
     }
 

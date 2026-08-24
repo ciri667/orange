@@ -575,7 +575,7 @@ function attachMockWriteTracePreview(steps: AgentTraceStep[], pendingChange?: Pr
   }
 
   return steps.map((step) => {
-    if (step.name !== "create_file_draft" && step.name !== "propose_file_change") {
+    if (step.name !== "write" && step.name !== "edit" && step.name !== "create_file_draft" && step.name !== "propose_file_change") {
       return step;
     }
 
@@ -694,7 +694,7 @@ export function runMockAgentTurn(
     };
     nextChange.diffStats = buildMarkdownDiff(original, next).stats;
     toolCalls.push(
-      createToolCall("propose_file_change", `已为 TXT《${activeTextDocument.title}》生成待确认改写`, {
+      createToolCall("edit", `已为 TXT《${activeTextDocument.title}》生成待确认改写`, {
         fileId: activeTextDocument.id,
         targetPath: activeTextDocument.path,
         title: nextChange.title,
@@ -740,7 +740,7 @@ export function runMockAgentTurn(
         };
         nextChange.diffStats = buildMarkdownDiff(nextChange.original, nextChange.next).stats;
         toolCalls.push(
-          createToolCall("propose_file_change", `已为《${activeNote.title}》生成待确认改写`, {
+          createToolCall("edit", `已为《${activeNote.title}》生成待确认改写`, {
             fileId: activeNote.id,
             targetPath: activeNote.path,
             title: nextChange.title,
@@ -784,7 +784,7 @@ export function runMockAgentTurn(
     };
     nextChange.diffStats = buildMarkdownDiff(nextChange.original, nextChange.next).stats;
     toolCalls.push(
-      createToolCall("create_file_draft", `已生成 ${targetPath} 的待确认新建`, {
+      createToolCall("write", `已生成 ${targetPath} 的待确认新建`, {
         targetPath,
         fileType: wantsTxt ? "txt" : "markdown",
         title: nextChange.title,
@@ -798,18 +798,12 @@ export function runMockAgentTurn(
     if (!activeNote) {
       content = "当前知识库没有可整理的 Markdown 笔记。";
     } else {
-      toolCalls.push(
-        createToolCall("suggest_organization", `已基于当前笔记生成整理建议`, {
-          noteId: activeNote.id,
-          knowledgeBaseId: activeKnowledgeBase.id,
-        }),
-      );
-      content = `建议继续把《${activeNote.title}》保留在「${activeKnowledgeBase.name}」中，并补充更稳定的标签和相关链接。该建议不涉及写入。`;
+      content = `建议继续把《${activeNote.title}》保留在「${activeKnowledgeBase.name}」中，并补充更稳定的标签和相关链接。该建议不涉及写入；若要落盘请确认后再用 edit 或 write。`;
     }
   } else if (shouldUseSearchTool(action)) {
     citations = searchNotes(nextSnapshot, session, prompt);
     toolCalls.push(
-      createToolCall("search_notes", `在 ${getScopeLabel(nextSnapshot, session)} 中检索到 ${citations.length} 条候选引用`, {
+      createToolCall("search", `在 ${getScopeLabel(nextSnapshot, session)} 中检索到 ${citations.length} 条候选引用`, {
         query: prompt,
         knowledgeBaseIds: session.knowledgeBaseIds,
       }),
@@ -817,7 +811,7 @@ export function runMockAgentTurn(
 
     if (citations[0]) {
       toolCalls.push(
-        createToolCall("read_file", `已读取最相关笔记《${citations[0].title}》用于组织回答`, {
+        createToolCall("read", `已读取最相关笔记《${citations[0].title}》用于组织回答`, {
           fileId: citations[0].noteId,
         }),
       );

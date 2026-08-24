@@ -13,13 +13,19 @@ export type AgentSecurityLevel = "basic" | "advanced" | "autonomous";
 /** Markdown 编辑器视图模式，控制编辑、预览和分屏布局。 */
 export type MarkdownViewMode = "edit" | "preview" | "split";
 
-/** Agent 工具名称，检索是可选择工具而不是固定前置流程。 */
+/** Agent 工具名称。闭集短名是 schema 对外名；旧名保留以便历史会话轨迹仍能展示。 */
 export type AgentToolName =
   | "activate_skill"
   | "skill_context"
   | "model_request"
   | "local_rule_agent"
   | "review_change"
+  | "search"
+  | "read"
+  | "list"
+  | "edit"
+  | "write"
+  | "run"
   | "search_notes"
   | "read_file"
   | "read_document"

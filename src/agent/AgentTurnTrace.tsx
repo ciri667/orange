@@ -19,6 +19,7 @@ import { cn } from "../shared/cn";
 import type { AgentTraceStep } from "../shared/types";
 import {
   buildToolTraceDetails,
+  canonicalToolName,
   formatTurnDuration,
   getToolKindLabel,
   getToolTraceLabel,
@@ -323,19 +324,21 @@ function resolveToolIcon(step: AgentTraceStep) {
     return XCircle;
   }
 
-  if (step.name === "search_notes" || step.name === "search_session_messages") {
+  const toolName = canonicalToolName(step.name);
+
+  if (toolName === "search" || step.name === "search_session_messages") {
     return Search;
   }
 
-  if (step.name === "run_skill") {
+  if (toolName === "run") {
     return Sparkles;
   }
 
-  if (step.name === "create_file_draft") {
+  if (toolName === "write") {
     return FilePlus;
   }
 
-  if (step.name === "propose_file_change") {
+  if (toolName === "edit") {
     return PencilLine;
   }
 
@@ -343,7 +346,7 @@ function resolveToolIcon(step: AgentTraceStep) {
     return FolderPlus;
   }
 
-  if (step.name === "list_tree" || step.name === "list_path") {
+  if (toolName === "list" || step.name === "list_path") {
     return ListTree;
   }
 
@@ -351,7 +354,7 @@ function resolveToolIcon(step: AgentTraceStep) {
     return BookOpen;
   }
 
-  if (step.name === "read_file" || step.name === "read_path" || step.name === "get_current_file") {
+  if (toolName === "read" || step.name === "read_path") {
     return FileText;
   }
 

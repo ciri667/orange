@@ -84,7 +84,7 @@ export function ToolCallList({ toolCalls }: { toolCalls?: AgentToolCall[] }) {
                 ? Sparkles
                 : toolCall.name === "model_request"
                 ? BrainCircuit
-                : toolCall.name === "search_notes"
+                : toolCall.name === "search" || toolCall.name === "search_notes"
                   ? Search
                   : toolCall.status === "completed"
                     ? CheckCircle2
