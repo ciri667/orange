@@ -742,6 +742,12 @@ fn ensure_database_schema(connection: &Connection, database_path: &Path) -> Resu
               payload_json TEXT NOT NULL,
               updated_at TEXT NOT NULL
             );
+
+            CREATE TABLE IF NOT EXISTS agent_session_transcripts (
+              session_id TEXT PRIMARY KEY,
+              payload_json TEXT NOT NULL,
+              updated_at TEXT NOT NULL
+            );
             "#,
         )
         .map_err(|error| format!("无法初始化 SQLite schema：{error}"))?;
@@ -996,6 +1002,118 @@ fn persist_sessions_in_transaction(
     for session in &snapshot.sessions {
         persist_session_in_transaction(transaction, session)?;
     }
+
+    cleanup_orphan_session_transcripts(
+        transaction,
+        snapshot
+            .sessions
+            .iter()
+            .map(|session| session.id.as_str())
+            .chain(deleted_sessions.iter().map(|session| session.id.as_str())),
+    )?;
+
+    Ok(())
+}
+
+/** 删除已不存在会话的模型 transcript，避免 UI 会话列表收缩后残留大 JSON。 */
+fn cleanup_orphan_session_transcripts<'a>(
+    transaction: &rusqlite::Transaction<'_>,
+    keep_session_ids: impl IntoIterator<Item = &'a str>,
+) -> Result<(), String> {
+    let keep_session_ids: HashSet<&str> = keep_session_ids.into_iter().collect();
+    let mut statement = transaction
+        .prepare("SELECT session_id FROM agent_session_transcripts")
+        .map_err(|error| format!("无法准备 transcript 清理：{error}"))?;
+    let rows = statement
+        .query_map([], |row| row.get::<_, String>(0))
+        .map_err(|error| format!("无法查询 transcript 列表：{error}"))?;
+    let mut orphan_ids = Vec::new();
+
+    for row in rows {
+        let session_id = row.map_err(|error| format!("无法读取 transcript 会话 ID：{error}"))?;
+        if !keep_session_ids.contains(session_id.as_str()) {
+            orphan_ids.push(session_id);
+        }
+    }
+    drop(statement);
+
+    for session_id in orphan_ids {
+        transaction
+            .execute(
+                "DELETE FROM agent_session_transcripts WHERE session_id = ?1",
+                params![session_id],
+            )
+            .map_err(|error| format!("无法删除过期 transcript：{error}"))?;
+    }
+
+    Ok(())
+}
+
+/** 读取会话级模型 transcript；没有记录时返回 None，由 runtime seed。 */
+pub fn load_agent_session_transcript(
+    app: &AppHandle,
+    session_id: &str,
+) -> Result<Option<Vec<Value>>, String> {
+    let connection = open_database(app)?;
+    load_agent_session_transcript_from_connection(&connection, session_id)
+}
+
+/** 保存会话级模型 transcript，不写入前端会话 payload。 */
+pub fn save_agent_session_transcript(
+    app: &AppHandle,
+    session_id: &str,
+    messages: &[Value],
+) -> Result<(), String> {
+    let mut connection = open_database(app)?;
+    let _write_guard = lock_database_writer()?;
+    let transaction = connection
+        .transaction_with_behavior(TransactionBehavior::Immediate)
+        .map_err(|error| format!("无法启动 transcript 事务：{error}"))?;
+    persist_agent_session_transcript(&transaction, session_id, messages)?;
+    transaction
+        .commit()
+        .map_err(|error| format!("无法提交 transcript 事务：{error}"))
+}
+
+/** 从已打开的连接读取 transcript，供 runtime 和单测复用。 */
+fn load_agent_session_transcript_from_connection(
+    connection: &Connection,
+    session_id: &str,
+) -> Result<Option<Vec<Value>>, String> {
+    let payload = connection
+        .query_row(
+            "SELECT payload_json FROM agent_session_transcripts WHERE session_id = ?1",
+            params![session_id],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()
+        .map_err(|error| format!("无法读取会话 transcript：{error}"))?;
+
+    payload
+        .map(|payload| {
+            serde_json::from_str(&payload)
+                .map_err(|error| format!("无法解析会话 transcript：{error}"))
+        })
+        .transpose()
+}
+
+/** 在已有连接或事务中写入 transcript。 */
+fn persist_agent_session_transcript(
+    connection: &Connection,
+    session_id: &str,
+    messages: &[Value],
+) -> Result<(), String> {
+    let payload_json = serde_json::to_string(messages)
+        .map_err(|error| format!("无法序列化会话 transcript：{error}"))?;
+
+    connection
+        .execute(
+            "INSERT OR REPLACE INTO agent_session_transcripts
+             (session_id, payload_json, updated_at)
+             VALUES (?1, ?2, ?3)",
+            params![session_id, payload_json, format_local_datetime()],
+        )
+        .map_err(|error| format!("无法持久化会话 transcript：{error}"))?;
 
     Ok(())
 }
@@ -5330,15 +5448,17 @@ mod tests {
         extract_docx_preview_blocks, file_modified_local_datetime, format_local_datetime,
         format_local_datetime_from_millis, hash_bytes, hash_content, insert_app_event_log,
         insert_document_history_entry, is_missing_keyring_entry_error, keyring_service_for_build,
-        load_document_history_ids_for_target, load_document_preview,
-        load_keyring_password_after_cache_miss_with, load_latest_document_history_hash,
-        load_model_api_key_from_cache, model_keyring_persists_until_delete,
-        normalize_audit_log_created_at, normalize_im_settings, normalize_knowledge_base_memory,
-        normalize_session_created_at, normalize_workspace_editor_state, parse_im_settings_payload,
-        prune_app_event_logs, prune_document_history_entries, query_app_event_logs,
-        read_document_history_snapshot, redact_memory_secrets, rename_markdown_file,
-        rename_text_document_file, resolve_existing_file_inside_root, resolve_inside_root,
-        save_note_image_attachments, scan_markdown_directory, scan_supported_documents_directory,
+        load_agent_session_transcript_from_connection, load_document_history_ids_for_target,
+        load_document_preview, load_keyring_password_after_cache_miss_with,
+        load_latest_document_history_hash, load_model_api_key_from_cache,
+        model_keyring_persists_until_delete, normalize_audit_log_created_at, normalize_im_settings,
+        normalize_knowledge_base_memory, normalize_session_created_at,
+        normalize_workspace_editor_state, parse_im_settings_payload,
+        persist_agent_session_transcript, persist_sessions_in_transaction, prune_app_event_logs,
+        prune_document_history_entries, query_app_event_logs, read_document_history_snapshot,
+        redact_memory_secrets, rename_markdown_file, rename_text_document_file,
+        resolve_existing_file_inside_root, resolve_inside_root, save_note_image_attachments,
+        scan_markdown_directory, scan_supported_documents_directory,
         sort_sessions_by_updated_at_desc, store_model_api_key_in_cache, trash_markdown_file,
         trash_text_document_file_with, validate_folder_name, validate_markdown_file_name,
         validate_new_markdown_file_name, validate_new_text_document_file_name,
@@ -5355,6 +5475,7 @@ mod tests {
     };
     use base64::Engine as _;
     use rusqlite::Connection;
+    use serde_json::json;
     use std::fs;
     use std::io::Write;
     use std::path::Path;
@@ -6824,5 +6945,93 @@ mod tests {
         assert!(!memory.entries[0].content.contains("abc123456"));
         assert!(!memory.updated_at.is_empty());
         assert!(!memory.entries[0].updated_at.is_empty());
+    }
+
+    /** 模型 transcript 独立落库，不能写进会话 payload_json 以免撑爆前端快照。 */
+    #[test]
+    fn agent_session_transcript_round_trips_independently_of_session_payload() {
+        let dir = tempdir().unwrap();
+        let database_path = dir.path().join("transcript.sqlite3");
+        let mut connection = Connection::open(&database_path).unwrap();
+        ensure_database_schema(&connection, &database_path).unwrap();
+
+        let messages = vec![
+            json!({ "role": "user", "content": "完整工具结果应保留" }),
+            json!({
+                "role": "tool",
+                "tool_call_id": "call_abc123",
+                "content": "{\"matches\":[{\"title\":\"完整命中\"}]}"
+            }),
+        ];
+        persist_agent_session_transcript(&connection, "session-a", &messages).unwrap();
+
+        let loaded =
+            load_agent_session_transcript_from_connection(&connection, "session-a").unwrap();
+        assert_eq!(loaded, Some(messages));
+
+        let mut snapshot = test_workspace_snapshot();
+        snapshot
+            .sessions
+            .push(test_agent_session("session-a", "2026/01/01 00:00"));
+        let transaction = connection.transaction().unwrap();
+        persist_sessions_in_transaction(&transaction, &snapshot).unwrap();
+        transaction.commit().unwrap();
+
+        let payload_json: String = connection
+            .query_row(
+                "SELECT payload_json FROM agent_sessions WHERE id = ?1",
+                ["session-a"],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(!payload_json.contains("完整工具结果应保留"));
+        assert!(!payload_json.contains("call_abc123"));
+        let loaded =
+            load_agent_session_transcript_from_connection(&connection, "session-a").unwrap();
+        assert!(loaded.unwrap()[0]["content"]
+            .as_str()
+            .unwrap()
+            .contains("完整工具结果应保留"));
+    }
+
+    /** 会话从快照中消失后，对应 transcript 应被清理。 */
+    #[test]
+    fn persist_sessions_removes_orphan_transcripts() {
+        let dir = tempdir().unwrap();
+        let database_path = dir.path().join("transcript-orphan.sqlite3");
+        let mut connection = Connection::open(&database_path).unwrap();
+        ensure_database_schema(&connection, &database_path).unwrap();
+
+        persist_agent_session_transcript(
+            &connection,
+            "session-keep",
+            &[json!({ "role": "user", "content": "保留" })],
+        )
+        .unwrap();
+        persist_agent_session_transcript(
+            &connection,
+            "session-drop",
+            &[json!({ "role": "user", "content": "删除" })],
+        )
+        .unwrap();
+
+        let mut snapshot = test_workspace_snapshot();
+        snapshot
+            .sessions
+            .push(test_agent_session("session-keep", "2026/01/01 00:00"));
+        let transaction = connection.transaction().unwrap();
+        persist_sessions_in_transaction(&transaction, &snapshot).unwrap();
+        transaction.commit().unwrap();
+
+        assert!(
+            load_agent_session_transcript_from_connection(&connection, "session-keep")
+                .unwrap()
+                .is_some()
+        );
+        assert!(
+            load_agent_session_transcript_from_connection(&connection, "session-drop")
+                .unwrap()
+                .is_none()
+        );
     }
 }
