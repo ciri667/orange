@@ -9,6 +9,7 @@ mod fs_guard;
 mod im;
 mod logging;
 mod model_provider;
+mod provider_error;
 mod runtime;
 mod skill_execution;
 mod skills;

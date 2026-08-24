@@ -9,6 +9,7 @@ use crate::domain::{
     MEMORY_CATEGORY_OTHER, MEMORY_CATEGORY_TAG_CONVENTION,
 };
 use crate::model_provider;
+use crate::provider_error;
 use crate::skills;
 use crate::storage::{create_id, format_local_datetime};
 use reqwest::Client;
@@ -96,6 +97,9 @@ const AUTO_COMPACT_PROMPT_CHAR_THRESHOLD: usize = 48_000;
 
 /** 工具结果回填给模型时的最大 JSON 字符数。 */
 const MAX_TOOL_RESULT_CHARS: usize = 9000;
+
+/** 内层工具续跑安全帽；有 tool call 就继续，error/abort/length 在循环内立刻停。 */
+const MAX_INNER_TOOL_ROUNDS: usize = 12;
 
 /** 请求审计最多记录的发送片段摘要数量。 */
 const MAX_AUDIT_FRAGMENTS: usize = 8;
@@ -808,7 +812,7 @@ pub async fn run_agent_turn(
         Ok(result) => result,
         Err(error) => {
             tracer.mark_failed();
-            let error_text = format!("模型请求失败：{error}");
+            let error_text = provider_error::user_facing_provider_error(&error);
             tracer.finish(Some(&error_text), Some(app));
             model_error_turn(
                 snapshot,
@@ -949,19 +953,20 @@ async fn run_model_loop(
         request.prompt.chars().count()
     );
 
-    for _ in 0..3 {
+    for _ in 0..MAX_INNER_TOOL_ROUNDS {
         audit_trail.record_model_request();
-        let response = send_chat_completion_logged(
+        let response = send_chat_completion_with_policy(
             &client,
             &provider,
             &selected_model_id,
             &endpoint,
             &api_key,
-            &model_messages,
+            &mut model_messages,
             Some(&tool_schemas),
             None,
         )
         .await?;
+        let finish_reason = provider_error::parse_finish_reason(&response);
         let message = response
             .get("choices")
             .and_then(Value::as_array)
@@ -973,15 +978,57 @@ async fn run_model_loop(
         let model_tool_calls = extracted_tool_calls.tool_calls;
         log::debug!(
             target: "agent_runtime",
-            "模型返回工具调用：session={} tool_call_count={} dsml_visible_chars={}",
+            "模型返回工具调用：session={} tool_call_count={} dsml_visible_chars={} finish_reason={:?}",
             snapshot.sessions[session_index].id,
             model_tool_calls.len(),
-            extracted_tool_calls.visible_content.chars().count()
+            extracted_tool_calls.visible_content.chars().count(),
+            finish_reason
         );
+
+        if provider_error::is_length_stop(finish_reason.as_deref()) && !model_tool_calls.is_empty() {
+            log::info!(
+                target: "agent_runtime",
+                "finish_reason=length，整批拒绝 {} 个 tool call",
+                model_tool_calls.len()
+            );
+            model_messages.push(normalize_assistant_tool_message(
+                message,
+                &model_tool_calls,
+                &extracted_tool_calls.visible_content,
+            ));
+            tracer.push_thinking(&extracted_tool_calls.visible_content, Some(app));
+            let failure_text = "工具参数可能被截断，本批调用未执行。请用完整参数重新发送。";
+            for model_tool_call in &model_tool_calls {
+                let failed_call = AgentToolCall {
+                    id: create_id("tool"),
+                    name: model_tool_call_name(model_tool_call),
+                    status: "failed".to_owned(),
+                    summary: failure_text.to_owned(),
+                    args: parse_tool_args(model_tool_call),
+                };
+                tool_calls.push(failed_call);
+                model_messages.push(json!({
+                    "role": "tool",
+                    "tool_call_id": model_tool_call.get("id").and_then(Value::as_str).unwrap_or("tool-call"),
+                    "content": json!({ "success": false, "error": failure_text }).to_string()
+                }));
+            }
+            last_failed_tool_summary = Some(failure_text.to_owned());
+            continue;
+        }
 
         if model_tool_calls.is_empty() {
             let content = if extracted_tool_calls.visible_content.is_empty() {
-                "模型未返回可展示内容。".to_owned()
+                if provider_error::is_length_stop(finish_reason.as_deref()) {
+                    "模型输出因长度限制被截断，没有完整回复。请用更短的下一步继续。".to_owned()
+                } else {
+                    "模型未返回可展示内容。".to_owned()
+                }
+            } else if provider_error::is_length_stop(finish_reason.as_deref()) {
+                format!(
+                    "{}\n\n（输出因长度限制被截断）",
+                    extracted_tool_calls.visible_content
+                )
             } else {
                 extracted_tool_calls.visible_content
             };
@@ -1223,40 +1270,8 @@ async fn run_model_loop(
         }
     }
 
-    audit_trail.record_model_request();
-    let response = send_chat_completion_logged(
-        &client,
-        &provider,
-        &selected_model_id,
-        &endpoint,
-        &api_key,
-        &model_messages,
-        None,
-        None,
-    )
-    .await?;
-    let final_message = response
-        .get("choices")
-        .and_then(Value::as_array)
-        .and_then(|choices| choices.first())
-        .and_then(|choice| choice.get("message"))
-        .cloned();
-    let raw_final_content = final_message
-        .as_ref()
-        .map(extract_tool_calls_from_message)
-        .map(|extraction| extraction.visible_content)
-        .filter(|content| !content.trim().is_empty())
-        .or_else(|| {
-            final_message
-                .as_ref()
-                .and_then(|message| message.get("content"))
-                .and_then(Value::as_str)
-                .map(strip_dsml_tool_calls)
-        })
-        .filter(|content| !content.trim().is_empty())
-        .unwrap_or_else(|| "我已经完成工具调用，但模型没有返回最终说明。".to_owned());
     let content = reconcile_final_content_with_tool_status(
-        raw_final_content,
+        "已达到本轮工具步数上限。请根据已有结果继续，或再发一条指令。".to_owned(),
         last_failed_tool_summary.as_deref(),
     );
     tracer.finish(Some(&content), Some(app));
@@ -2339,6 +2354,83 @@ fn current_pending_change_summary(session: &AgentSession) -> Option<String> {
         .and_then(summarize_pending_change)
 }
 
+/** 超窗时压缩已装箱的 tool 结果，避免把超窗请求原样再打一遍。 */
+fn shrink_model_messages_after_overflow(messages: &mut Vec<Value>) {
+    for message in messages.iter_mut() {
+        if message.get("role").and_then(Value::as_str) != Some("tool") {
+            continue;
+        }
+        let Some(content) = message.get("content").and_then(Value::as_str) else {
+            continue;
+        };
+        if content.chars().count() > 600 {
+            message["content"] = json!(truncate_chars(content, 600));
+        }
+    }
+}
+
+/** 发送模型请求：配额不重试，超窗 compact 后最多一次，429/5xx 指数退避。 */
+async fn send_chat_completion_with_policy(
+    client: &Client,
+    provider: &LlmProviderConfig,
+    model_id: &str,
+    endpoint: &str,
+    api_key: &str,
+    messages: &mut Vec<Value>,
+    tool_schemas: Option<&Value>,
+    response_format: Option<&Value>,
+) -> Result<Value, String> {
+    let mut delay = Duration::from_millis(400);
+    let mut overflow_retried = false;
+    let mut retryable_attempts = 0usize;
+    loop {
+        match send_chat_completion_logged(
+            client,
+            provider,
+            model_id,
+            endpoint,
+            api_key,
+            messages,
+            tool_schemas,
+            response_format,
+        )
+        .await
+        {
+            Ok(value) => return Ok(value),
+            Err(error) => {
+                let status = provider_error::parse_http_status_from_error(&error);
+                let kind = provider_error::classify_provider_error(&error, status);
+                log::info!(
+                    target: "agent_runtime",
+                    "模型请求失败分类：kind={:?} http_status={:?} overflow_retried={} retryable_attempts={}",
+                    kind,
+                    status,
+                    overflow_retried,
+                    retryable_attempts
+                );
+                match kind {
+                    provider_error::ProviderErrorKind::Abort
+                    | provider_error::ProviderErrorKind::Quota => {
+                        return Err(provider_error::user_facing_provider_error(&error));
+                    }
+                    provider_error::ProviderErrorKind::Overflow if !overflow_retried => {
+                        overflow_retried = true;
+                        shrink_model_messages_after_overflow(messages);
+                        continue;
+                    }
+                    provider_error::ProviderErrorKind::Retryable if retryable_attempts < 3 => {
+                        retryable_attempts += 1;
+                        std::thread::sleep(delay);
+                        delay = delay.saturating_mul(2);
+                        continue;
+                    }
+                    _ => return Err(provider_error::user_facing_provider_error(&error)),
+                }
+            }
+        }
+    }
+}
+
 /** 发送一次 chat completions 请求并记录 providerId/model/status/耗时/endpointHost；错误统一脱敏。 */
 async fn send_chat_completion_logged(
     client: &Client,
@@ -2867,9 +2959,23 @@ fn parse_context_summary_response(response: Value) -> Result<AgentContextSummary
         .ok_or_else(|| "summary 响应缺少 content".to_owned())?;
     let json_text = extract_json_object_text(content)
         .ok_or_else(|| "summary 响应不是 JSON object".to_owned())?;
+    let mut parsed: Value = serde_json::from_str(&json_text)
+        .map_err(|error| format!("summary JSON 解析失败：{error}"))?;
+    coerce_context_summary_json(&mut parsed);
 
-    serde_json::from_str::<AgentContextSummary>(&json_text)
-        .map_err(|error| format!("summary JSON 解析失败：{error}"))
+    serde_json::from_value(parsed).map_err(|error| format!("summary JSON 解析失败：{error}"))
+}
+
+/** 兼容部分 provider 把 json_schema integer 写成字符串，避免整份工作记忆被丢掉。 */
+fn coerce_context_summary_json(value: &mut Value) {
+    let Some(object) = value.as_object_mut() else {
+        return;
+    };
+    if let Some(text) = object.get("version").and_then(Value::as_str) {
+        if let Ok(number) = text.trim().parse::<u32>() {
+            object.insert("version".to_owned(), json!(number));
+        }
+    }
 }
 
 /** 从模型响应中提取第一个 JSON object，避免 fenced JSON 导致解析失败。 */
@@ -4634,6 +4740,23 @@ mod tests {
 
         assert_eq!(summary.current_goal.as_deref(), Some("继续改写"));
         assert_eq!(summary.completed_work, vec!["已检索笔记".to_owned()]);
+    }
+
+    /** 部分兼容 provider 会把 integer 输出成字符串 "1"，不能因此丢掉整份工作记忆。 */
+    #[test]
+    fn parse_context_summary_response_accepts_string_version() {
+        let response = json!({
+            "choices": [{
+                "message": {
+                    "content": "{\"version\":\"1\",\"updatedAt\":\"2026-08-24 19:02:03\",\"currentGoal\":\"记住苹果是红色的\",\"userConstraints\":[],\"decisions\":[],\"completedWork\":[],\"pendingTasks\":[],\"touchedNotes\":[],\"pendingChangeSummary\":null,\"openQuestions\":[],\"lastSummarizedMessageId\":null,\"lastCompactedMessageId\":null}"
+                }
+            }]
+        });
+        let summary = parse_context_summary_response(response)
+            .expect("string version should coerce to u32");
+
+        assert_eq!(summary.version, 1);
+        assert_eq!(summary.current_goal.as_deref(), Some("记住苹果是红色的"));
     }
 
     /** 已启用的跨会话记忆应作为独立 system 层注入，且位于项目指令之后、会话工作记忆之前。 */
