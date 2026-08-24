@@ -5,10 +5,30 @@
 橘记 (Orange) is a Vite + React + TypeScript frontend with a Tauri v2 Rust desktop backend.
 
 - `src/` contains the application UI, split by feature: `workspace/`, `knowledge-base/`, `editor/`, `agent/`, `diff/`, `settings/`, and shared types/utilities in `shared/`.
-- `src-tauri/src/` contains Rust commands, local storage, agent runtime, domain types, and secure file operations.
+- `src-tauri/src/` contains Tauri commands, local storage, agent runtime, domain types, and secure file operations.
 - `public/` stores static frontend assets such as the logo.
 - `docs/product/` and `docs/prototype/` hold product notes and archived prototype references.
 - Generated output belongs in `dist/` and `src-tauri/target/`; do not edit these by hand.
+
+## Module Boundaries
+
+New code should land in the module that already owns that concern. Do not grow the remaining large files when a domain module exists.
+
+**Rust (`src-tauri/src/`)**
+
+- `commands/` — Tauri IPC adapters grouped by domain (`workspace`, `knowledge`, `notes`, `documents`, `history`, `sessions`, `settings`, `skills`, `im`, `agent`, `logs`). Keep command names stable. Shared blocking/IO helpers live in `commands/common.rs`. Register commands from the domain module in `lib.rs` (for example `commands::notes::create_note`).
+- `storage/` — SQLite, FTS, filesystem scan/write, keyring, document history, and preview extraction. Public functions stay reachable as `crate::storage::…`. New persistence code belongs in the matching submodule (`ids`, `db`, `sessions`, `config`, `memory`, `logs`, `history`, `workspace`, `files`).
+- `agent_tools/` — closed-set tools (`types`, `registry`, `execute`). Do not add a 7th tool name; extend `search` / `read` / `list` / `edit` / `write` / `run`.
+- `runtime/` — agent loop in `mod.rs`, DeepSeek DSML parsing in `dsml.rs`.
+- `domain.rs` — IPC and persistence DTOs. Prefer existing types over ad-hoc JSON maps.
+- `im/` — IM provider routing; Feishu-specific code stays in `im/feishu.rs`.
+- `fs_guard.rs`, `agent_writes.rs`, `text_edit.rs` — path policy and confirmed writes. Agent file mutations must keep diff → confirm → hash check → atomic write.
+
+**Frontend (`src/`)**
+
+- Feature folders own UI for that surface. `workspace/` orchestrates snapshot state; do not introduce a global store.
+- `shared/tauriApi.ts` (moving into `shared/api/`) is the only IPC boundary. Browser mock fallbacks stay next to that API, not in feature components.
+- Settings sections belong under `settings/`; do not add new settings UI into `WorkspaceShell.tsx`.
 
 ## Build, Test, and Development Commands
 
