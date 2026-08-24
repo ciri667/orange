@@ -1,4 +1,6 @@
 mod agent;
+#[cfg(test)]
+mod agent_eval;
 mod agent_tools;
 mod agent_trace;
 mod agent_writes;
