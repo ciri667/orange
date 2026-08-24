@@ -1055,7 +1055,11 @@ mod tests {
             "现在",
         );
 
-        let model_ids: Vec<&str> = provider.models.iter().map(|model| model.id.as_str()).collect();
+        let model_ids: Vec<&str> = provider
+            .models
+            .iter()
+            .map(|model| model.id.as_str())
+            .collect();
         assert_eq!(
             model_ids,
             vec![

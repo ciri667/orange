@@ -55,12 +55,13 @@ fn run_scripted_tool_loop(
         }
 
         if model_tool_calls.is_empty() {
-            final_content = Some(if visible.is_empty() && is_length_stop(finish_reason.as_deref())
-            {
-                "模型输出因长度限制被截断，没有完整回复。请用更短的下一步继续。".to_owned()
-            } else {
-                visible
-            });
+            final_content = Some(
+                if visible.is_empty() && is_length_stop(finish_reason.as_deref()) {
+                    "模型输出因长度限制被截断，没有完整回复。请用更短的下一步继续。".to_owned()
+                } else {
+                    visible
+                },
+            );
             break;
         }
 
@@ -329,7 +330,8 @@ mod tests {
             session_index: 0,
             request: &request,
         };
-        let first_outcome = registry.execute_named(&mut context, "read", json!({ "fileId": "note-a" }));
+        let first_outcome =
+            registry.execute_named(&mut context, "read", json!({ "fileId": "note-a" }));
         assert_eq!(first_outcome.payload["truncated"], true);
         let next_offset = first_outcome.payload["nextOffset"].as_u64().unwrap();
         let first_text = first_outcome.payload["note"]["content"]
@@ -464,22 +466,38 @@ mod tests {
                 scripted_response(
                     "stop",
                     "",
-                    vec![scripted_tool_call("r1", "read", json!({ "fileId": "note-a" }))],
+                    vec![scripted_tool_call(
+                        "r1",
+                        "read",
+                        json!({ "fileId": "note-a" }),
+                    )],
                 ),
                 scripted_response(
                     "stop",
                     "",
-                    vec![scripted_tool_call("r2", "read", json!({ "fileId": "note-a" }))],
+                    vec![scripted_tool_call(
+                        "r2",
+                        "read",
+                        json!({ "fileId": "note-a" }),
+                    )],
                 ),
                 scripted_response(
                     "stop",
                     "",
-                    vec![scripted_tool_call("r3", "read", json!({ "fileId": "note-a" }))],
+                    vec![scripted_tool_call(
+                        "r3",
+                        "read",
+                        json!({ "fileId": "note-a" }),
+                    )],
                 ),
                 scripted_response(
                     "stop",
                     "",
-                    vec![scripted_tool_call("r4", "read", json!({ "fileId": "note-a" }))],
+                    vec![scripted_tool_call(
+                        "r4",
+                        "read",
+                        json!({ "fileId": "note-a" }),
+                    )],
                 ),
                 scripted_response("stop", "已读完四次。", vec![]),
             ],

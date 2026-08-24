@@ -103,14 +103,15 @@ pub fn parse_http_status_from_error(text: &str) -> Option<u16> {
 pub fn user_facing_provider_error(text: &str) -> String {
     match classify_provider_error(text, parse_http_status_from_error(text)) {
         ProviderErrorKind::Abort => "模型请求已取消。".to_owned(),
-        ProviderErrorKind::Quota => {
-            "模型额度或账单不可用，请检查 Provider 配额后再试。".to_owned()
-        }
+        ProviderErrorKind::Quota => "模型额度或账单不可用，请检查 Provider 配额后再试。".to_owned(),
         ProviderErrorKind::Overflow => {
             "模型上下文超出窗口。已尝试压缩后仍失败，请缩短输入或新开会话。".to_owned()
         }
         ProviderErrorKind::Retryable => {
-            format!("模型服务暂时不可用：{}", crate::model_provider::redact_model_error_text(text))
+            format!(
+                "模型服务暂时不可用：{}",
+                crate::model_provider::redact_model_error_text(text)
+            )
         }
         ProviderErrorKind::Other => crate::model_provider::redact_model_error_text(text),
     }
