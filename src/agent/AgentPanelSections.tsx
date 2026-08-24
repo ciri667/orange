@@ -1,4 +1,4 @@
-import { Database, FileText, Layers3, MessageSquareText, ShieldAlert, Sparkles, Trash2, X } from "lucide-react";
+import { Clock, Database, FileText, Layers3, MessageSquareText, ShieldAlert, Sparkles, Trash2, X } from "lucide-react";
 import { useEffect, useRef } from "react";
 import ReactMarkdown from "react-markdown";
 import rehypeSanitize from "rehype-sanitize";
@@ -474,11 +474,14 @@ export function AgentMessageList({
   notes,
   documents,
   liveTurn,
+  queuedFollowUp,
 }: {
   activeSession: AgentSession;
   notes: Note[];
   documents: WorkspaceDocument[];
   liveTurn?: AgentTurnProgressEvent | null;
+  /** 当前回合结束后才会发给模型的下一条用户指令。 */
+  queuedFollowUp?: string | null;
 }) {
   const persistedIds = new Set(activeSession.messages.map((message) => message.id));
   const showLiveTurn =
@@ -488,11 +491,11 @@ export function AgentMessageList({
   useEffect(() => {
     // 过程增量到达时跟到底部，避免执行中展开的步骤被旧消息挡住。
     listRef.current?.scrollTo({ top: listRef.current.scrollHeight });
-  }, [activeSession.messages.length, liveTurn?.steps.length, liveTurn?.content, liveTurn?.status]);
+  }, [activeSession.messages.length, liveTurn?.steps.length, liveTurn?.content, liveTurn?.status, queuedFollowUp]);
 
   return (
     <div className="min-h-0 flex-1 overflow-auto pr-0.5" aria-live="polite" ref={listRef}>
-      {activeSession.messages.length === 0 && !showLiveTurn && (
+      {activeSession.messages.length === 0 && !showLiveTurn && !queuedFollowUp && (
         <div className="grid min-h-full place-content-center justify-items-center gap-1.5 px-3 py-6 text-center text-ink-muted">
           <Sparkles size={16} className="text-agent opacity-70" />
           <p className="m-0 text-[13px] font-[650] text-ink">从下面开始提问</p>
@@ -516,6 +519,18 @@ export function AgentMessageList({
           notes={notes}
         />
       )}
+      {queuedFollowUp ? (
+        <AgentMessageItem
+          documents={documents}
+          message={{
+            id: "queued-follow-up",
+            role: "user",
+            content: queuedFollowUp,
+          }}
+          notes={notes}
+          queued
+        />
+      ) : null}
     </div>
   );
 }
@@ -526,11 +541,14 @@ function AgentMessageItem({
   notes,
   documents,
   liveStatus,
+  queued = false,
 }: {
   message: AgentMessage;
   notes: Note[];
   documents: WorkspaceDocument[];
   liveStatus?: AgentTurnProgressEvent["status"];
+  /** 尚未进入模型的排队用户消息，只存在于当前界面。 */
+  queued?: boolean;
 }) {
   const usesTurnTrace =
     liveStatus != null || message.turnDurationMs != null || Boolean(message.trace?.length);
@@ -541,15 +559,23 @@ function AgentMessageItem({
 
   return (
     <article
+      aria-label={queued ? "排队中的下一条指令" : undefined}
       className={cn(
         "min-w-0 rounded-xl border border-transparent bg-surface-translucent px-3 py-2.5 [&+&]:mt-2.5",
         message.role === "user" && "ml-[18px] bg-primary-wash text-agent-strong",
         message.role === "assistant" && "mr-2.5",
+        queued && "border-dashed border-primary-border opacity-80",
       )}
     >
       <div className={cn("flex items-center gap-1.5 text-xs font-bold text-ink-muted", message.role === "assistant" && "[&_svg]:text-agent")}>
         {message.role === "assistant" ? <Sparkles size={14} /> : <MessageSquareText size={14} />}
         <span>{message.role === "assistant" ? "橘记 Agent" : "你"}</span>
+        {queued ? (
+          <span className="inline-flex items-center gap-1 rounded-full border border-primary-border bg-surface px-1.5 py-px text-[11px] font-semibold text-ink-muted">
+            <Clock size={11} />
+            排队中
+          </span>
+        ) : null}
       </div>
       {message.mentionedFileIds?.length ? (
         <div className="my-2 flex flex-wrap gap-[5px]" aria-label="本轮 @ 文件">

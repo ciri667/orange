@@ -379,6 +379,10 @@ export function WorkspaceShell() {
   const [liveTurn, setLiveTurn] = useState<AgentTurnProgressEvent | null>(null);
   /** 只在本轮 invoke 进行中接受过程事件，避免结束后迟到事件把 live 气泡拉回来。 */
   const liveTurnActiveRef = useRef(false);
+  /** busy 时最多排队一条用户指令；ref 供当前 turn 的 finally 读取，避免排队后的 state 尚未提交。 */
+  const queuedFollowUpRef = useRef<string | null>(null);
+  /** 排队中的下一条用户指令，仅用于界面展示，不写入会话快照。 */
+  const [queuedFollowUp, setQueuedFollowUp] = useState<string | null>(null);
   /** 忙碌状态文案只展示当前操作类型，不包含路径、密钥或请求内容。 */
   const [busyLabel, setBusyLabel] = useState("");
   /** 顶部/侧栏轻量通知，展示用户操作结果和可恢复错误。 */
@@ -692,6 +696,39 @@ export function WorkspaceShell() {
   function endBusy() {
     setIsBusy(false);
     setBusyLabel("");
+  }
+
+  /** busy 时最多接受一条 follow-up；成功入队后清空输入框，让用户看到消息已离开编辑区。 */
+  function enqueueFollowUp(prompt: string) {
+    if (queuedFollowUpRef.current) {
+      setNotice("已有一条排队指令，请等当前回合结束。");
+      return;
+    }
+
+    queuedFollowUpRef.current = prompt;
+    setQueuedFollowUp(prompt);
+    setAgentPrompt("");
+    setNotice("当前回合结束后会处理下一条指令。");
+  }
+
+  /** 取出排队指令并清掉展示态；finally 里用返回值再开一轮，避免重复发送。 */
+  function takeQueuedFollowUp() {
+    const prompt = queuedFollowUpRef.current;
+
+    queuedFollowUpRef.current = null;
+    setQueuedFollowUp(null);
+    return prompt;
+  }
+
+  /** 用户取消尚未进入模型的排队指令，不影响当前正在跑的回合。 */
+  function handleClearQueuedFollowUp() {
+    if (!queuedFollowUpRef.current) {
+      return;
+    }
+
+    queuedFollowUpRef.current = null;
+    setQueuedFollowUp(null);
+    setNotice("已取消排队指令。");
   }
 
   /** 打开应用内确认弹窗，调用方只在用户确认后执行真实副作用。 */
@@ -1921,9 +1958,16 @@ export function WorkspaceShell() {
       return;
     }
 
+    if (liveTurnActiveRef.current && !presetPrompt) {
+      enqueueFollowUp(prompt);
+      return;
+    }
+
     const optimisticMessage = buildOptimisticUserMessage(prompt, action, turnMentionedFileIds);
     const promptBeforeSubmit = agentPrompt;
     let didPersistOptimisticMessage = false;
+    // 排队的下一条必须带着本轮已经提交的快照；闭包里的 currentSnapshot 仍是点发送时的旧值。
+    let latestSnapshot = sourceSnapshot;
 
     liveTurnActiveRef.current = true;
     setLiveTurn(null);
@@ -1976,10 +2020,12 @@ export function WorkspaceShell() {
       snapshotForTurn = optimisticTurn.snapshot;
       // 先提交本地快照，让用户发送的消息立即出现在对话框中，再等待 Agent 慢任务。
       commitSnapshot(snapshotForTurn);
+      latestSnapshot = snapshotForTurn;
       setAgentPrompt("");
       // 消息已携带引用 ID，发送后清空输入态；请求失败时会在 catch 中恢复，方便重试。
       setMentionedFileIds([]);
       snapshotForTurn = await saveSession(snapshotForTurn, sessionForTurn);
+      latestSnapshot = snapshotForTurn;
       didPersistOptimisticMessage = true;
       logInfo("用户消息已乐观落库。", {
         category: "frontend",
@@ -2013,6 +2059,7 @@ export function WorkspaceShell() {
       );
 
       commitSnapshot(result.snapshot);
+      latestSnapshot = result.snapshot;
       setLiveTurn(null);
       if (!presetPrompt) {
         setExplicitSkillIds([]);
@@ -2027,6 +2074,7 @@ export function WorkspaceShell() {
       }
       if (!didPersistOptimisticMessage) {
         commitSnapshot(sourceSnapshot);
+        latestSnapshot = sourceSnapshot;
         setAgentPrompt(promptBeforeSubmit);
       }
       setNotice(error instanceof Error ? error.message : String(error));
@@ -2034,6 +2082,10 @@ export function WorkspaceShell() {
       liveTurnActiveRef.current = false;
       setLiveTurn(null);
       endBusy();
+      const queuedPrompt = takeQueuedFollowUp();
+      if (queuedPrompt) {
+        void handleSubmitPrompt("ask", queuedPrompt, latestSnapshot);
+      }
     }
   }
 
@@ -2607,6 +2659,7 @@ export function WorkspaceShell() {
             turnModelSelection={turnModelSelection}
             isBusy={isBusy}
             liveTurn={liveTurn}
+            queuedFollowUp={queuedFollowUp}
             isSessionListOpen={isSessionListOpen}
             isSessionContextOpen={isSessionContextOpen}
             isScopeSelectorOpen={isScopeSelectorOpen}
@@ -2622,6 +2675,7 @@ export function WorkspaceShell() {
             onSelectedSkillIdsChange={setExplicitSkillIds}
             onSelectedMentionedFileIdsChange={setMentionedFileIds}
             onSubmitPrompt={() => handleSubmitPrompt("ask")}
+            onClearQueuedFollowUp={handleClearQueuedFollowUp}
             onTurnModelSelectionChange={setTurnModelSelection}
             onSetSessionModelSelection={handleSetSessionModelSelection}
             onCompactAgentContext={handleCompactAgentContext}

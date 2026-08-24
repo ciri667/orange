@@ -44,6 +44,7 @@ export function AgentPanel({
   turnModelSelection,
   isBusy,
   liveTurn,
+  queuedFollowUp,
   isSessionListOpen,
   isSessionContextOpen,
   isScopeSelectorOpen,
@@ -59,6 +60,7 @@ export function AgentPanel({
   onSelectedSkillIdsChange,
   onSelectedMentionedFileIdsChange,
   onSubmitPrompt,
+  onClearQueuedFollowUp,
   onTurnModelSelectionChange,
   onSetSessionModelSelection,
   onCompactAgentContext,
@@ -93,6 +95,8 @@ export function AgentPanel({
   isBusy: boolean;
   /** 当前正在执行的过程快照；完成后由持久化助手消息接管。 */
   liveTurn?: AgentTurnProgressEvent | null;
+  /** 当前回合结束后才会发给模型的下一条用户指令；只存在于界面，未写入会话。 */
+  queuedFollowUp?: string | null;
   isSessionListOpen: boolean;
   isSessionContextOpen: boolean;
   isScopeSelectorOpen: boolean;
@@ -108,6 +112,8 @@ export function AgentPanel({
   onSelectedSkillIdsChange: (skillIds: string[]) => void;
   onSelectedMentionedFileIdsChange: (fileIds: string[]) => void;
   onSubmitPrompt: () => void;
+  /** 取消尚未进入模型的排队指令。 */
+  onClearQueuedFollowUp?: () => void;
   onTurnModelSelectionChange: (selection: string) => void;
   onSetSessionModelSelection: (selection: string) => void;
   onCompactAgentContext: () => void;
@@ -202,6 +208,7 @@ export function AgentPanel({
         documents={documents}
         liveTurn={liveTurn}
         notes={notes}
+        queuedFollowUp={queuedFollowUp}
       />
 
       {activeSession.pendingExecution?.status === "pending" && (
@@ -277,10 +284,12 @@ export function AgentPanel({
         agentSecurity={agentSecurity}
         turnModelSelection={turnModelSelection}
         isBusy={isBusy}
+        queuedFollowUp={queuedFollowUp}
         onPromptChange={onPromptChange}
         onSelectedSkillIdsChange={onSelectedSkillIdsChange}
         onSelectedMentionedFileIdsChange={onSelectedMentionedFileIdsChange}
         onSubmitPrompt={onSubmitPrompt}
+        onClearQueuedFollowUp={onClearQueuedFollowUp}
         onTurnModelSelectionChange={onTurnModelSelectionChange}
         onSecurityLevelChange={onSecurityLevelChange}
       />

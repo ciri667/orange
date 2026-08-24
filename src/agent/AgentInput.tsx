@@ -122,10 +122,12 @@ export function AgentInput({
   agentSecurity,
   turnModelSelection,
   isBusy,
+  queuedFollowUp,
   onPromptChange,
   onSelectedSkillIdsChange,
   onSelectedMentionedFileIdsChange,
   onSubmitPrompt,
+  onClearQueuedFollowUp,
   onTurnModelSelectionChange,
   onSecurityLevelChange,
 }: {
@@ -142,10 +144,14 @@ export function AgentInput({
   /** 本轮显式选择的 provider/model，空字符串表示跟随会话/全局默认。 */
   turnModelSelection: string;
   isBusy: boolean;
+  /** 当前回合结束后才会发给模型的下一条用户指令。 */
+  queuedFollowUp?: string | null;
   onPromptChange: (value: string) => void;
   onSelectedSkillIdsChange: (skillIds: string[]) => void;
   onSelectedMentionedFileIdsChange?: (fileIds: string[]) => void;
   onSubmitPrompt: () => void;
+  /** 取消尚未进入模型的排队指令。 */
+  onClearQueuedFollowUp?: () => void;
   onTurnModelSelectionChange: (selection: string) => void;
   onSecurityLevelChange: (level: AgentSession["securityLevel"]) => void;
 }) {
@@ -571,8 +577,23 @@ export function AgentInput({
     allowedNetworkDomains: [],
   };
 
+  const promptPlaceholder = queuedFollowUp
+    ? "已有一条排队指令，当前回合结束后发送"
+    : isBusy
+      ? "发送后将在当前回合结束后处理"
+      : "问橘记，或 @ 文件、/ Skill";
+  const sendTitle = queuedFollowUp ? "已有一条排队指令" : isBusy ? "排队到当前回合之后发送" : "发送";
+
   return (
     <footer className="flex min-w-0 shrink-0 flex-col gap-1 rounded-2xl border border-border-translucent bg-surface-translucent px-2.5 py-2 pr-2 shadow-[0_8px_20px_rgba(47,39,29,0.05)]">
+      {queuedFollowUp ? (
+        <div className="flex min-w-0 items-center gap-2 px-0.5 pt-0.5" role="status" aria-label="输入区的排队指令">
+          <Chip className="max-w-full flex-1" onRemove={onClearQueuedFollowUp} removeLabel="取消排队指令">
+            <span className="shrink-0">排队中</span>
+            <OverflowTooltipText className="min-w-0" text={queuedFollowUp} logArea="agent_queued_follow_up" />
+          </Chip>
+        </div>
+      ) : null}
       {hasComposerChips && (
         <div className="flex min-w-0 items-center justify-start gap-2 px-0.5 pt-0.5 max-[760px]:items-start">
           <div className="inline-flex min-w-0 items-center gap-[7px] max-[760px]:flex-wrap">
@@ -687,9 +708,8 @@ export function AgentInput({
           onCompositionStart={handlePromptCompositionStart}
           onCompositionEnd={handlePromptCompositionEnd}
           onKeyDown={handlePromptKeyDown}
-          placeholder="问橘记，或 @ 文件、/ Skill"
+          placeholder={promptPlaceholder}
           aria-label="Agent 输入"
-          disabled={isBusy}
         />
       </div>
       <div className="flex min-w-0 items-center gap-2 pt-0.5">
@@ -719,10 +739,10 @@ export function AgentInput({
           variant="primary"
           size="compact"
           className="inline-grid size-[34px] min-h-[34px] min-w-[34px] shrink-0 place-items-center rounded-full border-transparent bg-agent p-0 hover:enabled:bg-agent-strong disabled:opacity-[0.38]"
-          title="发送"
-          aria-label="发送"
+          title={sendTitle}
+          aria-label={sendTitle}
           onClick={onSubmitPrompt}
-          disabled={isBusy || !prompt.trim()}
+          disabled={!prompt.trim() || Boolean(queuedFollowUp)}
         >
           <ArrowRight size={16} />
         </Button>
