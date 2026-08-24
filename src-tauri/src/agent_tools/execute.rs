@@ -1,7 +1,12 @@
+use super::registry::{
+    parse_limit_arg, read_window, slice_chars, tool_path_arg, truncation_hint, write_kind,
+};
+use super::types::*;
+use crate::domain::AgentTurnRequest;
 use crate::domain::{
-    AgentSecurityLevel, AgentSecuritySettings, AgentSession, AgentToolCall, AgentTurnRequest,
-    Citation, ProposedChange, ProposedChangeSet, ProposedFileOperation, SkillExecutionRequest,
-    WorkspaceDocument, WorkspaceSnapshot, AGENT_DIRECT_EXECUTION_ID, AGENT_DIRECT_SOURCE,
+    AgentSecurityLevel, AgentSession, Citation, ProposedChange, ProposedChangeSet,
+    ProposedFileOperation, SkillExecutionRequest, WorkspaceDocument, WorkspaceSnapshot,
+    AGENT_DIRECT_EXECUTION_ID, AGENT_DIRECT_SOURCE,
 };
 use crate::storage::{create_id, format_local_datetime, hash_content};
 use crate::text_edit::{
@@ -12,210 +17,8 @@ use serde_json::{json, Value};
 use std::collections::HashSet;
 use tauri::AppHandle;
 
-/** 单次 read_note 工具最多发送给模型的正文字符数。 */
-pub(crate) const MAX_READ_NOTE_CHARS: usize = 6000;
-
-/** list_tree 工具最多发送的目录、Markdown 和普通文档摘要数量。 */
-const MAX_TREE_ITEMS: usize = 120;
-
-/** 会话历史检索最多返回的消息数量，避免旧对话一次性塞满模型上下文。 */
-const MAX_SESSION_CONTEXT_MESSAGES: usize = 24;
-
-/** 会话历史工具单条消息最多返回的字符数。 */
-const MAX_SESSION_CONTEXT_MESSAGE_CHARS: usize = 4000;
-
-/** 跨会话记忆工具最多返回的条目数量，避免一次工具结果挤占模型上下文。 */
-const MAX_KB_MEMORY_TOOL_ENTRIES: usize = 32;
-
-/** 跨会话记忆工具单条内容最多返回的字符数，保存层和读取层都会做长度保护。 */
-const MAX_KB_MEMORY_TOOL_ENTRY_CHARS: usize = 800;
-
-/** list_path 单次最多返回的目录项数量，避免把超大目录一次性塞进模型上下文。 */
-const MAX_LIST_PATH_ENTRIES: usize = 200;
-
-/** read_path 最多读取的字节数；超出后按字符预算再截断。 */
-const MAX_READ_PATH_BYTES: usize = 256 * 1024;
-
-/** search 默认返回条数；未传 limit 时与旧行为一致。 */
-const DEFAULT_SEARCH_LIMIT: usize = 4;
-
-/** search 单次最多返回条数，避免一次检索塞满上下文。 */
-const MAX_SEARCH_LIMIT: usize = 16;
-
-/** list_tree 按支持文档类型输出的计数，避免模型把未知扩展名误认为已索引内容。 */
-#[derive(Clone, Debug)]
-struct ListTreeFileTypeCounts {
-    markdown: usize,
-    txt: usize,
-    docx: usize,
-    pdf: usize,
-    image: usize,
-}
-
-/** Agent 一次多处编辑中的单个片段，original 必须唯一命中，next 允许为空表示删除。 */
-#[derive(Clone, Debug)]
-struct ProposedTextEdit {
-    original: String,
-    next: String,
-    occurrence: Option<usize>,
-}
-
-/** Agent 工具执行时共享的受控上下文，所有工具都必须通过它访问会话 scope 和当前请求。 */
-pub struct AgentToolContext<'a> {
-    /** Tauri 应用句柄，只有需要 SQLite/FTS 或系统能力的工具才会读取。 */
-    pub app: Option<&'a AppHandle>,
-    /** 本轮可变工作台快照，写入类工具只能在这里创建 pending diff。 */
-    pub snapshot: &'a mut WorkspaceSnapshot,
-    /** 当前会话在 snapshot.sessions 中的位置，用于统一 scope 校验。 */
-    pub session_index: usize,
-    /** 用户本轮请求，提供当前笔记、知识库和 prompt 等 UI 上下文。 */
-    pub request: &'a AgentTurnRequest,
-}
-
-/** 单个工具执行的标准结果，模型、UI 轨迹和审计日志都从这里派生。 */
-pub struct ToolExecutionResult {
-    pub success: bool,
-    pub summary: String,
-    pub payload: Value,
-    pub citations: Vec<Citation>,
-    pub audit_fragment: Option<String>,
-}
-
-impl ToolExecutionResult {
-    /** 构造失败工具结果，模型会收到同一份错误摘要。 */
-    pub fn failed(message: &str) -> Self {
-        Self {
-            success: false,
-            summary: message.to_owned(),
-            payload: json!({ "error": message }),
-            citations: Vec::new(),
-            audit_fragment: Some(format!("工具失败：{message}")),
-        }
-    }
-}
-
-/** 已执行工具的完整外部形态，包含 UI 轨迹、模型可读 payload、引用和审计片段。 */
-pub struct ToolOutcome {
-    pub call: AgentToolCall,
-    pub payload: Value,
-    pub citations: Vec<Citation>,
-    pub audit_fragment: Option<String>,
-}
-
-/** Agent 内置工具接口，新增工具必须声明 schema 并在 execute 内完成权限校验。 */
-pub trait AgentTool: Send + Sync {
-    /** 工具名称，必须与模型 tool_call 中的 function.name 保持一致。 */
-    fn name(&self) -> &'static str;
-
-    /** 面向模型的工具说明，描述能力边界而不是 UI 行为。 */
-    fn description(&self) -> &'static str;
-
-    /** OpenAI-compatible function calling 参数 schema。 */
-    fn parameters(&self) -> Value;
-
-    /** 执行工具并返回标准结果，禁止绕过 context 中的 scope 和写入边界。 */
-    fn execute(&self, context: &mut AgentToolContext<'_>, args: &Value) -> ToolExecutionResult;
-}
-
-/** 内置 Agent 工具注册表，统一负责 schema 输出和按名称分发工具调用。 */
-pub struct ToolRegistry {
-    /** 已注册工具列表；顺序稳定，便于 UI 和测试比对 schema。 */
-    tools: Vec<Box<dyn AgentTool>>,
-}
-
-impl Default for ToolRegistry {
-    /** 基础闭集：search/read/list/edit/write。进阶以上的 run 与范围扩展由 for_session 追加。 */
-    fn default() -> Self {
-        Self {
-            tools: vec![
-                Box::new(SearchNotesTool),
-                Box::new(ReadFileTool),
-                Box::new(ListTreeTool),
-                Box::new(ProposeFileChangeTool),
-                Box::new(CreateFileDraftTool),
-            ],
-        }
-    }
-}
-
-impl ToolRegistry {
-    /** 按会话安全级别构造工具集；高权限工具在注册层不可见，而不是执行时才软拒绝。 */
-    pub fn for_session(session: &AgentSession, settings: &AgentSecuritySettings) -> Self {
-        let mut registry = Self::default();
-        let local_session = session.im_identity.is_none();
-        let can_run_skills = local_session
-            && session.security_level != "basic"
-            && settings.advanced_execution_enabled
-            && (session.security_level != "autonomous" || settings.autonomous_mode_enabled);
-
-        if can_run_skills {
-            registry.tools.push(Box::new(RunSkillTool));
-        }
-
-        registry
-    }
-
-    /** 将当前注册工具转换成 OpenAI-compatible tools schema。 */
-    pub fn schemas(&self) -> Value {
-        Value::Array(
-            self.tools
-                .iter()
-                .map(|tool| function_tool(tool.name(), tool.description(), tool.parameters()))
-                .collect(),
-        )
-    }
-
-    /** 返回已注册工具名，主要用于测试和诊断工具集是否完整。 */
-    #[cfg(test)]
-    pub fn tool_names(&self) -> Vec<&'static str> {
-        self.tools.iter().map(|tool| tool.name()).collect()
-    }
-
-    /** 按名称执行工具，未知工具会被显式拒绝且不会修改工作台快照。 */
-    pub fn execute_named(
-        &self,
-        context: &mut AgentToolContext<'_>,
-        name: &str,
-        args: Value,
-    ) -> ToolOutcome {
-        // 兼容已经持久化的旧模型调用；schema 只暴露闭集短名，不再引导模型使用别名。
-        let (canonical_name, canonical_args) = remap_tool_call(name, args);
-        if let Some(message) = retired_host_tool_message(canonical_name) {
-            return tool_outcome(
-                canonical_name,
-                canonical_args,
-                ToolExecutionResult::failed(message),
-            );
-        }
-        let result = self
-            .tools
-            .iter()
-            .find(|tool| tool.name() == canonical_name)
-            .map(|tool| tool.execute(context, &canonical_args))
-            .unwrap_or_else(|| ToolExecutionResult::failed("未知工具，已拒绝执行。"));
-
-        tool_outcome(canonical_name, canonical_args, result)
-    }
-
-    /** 执行模型返回的 tool_call，负责解析 arguments 并复用命名工具分发。 */
-    pub fn execute_model_tool_call(
-        &self,
-        context: &mut AgentToolContext<'_>,
-        model_tool_call: &Value,
-    ) -> ToolOutcome {
-        let name = model_tool_call
-            .get("function")
-            .and_then(|function| function.get("name"))
-            .and_then(Value::as_str)
-            .unwrap_or("unknown_tool");
-        let args = parse_tool_args(model_tool_call);
-
-        self.execute_named(context, name, args)
-    }
-}
-
 /** run_skill 只创建结构化执行请求；真正启动进程由独立审批命令和沙箱运行器负责。 */
-struct RunSkillTool;
+pub(crate) struct RunSkillTool;
 
 impl AgentTool for RunSkillTool {
     fn name(&self) -> &'static str {
@@ -248,7 +51,7 @@ impl AgentTool for RunSkillTool {
 }
 
 /** 校验 Skill 当前包 hash、运行时和会话 scope，然后生成可审计的待审批执行请求。 */
-fn execute_run_skill_request(
+pub(crate) fn execute_run_skill_request(
     context: &mut AgentToolContext<'_>,
     args: &Value,
 ) -> ToolExecutionResult {
@@ -357,159 +160,9 @@ fn execute_run_skill_request(
 }
 
 /** 把历史 noteId 参数转换为统一 fileId，避免旧会话重试失效。 */
-/** 把历史工具名收成闭集短名；schema 只暴露新名。 */
-fn remap_tool_call(name: &str, args: Value) -> (&str, Value) {
-    match name {
-        "search_notes" => ("search", args),
-        "read_file" | "read_note" | "read_document" | "get_current_file" => {
-            ("read", remap_read_args(name, args))
-        }
-        "list_tree" => ("list", args),
-        "propose_file_change" | "propose_note_change" => ("edit", remap_legacy_file_id(args)),
-        "create_file_draft" | "create_note_draft" => ("write", remap_legacy_markdown_draft(args)),
-        "create_folder" => ("write", remap_write_folder_args(args)),
-        "list_path" => ("list", args),
-        "read_path" => ("read", args),
-        "run_skill" => ("run", args),
-        _ => (name, args),
-    }
-}
-
-/** 已降级为宿主注入的工具：旧名调用返回结构化失败，避免旧模型缓存空转。 */
-fn retired_host_tool_message(name: &str) -> Option<&'static str> {
-    match name {
-        "get_session_summary" | "get_knowledge_base_memory" | "search_session_messages"
-        | "read_session_context" => Some(
-            "该信息已由宿主注入当前上下文，请直接使用 system 中的工作记忆、待确认变更或跨会话记忆，不要再调用此工具。",
-        ),
-        "suggest_organization" => {
-            Some("请直接在回复中给出整理建议；若要落盘请调用 edit 或 write。")
-        }
-        _ => None,
-    }
-}
-
-/** 把旧读取参数收成 read 可识别的 fileId/documentId。 */
-fn remap_read_args(original_name: &str, args: Value) -> Value {
-    if original_name == "read_note" {
-        return remap_legacy_file_id(args);
-    }
-    args
-}
-
-/** 旧 create_folder 收成 write + kind=folder。 */
-fn remap_write_folder_args(mut args: Value) -> Value {
-    if let Some(object) = args.as_object_mut() {
-        object.insert("kind".to_owned(), Value::String("folder".to_owned()));
-    }
-    args
-}
-
-/** 参数里是否带了文件系统 path，用于 list/read 在完全级别走外部路径。 */
-fn tool_path_arg(args: &Value) -> Option<&str> {
-    args.get("path")
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-}
-
-/** write 是建文件还是建文件夹。 */
-fn write_kind(args: &Value) -> &str {
-    let kind = args
-        .get("kind")
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .unwrap_or("");
-    if kind.eq_ignore_ascii_case("folder") {
-        return "folder";
-    }
-    let file_type = args
-        .get("fileType")
-        .or_else(|| args.get("file_type"))
-        .and_then(Value::as_str)
-        .unwrap_or("");
-    if file_type.eq_ignore_ascii_case("folder") {
-        "folder"
-    } else {
-        "file"
-    }
-}
-
-/** 读取可选正整数参数，缺省或非法时回退 default，并夹在 1..=max。 */
-fn parse_limit_arg(args: &Value, default: usize, max: usize) -> usize {
-    args.get("limit")
-        .and_then(Value::as_u64)
-        .map(|value| value as usize)
-        .unwrap_or(default)
-        .clamp(1, max)
-}
-
-/** read 的字符窗口：offset 从 0 起，limit 不超过单次正文预算。 */
-fn read_window(args: &Value) -> (usize, usize) {
-    let offset = args
-        .get("offset")
-        .and_then(Value::as_u64)
-        .map(|value| value as usize)
-        .unwrap_or(0);
-    let limit = parse_limit_arg(args, MAX_READ_NOTE_CHARS, MAX_READ_NOTE_CHARS);
-    (offset, limit)
-}
-
-/** 按字符 offset/limit 切片正文，返回切片、是否截断、下一 offset。 */
-fn slice_chars(value: &str, offset: usize, limit: usize) -> (String, bool, Option<usize>) {
-    let total = value.chars().count();
-    if offset >= total {
-        return (String::new(), false, None);
-    }
-    let sliced: String = value.chars().skip(offset).take(limit).collect();
-    let end = offset + sliced.chars().count();
-    let truncated = end < total;
-    let next_offset = truncated.then_some(end);
-    (sliced, truncated, next_offset)
-}
-
-/** 截断时给模型的下一步；未截断不返回 hint。 */
-fn truncation_hint(kind: &str, truncated: bool, next_offset: Option<usize>) -> Option<String> {
-    if !truncated {
-        return None;
-    }
-    match kind {
-        "read" => next_offset.map(|offset| {
-            format!("Use offset={offset} to continue reading from this character.")
-        }),
-        "list" => Some(
-            "Narrow prefix or fileType, or increase limit (max 120) to see more items.".to_owned(),
-        ),
-        "search" => Some(
-            "Narrow the query or increase limit (max 16) to see more citations.".to_owned(),
-        ),
-        _ => Some("The result was truncated; narrow the request or raise limit.".to_owned()),
-    }
-}
-
-fn remap_legacy_file_id(mut args: Value) -> Value {
-    if let Some(object) = args.as_object_mut() {
-        if !object.contains_key("fileId") {
-            if let Some(note_id) = object.get("noteId").cloned() {
-                object.insert("fileId".to_owned(), note_id);
-            }
-        }
-    }
-    args
-}
-
-/** 为历史新建 Markdown 草稿补齐统一工具所需的类型字段。 */
-fn remap_legacy_markdown_draft(mut args: Value) -> Value {
-    if let Some(object) = args.as_object_mut() {
-        object
-            .entry("fileType")
-            .or_insert_with(|| Value::String("markdown".to_owned()));
-    }
-    args
-}
 
 /** search_notes 工具，在当前会话授权知识库内执行 SQLite/FTS 检索。 */
-struct SearchNotesTool;
+pub(crate) struct SearchNotesTool;
 
 impl AgentTool for SearchNotesTool {
     fn name(&self) -> &'static str {
@@ -552,7 +205,7 @@ impl AgentTool for SearchNotesTool {
 }
 
 /** read 工具：按 id 读 scope 内文件；无 id 时读当前激活文件；DOCX/PDF 走只读抽取。 */
-struct ReadFileTool;
+pub(crate) struct ReadFileTool;
 
 impl AgentTool for ReadFileTool {
     fn name(&self) -> &'static str {
@@ -608,7 +261,7 @@ impl AgentTool for ReadFileTool {
 }
 
 /** list 工具，列出当前 scope 内目录、Markdown 笔记和支持文档摘要，供模型判断下一步。 */
-struct ListTreeTool;
+pub(crate) struct ListTreeTool;
 
 impl AgentTool for ListTreeTool {
     fn name(&self) -> &'static str {
@@ -654,7 +307,7 @@ impl AgentTool for ListTreeTool {
 }
 
 /** edit 工具，只创建待确认 diff，不直接写 Markdown/TXT 文件。 */
-struct ProposeFileChangeTool;
+pub(crate) struct ProposeFileChangeTool;
 
 impl AgentTool for ProposeFileChangeTool {
     fn name(&self) -> &'static str {
@@ -706,7 +359,7 @@ impl AgentTool for ProposeFileChangeTool {
 }
 
 /** write 工具，只创建待确认新建 Markdown/TXT diff，不直接落盘。 */
-struct CreateFileDraftTool;
+pub(crate) struct CreateFileDraftTool;
 
 impl AgentTool for CreateFileDraftTool {
     fn name(&self) -> &'static str {
@@ -741,67 +394,11 @@ impl AgentTool for CreateFileDraftTool {
     }
 }
 
-/** 构造 OpenAI-compatible function tool 描述。 */
-fn function_tool(name: &str, description: &str, parameters: Value) -> Value {
-    json!({
-        "type": "function",
-        "function": {
-            "name": name,
-            "description": description,
-            "parameters": parameters
-        }
-    })
-}
-
-/** 读取模型 tool_call 的 function.name，缺失时回退为 unknown_tool。 */
-pub(crate) fn model_tool_call_name(model_tool_call: &Value) -> String {
-    model_tool_call
-        .get("function")
-        .and_then(|function| function.get("name"))
-        .and_then(Value::as_str)
-        .unwrap_or("unknown_tool")
-        .to_owned()
-}
-
-/** 解析模型 tool_call 的 arguments JSON 字符串。 */
-pub(crate) fn parse_tool_args(model_tool_call: &Value) -> Value {
-    model_tool_call
-        .get("function")
-        .and_then(|function| function.get("arguments"))
-        .and_then(|raw_args| {
-            if let Some(raw_args) = raw_args.as_str() {
-                serde_json::from_str(raw_args).ok()
-            } else if raw_args.is_object() {
-                Some(raw_args.clone())
-            } else {
-                None
-            }
-        })
-        .unwrap_or_else(|| json!({}))
-}
-
-/** 把标准执行结果转换成前端可展示的工具轨迹。 */
-fn tool_outcome(name: &str, args: Value, result: ToolExecutionResult) -> ToolOutcome {
-    ToolOutcome {
-        call: AgentToolCall {
-            id: create_id("tool"),
-            name: name.to_owned(),
-            status: if result.success {
-                "completed".to_owned()
-            } else {
-                "failed".to_owned()
-            },
-            summary: result.summary,
-            args,
-        },
-        payload: result.payload,
-        citations: result.citations,
-        audit_fragment: result.audit_fragment,
-    }
-}
-
 /** 闭集 search：默认笔记 FTS；完全级别可用 target=path 扫描目录。 */
-fn execute_search(context: &mut AgentToolContext<'_>, args: &Value) -> ToolExecutionResult {
+pub(crate) fn execute_search(
+    context: &mut AgentToolContext<'_>,
+    args: &Value,
+) -> ToolExecutionResult {
     let target = args
         .get("target")
         .and_then(Value::as_str)
@@ -815,7 +412,10 @@ fn execute_search(context: &mut AgentToolContext<'_>, args: &Value) -> ToolExecu
 }
 
 /** 完全级别下对合规目录做内容命中，仍叫 search，不新增 grep。 */
-fn execute_search_path(context: &mut AgentToolContext<'_>, args: &Value) -> ToolExecutionResult {
+pub(crate) fn execute_search_path(
+    context: &mut AgentToolContext<'_>,
+    args: &Value,
+) -> ToolExecutionResult {
     let session = &context.snapshot.sessions[context.session_index];
     if session.im_identity.is_some()
         || !AgentSecurityLevel::parse(&session.security_level).allows_external_filesystem()
@@ -915,7 +515,10 @@ fn execute_search_path(context: &mut AgentToolContext<'_>, args: &Value) -> Tool
 }
 
 /** 执行 search_notes，并把引用同步给前端消息展示。 */
-fn execute_search_notes(context: &mut AgentToolContext<'_>, args: &Value) -> ToolExecutionResult {
+pub(crate) fn execute_search_notes(
+    context: &mut AgentToolContext<'_>,
+    args: &Value,
+) -> ToolExecutionResult {
     let Some(app) = context.app else {
         return ToolExecutionResult::failed("当前运行环境无法访问本地检索索引。");
     };
@@ -949,7 +552,11 @@ fn execute_search_notes(context: &mut AgentToolContext<'_>, args: &Value) -> Too
                 summary: format!(
                     "在会话允许范围内检索到 {} 条候选引用{}",
                     bounded_citations.len(),
-                    if truncated { "（已达 limit，可收窄 query 或提高 limit）" } else { "" }
+                    if truncated {
+                        "（已达 limit，可收窄 query 或提高 limit）"
+                    } else {
+                        ""
+                    }
                 ),
                 payload: json!({
                     "citations": &bounded_citations,
@@ -974,7 +581,10 @@ fn execute_search_notes(context: &mut AgentToolContext<'_>, args: &Value) -> Too
 }
 
 /** 闭集 read：无 id 时读当前激活文件；带 path 时走完全级别文件系统读取。 */
-fn execute_read(context: &mut AgentToolContext<'_>, args: &Value) -> ToolExecutionResult {
+pub(crate) fn execute_read(
+    context: &mut AgentToolContext<'_>,
+    args: &Value,
+) -> ToolExecutionResult {
     if tool_path_arg(args).is_some() {
         return execute_read_path(context, args);
     }
@@ -1023,7 +633,7 @@ fn execute_read(context: &mut AgentToolContext<'_>, args: &Value) -> ToolExecuti
 }
 
 /** 执行 read_file；TXT 不生成知识库引用，避免扩大 Markdown 检索引用语义。 */
-fn execute_read_file(
+pub(crate) fn execute_read_file(
     snapshot: &WorkspaceSnapshot,
     session_index: usize,
     args: &Value,
@@ -1058,8 +668,7 @@ fn execute_read_file(
         };
         let note_content_chars = note.content.chars().count();
         let (offset, limit) = read_window(args);
-        let (bounded_content, truncated, next_offset) =
-            slice_chars(&note.content, offset, limit);
+        let (bounded_content, truncated, next_offset) = slice_chars(&note.content, offset, limit);
         let hint = truncation_hint("read", truncated, next_offset);
 
         return ToolExecutionResult {
@@ -1067,7 +676,11 @@ fn execute_read_file(
             summary: format!(
                 "已读取笔记《{}》{}",
                 note.title,
-                if truncated { "（已截断，可用 offset 续读）" } else { "" }
+                if truncated {
+                    "（已截断，可用 offset 续读）"
+                } else {
+                    ""
+                }
             ),
             payload: json!({
                 "truncated": truncated,
@@ -1115,7 +728,11 @@ fn execute_read_file(
         summary: format!(
             "已读取 TXT 文件《{}》{}",
             document.title,
-            if truncated { "（已截断，可用 offset 续读）" } else { "" }
+            if truncated {
+                "（已截断，可用 offset 续读）"
+            } else {
+                ""
+            }
         ),
         payload: json!({
             "truncated": truncated,
@@ -1143,7 +760,7 @@ fn execute_read_file(
 }
 
 /** 执行只读文档读取；正文仅在本次工具结果中传给模型，不写入工作台快照或审计日志。 */
-fn execute_read_document(
+pub(crate) fn execute_read_document(
     snapshot: &WorkspaceSnapshot,
     session_index: usize,
     args: &Value,
@@ -1174,7 +791,10 @@ fn execute_read_document(
         Err(error) => return ToolExecutionResult::failed(&format!("文档读取失败：{error}")),
     };
     let (offset, limit) = read_window(args);
-    let requested_page = args.get("page").and_then(Value::as_u64).map(|page| page as usize);
+    let requested_page = args
+        .get("page")
+        .and_then(Value::as_u64)
+        .map(|page| page as usize);
     let mut remaining_skip = offset;
     let mut remaining_take = limit;
     let mut truncated = false;
@@ -1269,7 +889,10 @@ fn execute_read_document(
 }
 
 /** 闭集 list：无 path 时列知识库树；带 path 时走完全级别目录列出。 */
-fn execute_list(context: &mut AgentToolContext<'_>, args: &Value) -> ToolExecutionResult {
+pub(crate) fn execute_list(
+    context: &mut AgentToolContext<'_>,
+    args: &Value,
+) -> ToolExecutionResult {
     if tool_path_arg(args).is_some() {
         return execute_list_path(context, args);
     }
@@ -1277,7 +900,10 @@ fn execute_list(context: &mut AgentToolContext<'_>, args: &Value) -> ToolExecuti
 }
 
 /** 闭集 write：kind=folder 建目录，否则建 Markdown/TXT 草稿。 */
-fn execute_write(context: &mut AgentToolContext<'_>, args: &Value) -> ToolExecutionResult {
+pub(crate) fn execute_write(
+    context: &mut AgentToolContext<'_>,
+    args: &Value,
+) -> ToolExecutionResult {
     if write_kind(args) == "folder" {
         return execute_create_folder(context, args);
     }
@@ -1290,7 +916,7 @@ fn execute_write(context: &mut AgentToolContext<'_>, args: &Value) -> ToolExecut
 }
 
 /** 执行 list_tree，只返回当前 scope 内的目录、Markdown 笔记和普通文档元数据。 */
-fn execute_list_tree(
+pub(crate) fn execute_list_tree(
     snapshot: &WorkspaceSnapshot,
     session_index: usize,
     args: &Value,
@@ -1492,7 +1118,7 @@ fn execute_list_tree(
 
 /** 执行 get_session_summary，只返回当前会话工作记忆和 diff 状态摘要。 */
 #[allow(dead_code)]
-fn execute_get_session_summary(
+pub(crate) fn execute_get_session_summary(
     snapshot: &WorkspaceSnapshot,
     session_index: usize,
 ) -> ToolExecutionResult {
@@ -1531,7 +1157,7 @@ fn execute_get_session_summary(
 
 /** 执行 get_knowledge_base_memory，只返回当前会话 scope 内已启用记忆的脱敏摘要。 */
 #[allow(dead_code)]
-fn execute_get_knowledge_base_memory(
+pub(crate) fn execute_get_knowledge_base_memory(
     app: Option<&AppHandle>,
     snapshot: &WorkspaceSnapshot,
     session_index: usize,
@@ -1604,7 +1230,7 @@ fn execute_get_knowledge_base_memory(
 
 /** 执行 search_session_messages，只在当前会话消息和工具摘要内做大小写不敏感匹配。 */
 #[allow(dead_code)]
-fn execute_search_session_messages(
+pub(crate) fn execute_search_session_messages(
     snapshot: &WorkspaceSnapshot,
     session_index: usize,
     args: &Value,
@@ -1662,7 +1288,7 @@ fn execute_search_session_messages(
 
 /** 执行 read_session_context，按 messageId 精确读取或按 1-based 索引读取受限范围。 */
 #[allow(dead_code)]
-fn execute_read_session_context(
+pub(crate) fn execute_read_session_context(
     snapshot: &WorkspaceSnapshot,
     session_index: usize,
     args: &Value,
@@ -1734,7 +1360,7 @@ fn execute_read_session_context(
 
 /** 构造会话历史检索文本，仅在内存中使用，不进入审计日志。 */
 #[allow(dead_code)]
-fn session_message_search_text(message: &crate::domain::AgentMessage) -> String {
+pub(crate) fn session_message_search_text(message: &crate::domain::AgentMessage) -> String {
     let mut parts = vec![message.content.clone()];
 
     if let Some(tool_calls) = &message.tool_calls {
@@ -1758,7 +1384,7 @@ impl ListTreeFileTypeCounts {
 }
 
 /** 汇总 list_tree 返回范围内的文件类型数量，不读取普通文档正文或 hash。 */
-fn build_list_tree_file_type_counts(
+pub(crate) fn build_list_tree_file_type_counts(
     markdown_count: usize,
     documents: &[&WorkspaceDocument],
 ) -> ListTreeFileTypeCounts {
@@ -1785,7 +1411,7 @@ fn build_list_tree_file_type_counts(
 }
 
 /** 同一文件已有 pending 时拒绝后写覆盖先写。 */
-fn pending_write_conflict(
+pub(crate) fn pending_write_conflict(
     session: &AgentSession,
     file_id: Option<&str>,
     target_path: Option<&str>,
@@ -1794,11 +1420,9 @@ fn pending_write_conflict(
         .pending_change
         .as_ref()
         .filter(|change| change.status == "pending")?;
-    let same_id = file_id
-        .filter(|id| !id.is_empty())
-        .is_some_and(|id| {
-            pending.target_id.as_deref() == Some(id) || pending.note_id.as_deref() == Some(id)
-        });
+    let same_id = file_id.filter(|id| !id.is_empty()).is_some_and(|id| {
+        pending.target_id.as_deref() == Some(id) || pending.note_id.as_deref() == Some(id)
+    });
     let same_path = target_path
         .filter(|path| !path.is_empty())
         .is_some_and(|path| pending.target_path == path);
@@ -1810,7 +1434,7 @@ fn pending_write_conflict(
 }
 
 /** 执行 propose_file_change，只创建待确认 diff，不直接写 Markdown/TXT 文件。 */
-fn execute_propose_file_change(
+pub(crate) fn execute_propose_file_change(
     snapshot: &mut WorkspaceSnapshot,
     session_index: usize,
     args: &Value,
@@ -1908,7 +1532,7 @@ fn execute_propose_file_change(
 }
 
 /** 根据 operation 准备待审阅 diff 的原文和建议内容，不在日志或错误里回显正文。 */
-fn prepare_rewrite_content(
+pub(crate) fn prepare_rewrite_content(
     content: &str,
     operation: &str,
     args: &Value,
@@ -1922,7 +1546,10 @@ fn prepare_rewrite_content(
 }
 
 /** 准备单处替换，original 必须唯一命中，next 可以为空以支持删除。 */
-fn prepare_single_replace_rewrite(content: &str, args: &Value) -> Result<(String, String), String> {
+pub(crate) fn prepare_single_replace_rewrite(
+    content: &str,
+    args: &Value,
+) -> Result<(String, String), String> {
     let original = args
         .get("original")
         .and_then(Value::as_str)
@@ -1950,7 +1577,7 @@ fn prepare_single_replace_rewrite(content: &str, args: &Value) -> Result<(String
 }
 
 /** 准备文末追加，工具层合成整篇 diff，避免模型把整篇正文塞进局部替换。 */
-fn prepare_append_rewrite(
+pub(crate) fn prepare_append_rewrite(
     content: &str,
     args: &Value,
     is_markdown: bool,
@@ -1975,7 +1602,10 @@ fn prepare_append_rewrite(
 }
 
 /** 准备同一文件内多处替换，先按唯一片段顺序应用到内存，再生成整篇待确认 diff。 */
-fn prepare_multi_replace_rewrite(content: &str, args: &Value) -> Result<(String, String), String> {
+pub(crate) fn prepare_multi_replace_rewrite(
+    content: &str,
+    args: &Value,
+) -> Result<(String, String), String> {
     let edits = parse_text_edits(args)?;
     let next = apply_multi_text_edits(content, &edits)?;
 
@@ -1987,7 +1617,7 @@ fn prepare_multi_replace_rewrite(content: &str, args: &Value) -> Result<(String,
 }
 
 /** 从工具参数读取 edits/replacements，正文只保存在 pending diff，不进入日志。 */
-fn parse_text_edits(args: &Value) -> Result<Vec<ProposedTextEdit>, String> {
+pub(crate) fn parse_text_edits(args: &Value) -> Result<Vec<ProposedTextEdit>, String> {
     let Some(raw_edits_value) = args.get("edits").or_else(|| args.get("replacements")) else {
         return Err("多处编辑需要提供 edits 数组。".to_owned());
     };
@@ -2042,7 +1672,10 @@ fn parse_text_edits(args: &Value) -> Result<Vec<ProposedTextEdit>, String> {
 }
 
 /** 顺序应用多处唯一替换；任一处定位失败都会拒绝整次 diff。 */
-fn apply_multi_text_edits(content: &str, edits: &[ProposedTextEdit]) -> Result<String, String> {
+pub(crate) fn apply_multi_text_edits(
+    content: &str,
+    edits: &[ProposedTextEdit],
+) -> Result<String, String> {
     let mut next_content = content.to_owned();
 
     for (index, edit) in edits.iter().enumerate() {
@@ -2059,7 +1692,7 @@ fn apply_multi_text_edits(content: &str, edits: &[ProposedTextEdit]) -> Result<S
 }
 
 /** 单处替换定位失败时返回给模型的错误，禁止包含原文片段。 */
-fn single_rewrite_validation_message(error: UniqueReplacementError) -> String {
+pub(crate) fn single_rewrite_validation_message(error: UniqueReplacementError) -> String {
     match error {
         UniqueReplacementError::NotFound => {
             "改写工具的 original 未命中目标笔记，已拒绝生成不可应用 diff。".to_owned()
@@ -2073,7 +1706,10 @@ fn single_rewrite_validation_message(error: UniqueReplacementError) -> String {
 }
 
 /** 多处替换定位失败时带上序号，方便模型重试但不回显正文。 */
-fn multi_rewrite_validation_message(index: usize, error: UniqueReplacementError) -> String {
+pub(crate) fn multi_rewrite_validation_message(
+    index: usize,
+    error: UniqueReplacementError,
+) -> String {
     match error {
         UniqueReplacementError::NotFound => {
             format!("多处编辑第 {index} 处 original 未命中目标笔记，已拒绝生成 diff。")
@@ -2088,7 +1724,7 @@ fn multi_rewrite_validation_message(index: usize, error: UniqueReplacementError)
 }
 
 /** occurrence 定位失败时返回可操作提示，不回显目标正文。 */
-fn occurrence_rewrite_validation_message(
+pub(crate) fn occurrence_rewrite_validation_message(
     index: usize,
     error: OccurrenceReplacementError,
 ) -> String {
@@ -2101,7 +1737,10 @@ fn occurrence_rewrite_validation_message(
 }
 
 /** 校验原文片段是否能唯一定位到一处待改写内容。 */
-fn validate_unique_original(content: &str, original: &str) -> Result<(), UniqueReplacementError> {
+pub(crate) fn validate_unique_original(
+    content: &str,
+    original: &str,
+) -> Result<(), UniqueReplacementError> {
     if original.is_empty() {
         return Err(UniqueReplacementError::EmptyOriginal);
     }
@@ -2114,7 +1753,7 @@ fn validate_unique_original(content: &str, original: &str) -> Result<(), UniqueR
 }
 
 /** 判断模型是否把整篇改后文档误塞进局部替换 next，避免确认后出现正文重复。 */
-fn looks_like_full_document_replacement_mismatch(
+pub(crate) fn looks_like_full_document_replacement_mismatch(
     content: &str,
     original: &str,
     next: &str,
@@ -2135,7 +1774,7 @@ fn looks_like_full_document_replacement_mismatch(
 }
 
 /** 将增量内容追加到笔记末尾，统一保留一个空行作为 Markdown 分隔。 */
-fn append_note_content(content: &str, addition: &str) -> String {
+pub(crate) fn append_note_content(content: &str, addition: &str) -> String {
     let trimmed_addition = addition.trim();
 
     if content.trim().is_empty() {
@@ -2146,7 +1785,7 @@ fn append_note_content(content: &str, addition: &str) -> String {
 }
 
 /** 执行 create_file_draft，只创建待确认新建 Markdown/TXT diff。 */
-fn execute_create_file_draft(
+pub(crate) fn execute_create_file_draft(
     snapshot: &mut WorkspaceSnapshot,
     session_index: usize,
     request: &AgentTurnRequest,
@@ -2283,7 +1922,10 @@ fn execute_create_file_draft(
 }
 
 /** 执行 create_folder：生成待确认的 create_folder 变更集操作，不直接落盘。 */
-fn execute_create_folder(context: &mut AgentToolContext<'_>, args: &Value) -> ToolExecutionResult {
+pub(crate) fn execute_create_folder(
+    context: &mut AgentToolContext<'_>,
+    args: &Value,
+) -> ToolExecutionResult {
     let session = &context.snapshot.sessions[context.session_index];
     if session.im_identity.is_some()
         || !AgentSecurityLevel::parse(&session.security_level).allows_general_fs_tools()
@@ -2378,7 +2020,10 @@ fn execute_create_folder(context: &mut AgentToolContext<'_>, args: &Value) -> To
 }
 
 /** 执行 list_path：列出完全级别下合规目录的一层内容，不跟随符号链接。 */
-fn execute_list_path(context: &mut AgentToolContext<'_>, args: &Value) -> ToolExecutionResult {
+pub(crate) fn execute_list_path(
+    context: &mut AgentToolContext<'_>,
+    args: &Value,
+) -> ToolExecutionResult {
     let session = &context.snapshot.sessions[context.session_index];
     if session.im_identity.is_some()
         || !AgentSecurityLevel::parse(&session.security_level).allows_external_filesystem()
@@ -2487,7 +2132,10 @@ fn execute_list_path(context: &mut AgentToolContext<'_>, args: &Value) -> ToolEx
 }
 
 /** 执行 read_path：读取完全级别下合规 UTF-8 文本文件，二进制和超大文件会被拒绝或截断。 */
-fn execute_read_path(context: &mut AgentToolContext<'_>, args: &Value) -> ToolExecutionResult {
+pub(crate) fn execute_read_path(
+    context: &mut AgentToolContext<'_>,
+    args: &Value,
+) -> ToolExecutionResult {
     let session = &context.snapshot.sessions[context.session_index];
     if session.im_identity.is_some()
         || !AgentSecurityLevel::parse(&session.security_level).allows_external_filesystem()
@@ -2547,7 +2195,11 @@ fn execute_read_path(context: &mut AgentToolContext<'_>, args: &Value) -> ToolEx
             "已读取 {}，{} 字符{}",
             resolved.stored_path,
             content.chars().count(),
-            if truncated { "（已截断，可用 offset 续读）" } else { "" }
+            if truncated {
+                "（已截断，可用 offset 续读）"
+            } else {
+                ""
+            }
         ),
         payload: json!({
             "path": resolved.stored_path,
@@ -2570,7 +2222,7 @@ fn execute_read_path(context: &mut AgentToolContext<'_>, args: &Value) -> ToolEx
 
 /** 执行 organize 建议工具，该工具首版不写入文件。 */
 #[allow(dead_code)]
-fn execute_suggest_organization(args: &Value) -> ToolExecutionResult {
+pub(crate) fn execute_suggest_organization(args: &Value) -> ToolExecutionResult {
     let suggestion = args
         .get("suggestion")
         .and_then(Value::as_str)
@@ -2586,7 +2238,7 @@ fn execute_suggest_organization(args: &Value) -> ToolExecutionResult {
 }
 
 /** 获取会话 scope 内的笔记。 */
-fn scoped_note<'a>(
+pub(crate) fn scoped_note<'a>(
     snapshot: &'a WorkspaceSnapshot,
     session_index: usize,
     note_id: &str,
@@ -2600,7 +2252,7 @@ fn scoped_note<'a>(
 }
 
 /** 返回会话授权范围内可被 Agent 读取和改写的 TXT；其它普通文档始终拒绝。 */
-fn scoped_text_document<'a>(
+pub(crate) fn scoped_text_document<'a>(
     snapshot: &'a WorkspaceSnapshot,
     session_index: usize,
     file_id: &str,
@@ -2615,7 +2267,7 @@ fn scoped_text_document<'a>(
 }
 
 /** 返回当前 scope 内可由 Agent 按需读取、但绝不可写入的 DOCX/PDF。 */
-fn scoped_readonly_document<'a>(
+pub(crate) fn scoped_readonly_document<'a>(
     snapshot: &'a WorkspaceSnapshot,
     session_index: usize,
     document_id: &str,
@@ -2629,7 +2281,7 @@ fn scoped_readonly_document<'a>(
 }
 
 /** 把会话知识库范围转成 HashSet，统一工具权限校验。 */
-fn scope_id_set(session: &AgentSession) -> HashSet<&str> {
+pub(crate) fn scope_id_set(session: &AgentSession) -> HashSet<&str> {
     session
         .knowledge_base_ids
         .iter()
@@ -2638,7 +2290,10 @@ fn scope_id_set(session: &AgentSession) -> HashSet<&str> {
 }
 
 /** 按知识库 id 取展示名，缺失时给出明确占位，避免模型把文件归到错误的知识库。 */
-fn knowledge_base_display_name(snapshot: &WorkspaceSnapshot, knowledge_base_id: &str) -> String {
+pub(crate) fn knowledge_base_display_name(
+    snapshot: &WorkspaceSnapshot,
+    knowledge_base_id: &str,
+) -> String {
     snapshot
         .knowledge_bases
         .iter()
@@ -2648,7 +2303,7 @@ fn knowledge_base_display_name(snapshot: &WorkspaceSnapshot, knowledge_base_id: 
 }
 
 /** 提取首个可改写正文段落。 */
-fn first_body_paragraph(content: &str) -> String {
+pub(crate) fn first_body_paragraph(content: &str) -> String {
     content
         .lines()
         .map(str::trim)
@@ -2658,7 +2313,7 @@ fn first_body_paragraph(content: &str) -> String {
 }
 
 /** 把字符串裁剪到指定字符预算，保留明确截断标记。 */
-fn truncate_chars(value: &str, max_chars: usize) -> String {
+pub(crate) fn truncate_chars(value: &str, max_chars: usize) -> String {
     if value.chars().count() <= max_chars {
         return value.to_owned();
     }
@@ -2669,1126 +2324,7 @@ fn truncate_chars(value: &str, max_chars: usize) -> String {
 }
 
 /** 裁剪引用片段，避免单条引用把模型上下文撑大。 */
-fn budget_citation(mut citation: Citation) -> Citation {
+pub(crate) fn budget_citation(mut citation: Citation) -> Citation {
     citation.snippet = truncate_chars(&citation.snippet, 500);
     citation
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::domain::{FolderEntry, KnowledgeBase, Note, WorkspaceDocument};
-
-    /** 构造工具层测试使用的最小工作台快照。 */
-    fn tool_test_snapshot(note_content: String) -> WorkspaceSnapshot {
-        WorkspaceSnapshot {
-            knowledge_bases: vec![
-                KnowledgeBase {
-                    id: "kb-a".to_owned(),
-                    name: "主知识库".to_owned(),
-                    path: "/tmp/kb-a".to_owned(),
-                    description: "测试知识库".to_owned(),
-                    status: "ready".to_owned(),
-                    note_count: 1,
-                    document_count: 0,
-                    updated_at: "刚刚".to_owned(),
-                    is_default: true,
-                    semantic_index_enabled: false,
-                    scan_report: None,
-                },
-                KnowledgeBase {
-                    id: "kb-b".to_owned(),
-                    name: "未授权知识库".to_owned(),
-                    path: "/tmp/kb-b".to_owned(),
-                    description: "测试知识库".to_owned(),
-                    status: "ready".to_owned(),
-                    note_count: 1,
-                    document_count: 0,
-                    updated_at: "刚刚".to_owned(),
-                    is_default: false,
-                    semantic_index_enabled: false,
-                    scan_report: None,
-                },
-            ],
-            folders: vec![FolderEntry {
-                id: "folder-a".to_owned(),
-                knowledge_base_id: "kb-a".to_owned(),
-                name: "Notes".to_owned(),
-                path: "Notes".to_owned(),
-                updated_at: "刚刚".to_owned(),
-            }],
-            notes: vec![
-                Note {
-                    id: "note-a".to_owned(),
-                    knowledge_base_id: "kb-a".to_owned(),
-                    title: "授权笔记".to_owned(),
-                    path: "Notes/授权笔记.md".to_owned(),
-                    content_hash: hash_content(&note_content),
-                    content: note_content,
-                    tags: vec!["测试".to_owned()],
-                    updated_at: "刚刚".to_owned(),
-                    backlinks: Vec::new(),
-                },
-                Note {
-                    id: "note-b".to_owned(),
-                    knowledge_base_id: "kb-b".to_owned(),
-                    title: "未授权笔记".to_owned(),
-                    path: "Private/未授权笔记.md".to_owned(),
-                    content_hash: hash_content("private"),
-                    content: "private".to_owned(),
-                    tags: Vec::new(),
-                    updated_at: "刚刚".to_owned(),
-                    backlinks: Vec::new(),
-                },
-            ],
-            documents: Vec::new(),
-            sessions: vec![AgentSession {
-                id: "session-a".to_owned(),
-                title: "测试会话".to_owned(),
-                im_identity: None,
-                r#type: "knowledge-base".to_owned(),
-                knowledge_base_ids: vec!["kb-a".to_owned()],
-                active_note_id: Some("note-a".to_owned()),
-                pinned_note_ids: vec!["note-a".to_owned()],
-                messages: Vec::new(),
-                pending_change: None,
-                pending_change_set: None,
-                pending_execution: None,
-                security_level: "basic".to_owned(),
-                context_summary: None,
-                created_at: "刚刚".to_owned(),
-                updated_at: "刚刚".to_owned(),
-                deleted_at: None,
-                model_provider_id: None,
-                model_id: None,
-            }],
-            active_knowledge_base_id: "kb-a".to_owned(),
-            active_note_id: "note-a".to_owned(),
-            active_document_id: String::new(),
-            active_session_id: "session-a".to_owned(),
-        }
-    }
-
-    /** 构造工具层测试使用的 Agent 请求。 */
-    fn tool_test_request(action: &str, prompt: &str) -> AgentTurnRequest {
-        AgentTurnRequest {
-            prompt: prompt.to_owned(),
-            action: action.to_owned(),
-            session_id: "session-a".to_owned(),
-            active_knowledge_base_id: "kb-a".to_owned(),
-            active_note_id: "note-a".to_owned(),
-            client_message_id: None,
-            model_provider_id: None,
-            model_id: None,
-            explicit_skill_ids: Vec::new(),
-            mentioned_file_ids: Vec::new(),
-        }
-    }
-
-    /** 创建无 AppHandle 的纯内存工具上下文，适合测试非索引类工具。 */
-    fn tool_test_context<'a>(
-        snapshot: &'a mut WorkspaceSnapshot,
-        request: &'a AgentTurnRequest,
-    ) -> AgentToolContext<'a> {
-        AgentToolContext {
-            app: None,
-            snapshot,
-            session_index: 0,
-            request,
-        }
-    }
-
-    /** 构造工具层普通文档条目，测试 list_tree 元数据时不需要真实文件系统。 */
-    fn tool_test_document(
-        id: &str,
-        knowledge_base_id: &str,
-        path: &str,
-        file_type: &str,
-        preview_available: bool,
-    ) -> WorkspaceDocument {
-        WorkspaceDocument {
-            id: id.to_owned(),
-            knowledge_base_id: knowledge_base_id.to_owned(),
-            title: path
-                .rsplit('/')
-                .next()
-                .unwrap_or("测试文档")
-                .trim_end_matches(&format!(".{file_type}"))
-                .to_owned(),
-            path: path.to_owned(),
-            file_type: file_type.to_owned(),
-            updated_at: "刚刚".to_owned(),
-            content_hash: hash_content(id),
-            content: (file_type == "txt").then(|| "纯文本正文不会通过 list_tree 返回。".to_owned()),
-            preview_available,
-        }
-    }
-
-    /** 默认 registry 只暴露闭集五个短名。 */
-    #[test]
-    fn registry_schema_contains_builtin_tools() {
-        let registry = ToolRegistry::default();
-        let schemas = registry.schemas();
-        let tool_names = registry.tool_names();
-
-        assert!(schemas.is_array());
-        assert_eq!(
-            tool_names,
-            vec!["search", "read", "list", "edit", "write"]
-        );
-        assert!(!tool_names.contains(&"run"));
-        assert!(!tool_names.contains(&"search_notes"));
-        assert!(!tool_names.contains(&"read_document"));
-        assert!(!tool_names.contains(&"get_current_file"));
-        assert!(!tool_names.contains(&"get_session_summary"));
-        assert!(!tool_names.contains(&"get_knowledge_base_memory"));
-        assert!(!tool_names.contains(&"suggest_organization"));
-        assert!(!tool_names.contains(&"search_session_messages"));
-        assert!(!tool_names.contains(&"read_session_context"));
-    }
-
-    /** run_skill 仅在本地进阶/完全会话和全局执行开关同时满足时注册；create_folder 同样要求本地进阶会话。 */
-    #[test]
-    fn run_skill_registry_requires_local_advanced_session() {
-        let mut snapshot = tool_test_snapshot("正文内容足够用于测试。".to_owned());
-        let mut settings = AgentSecuritySettings::default();
-        settings.advanced_execution_enabled = true;
-
-        snapshot.sessions[0].security_level = "advanced".to_owned();
-        let advanced_tools =
-            ToolRegistry::for_session(&snapshot.sessions[0], &settings).tool_names();
-        assert!(advanced_tools.contains(&"run"));
-        assert!(!advanced_tools.contains(&"create_folder"));
-        assert!(!advanced_tools.contains(&"list_path"));
-        assert!(!advanced_tools.contains(&"read_path"));
-        assert!(!advanced_tools.contains(&"run_skill"));
-        assert_eq!(
-            advanced_tools,
-            vec!["search", "read", "list", "edit", "write", "run"]
-        );
-
-        snapshot.sessions[0].security_level = "basic".to_owned();
-        let basic_tools = ToolRegistry::for_session(&snapshot.sessions[0], &settings).tool_names();
-        assert!(!basic_tools.contains(&"run"));
-        assert!(!basic_tools.contains(&"create_folder"));
-        assert!(!basic_tools.contains(&"list_path"));
-        assert_eq!(basic_tools, vec!["search", "read", "list", "edit", "write"]);
-
-        snapshot.sessions[0].security_level = "autonomous".to_owned();
-        settings.autonomous_mode_enabled = false;
-        let autonomous_without_toggle =
-            ToolRegistry::for_session(&snapshot.sessions[0], &settings).tool_names();
-        assert!(!autonomous_without_toggle.contains(&"run"));
-        assert!(!autonomous_without_toggle.contains(&"create_folder"));
-        assert!(!autonomous_without_toggle.contains(&"list_path"));
-        assert!(!autonomous_without_toggle.contains(&"read_path"));
-        assert_eq!(
-            autonomous_without_toggle,
-            vec!["search", "read", "list", "edit", "write"]
-        );
-
-        snapshot.sessions[0].security_level = "advanced".to_owned();
-        snapshot.sessions[0].im_identity = Some(crate::domain::ImSessionIdentity {
-            provider_id: "feishu".to_owned(),
-            conversation_kind: "direct".to_owned(),
-            channel_hash: "redacted".to_owned(),
-            initial_message_preview: "IM".to_owned(),
-            last_message_preview: "IM".to_owned(),
-        });
-        let im_tools = ToolRegistry::for_session(&snapshot.sessions[0], &settings).tool_names();
-        assert!(!im_tools.contains(&"run"));
-        assert_eq!(im_tools, vec!["search", "read", "list", "edit", "write"]);
-    }
-
-    /** 任何级别 schema 都不应再出现分身工具名。 */
-    #[test]
-    fn closed_set_schema_never_exposes_split_tool_names() {
-        let mut snapshot = tool_test_snapshot("正文内容足够用于测试。".to_owned());
-        let mut settings = AgentSecuritySettings::default();
-        settings.advanced_execution_enabled = true;
-        settings.autonomous_mode_enabled = true;
-        for level in ["basic", "advanced", "autonomous"] {
-            snapshot.sessions[0].security_level = level.to_owned();
-            let names = ToolRegistry::for_session(&snapshot.sessions[0], &settings).tool_names();
-            for forbidden in [
-                "create_folder",
-                "list_path",
-                "read_path",
-                "run_skill",
-                "search_notes",
-                "read_file",
-                "propose_file_change",
-                "create_file_draft",
-            ] {
-                assert!(
-                    !names.contains(&forbidden),
-                    "level={level} still exposes {forbidden}"
-                );
-            }
-        }
-    }
-
-    /** create_folder 在 advanced 会话执行后应生成 agent-direct 变更集，operation 类型为 create_folder。 */
-    #[test]
-    fn create_folder_builds_agent_direct_change_set() {
-        let kb_root = tempfile::tempdir().expect("kb root");
-        let mut snapshot = tool_test_snapshot("正文内容足够用于测试。".to_owned());
-        snapshot.knowledge_bases[0].path = kb_root.path().to_string_lossy().into_owned();
-        snapshot.sessions[0].security_level = "advanced".to_owned();
-        let mut settings = AgentSecuritySettings::default();
-        settings.advanced_execution_enabled = true;
-        let registry = ToolRegistry::for_session(&snapshot.sessions[0], &settings);
-        let request = tool_test_request("create", "建文件夹");
-        let mut context = tool_test_context(&mut snapshot, &request);
-        let outcome = registry.execute_named(
-            &mut context,
-            "create_folder",
-            json!({ "targetPath": "Notes/新目录" }),
-        );
-
-        assert_eq!(outcome.call.status, "completed");
-        let change_set = context.snapshot.sessions[0]
-            .pending_change_set
-            .as_ref()
-            .unwrap();
-        assert_eq!(change_set.execution_id, "agent-direct");
-        assert_eq!(change_set.status, "pending");
-        assert_eq!(change_set.operations.len(), 1);
-        assert_eq!(change_set.operations[0].operation, "create_folder");
-        assert_eq!(change_set.operations[0].file_type, "folder");
-        assert_eq!(change_set.operations[0].target_path, "Notes/新目录");
-        assert!(!change_set.operations[0].binary);
-    }
-
-    /** 连续两次 create_folder 应追加到同一 agent-direct 变更集。 */
-    #[test]
-    fn create_folder_appends_to_existing_agent_change_set() {
-        let kb_root = tempfile::tempdir().expect("kb root");
-        let mut snapshot = tool_test_snapshot("正文内容足够用于测试。".to_owned());
-        snapshot.knowledge_bases[0].path = kb_root.path().to_string_lossy().into_owned();
-        snapshot.sessions[0].security_level = "advanced".to_owned();
-        let mut settings = AgentSecuritySettings::default();
-        settings.advanced_execution_enabled = true;
-        let registry = ToolRegistry::for_session(&snapshot.sessions[0], &settings);
-        let request = tool_test_request("create", "建文件夹");
-        let mut context = tool_test_context(&mut snapshot, &request);
-        registry.execute_named(
-            &mut context,
-            "create_folder",
-            json!({ "targetPath": "Notes/目录A" }),
-        );
-        registry.execute_named(
-            &mut context,
-            "create_folder",
-            json!({ "targetPath": "Notes/目录B" }),
-        );
-
-        let change_set = context.snapshot.sessions[0]
-            .pending_change_set
-            .as_ref()
-            .unwrap();
-        assert_eq!(change_set.operations.len(), 2);
-        assert_eq!(change_set.operations[0].target_path, "Notes/目录A");
-        assert_eq!(change_set.operations[1].target_path, "Notes/目录B");
-    }
-
-    /** create_folder 必须拒绝路径穿越和 scope 外知识库。 */
-    #[test]
-    fn create_folder_rejects_unsafe_paths_and_outside_scope() {
-        let mut snapshot = tool_test_snapshot("正文内容足够用于测试。".to_owned());
-        snapshot.sessions[0].security_level = "advanced".to_owned();
-        let mut settings = AgentSecuritySettings::default();
-        settings.advanced_execution_enabled = true;
-        let registry = ToolRegistry::for_session(&snapshot.sessions[0], &settings);
-        let request = tool_test_request("create", "建文件夹");
-        let mut context = tool_test_context(&mut snapshot, &request);
-
-        let escape_outcome = registry.execute_named(
-            &mut context,
-            "create_folder",
-            json!({ "targetPath": "../escape" }),
-        );
-        assert_eq!(escape_outcome.call.status, "failed");
-        assert!(context.snapshot.sessions[0].pending_change_set.is_none());
-
-        let absolute_outcome = registry.execute_named(
-            &mut context,
-            "create_folder",
-            json!({ "targetPath": "/etc/evil" }),
-        );
-        assert_eq!(absolute_outcome.call.status, "failed");
-
-        let outside_scope_outcome = registry.execute_named(
-            &mut context,
-            "create_folder",
-            json!({ "knowledgeBaseId": "kb-b", "targetPath": "Notes/目录" }),
-        );
-        assert_eq!(outside_scope_outcome.call.status, "failed");
-        assert!(context.snapshot.sessions[0].pending_change_set.is_none());
-    }
-
-    /** 完全级别允许合规的绝对路径，并把它记为 external scope。 */
-    #[test]
-    fn create_folder_full_mode_accepts_compliant_absolute_path() {
-        let kb_root = tempfile::tempdir().expect("kb root");
-        let external = tempfile::tempdir().expect("external root");
-        let mut snapshot = tool_test_snapshot("正文内容足够用于测试。".to_owned());
-        snapshot.knowledge_bases[0].path = kb_root.path().to_string_lossy().into_owned();
-        snapshot.sessions[0].security_level = "autonomous".to_owned();
-        let mut settings = AgentSecuritySettings::default();
-        settings.advanced_execution_enabled = true;
-        settings.autonomous_mode_enabled = true;
-        let registry = ToolRegistry::for_session(&snapshot.sessions[0], &settings);
-        let request = tool_test_request("create", "建外部文件夹");
-        let mut context = tool_test_context(&mut snapshot, &request);
-        let target = external.path().join("AgentOut");
-        let outcome = registry.execute_named(
-            &mut context,
-            "create_folder",
-            json!({ "targetPath": target.to_string_lossy() }),
-        );
-
-        assert_eq!(outcome.call.status, "completed");
-        let operation = &context.snapshot.sessions[0]
-            .pending_change_set
-            .as_ref()
-            .unwrap()
-            .operations[0];
-        assert_eq!(operation.knowledge_base_id, "external");
-        assert!(operation.target_path.contains("AgentOut"));
-    }
-
-    /** 完全级别下，落在授权知识库内的绝对路径仍按知识库相对路径保存。 */
-    #[test]
-    fn create_folder_full_mode_maps_absolute_path_inside_kb() {
-        let kb_root = tempfile::tempdir().expect("kb root");
-        std::fs::create_dir_all(kb_root.path().join("Notes")).expect("notes");
-        let mut snapshot = tool_test_snapshot("正文内容足够用于测试。".to_owned());
-        snapshot.knowledge_bases[0].path = kb_root.path().to_string_lossy().into_owned();
-        snapshot.sessions[0].security_level = "autonomous".to_owned();
-        let mut settings = AgentSecuritySettings::default();
-        settings.advanced_execution_enabled = true;
-        settings.autonomous_mode_enabled = true;
-        let registry = ToolRegistry::for_session(&snapshot.sessions[0], &settings);
-        let request = tool_test_request("create", "建知识库文件夹");
-        let mut context = tool_test_context(&mut snapshot, &request);
-        let target = kb_root.path().join("Notes").join("归档");
-        let outcome = registry.execute_named(
-            &mut context,
-            "create_folder",
-            json!({ "targetPath": target.to_string_lossy() }),
-        );
-
-        assert_eq!(outcome.call.status, "completed");
-        let operation = &context.snapshot.sessions[0]
-            .pending_change_set
-            .as_ref()
-            .unwrap()
-            .operations[0];
-        assert_eq!(operation.knowledge_base_id, "kb-a");
-        assert_eq!(operation.target_path, "Notes/归档");
-    }
-
-    /** list_path / read_path 可读取知识库外的合规目录和文本。 */
-    #[test]
-    fn list_and_read_path_full_mode_round_trip() {
-        let kb_root = tempfile::tempdir().expect("kb root");
-        let external = tempfile::tempdir().expect("external root");
-        std::fs::write(external.path().join("hello.txt"), "hello orange").expect("write file");
-        let mut snapshot = tool_test_snapshot("正文内容足够用于测试。".to_owned());
-        snapshot.knowledge_bases[0].path = kb_root.path().to_string_lossy().into_owned();
-        snapshot.sessions[0].security_level = "autonomous".to_owned();
-        let mut settings = AgentSecuritySettings::default();
-        settings.advanced_execution_enabled = true;
-        settings.autonomous_mode_enabled = true;
-        let registry = ToolRegistry::for_session(&snapshot.sessions[0], &settings);
-        let request = tool_test_request("ask", "看外部目录");
-        let mut context = tool_test_context(&mut snapshot, &request);
-
-        let list_outcome = registry.execute_named(
-            &mut context,
-            "list_path",
-            json!({ "path": external.path().to_string_lossy() }),
-        );
-        assert_eq!(list_outcome.call.status, "completed");
-        assert!(list_outcome.payload["entries"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|entry| entry["name"] == "hello.txt"));
-
-        let read_outcome = registry.execute_named(
-            &mut context,
-            "read_path",
-            json!({ "path": external.path().join("hello.txt").to_string_lossy() }),
-        );
-        assert_eq!(read_outcome.call.status, "completed");
-        assert!(read_outcome.payload["content"]
-            .as_str()
-            .unwrap()
-            .contains("hello orange"));
-        assert_eq!(read_outcome.payload["external"], true);
-    }
-
-    /** 完全级别 search target=path 能命中目录文本；基础级别同一 path 失败。 */
-    #[test]
-    fn search_path_full_mode_hits_and_basic_rejects() {
-        let kb_root = tempfile::tempdir().expect("kb root");
-        let external = tempfile::tempdir().expect("external root");
-        std::fs::write(external.path().join("notes.txt"), "orange secret token")
-            .expect("write file");
-        let mut snapshot = tool_test_snapshot("正文内容足够用于测试。".to_owned());
-        snapshot.knowledge_bases[0].path = kb_root.path().to_string_lossy().into_owned();
-        let request = tool_test_request("ask", "搜外部");
-        let basic_registry = ToolRegistry::default();
-        let basic_outcome = {
-            let mut basic_context = tool_test_context(&mut snapshot, &request);
-            basic_registry.execute_named(
-                &mut basic_context,
-                "search",
-                json!({
-                    "query": "secret",
-                    "target": "path",
-                    "path": external.path().to_string_lossy()
-                }),
-            )
-        };
-        assert_eq!(basic_outcome.call.status, "failed");
-
-        snapshot.sessions[0].security_level = "autonomous".to_owned();
-        let mut settings = AgentSecuritySettings::default();
-        settings.advanced_execution_enabled = true;
-        settings.autonomous_mode_enabled = true;
-        let full_registry = ToolRegistry::for_session(&snapshot.sessions[0], &settings);
-        let mut full_context = tool_test_context(&mut snapshot, &request);
-        let full_outcome = full_registry.execute_named(
-            &mut full_context,
-            "search",
-            json!({
-                "query": "secret",
-                "target": "path",
-                "path": external.path().to_string_lossy()
-            }),
-        );
-        assert_eq!(full_outcome.call.status, "completed");
-        assert_eq!(full_outcome.call.name, "search");
-        let hits = full_outcome.payload["hits"].as_array().unwrap();
-        assert_eq!(hits.len(), 1);
-        assert!(hits[0]["snippet"].as_str().unwrap_or_default().contains("secret"));
-    }
-
-    /** 基础级别 write 建文件夹必须失败且不产生 pending。 */
-    #[test]
-    fn write_folder_rejects_basic_session() {
-        let mut snapshot = tool_test_snapshot("正文内容足够用于测试。".to_owned());
-        let registry = ToolRegistry::default();
-        let request = tool_test_request("create", "建文件夹");
-        let mut context = tool_test_context(&mut snapshot, &request);
-        let outcome = registry.execute_named(
-            &mut context,
-            "write",
-            json!({ "kind": "folder", "targetPath": "Notes/新目录" }),
-        );
-
-        assert_eq!(outcome.call.status, "failed");
-        assert_eq!(outcome.call.name, "write");
-        assert!(context.snapshot.sessions[0].pending_change_set.is_none());
-        assert!(context.snapshot.sessions[0].pending_change.is_none());
-    }
-
-    /** 基础级别 list/read 外部 path 必须失败。 */
-    #[test]
-    fn list_and_read_external_path_reject_basic_session() {
-        let registry = ToolRegistry::default();
-        let mut snapshot = tool_test_snapshot("正文内容足够用于测试。".to_owned());
-        let request = tool_test_request("ask", "看外部路径");
-        let mut context = tool_test_context(&mut snapshot, &request);
-        let list_outcome = registry.execute_named(
-            &mut context,
-            "list",
-            json!({ "path": "C:/Windows" }),
-        );
-        let read_outcome = registry.execute_named(
-            &mut context,
-            "read",
-            json!({ "path": "C:/Windows/win.ini" }),
-        );
-
-        assert_eq!(list_outcome.call.status, "failed");
-        assert_eq!(read_outcome.call.status, "failed");
-        assert!(context.snapshot.sessions[0].pending_change.is_none());
-    }
-
-    /** basic 会话即使手动调用 create_folder 也必须失败。 */
-    #[test]
-    fn create_folder_rejects_basic_session() {
-        let mut snapshot = tool_test_snapshot("正文内容足够用于测试。".to_owned());
-        // 会话保持 basic；模拟模型误调用。这里用 default registry，因为 for_session 在 basic 不会注册 create_folder。
-        let registry = ToolRegistry::default();
-        let request = tool_test_request("create", "建文件夹");
-        let mut context = tool_test_context(&mut snapshot, &request);
-        let outcome = registry.execute_named(
-            &mut context,
-            "create_folder",
-            json!({ "targetPath": "Notes/新目录" }),
-        );
-
-        assert_eq!(outcome.call.status, "failed");
-        assert!(context.snapshot.sessions[0].pending_change_set.is_none());
-    }
-
-    /** 未知工具调用必须失败且不能修改 pending_change。 */
-    #[test]
-    fn unknown_tool_is_rejected_without_pending_change() {
-        let registry = ToolRegistry::default();
-        let mut snapshot = tool_test_snapshot("正文内容足够用于测试。".to_owned());
-        let request = tool_test_request("ask", "测试未知工具");
-        let mut context = tool_test_context(&mut snapshot, &request);
-        let outcome = registry.execute_named(&mut context, "unknown_tool", json!({}));
-
-        assert_eq!(outcome.call.status, "failed");
-        assert!(context.snapshot.sessions[0].pending_change.is_none());
-    }
-
-    /** 无 fileId 时 read 读取当前激活笔记。 */
-    #[test]
-    fn read_without_id_uses_active_file() {
-        let registry = ToolRegistry::default();
-        let mut snapshot = tool_test_snapshot("当前激活笔记正文。".to_owned());
-        let request = tool_test_request("ask", "读当前文件");
-        let mut context = tool_test_context(&mut snapshot, &request);
-        let outcome = registry.execute_named(&mut context, "read", json!({}));
-
-        assert_eq!(outcome.call.status, "completed");
-        assert_eq!(outcome.call.name, "read");
-        assert_eq!(
-            outcome.payload["note"]["content"].as_str(),
-            Some("当前激活笔记正文。")
-        );
-    }
-
-    /** 旧名 remap 后仍能执行，轨迹使用闭集短名。 */
-    #[test]
-    fn legacy_tool_names_remap_to_closed_set() {
-        let registry = ToolRegistry::default();
-        let mut snapshot = tool_test_snapshot("正文内容足够用于测试。".to_owned());
-        let request = tool_test_request("ask", "兼容旧名");
-        let mut context = tool_test_context(&mut snapshot, &request);
-
-        let search = registry.execute_named(
-            &mut context,
-            "search_notes",
-            json!({ "query": "不会命中因为没有 app" }),
-        );
-        assert_eq!(search.call.name, "search");
-
-        let read = registry.execute_named(
-            &mut context,
-            "read_note",
-            json!({ "noteId": "note-a" }),
-        );
-        assert_eq!(read.call.name, "read");
-        assert_eq!(read.call.status, "completed");
-
-        let list = registry.execute_named(&mut context, "list_tree", json!({}));
-        assert_eq!(list.call.name, "list");
-        assert_eq!(list.call.status, "completed");
-    }
-
-    /** 已降级为宿主注入的工具不再出现在 schema，调用只返回结构化失败。 */
-    #[test]
-    fn retired_host_tools_fail_without_pending_change() {
-        let registry = ToolRegistry::default();
-        let mut snapshot = tool_test_snapshot("正文内容足够用于测试。".to_owned());
-        let request = tool_test_request("ask", "旧宿主工具");
-        let mut context = tool_test_context(&mut snapshot, &request);
-
-        for name in [
-            "get_session_summary",
-            "get_knowledge_base_memory",
-            "search_session_messages",
-            "read_session_context",
-            "suggest_organization",
-        ] {
-            let outcome = registry.execute_named(&mut context, name, json!({ "query": "x" }));
-            assert_eq!(outcome.call.status, "failed", "{name}");
-            assert!(outcome.payload.get("error").is_some(), "{name}");
-        }
-        assert!(context.snapshot.sessions[0].pending_change.is_none());
-    }
-
-    /** read_note 必须拒绝读取当前会话 scope 外的笔记。 */
-    #[test]
-    fn read_note_rejects_note_outside_scope() {
-        let registry = ToolRegistry::default();
-        let mut snapshot = tool_test_snapshot("正文内容足够用于测试。".to_owned());
-        let request = tool_test_request("ask", "读取笔记");
-        let mut context = tool_test_context(&mut snapshot, &request);
-        let outcome =
-            registry.execute_named(&mut context, "read_note", json!({ "noteId": "note-b" }));
-
-        assert_eq!(outcome.call.status, "failed");
-        assert!(outcome.payload.get("error").is_some());
-    }
-
-    /** list_tree 应返回当前 scope 内普通文档元数据，但不暴露正文和 hash。 */
-    #[test]
-    fn list_tree_returns_document_metadata_for_scope() {
-        let registry = ToolRegistry::default();
-        let mut snapshot = tool_test_snapshot("正文内容足够用于测试。".to_owned());
-        snapshot.documents = vec![
-            tool_test_document("document-txt", "kb-a", "Docs/brief.txt", "txt", false),
-            tool_test_document("document-pdf", "kb-a", "Docs/spec.pdf", "pdf", true),
-        ];
-        let request = tool_test_request("ask", "列出文件");
-        let mut context = tool_test_context(&mut snapshot, &request);
-        let outcome = registry.execute_named(&mut context, "list_tree", json!({}));
-        let documents = outcome.payload["documents"].as_array().unwrap();
-        let txt_document = documents
-            .iter()
-            .find(|document| document["id"].as_str() == Some("document-txt"))
-            .unwrap();
-
-        assert_eq!(outcome.call.status, "completed");
-        assert_eq!(documents.len(), 2);
-        assert_eq!(txt_document["fileType"].as_str(), Some("txt"));
-        assert_eq!(txt_document["knowledgeBaseId"].as_str(), Some("kb-a"));
-        assert_eq!(txt_document["knowledgeBaseName"].as_str(), Some("主知识库"));
-        assert_eq!(txt_document["previewAvailable"].as_bool(), Some(false));
-        assert_eq!(txt_document["agentReadable"].as_bool(), Some(true));
-        assert!(txt_document.get("content").is_none());
-        assert!(txt_document.get("contentHash").is_none());
-    }
-
-    /** 统一读取和改写工具必须允许 scope 内 TXT，并保留纯文本正文。 */
-    #[test]
-    fn unified_tools_read_and_propose_txt_change() {
-        let registry = ToolRegistry::default();
-        let mut snapshot = tool_test_snapshot("Markdown 正文".to_owned());
-        let mut document =
-            tool_test_document("document-txt", "kb-a", "Docs/brief.txt", "txt", false);
-        document.content = Some("旧纯文本".to_owned());
-        document.content_hash = hash_content("旧纯文本");
-        snapshot.documents = vec![document];
-        let request = tool_test_request("rewrite", "改写 TXT");
-        let mut context = tool_test_context(&mut snapshot, &request);
-
-        let read = registry.execute_named(
-            &mut context,
-            "read_file",
-            json!({ "fileId": "document-txt" }),
-        );
-        assert_eq!(read.call.status, "completed");
-        assert_eq!(read.payload["file"]["fileType"].as_str(), Some("txt"));
-        assert_eq!(read.payload["file"]["content"].as_str(), Some("旧纯文本"));
-
-        let change = registry.execute_named(&mut context, "propose_file_change", json!({
-            "fileId": "document-txt", "operation": "replace", "original": "旧纯文本", "next": "新纯文本"
-        }));
-        assert_eq!(change.call.status, "completed");
-        let pending = context.snapshot.sessions[0]
-            .pending_change
-            .as_ref()
-            .unwrap();
-        assert_eq!(pending.file_type.as_deref(), Some("txt"));
-        assert_eq!(pending.target_kind.as_deref(), Some("document"));
-        assert_eq!(pending.next, "新纯文本");
-    }
-
-    /** 同一文件第二次 edit 不得覆盖已有 pending。 */
-    #[test]
-    fn edit_same_file_rejects_when_pending_exists() {
-        let registry = ToolRegistry::default();
-        let mut snapshot = tool_test_snapshot("这是一段可以被改写的正文内容。".to_owned());
-        let request = tool_test_request("rewrite", "改两次");
-        let mut context = tool_test_context(&mut snapshot, &request);
-        let first = registry.execute_named(
-            &mut context,
-            "edit",
-            json!({
-                "fileId": "note-a",
-                "operation": "replace",
-                "original": "这是一段可以被改写的正文内容。",
-                "next": "第一版"
-            }),
-        );
-        let second = registry.execute_named(
-            &mut context,
-            "edit",
-            json!({
-                "fileId": "note-a",
-                "operation": "replace",
-                "original": "这是一段可以被改写的正文内容。",
-                "next": "第二版"
-            }),
-        );
-
-        assert_eq!(first.call.status, "completed");
-        assert_eq!(second.call.status, "failed");
-        assert_eq!(
-            context.snapshot.sessions[0]
-                .pending_change
-                .as_ref()
-                .unwrap()
-                .next,
-            "第一版"
-        );
-    }
-
-    /** list_tree 必须按会话 scope 过滤普通文档，避免暴露未授权知识库结构。 */
-    #[test]
-    fn list_tree_rejects_documents_outside_scope() {
-        let registry = ToolRegistry::default();
-        let mut snapshot = tool_test_snapshot("正文内容足够用于测试。".to_owned());
-        snapshot.documents = vec![
-            tool_test_document("document-a", "kb-a", "Docs/allowed.txt", "txt", false),
-            tool_test_document("document-b", "kb-b", "Private/hidden.pdf", "pdf", true),
-        ];
-        let request = tool_test_request("ask", "列出文件");
-        let mut context = tool_test_context(&mut snapshot, &request);
-        let outcome = registry.execute_named(&mut context, "list_tree", json!({}));
-        let documents = outcome.payload["documents"].as_array().unwrap();
-
-        assert_eq!(outcome.call.status, "completed");
-        assert_eq!(documents.len(), 1);
-        assert_eq!(documents[0]["id"].as_str(), Some("document-a"));
-        assert_eq!(outcome.payload["totalDocuments"].as_u64(), Some(1));
-    }
-
-    /** list_tree 应汇总混合文件总数、类型计数和截断状态。 */
-    #[test]
-    fn list_tree_reports_totals_type_counts_and_truncation() {
-        let registry = ToolRegistry::default();
-        let mut snapshot = tool_test_snapshot("正文内容足够用于测试。".to_owned());
-
-        snapshot.documents = vec![
-            tool_test_document("document-txt-base", "kb-a", "Docs/base.txt", "txt", false),
-            tool_test_document("document-docx", "kb-a", "Docs/brief.docx", "docx", true),
-            tool_test_document("document-pdf", "kb-a", "Docs/spec.pdf", "pdf", true),
-            tool_test_document(
-                "document-image",
-                "kb-a",
-                "Assets/diagram.png",
-                "image",
-                true,
-            ),
-        ];
-
-        for index in 0..(MAX_TREE_ITEMS - 3) {
-            // 生成超过 list_tree 单类预算的 TXT 文档，用于验证 totals 保留真实数量而数组被截断。
-            snapshot.documents.push(tool_test_document(
-                &format!("document-extra-{index}"),
-                "kb-a",
-                &format!("Docs/extra-{index}.txt"),
-                "txt",
-                false,
-            ));
-        }
-
-        let request = tool_test_request("ask", "列出文件");
-        let mut context = tool_test_context(&mut snapshot, &request);
-        let outcome = registry.execute_named(&mut context, "list_tree", json!({}));
-        let documents = outcome.payload["documents"].as_array().unwrap();
-        let file_type_counts = &outcome.payload["fileTypeCounts"];
-
-        assert_eq!(outcome.call.status, "completed");
-        assert_eq!(documents.len(), MAX_TREE_ITEMS);
-        assert_eq!(outcome.payload["totalNotes"].as_u64(), Some(1));
-        assert_eq!(
-            outcome.payload["totalDocuments"].as_u64(),
-            Some((MAX_TREE_ITEMS + 1) as u64)
-        );
-        assert_eq!(
-            outcome.payload["totalFiles"].as_u64(),
-            Some((MAX_TREE_ITEMS + 2) as u64)
-        );
-        assert_eq!(outcome.payload["truncated"].as_bool(), Some(true));
-        assert!(outcome.payload["hint"]
-            .as_str()
-            .unwrap_or_default()
-            .contains("limit"));
-        assert_eq!(file_type_counts["markdown"].as_u64(), Some(1));
-        assert_eq!(
-            file_type_counts["txt"].as_u64(),
-            Some((MAX_TREE_ITEMS - 2) as u64)
-        );
-        assert_eq!(file_type_counts["docx"].as_u64(), Some(1));
-        assert_eq!(file_type_counts["pdf"].as_u64(), Some(1));
-        assert_eq!(file_type_counts["image"].as_u64(), Some(1));
-    }
-
-    /** read_note 会按上下文预算截断长正文并保留截断标记。 */
-    #[test]
-    fn read_note_truncates_large_content_for_model_context() {
-        let registry = ToolRegistry::default();
-        let long_content = "段落内容。".repeat(MAX_READ_NOTE_CHARS);
-        let mut snapshot = tool_test_snapshot(long_content);
-        let request = tool_test_request("ask", "读取长文");
-        let mut context = tool_test_context(&mut snapshot, &request);
-        let outcome =
-            registry.execute_named(&mut context, "read_note", json!({ "noteId": "note-a" }));
-        let content = outcome.payload["note"]["content"]
-            .as_str()
-            .unwrap_or_default()
-            .to_owned();
-
-        assert_eq!(outcome.call.status, "completed");
-        assert_eq!(outcome.payload["note"]["contentTruncated"], true);
-        assert_eq!(outcome.payload["truncated"], true);
-        assert!(outcome.payload["nextOffset"].as_u64().is_some());
-        assert!(outcome.payload["hint"]
-            .as_str()
-            .unwrap_or_default()
-            .contains("offset="));
-        assert!(!content.contains("内容已按上下文预算截断"));
-    }
-
-    /** 第二次带 offset 的 read 应续上且不重复前缀。 */
-    #[test]
-    fn read_offset_continues_without_repeating_prefix() {
-        let registry = ToolRegistry::default();
-        let content = format!("{}{}", "HEAD", "TAIL".repeat(MAX_READ_NOTE_CHARS));
-        let mut snapshot = tool_test_snapshot(content);
-        let request = tool_test_request("ask", "续读");
-        let mut context = tool_test_context(&mut snapshot, &request);
-        let first = registry.execute_named(&mut context, "read", json!({ "fileId": "note-a" }));
-        let first_content = first.payload["note"]["content"].as_str().unwrap_or_default();
-        let next_offset = first.payload["nextOffset"].as_u64().unwrap() as usize;
-
-        assert!(first_content.starts_with("HEAD"));
-        assert_eq!(first.payload["truncated"], true);
-
-        let second = registry.execute_named(
-            &mut context,
-            "read",
-            json!({ "fileId": "note-a", "offset": next_offset }),
-        );
-        let second_content = second.payload["note"]["content"]
-            .as_str()
-            .unwrap_or_default();
-
-        assert!(!second_content.starts_with("HEAD"));
-        assert!(second_content.contains("TAIL"));
-        assert!(!second_content.contains("HEAD"));
-    }
-
-    /** rewrite 工具会拒绝无法命中原文的 diff，避免生成不可应用变更。 */
-    #[test]
-    fn propose_note_change_rejects_original_not_found() {
-        let registry = ToolRegistry::default();
-        let mut snapshot = tool_test_snapshot("这是一段可以被改写的正文内容。".to_owned());
-        let request = tool_test_request("rewrite", "改写当前笔记");
-        let mut context = tool_test_context(&mut snapshot, &request);
-        let outcome = registry.execute_named(
-            &mut context,
-            "propose_note_change",
-            json!({
-                "noteId": "note-a",
-                "original": "不存在的原文",
-                "next": "新的建议"
-            }),
-        );
-
-        assert_eq!(outcome.call.status, "failed");
-        assert!(context.snapshot.sessions[0].pending_change.is_none());
-    }
-
-    /** rewrite 工具必须拒绝重复出现的 original，避免生成模糊 diff。 */
-    #[test]
-    fn propose_note_change_rejects_ambiguous_original() {
-        let registry = ToolRegistry::default();
-        let mut snapshot = tool_test_snapshot("重复段落\n其他内容\n重复段落".to_owned());
-        let request = tool_test_request("rewrite", "改写当前笔记");
-        let mut context = tool_test_context(&mut snapshot, &request);
-        let outcome = registry.execute_named(
-            &mut context,
-            "propose_note_change",
-            json!({
-                "noteId": "note-a",
-                "original": "重复段落",
-                "next": "新的建议"
-            }),
-        );
-
-        assert_eq!(outcome.call.status, "failed");
-        assert!(outcome.call.summary.contains("出现多次"));
-        assert!(context.snapshot.sessions[0].pending_change.is_none());
-    }
-
-    /** rewrite 工具在 original 恰好命中一次时生成待确认 diff。 */
-    #[test]
-    fn propose_note_change_accepts_unique_original() {
-        let registry = ToolRegistry::default();
-        let mut snapshot = tool_test_snapshot("第一段\n唯一段落\n第三段".to_owned());
-        let request = tool_test_request("rewrite", "改写当前笔记");
-        let mut context = tool_test_context(&mut snapshot, &request);
-        let outcome = registry.execute_named(
-            &mut context,
-            "propose_note_change",
-            json!({
-                "noteId": "note-a",
-                "original": "唯一段落",
-                "next": "新的建议"
-            }),
-        );
-
-        assert_eq!(outcome.call.status, "completed");
-        assert_eq!(
-            context.snapshot.sessions[0]
-                .pending_change
-                .as_ref()
-                .map(|change| change.original.as_str()),
-            Some("唯一段落")
-        );
-    }
-
-    /** 局部 original 不能搭配整篇文档 next，否则确认后会把前文重复插入。 */
-    #[test]
-    fn propose_note_change_rejects_full_document_next_for_partial_replace() {
-        let registry = ToolRegistry::default();
-        let original_content = "第一段\n第二段\n第三段";
-        let mut snapshot = tool_test_snapshot(original_content.to_owned());
-        let request = tool_test_request("rewrite", "在文末追加内容");
-        let mut context = tool_test_context(&mut snapshot, &request);
-        let outcome = registry.execute_named(
-            &mut context,
-            "propose_note_change",
-            json!({
-                "noteId": "note-a",
-                "operation": "replace",
-                "original": "第二段",
-                "next": format!("{}\n\n新增段落", original_content)
-            }),
-        );
-
-        assert_eq!(outcome.call.status, "failed");
-        assert!(outcome.call.summary.contains("正文重复"));
-        assert!(context.snapshot.sessions[0].pending_change.is_none());
-    }
-
-    /** 文末追加必须使用 append，工具会把增量内容安全合成为整篇待确认 diff。 */
-    #[test]
-    fn propose_note_change_append_builds_full_note_replacement() {
-        let registry = ToolRegistry::default();
-        let mut snapshot = tool_test_snapshot("第一段\n第二段".to_owned());
-        let request = tool_test_request("rewrite", "在文末追加内容");
-        let mut context = tool_test_context(&mut snapshot, &request);
-        let outcome = registry.execute_named(
-            &mut context,
-            "propose_note_change",
-            json!({
-                "noteId": "note-a",
-                "operation": "append",
-                "next": "新增段落"
-            }),
-        );
-
-        let change = context.snapshot.sessions[0]
-            .pending_change
-            .as_ref()
-            .unwrap();
-
-        assert_eq!(outcome.call.status, "completed");
-        assert_eq!(change.operation.as_deref(), Some("append"));
-        assert_eq!(change.original, "第一段\n第二段");
-        assert_eq!(change.next, "第一段\n第二段\n\n新增段落");
-    }
-
-    /** 多处编辑应在工具层合成为整篇待确认 diff，避免模型拆成多个后续承诺。 */
-    #[test]
-    fn propose_note_change_multi_replace_builds_full_note_replacement() {
-        let registry = ToolRegistry::default();
-        let mut snapshot =
-            tool_test_snapshot("标题\n重复段落一\n正文\n重复段落二\n结尾".to_owned());
-        let request = tool_test_request("rewrite", "删除文档里的重复内容");
-        let mut context = tool_test_context(&mut snapshot, &request);
-        let outcome = registry.execute_named(
-            &mut context,
-            "propose_note_change",
-            json!({
-                "noteId": "note-a",
-                "operation": "multi_replace",
-                "edits": [
-                    { "original": "重复段落一\n", "next": "" },
-                    { "original": "重复段落二\n", "next": "" }
-                ]
-            }),
-        );
-        let change = context.snapshot.sessions[0]
-            .pending_change
-            .as_ref()
-            .unwrap();
-
-        assert_eq!(outcome.call.status, "completed");
-        assert_eq!(change.operation.as_deref(), Some("multi_replace"));
-        assert_eq!(change.original, "标题\n重复段落一\n正文\n重复段落二\n结尾");
-        assert_eq!(change.next, "标题\n正文\n结尾");
-    }
-
-    /** 多处编辑支持 occurrence 精确删除重复片段中的指定一次。 */
-    #[test]
-    fn propose_note_change_multi_replace_accepts_occurrence_for_duplicates() {
-        let registry = ToolRegistry::default();
-        let mut snapshot = tool_test_snapshot("开头\n重复段落\n中间\n重复段落\n结尾".to_owned());
-        let request = tool_test_request("rewrite", "删除后面的重复段落");
-        let mut context = tool_test_context(&mut snapshot, &request);
-        let outcome = registry.execute_named(
-            &mut context,
-            "propose_note_change",
-            json!({
-                "noteId": "note-a",
-                "operation": "multi_replace",
-                "edits": [
-                    { "original": "重复段落\n", "next": "", "occurrence": 2 }
-                ]
-            }),
-        );
-        let change = context.snapshot.sessions[0]
-            .pending_change
-            .as_ref()
-            .unwrap();
-
-        assert_eq!(outcome.call.status, "completed");
-        assert_eq!(change.operation.as_deref(), Some("multi_replace"));
-        assert_eq!(change.next, "开头\n重复段落\n中间\n结尾");
-    }
-
-    /** propose_note_change 必须拒绝 scope 外笔记。 */
-    #[test]
-    fn propose_note_change_rejects_note_outside_scope() {
-        let registry = ToolRegistry::default();
-        let mut snapshot = tool_test_snapshot("这是一段可以被改写的正文内容。".to_owned());
-        let request = tool_test_request("rewrite", "改写当前笔记");
-        let mut context = tool_test_context(&mut snapshot, &request);
-        let outcome = registry.execute_named(
-            &mut context,
-            "propose_note_change",
-            json!({ "noteId": "note-b", "next": "新的建议" }),
-        );
-
-        assert_eq!(outcome.call.status, "failed");
-        assert!(context.snapshot.sessions[0].pending_change.is_none());
-    }
-
-    /** 未授权知识库不能成为 create_note_draft 的目标。 */
-    #[test]
-    fn create_note_draft_rejects_knowledge_base_outside_scope() {
-        let registry = ToolRegistry::default();
-        let mut snapshot = tool_test_snapshot("正文内容足够用于测试。".to_owned());
-        let request = tool_test_request("create", "生成草稿");
-        let mut context = tool_test_context(&mut snapshot, &request);
-        let outcome = registry.execute_named(
-            &mut context,
-            "create_note_draft",
-            json!({
-                "knowledgeBaseId": "kb-b",
-                "targetPath": "Private/草稿.md",
-                "content": "# 草稿"
-            }),
-        );
-
-        assert_eq!(outcome.call.status, "failed");
-        assert!(context.snapshot.sessions[0].pending_change.is_none());
-    }
-
 }
