@@ -20,15 +20,16 @@ New code should land in the module that already owns that concern. Do not grow t
 - `storage/` — SQLite, FTS, filesystem scan/write, keyring, document history, and preview extraction. Public functions stay reachable as `crate::storage::…`. New persistence code belongs in the matching submodule (`ids`, `db`, `sessions`, `config`, `memory`, `logs`, `history`, `workspace`, `files`).
 - `agent_tools/` — closed-set tools (`types`, `registry`, `execute`). Do not add a 7th tool name; extend `search` / `read` / `list` / `edit` / `write` / `run`.
 - `runtime/` — agent loop in `mod.rs`, DeepSeek DSML parsing in `dsml.rs`.
-- `domain.rs` — IPC and persistence DTOs. Prefer existing types over ad-hoc JSON maps.
+- `domain/` — IPC and persistence DTOs grouped by aggregate (`knowledge`, `history`, `agent`, `session`, `settings`, `skills`, `im`, `logs`, `payloads`). Public types stay reachable as `crate::domain::…`. Prefer existing types over ad-hoc JSON maps.
+- `skills/` — catalog (built-in/custom listing), install (download/copy/conflict), execution (approve/run/change-set). Keep `crate::skills::…` and `crate::skill_execution::…`.
 - `im/` — IM provider routing; Feishu-specific code stays in `im/feishu.rs`.
 - `fs_guard.rs`, `agent_writes.rs`, `text_edit.rs` — path policy and confirmed writes. Agent file mutations must keep diff → confirm → hash check → atomic write.
 
 **Frontend (`src/`)**
 
-- Feature folders own UI for that surface. `workspace/` orchestrates snapshot state; do not introduce a global store.
-- `shared/tauriApi.ts` (moving into `shared/api/`) is the only IPC boundary. Browser mock fallbacks stay next to that API, not in feature components.
-- Settings sections belong under `settings/`; do not add new settings UI into `WorkspaceShell.tsx`.
+- Feature folders own UI for that surface. `workspace/` orchestrates snapshot state; do not introduce a global store. File/session/Agent/review actions belong in `useEditorActions` / `useKnowledgeBaseActions` / `useSessionActions` / `useAgentTurn` / `useReviewActions`, not in `WorkspaceShell.tsx`.
+- `shared/tauriApi.ts` is a barrel over `shared/api/` (the only IPC boundary). Browser mock fallbacks live in `shared/mock/`, not in feature components.
+- Settings sections belong under `settings/sections/`; do not add new settings UI into `WorkspaceShell.tsx`.
 
 ## Build, Test, and Development Commands
 
