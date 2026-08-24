@@ -1,8 +1,9 @@
+use super::load_agent_skills;
 use crate::domain::{
     ProposedChangeSet, ProposedFileOperation, SkillExecutionRequest, WorkspaceSnapshot,
     AGENT_DIRECT_EXECUTION_ID, EXTERNAL_FILESYSTEM_SCOPE_ID,
 };
-use crate::{skills, storage};
+use crate::storage;
 use sha2::{Digest, Sha256};
 use std::collections::{HashMap, HashSet};
 use std::fs;
@@ -45,7 +46,7 @@ pub fn approve_and_execute(
     }
 
     let connection = storage::open_database(app)?;
-    let skill = skills::load_agent_skills(app, &connection)?
+    let skill = load_agent_skills(app, &connection)?
         .into_iter()
         .find(|skill| skill.id == request.skill_id && skill.enabled)
         .ok_or_else(|| "找不到待执行的已启用 Skill。".to_owned())?;

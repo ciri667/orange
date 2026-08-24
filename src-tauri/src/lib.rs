@@ -13,8 +13,8 @@ mod logging;
 mod model_provider;
 mod provider_error;
 mod runtime;
-mod skill_execution;
 mod skills;
+pub(crate) use skills::execution as skill_execution;
 mod storage;
 mod text_edit;
 
