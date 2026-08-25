@@ -81,6 +81,111 @@ export function getToolTraceLabel(step: AgentTraceStep): string {
   return step.name ?? "工具调用";
 }
 
+/** 与 AgentTurnTrace / liveTurn.status 相同的三态，避免纯函数依赖组件模块。 */
+export type AgentTraceTurnStatus = "running" | "completed" | "failed";
+
+/** 贴底跟滚阈值：大约两行，不做成设置项。 */
+export const TRACE_SCROLL_BOTTOM_PX = 48;
+
+/** 空过程区是否还要画出来。有步骤或失败必画；running 且还没有终稿也画（正在思考）；纯问答一旦有 content 且无步骤则不画。 */
+export function shouldRenderTurnTrace(
+  steps: AgentTraceStep[],
+  status: AgentTraceTurnStatus,
+  content: string,
+): boolean {
+  if (steps.length > 0) {
+    return true;
+  }
+  if (status === "failed") {
+    return true;
+  }
+  return status === "running" && !content.trim();
+}
+
+/** 整段过程区在状态跳转时的下一展开值。running→completed 收一次；转入 failed 展开一次；其余保持用户当前选择。 */
+export function nextTurnTraceExpanded(
+  previousStatus: AgentTraceTurnStatus,
+  nextStatus: AgentTraceTurnStatus,
+  currentExpanded: boolean,
+): boolean {
+  if (previousStatus === "running" && nextStatus === "completed") {
+    return false;
+  }
+  if (nextStatus === "failed" && previousStatus !== "failed") {
+    return true;
+  }
+  return currentExpanded;
+}
+
+/**
+ * 工具详情是否默认摊开。
+ * 失败始终摊开。running 时：当前 running 步、以及时间线末尾刚完成且终稿还没开始的步摊开。
+ * 终稿已经开始流（hasLiveAnswer）时，末尾完成步改为一行摘要，把光标让给回答区。
+ */
+export function shouldExpandToolStep(
+  steps: AgentTraceStep[],
+  index: number,
+  turnStatus: AgentTraceTurnStatus,
+  hasLiveAnswer = false,
+): boolean {
+  const step = steps[index];
+  if (!step || step.type !== "tool") {
+    return false;
+  }
+  if (step.status === "failed") {
+    return true;
+  }
+  if (turnStatus !== "running") {
+    return false;
+  }
+  if (step.status === "running") {
+    return true;
+  }
+  if (hasLiveAnswer) {
+    return false;
+  }
+  return index === steps.length - 1 && step.status === "completed";
+}
+
+/** 思考段是否带脉冲光标：仅 running、该段是时间线末尾、且回答区还没有终稿。 */
+export function shouldShowThinkingCaret(
+  steps: AgentTraceStep[],
+  index: number,
+  turnStatus: AgentTraceTurnStatus,
+  hasLiveAnswer = false,
+): boolean {
+  if (hasLiveAnswer || turnStatus !== "running") {
+    return false;
+  }
+  return steps[index]?.type === "thinking" && index === steps.length - 1;
+}
+
+/** 跟滚依赖指纹：思考变长或当前工具状态变化时必须变，不能只用 steps.length。 */
+export function getTraceScrollFingerprint(steps: AgentTraceStep[]): string {
+  const lastThinking = [...steps].reverse().find((step) => step.type === "thinking");
+  const runningTool = steps.find((step) => step.type === "tool" && step.status === "running");
+  const lastStep = steps[steps.length - 1];
+  return [
+    String(steps.length),
+    lastThinking?.content ?? "",
+    runningTool?.id ?? "",
+    runningTool?.status ?? "",
+    runningTool?.summary ?? "",
+    lastStep?.id ?? "",
+    lastStep?.status ?? "",
+  ].join("\0");
+}
+
+/** 离底部不超过 thresholdPx 视为贴底，才允许自动 scrollTo。 */
+export function isNearScrollBottom(
+  scrollTop: number,
+  scrollHeight: number,
+  clientHeight: number,
+  thresholdPx = TRACE_SCROLL_BOTTOM_PX,
+): boolean {
+  return scrollHeight - scrollTop - clientHeight <= thresholdPx;
+}
+
 /** 把毫秒格式化成 Codex 风格的 12s / 1m 5s / 1h 3m 50s。 */
 export function formatTurnDuration(durationMs: number): string {
   const totalSeconds = Math.max(0, Math.round(durationMs / 1000));
