@@ -14,7 +14,7 @@ import {
   Wrench,
   XCircle,
 } from "lucide-react";
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { cn } from "../shared/cn";
 import type { AgentTraceStep } from "../shared/types";
 import {
@@ -23,6 +23,9 @@ import {
   formatTurnDuration,
   getToolKindLabel,
   getToolTraceLabel,
+  nextTurnTraceExpanded,
+  shouldExpandToolStep,
+  shouldShowThinkingCaret,
   type TraceDetailField,
 } from "./agentTrace";
 
@@ -38,10 +41,13 @@ export function AgentTurnTrace({
   steps,
   durationMs,
   status,
+  hasLiveAnswer = false,
 }: {
   steps: AgentTraceStep[];
   durationMs?: number;
   status: AgentTurnTraceStatus;
+  /** 回答区已经有终稿文本时，思考不再带光标，末尾完成工具也不再当「刚完成」摊开。 */
+  hasLiveAnswer?: boolean;
 }) {
   const hasFailedStep = useMemo(
     () => steps.some((step) => step.type === "tool" && step.status === "failed"),
@@ -51,10 +57,12 @@ export function AgentTurnTrace({
   const [isExpanded, setIsExpanded] = useState(resolvedStatus !== "completed");
   const [elapsedMs, setElapsedMs] = useState(durationMs ?? 0);
   const toolCount = useMemo(() => steps.filter((step) => step.type === "tool").length, [steps]);
+  const previousStatusRef = useRef(resolvedStatus);
 
   useEffect(() => {
-    // 完成后强制收起，对齐「过程」默认折叠；失败和运行中保持展开。
-    setIsExpanded(resolvedStatus !== "completed");
+    const previousStatus = previousStatusRef.current;
+    previousStatusRef.current = resolvedStatus;
+    setIsExpanded((current) => nextTurnTraceExpanded(previousStatus, resolvedStatus, current));
   }, [resolvedStatus]);
 
   useEffect(() => {
@@ -110,16 +118,27 @@ export function AgentTurnTrace({
         <div className="ml-1.5 grid min-w-0 gap-2.5 border-l-[1.5px] border-border pl-3">
           {steps.length === 0 && resolvedStatus === "running" ? (
             <p className="m-0 text-[12.5px] leading-[1.65] text-ink-muted italic whitespace-pre-wrap [overflow-wrap:anywhere]">
-              正在等待模型开始本轮推理…
+              正在思考…
+              <TraceStreamingCaret />
             </p>
           ) : (
-            steps.map((step) =>
+            steps.map((step, index) =>
               step.type === "thinking" ? (
-                <p className="m-0 text-[12.5px] leading-[1.65] text-ink-muted italic whitespace-pre-wrap [overflow-wrap:anywhere]" key={step.id}>
+                <p
+                  className="m-0 text-[12.5px] leading-[1.65] text-ink-muted italic whitespace-pre-wrap [overflow-wrap:anywhere]"
+                  key={step.id}
+                >
                   {step.content}
+                  {shouldShowThinkingCaret(steps, index, resolvedStatus, hasLiveAnswer) ? (
+                    <TraceStreamingCaret />
+                  ) : null}
                 </p>
               ) : (
-                <TraceToolStep key={step.id} step={step} />
+                <TraceToolStep
+                  autoExpand={shouldExpandToolStep(steps, index, resolvedStatus, hasLiveAnswer)}
+                  key={step.id}
+                  step={step}
+                />
               ),
             )
           )}
@@ -130,19 +149,24 @@ export function AgentTurnTrace({
 }
 
 /** 单个工具步骤：收起显示友好摘要，展开显示结构化参数和结果。 */
-function TraceToolStep({ step }: { step: AgentTraceStep }) {
+function TraceToolStep({
+  step,
+  autoExpand,
+}: {
+  step: AgentTraceStep;
+  /** 由时间线位置和回合状态决定的默认摊开；角色变化时清掉用户覆盖。 */
+  autoExpand: boolean;
+}) {
   const isFailed = step.status === "failed";
   const isRunning = step.status === "running";
-  const [isExpanded, setIsExpanded] = useState(isFailed || isRunning);
+  const [userOverride, setUserOverride] = useState<boolean | null>(null);
+  const [previousAutoExpand, setPreviousAutoExpand] = useState(autoExpand);
+  if (previousAutoExpand !== autoExpand) {
+    setPreviousAutoExpand(autoExpand);
+    setUserOverride(null);
+  }
+  const isExpanded = userOverride ?? autoExpand;
   const details = useMemo(() => buildToolTraceDetails(step), [step]);
-
-  useEffect(() => {
-    if (isFailed || isRunning) {
-      setIsExpanded(true);
-    } else {
-      setIsExpanded(false);
-    }
-  }, [isFailed, isRunning]);
 
   const ToggleIcon = isExpanded ? ChevronDown : ChevronRight;
   const Icon = resolveToolIcon(step);
@@ -165,7 +189,7 @@ function TraceToolStep({ step }: { step: AgentTraceStep }) {
         )}
         type="button"
         aria-expanded={isExpanded}
-        onClick={() => hasDetails && setIsExpanded((current) => !current)}
+        onClick={() => hasDetails && setUserOverride((current) => !(current ?? autoExpand))}
       >
         {hasDetails ? <ToggleIcon size={13} /> : <span className="w-[13px]" />}
         <span
@@ -311,6 +335,16 @@ function TraceTruncatedBadge() {
     <em className="ml-1.5 inline-flex align-middle rounded-full bg-warning-soft px-1.5 py-px text-[10px] font-bold not-italic text-warning">
       已截断
     </em>
+  );
+}
+
+/** 与回答区相同的脉冲光标，过程区 running 时只允许出现一根。 */
+function TraceStreamingCaret() {
+  return (
+    <span
+      aria-hidden
+      className="ml-0.5 inline-block h-[0.85em] w-[2px] animate-pulse bg-agent align-text-bottom"
+    />
   );
 }
 
