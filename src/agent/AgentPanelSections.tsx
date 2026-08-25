@@ -38,6 +38,11 @@ import type {
 } from "../shared/types";
 import { CitationList } from "./CitationList";
 import { AgentTurnTrace } from "./AgentTurnTrace";
+import {
+  getTraceScrollFingerprint,
+  isNearScrollBottom,
+  shouldRenderTurnTrace,
+} from "./agentTrace";
 import { ToolCallList } from "./ToolCallList";
 
 /** 会话摘要条只保留当前文件和待确认写入，避免和输入条、范围入口重复。 */
@@ -487,14 +492,33 @@ export function AgentMessageList({
   const showLiveTurn =
     Boolean(liveTurn) && liveTurn?.sessionId === activeSession.id && !persistedIds.has(liveTurn.liveMessageId);
   const listRef = useRef<HTMLDivElement>(null);
+  const stickToBottomRef = useRef(true);
+  const traceScrollFingerprint = getTraceScrollFingerprint(liveTurn?.steps ?? []);
 
   useEffect(() => {
-    // 过程增量到达时跟到底部，避免执行中展开的步骤被旧消息挡住。
-    listRef.current?.scrollTo({ top: listRef.current.scrollHeight });
-  }, [activeSession.messages.length, liveTurn?.steps.length, liveTurn?.content, liveTurn?.status, queuedFollowUp]);
+    const list = listRef.current;
+    if (!list || !stickToBottomRef.current) {
+      return;
+    }
+    list.scrollTo({ top: list.scrollHeight });
+  }, [
+    activeSession.messages.length,
+    liveTurn?.content,
+    liveTurn?.status,
+    queuedFollowUp,
+    traceScrollFingerprint,
+  ]);
 
   return (
-    <div className="min-h-0 flex-1 overflow-auto pr-0.5" aria-live="polite" ref={listRef}>
+    <div
+      className="min-h-0 flex-1 overflow-auto pr-0.5"
+      aria-live="polite"
+      ref={listRef}
+      onScroll={(event) => {
+        const list = event.currentTarget;
+        stickToBottomRef.current = isNearScrollBottom(list.scrollTop, list.scrollHeight, list.clientHeight);
+      }}
+    >
       {activeSession.messages.length === 0 && !showLiveTurn && !queuedFollowUp && (
         <div className="grid min-h-full place-content-center justify-items-center gap-1.5 px-3 py-6 text-center text-ink-muted">
           <Sparkles size={16} className="text-agent opacity-70" />
@@ -555,7 +579,7 @@ function AgentMessageItem({
   const showTurnTrace =
     message.role === "assistant" &&
     usesTurnTrace &&
-    (Boolean(message.trace?.length) || liveStatus === "running" || liveStatus === "failed");
+    shouldRenderTurnTrace(message.trace ?? [], liveStatus ?? "completed", message.content);
 
   return (
     <article
@@ -592,14 +616,13 @@ function AgentMessageItem({
       {showTurnTrace ? (
         <AgentTurnTrace
           durationMs={message.turnDurationMs}
+          hasLiveAnswer={Boolean(message.content)}
           status={liveStatus ?? "completed"}
           steps={message.trace ?? []}
         />
       ) : null}
       {message.content ? (
         <MessageMarkdown content={message.content} streaming={liveStatus === "running"} />
-      ) : liveStatus === "running" ? (
-        <span aria-hidden className="mt-1 inline-block h-[0.85em] w-[2px] animate-pulse bg-agent" />
       ) : null}
       {message.role === "assistant" && !usesTurnTrace ? <ToolCallList toolCalls={message.toolCalls} /> : null}
       <CitationList citations={message.citations} />
