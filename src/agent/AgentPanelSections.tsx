@@ -493,7 +493,12 @@ export function AgentMessageList({
     Boolean(liveTurn) && liveTurn?.sessionId === activeSession.id && !persistedIds.has(liveTurn.liveMessageId);
   const listRef = useRef<HTMLDivElement>(null);
   const stickToBottomRef = useRef(true);
-  const traceScrollFingerprint = getTraceScrollFingerprint(liveTurn?.steps ?? []);
+  const sessionIdRef = useRef(activeSession.id);
+  if (sessionIdRef.current !== activeSession.id) {
+    sessionIdRef.current = activeSession.id;
+    stickToBottomRef.current = true;
+  }
+  const traceScrollFingerprint = getTraceScrollFingerprint(showLiveTurn ? (liveTurn?.steps ?? []) : []);
 
   useEffect(() => {
     const list = listRef.current;
@@ -502,6 +507,7 @@ export function AgentMessageList({
     }
     list.scrollTo({ top: list.scrollHeight });
   }, [
+    activeSession.id,
     activeSession.messages.length,
     liveTurn?.content,
     liveTurn?.status,
@@ -616,7 +622,7 @@ function AgentMessageItem({
       {showTurnTrace ? (
         <AgentTurnTrace
           durationMs={message.turnDurationMs}
-          hasLiveAnswer={Boolean(message.content)}
+          hasLiveAnswer={Boolean(message.content.trim())}
           status={liveStatus ?? "completed"}
           steps={message.trace ?? []}
         />
