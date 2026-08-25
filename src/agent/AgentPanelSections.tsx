@@ -596,7 +596,11 @@ function AgentMessageItem({
           steps={message.trace ?? []}
         />
       ) : null}
-      {message.content ? <MessageMarkdown content={message.content} /> : null}
+      {message.content ? (
+        <MessageMarkdown content={message.content} streaming={liveStatus === "running"} />
+      ) : liveStatus === "running" ? (
+        <span aria-hidden className="mt-1 inline-block h-[0.85em] w-[2px] animate-pulse bg-agent" />
+      ) : null}
       {message.role === "assistant" && !usesTurnTrace ? <ToolCallList toolCalls={message.toolCalls} /> : null}
       <CitationList citations={message.citations} />
     </article>
@@ -609,7 +613,7 @@ function getMentionedFileLabel(fileId: string, notes: Note[], documents: Workspa
 }
 
 /** 安全渲染 Agent 对话中的 GFM Markdown，避免模型内容中的 HTML 被直接执行。 */
-function MessageMarkdown({ content }: { content: string }) {
+function MessageMarkdown({ content, streaming = false }: { content: string; streaming?: boolean }) {
   return (
     <div className={markdownMessageClassName}>
       <ReactMarkdown
@@ -619,6 +623,9 @@ function MessageMarkdown({ content }: { content: string }) {
       >
         {content}
       </ReactMarkdown>
+      {streaming ? (
+        <span aria-hidden className="ml-0.5 inline-block h-[0.85em] w-[2px] animate-pulse bg-agent align-text-bottom" />
+      ) : null}
     </div>
   );
 }

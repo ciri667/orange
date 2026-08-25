@@ -1,5 +1,7 @@
 mod dsml;
+mod stream;
 use dsml::*;
+use stream::*;
 
 use crate::agent;
 use crate::agent_tools::{model_tool_call_name, parse_tool_args, AgentToolContext, ToolRegistry};
@@ -972,6 +974,9 @@ async fn run_model_loop(
             &mut model_messages,
             Some(&tool_schemas),
             None,
+            &mut |streamed| {
+                apply_streamed_assistant_progress(tracer, Some(app), streamed);
+            },
         )
         .await?;
         let finish_reason = provider_error::parse_finish_reason(&response);
@@ -1005,7 +1010,9 @@ async fn run_model_loop(
                 &model_tool_calls,
                 &extracted_tool_calls.visible_content,
             ));
-            tracer.push_thinking(&extracted_tool_calls.visible_content, Some(app));
+            if !tracer.last_step_is_thinking() {
+                tracer.push_thinking(&extracted_tool_calls.visible_content, Some(app));
+            }
             let failure_text = "工具参数可能被截断，本批调用未执行。请用完整参数重新发送。";
             for model_tool_call in &model_tool_calls {
                 let failed_call = AgentToolCall {
@@ -1096,7 +1103,9 @@ async fn run_model_loop(
             &extracted_tool_calls.visible_content,
         ));
 
-        tracer.push_thinking(&extracted_tool_calls.visible_content, Some(app));
+        if !tracer.last_step_is_thinking() {
+            tracer.push_thinking(&extracted_tool_calls.visible_content, Some(app));
+        }
 
         for model_tool_call in model_tool_calls {
             let tool_name = model_tool_call_name(&model_tool_call);
@@ -2272,12 +2281,13 @@ async fn send_chat_completion_with_policy(
     messages: &mut Vec<Value>,
     tool_schemas: Option<&Value>,
     response_format: Option<&Value>,
+    on_progress: &mut impl FnMut(&StreamedAssistant),
 ) -> Result<Value, String> {
     let mut delay = Duration::from_millis(400);
     let mut overflow_retried = false;
     let mut retryable_attempts = 0usize;
     loop {
-        match send_chat_completion_logged(
+        match send_chat_completion_logged_stream(
             client,
             provider,
             model_id,
@@ -2286,6 +2296,7 @@ async fn send_chat_completion_with_policy(
             messages,
             tool_schemas,
             response_format,
+            on_progress,
         )
         .await
         {
@@ -2322,6 +2333,53 @@ async fn send_chat_completion_with_policy(
             }
         }
     }
+}
+
+/** 发送一次流式 chat completions，并记录 providerId/model/status/耗时/endpointHost；错误统一脱敏。 */
+async fn send_chat_completion_logged_stream(
+    client: &Client,
+    provider: &LlmProviderConfig,
+    model_id: &str,
+    endpoint: &str,
+    api_key: &str,
+    messages: &[Value],
+    tool_schemas: Option<&Value>,
+    response_format: Option<&Value>,
+    on_progress: &mut impl FnMut(&StreamedAssistant),
+) -> Result<Value, String> {
+    let started_at = Instant::now();
+    let result = send_chat_completion_stream(
+        client,
+        endpoint,
+        api_key,
+        model_id,
+        messages,
+        tool_schemas,
+        response_format,
+        on_progress,
+    )
+    .await;
+
+    match &result {
+        Ok(_) => log_model_request_event(
+            provider,
+            model_id,
+            endpoint,
+            "completed",
+            started_at.elapsed(),
+            None,
+        ),
+        Err(error) => log_model_request_event(
+            provider,
+            model_id,
+            endpoint,
+            "failed",
+            started_at.elapsed(),
+            Some(error),
+        ),
+    }
+
+    result
 }
 
 /** 发送一次 chat completions 请求并记录 providerId/model/status/耗时/endpointHost；错误统一脱敏。 */
@@ -2411,6 +2469,7 @@ fn build_chat_completion_payload(
     messages: &[Value],
     tool_schemas: Option<&Value>,
     response_format: Option<&Value>,
+    stream: bool,
 ) -> Value {
     let mut payload = json!({
         "model": model,
@@ -2426,6 +2485,10 @@ fn build_chat_completion_payload(
 
     if let Some(response_format) = response_format {
         payload["response_format"] = response_format.clone();
+    }
+
+    if stream {
+        payload["stream"] = json!(true);
     }
 
     payload
@@ -2511,7 +2574,8 @@ async fn send_chat_completion(
     tool_schemas: Option<&Value>,
     response_format: Option<&Value>,
 ) -> Result<Value, String> {
-    let payload = build_chat_completion_payload(model, messages, tool_schemas, response_format);
+    let payload =
+        build_chat_completion_payload(model, messages, tool_schemas, response_format, false);
 
     let mut request_builder = client.post(endpoint).json(&payload);
 
@@ -2535,6 +2599,54 @@ async fn send_chat_completion(
     }
 
     serde_json::from_str(&body).map_err(|error| format!("无法解析模型响应：{error}"))
+}
+
+/** 发送流式 chat completions；SSE 边读边回调，provider 若返回完整 JSON 则只回调一次。 */
+async fn send_chat_completion_stream(
+    client: &Client,
+    endpoint: &str,
+    api_key: &str,
+    model: &str,
+    messages: &[Value],
+    tool_schemas: Option<&Value>,
+    response_format: Option<&Value>,
+    on_progress: &mut impl FnMut(&StreamedAssistant),
+) -> Result<Value, String> {
+    let payload =
+        build_chat_completion_payload(model, messages, tool_schemas, response_format, true);
+
+    let mut request_builder = client.post(endpoint).json(&payload);
+
+    if !api_key.trim().is_empty() {
+        request_builder = request_builder.bearer_auth(api_key);
+    }
+
+    let response = request_builder.send().await.map_err(|error| {
+        model_provider::redact_model_error_text(&format!("无法发送模型请求：{error}"))
+    })?;
+    let status = response.status();
+
+    if !status.is_success() {
+        let body = response.text().await.unwrap_or_else(|_| String::new());
+        return Err(model_provider::redact_model_error_text(&format!(
+            "模型请求失败：HTTP {status} {body}"
+        )));
+    }
+
+    read_chat_completion_response(response, on_progress).await
+}
+
+/** 把流式增量写进过程区：思考进 trace，回答进 live content。 */
+fn apply_streamed_assistant_progress(
+    tracer: &mut AgentTurnTracer,
+    app: Option<&AppHandle>,
+    streamed: &StreamedAssistant,
+) {
+    let progress = stream_ui_progress(streamed);
+    if !progress.thinking.is_empty() {
+        tracer.update_thinking(&progress.thinking, app);
+    }
+    tracer.set_partial_content(&progress.content, app);
 }
 
 /** 用模型增量合并会话工作记忆；失败时降级为确定性摘要，且不影响主 Agent 回合。 */
@@ -4591,6 +4703,7 @@ mod tests {
             &messages,
             None,
             Some(&context_summary_response_format()),
+            false,
         );
         let schema = &payload["response_format"];
 
@@ -4615,11 +4728,27 @@ mod tests {
             &[json!({ "role": "user", "content": "检索" })],
             Some(&tools),
             None,
+            false,
         );
 
         assert_eq!(payload["tool_choice"], "auto");
         assert_eq!(payload["tools"], tools);
         assert!(payload.get("response_format").is_none());
+        assert!(payload.get("stream").is_none());
+    }
+
+    /** Agent loop 必须显式打开 Chat Completions SSE，不能靠事后打字机伪装流式。 */
+    #[test]
+    fn chat_completion_payload_enables_stream_for_agent_loop() {
+        let payload = build_chat_completion_payload(
+            "gpt-4o-mini",
+            &[json!({ "role": "user", "content": "你好" })],
+            None,
+            None,
+            true,
+        );
+
+        assert_eq!(payload["stream"], true);
     }
 
     /** json_schema 成功时 content 仍是 JSON 字符串，解析层要直接读成工作记忆对象。 */

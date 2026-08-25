@@ -3,7 +3,10 @@ use crate::storage::{create_id, format_local_datetime};
 use serde::Serialize;
 use serde_json::Value;
 use std::collections::HashMap;
-use std::time::Instant;
+use std::time::{Duration, Instant};
+
+/** 流式正文/思考推送的最短间隔，避免每个 token 都打满窗口事件。 */
+const STREAM_EMIT_INTERVAL: Duration = Duration::from_millis(50);
 use tauri::{AppHandle, Emitter};
 
 /** 前端监听的过程推送事件名，和 UI live 气泡对齐。 */
@@ -48,6 +51,7 @@ pub struct AgentTurnTracer {
     status: String,
     content: Option<String>,
     running_started: HashMap<String, Instant>,
+    last_progress_emit: Option<Instant>,
 }
 
 impl AgentTurnTracer {
@@ -61,7 +65,13 @@ impl AgentTurnTracer {
             status: "running".to_owned(),
             content: None,
             running_started: HashMap::new(),
+            last_progress_emit: None,
         }
+    }
+
+    #[cfg(test)]
+    pub fn live_content(&self) -> Option<&str> {
+        self.content.as_deref()
     }
 
     pub fn live_message_id(&self) -> &str {
@@ -77,14 +87,32 @@ impl AgentTurnTracer {
     }
 
     /** 回合开始时推一次空过程，让 UI 立刻展开「正在处理」。 */
-    pub fn emit_started(&self, app: Option<&AppHandle>) {
+    pub fn emit_started(&mut self, app: Option<&AppHandle>) {
         self.emit(app);
     }
 
     /** 把模型在调用工具前的可见正文记为思考步骤；空白内容直接丢弃。 */
     pub fn push_thinking(&mut self, content: &str, app: Option<&AppHandle>) {
+        self.update_thinking(content, app);
+    }
+
+    /** 流式更新当前思考：最后一步已是 thinking 则改写，否则新开一步。 */
+    pub fn update_thinking(&mut self, content: &str, app: Option<&AppHandle>) {
         let trimmed = content.trim();
         if trimmed.is_empty() {
+            return;
+        }
+        let truncated = truncate_trace_text(trimmed, MAX_TRACE_THINKING_CHARS);
+        if let Some(step) = self
+            .steps
+            .last_mut()
+            .filter(|step| step.step_type == "thinking")
+        {
+            if step.content.as_deref() == Some(truncated.as_str()) {
+                return;
+            }
+            step.content = Some(truncated);
+            self.emit_throttled(app, false);
             return;
         }
 
@@ -92,7 +120,7 @@ impl AgentTurnTracer {
             id: create_id("trace"),
             step_type: "thinking".to_owned(),
             timestamp: format_local_datetime(),
-            content: Some(truncate_trace_text(trimmed, MAX_TRACE_THINKING_CHARS)),
+            content: Some(truncated),
             name: None,
             status: None,
             summary: None,
@@ -102,6 +130,37 @@ impl AgentTurnTracer {
             duration_ms: None,
         });
         self.emit(app);
+    }
+
+    /** 流式更新用户可见回答；空字符串表示清掉尚未定稿的正文。 */
+    pub fn set_partial_content(&mut self, content: &str, app: Option<&AppHandle>) {
+        let next = if content.is_empty() {
+            None
+        } else {
+            Some(content.to_owned())
+        };
+        if self.content == next {
+            return;
+        }
+        let clearing = next.is_none();
+        self.content = next;
+        self.emit_throttled(app, clearing);
+    }
+
+    /** 工具调用出现后，把已经流出的回答改记为思考，避免中间过程留在终稿位置。 */
+    #[cfg(test)]
+    pub fn promote_partial_content_to_thinking(&mut self, app: Option<&AppHandle>) {
+        let Some(content) = self.content.take() else {
+            return;
+        };
+        self.update_thinking(&content, None);
+        self.emit(app);
+    }
+
+    pub fn last_step_is_thinking(&self) -> bool {
+        self.steps
+            .last()
+            .is_some_and(|step| step.step_type == "thinking")
     }
 
     /** 开始执行用户可见工具；基建工具返回 None 且不发事件。 */
@@ -194,7 +253,7 @@ impl AgentTurnTracer {
         self.emit(app);
     }
 
-    fn emit(&self, app: Option<&AppHandle>) {
+    fn emit(&mut self, app: Option<&AppHandle>) {
         let Some(app) = app else {
             return;
         };
@@ -207,6 +266,7 @@ impl AgentTurnTracer {
             content: self.content.clone(),
         };
 
+        self.last_progress_emit = Some(Instant::now());
         if let Err(error) = app.emit(AGENT_TURN_PROGRESS_EVENT, payload) {
             log::debug!(
                 target: "agent_runtime",
@@ -214,6 +274,16 @@ impl AgentTurnTracer {
                 self.session_id,
                 error
             );
+        }
+    }
+
+    fn emit_throttled(&mut self, app: Option<&AppHandle>, force: bool) {
+        let due = self
+            .last_progress_emit
+            .map(|emitted_at| emitted_at.elapsed() >= STREAM_EMIT_INTERVAL)
+            .unwrap_or(true);
+        if force || due {
+            self.emit(app);
         }
     }
 }
@@ -462,6 +532,66 @@ mod tests {
         let original = args["original"].as_str().unwrap();
         assert!(original.ends_with("…[已截断]"));
         assert_eq!(args["count"], 1);
+    }
+
+    /** 流式正文必须在 running 时就能读到，不能等到 finish 才出现。 */
+    #[test]
+    fn set_partial_content_is_visible_while_running() {
+        let mut tracer = AgentTurnTracer::new("session-a", "assistant-a");
+
+        tracer.set_partial_content("橘", None);
+        tracer.set_partial_content("橘记", None);
+
+        assert_eq!(tracer.live_content(), Some("橘记"));
+    }
+
+    /** 同一轮思考要更新最后一条 thinking，不能每来一个 token 就新建一步。 */
+    #[test]
+    fn update_thinking_rewrites_last_thinking_step() {
+        let mut tracer = AgentTurnTracer::new("session-a", "assistant-a");
+
+        tracer.update_thinking("先", None);
+        tracer.update_thinking("先检索笔记。", None);
+
+        let steps = tracer.steps();
+        assert_eq!(steps.len(), 1);
+        assert_eq!(steps[0].step_type, "thinking");
+        assert_eq!(steps[0].content.as_deref(), Some("先检索笔记。"));
+    }
+
+    /** 工具执行之后的新思考属于下一轮，必须另起一步，不能覆盖上一轮。 */
+    #[test]
+    fn update_thinking_starts_new_step_after_tool() {
+        let mut tracer = AgentTurnTracer::new("session-a", "assistant-a");
+        tracer.update_thinking("先检索。", None);
+        tracer.begin_tool(
+            "search_notes",
+            "正在调用 search_notes",
+            json!({ "query": "本地优先" }),
+            None,
+        );
+        tracer.update_thinking("根据检索结果作答。", None);
+
+        let steps = tracer.steps();
+        assert_eq!(steps.len(), 3);
+        assert_eq!(steps[0].content.as_deref(), Some("先检索。"));
+        assert_eq!(steps[1].step_type, "tool");
+        assert_eq!(steps[2].content.as_deref(), Some("根据检索结果作答。"));
+    }
+
+    /** 工具调用开始后，已经流式展示的回答要降级为思考，避免把中间过程当成终稿。 */
+    #[test]
+    fn promote_partial_content_to_thinking_clears_live_answer() {
+        let mut tracer = AgentTurnTracer::new("session-a", "assistant-a");
+        tracer.set_partial_content("我先去检索相关笔记。", None);
+        tracer.promote_partial_content_to_thinking(None);
+
+        assert_eq!(tracer.live_content(), None);
+        assert_eq!(tracer.steps().len(), 1);
+        assert_eq!(
+            tracer.steps()[0].content.as_deref(),
+            Some("我先去检索相关笔记。")
+        );
     }
 
     /** 从 toolCalls 派生轨迹时也要过滤基建工具，供本地兜底消息直接落库。 */
