@@ -2,13 +2,17 @@ import { Clock, Database, FileText, Layers3, MessageSquareText, ShieldAlert, Spa
 import { useEffect, useRef } from "react";
 import ReactMarkdown from "react-markdown";
 import rehypeSanitize from "rehype-sanitize";
-import remarkGfm from "remark-gfm";
 import { Button } from "../shared/Button";
 import { Checkbox } from "../shared/Checkbox";
 import { Chip } from "../shared/Chip";
 import { cn } from "../shared/cn";
 import { listRowClassName } from "../shared/ListRow";
-import { createMarkdownComponents, markdownMessageClassName } from "../shared/markdown";
+import {
+  createMarkdownComponents,
+  markdownMessageClassName,
+  markdownRemarkPlugins,
+  protectGfmTablePipesInInlineCode,
+} from "../shared/markdown";
 import { OverflowTooltipText } from "../shared/OverflowTooltipText";
 import { SegmentedControl, SegmentedControlItem } from "../shared/SegmentedControl";
 import { agentPopoverClassName, popoverHeaderClassName, sectionLabelClassName } from "../shared/ui";
@@ -646,11 +650,11 @@ function MessageMarkdown({ content, streaming = false }: { content: string; stre
   return (
     <div className={markdownMessageClassName}>
       <ReactMarkdown
-        remarkPlugins={[remarkGfm]}
+        remarkPlugins={markdownRemarkPlugins}
         rehypePlugins={[rehypeSanitize]}
         components={createMarkdownComponents("agent_message", "message")}
       >
-        {content}
+        {protectGfmTablePipesInInlineCode(content)}
       </ReactMarkdown>
       {streaming ? (
         <span aria-hidden className="ml-0.5 inline-block h-[0.85em] w-[2px] animate-pulse bg-agent align-text-bottom" />

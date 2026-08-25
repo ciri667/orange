@@ -1,6 +1,13 @@
 import type { Components } from "react-markdown";
+import remarkGfm from "remark-gfm";
 import { cn } from "./cn";
 import { MarkdownLink, type MarkdownLinkSource } from "./MarkdownLink";
+import { remarkRestoreProtectedTablePipes } from "./protectMarkdownTablePipes";
+
+export { protectGfmTablePipesInInlineCode } from "./protectMarkdownTablePipes";
+
+/** 预览和 Agent 消息共用：GFM 表格 + 还原行内代码里被保护的竖线。 */
+export const markdownRemarkPlugins = [remarkGfm, remarkRestoreProtectedTablePipes];
 
 /** Markdown 预览容器：编辑器阅读区。 */
 export const markdownPreviewClassName =

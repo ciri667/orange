@@ -5,11 +5,15 @@ import ReactMarkdown, { defaultUrlTransform } from "react-markdown";
 import type { UrlTransform } from "react-markdown";
 import rehypeSanitize, { defaultSchema } from "rehype-sanitize";
 import type { Options as RehypeSanitizeOptions } from "rehype-sanitize";
-import remarkGfm from "remark-gfm";
 import { DiffPanel } from "../diff/DiffPanel";
 import type { ReviewCommentDraft } from "../diff/DiffPanel";
 import { Button } from "../shared/Button";
-import { createMarkdownComponents, markdownPreviewClassName } from "../shared/markdown";
+import {
+  createMarkdownComponents,
+  markdownPreviewClassName,
+  markdownRemarkPlugins,
+  protectGfmTablePipesInInlineCode,
+} from "../shared/markdown";
 import { SegmentedControl, SegmentedControlItem } from "../shared/SegmentedControl";
 import type { ExportFormat, KnowledgeBase, MarkdownViewMode, Note, ProposedChange } from "../shared/types";
 import { EditorEmptyHeader, EditorFileHeader, EditorMetaStrip, EditorMoreActionMenu } from "./EditorFileChrome";
@@ -276,12 +280,12 @@ function MarkdownPreview({
     <div className={markdownPreviewClassName} ref={previewRef} onScroll={onScroll} aria-label="Markdown 预览">
       {content.trim() ? (
         <ReactMarkdown
-          remarkPlugins={[remarkGfm]}
+          remarkPlugins={markdownRemarkPlugins}
           rehypePlugins={[[rehypeSanitize, MARKDOWN_PREVIEW_SANITIZE_SCHEMA]]}
           urlTransform={imageUrlTransform}
           components={createMarkdownComponents("editor_preview", "preview")}
         >
-          {content}
+          {protectGfmTablePipesInInlineCode(content)}
         </ReactMarkdown>
       ) : (
         <p className="m-0 text-ink-muted">空白笔记</p>
