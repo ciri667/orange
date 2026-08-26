@@ -145,4 +145,4 @@ assets/readme/    README 使用的截图与其他文档资源
 
 ## 许可证
 
-本项目采用 [MIT License](./LICENSE) 开源。
+本项目采用 [Apache License 2.0](./LICENSE) 开源。

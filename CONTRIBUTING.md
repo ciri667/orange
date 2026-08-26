@@ -65,4 +65,4 @@ npm run sidecar:feishu:build
 
 ## 许可证
 
-提交贡献即表示你同意将其以本仓库的 [MIT License](./LICENSE) 授权。
+提交贡献即表示你同意将其以本仓库的 [Apache License 2.0](./LICENSE) 授权。

@@ -3,6 +3,7 @@ name = "orange"
 version = "0.1.0"
 description = "Local-first knowledge base agent assistant"
 authors = ["橘记"]
+license = "Apache-2.0"
 edition = "2021"
 
 [lib]
