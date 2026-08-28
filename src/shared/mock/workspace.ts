@@ -844,6 +844,16 @@ export function runMockAgentTurn(
     ],
     turnDurationMs: 1200,
   });
+  const estimatedChars = session.messages.reduce((sum, message) => sum + message.content.length, 0) + 800;
+  const promptTokens = Math.max(1, Math.round(estimatedChars / 2));
+  session.contextUsage = {
+    modelId: session.modelId || "gpt-4o-mini",
+    promptTokens,
+    completionTokens: 80,
+    totalTokens: promptTokens + 80,
+    contextLength: 128000,
+    recordedAt: formatLocalDateTime(),
+  };
   session.updatedAt = "刚刚";
 
   return nextSnapshot;

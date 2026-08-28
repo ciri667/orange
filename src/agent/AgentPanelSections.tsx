@@ -1,5 +1,5 @@
-import { Clock, Database, FileText, Layers3, MessageSquareText, ShieldAlert, Sparkles, Trash2, X } from "lucide-react";
-import { useEffect, useRef } from "react";
+import { Clock, Database, FileText, FolderOpen, Gauge, Layers3, MessageSquareText, ShieldAlert, Sparkles, Trash2, X } from "lucide-react";
+import { useEffect, useRef, useState } from "react";
 import ReactMarkdown from "react-markdown";
 import rehypeSanitize from "rehype-sanitize";
 import { Button } from "../shared/Button";
@@ -30,8 +30,17 @@ import {
   getProviderModelSelectionLabel,
 } from "../shared/modelSelection";
 import { ModelCascadeSelector } from "../shared/ModelCascadeSelector";
+import { loadAgentPromptDump } from "../shared/api/agent";
+import { openAppLogFolder } from "../shared/api/logs";
+import {
+  formatContextMeterChip,
+  formatContextUsageLabel,
+  formatContextWindowLabel,
+  resolveContextMeter,
+} from "../shared/contextUsage";
 import type {
   AgentMessage,
+  AgentPromptDump,
   AgentSecuritySettings,
   AgentSession,
   AgentTurnProgressEvent,
@@ -49,23 +58,38 @@ import {
 } from "./agentTrace";
 import { ToolCallList } from "./ToolCallList";
 
-/** 会话摘要条只保留当前文件和待确认写入，避免和输入条、范围入口重复。 */
+/** 会话摘要条只保留当前文件、上下文占用和待确认写入，避免和输入条、范围入口重复。 */
 export function AgentSessionSummary({
   activeSession,
   currentFileLabel,
+  modelConfig,
 }: {
   activeSession: AgentSession;
   /** 工作台当前焦点文件；它是本轮默认编辑目标，独立于会话恢复锚点。 */
   currentFileLabel: string;
+  modelConfig: ModelConfig;
 }) {
   const isPendingWrite = activeSession.pendingChange?.status === "pending";
+  const contextMeter = resolveContextMeter(activeSession, modelConfig);
+  const contextMeterLabel = formatContextMeterChip(contextMeter);
 
   return (
     <div className="flex min-h-0 min-w-0 flex-1 flex-nowrap items-center gap-1.5 overflow-hidden" aria-label="当前会话摘要">
-      <Chip className="max-w-[54%] flex-1 rounded-full border-border bg-surface py-[5px] pr-[9px] pl-[9px] font-normal text-ink-muted">
+      <Chip className="max-w-[46%] flex-1 rounded-full border-border bg-surface py-[5px] pr-[9px] pl-[9px] font-normal text-ink-muted">
         <FileText size={13} />
         <OverflowTooltipText text={currentFileLabel} logArea="agent_session_current_file_summary" />
       </Chip>
+      {contextMeterLabel && (
+        <span title={`窗口 ${formatContextWindowLabel(contextMeter)} · 占用 ${formatContextUsageLabel(contextMeter)}`} aria-label={`窗口 ${formatContextWindowLabel(contextMeter)} · 占用 ${formatContextUsageLabel(contextMeter)}`}>
+          <Chip className="max-w-[34%] shrink-0 rounded-full border-border bg-surface py-[5px] pr-[9px] pl-[9px] font-normal text-ink-muted">
+            <Gauge size={13} />
+            <OverflowTooltipText
+              text={contextMeterLabel}
+              logArea="agent_session_context_usage"
+            />
+          </Chip>
+        </span>
+      )}
       {isPendingWrite && (
         <OverflowTooltipText
           className="shrink-0 rounded-control border border-[rgba(var(--danger-rgb),0.26)] bg-danger-soft px-1.5 py-0.5 text-xs text-danger"
@@ -282,6 +306,31 @@ export function AgentSessionContextPopover({
   const memoryStatus = activeSession.contextSummary
     ? `${getContextSummaryFieldCount(activeSession)} 项 · ${activeSession.contextSummary.updatedAt || "刚刚"}`
     : "未整理";
+  const contextMeter = resolveContextMeter(activeSession, modelConfig);
+  const [promptDump, setPromptDump] = useState<AgentPromptDump | null>(null);
+  const [promptDumpError, setPromptDumpError] = useState<string | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+
+    loadAgentPromptDump(activeSession.id)
+      .then((dump) => {
+        if (!cancelled) {
+          setPromptDump(dump);
+          setPromptDumpError(null);
+        }
+      })
+      .catch((error: unknown) => {
+        if (!cancelled) {
+          setPromptDump(null);
+          setPromptDumpError(error instanceof Error ? error.message : "无法读取发给模型的上下文");
+        }
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [activeSession.id, activeSession.updatedAt, activeSession.contextUsage?.recordedAt]);
 
   return (
     <section className={agentPopoverClassName} aria-label="会话上下文">
@@ -301,6 +350,22 @@ export function AgentSessionContextPopover({
       </div>
       <div className="overflow-auto pr-0.5">
         <div className="mt-3 grid grid-cols-2 gap-2">
+          <div className="rounded-control border border-border-translucent bg-surface-translucent p-[9px]">
+            <span className="text-xs text-ink-muted">模型窗口</span>
+            <strong className="mt-1 block text-[13px] text-ink-strong">{formatContextWindowLabel(contextMeter)}</strong>
+            {!contextMeter.windowKnown ? (
+              <span className="mt-1 block text-[11px] text-ink-muted">可在模型设置中填写上下文窗口</span>
+            ) : null}
+          </div>
+          <div className="rounded-control border border-border-translucent bg-surface-translucent p-[9px]">
+            <span className="text-xs text-ink-muted">上下文占用</span>
+            <strong className="mt-1 block text-[13px] text-ink-strong">{formatContextUsageLabel(contextMeter)}</strong>
+            {!contextMeter.matchesCurrentModel && contextMeter.usageModelId ? (
+              <span className="mt-1 block text-[11px] text-ink-muted">上次为 {contextMeter.usageModelId}</span>
+            ) : contextMeter.recordedAt ? (
+              <span className="mt-1 block text-[11px] text-ink-muted">{contextMeter.recordedAt}</span>
+            ) : null}
+          </div>
           <div className="rounded-control border border-border-translucent bg-surface-translucent p-[9px]">
             <span className="text-xs text-ink-muted">工具检索范围</span>
             <OverflowTooltipText
@@ -350,8 +415,42 @@ export function AgentSessionContextPopover({
             />
           </label>
         )}
+        <section className="mt-2.5 rounded-control border border-border-translucent bg-surface-translucent p-[9px]" aria-label="发给模型的上下文">
+          <div className="flex items-start justify-between gap-2">
+            <div>
+              <span className="text-xs text-ink-muted">发给模型的上下文</span>
+              <strong className="mt-1 block text-[13px] text-ink-strong">
+                {promptDump
+                  ? `第 ${promptDump.round} 轮 · ${promptDump.messages.length} 条 · ${promptDump.totalChars.toLocaleString()} 字`
+                  : "尚未发送"}
+              </strong>
+            </div>
+            <Button variant="ghost" size="compact" title="打开应用日志目录" onClick={() => void openAppLogFolder()}>
+              <FolderOpen size={14} />
+              日志
+            </Button>
+          </div>
+          {promptDumpError ? <p className="mt-2 mb-0 text-xs text-danger">{promptDumpError}</p> : null}
+          {promptDump ? (
+            <ol className="mt-2 mb-0 grid list-none gap-1.5 p-0">
+              {promptDump.messages.map((message) => (
+                <li className="min-w-0 rounded-small border border-border-translucent bg-surface p-1.5" key={`${message.role}-${message.index}`}>
+                  <div className="flex items-center justify-between gap-2 text-[11px] text-ink-muted">
+                    <span>{message.role}</span>
+                    <span>{message.chars.toLocaleString()} 字{message.truncated ? " · 已截断预览" : ""}</span>
+                  </div>
+                  <pre className="m-0 max-h-24 overflow-auto whitespace-pre-wrap break-words font-mono text-[11px] leading-[1.45] text-ink">
+                    {message.preview}
+                  </pre>
+                </li>
+              ))}
+            </ol>
+          ) : (
+            <p className="mt-2 mb-0 text-xs text-ink-muted">发送一轮后可在这里查看结构。完整 JSON 写在应用日志目录的 agent-prompts 下。</p>
+          )}
+        </section>
         <p className="text-xs text-ink-muted">
-          当前文件是本轮默认编辑目标；会话恢复笔记只用于恢复旧会话位置。Agent 会按模型窗口装入尽量多的最近对话，更早内容进入工作记忆，也可按需检索会话历史和其他文件。
+          占用取最近一次有效模型 usage；窗口来自当前模型目录，Provider 未提供时显示未知。当前文件是本轮默认编辑目标；会话恢复笔记只用于恢复旧会话位置。Agent 会按模型窗口装入尽量多的最近对话，更早内容进入工作记忆，也可按需检索会话历史和其他文件。
         </p>
       </div>
     </section>

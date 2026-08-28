@@ -175,6 +175,7 @@ export function AgentPanel({
         <AgentSessionSummary
           activeSession={activeSession}
           currentFileLabel={currentFileLabel}
+          modelConfig={modelConfig}
         />
       </div>
 

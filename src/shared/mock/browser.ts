@@ -1,7 +1,9 @@
 import { createContentHash, createLocalId, formatLocalDateTime } from "../id";
 import { logDebug, logInfo } from "../logger";
 import type {
+  AgentActionType,
   AgentContextSummary,
+  AgentPromptDump,
   AgentSkill,
   AgentSession,
   AgentTurnRequest,
@@ -47,6 +49,7 @@ export const defaultBrowserProvider: LlmProviderConfig = {
       name: "gpt-4o-mini",
       enabled: true,
       source: "manual",
+      contextLength: 128000,
       updatedAt: "刚刚",
     },
   ],
@@ -682,8 +685,60 @@ export function createBrowserDiscoveredModels(provider: LlmProviderConfig): LlmP
     ownedBy: lowerName.includes("ollama") ? "ollama" : provider.name,
     enabled: false,
     source: "discovered",
+    contextLength: mockModelContextLength(modelId),
     updatedAt: formatLocalDateTime(),
   }));
+}
+
+/** 浏览器开发态给常见模型补一个窗口，方便上下文占用条展示。 */
+function mockModelContextLength(modelId: string) {
+  if (modelId.includes("gpt-4.1") || modelId.includes("gemini")) {
+    return 1_048_576;
+  }
+
+  if (modelId.includes("claude")) {
+    return 200_000;
+  }
+
+  if (modelId.includes("deepseek")) {
+    return 65_536;
+  }
+
+  if (modelId.includes("llama") || modelId.includes("qwen") || modelId.includes("mistral")) {
+    return 32_768;
+  }
+
+  return 128_000;
+}
+
+/** 浏览器开发态记住最近一次模拟发给模型的上下文，供上下文浮层查看。 */
+export function rememberBrowserPromptDump(session: AgentSession, prompt: string, action: AgentActionType) {
+  const systemContent = "你是橘记的本地优先知识库 Agent。浏览器 mock 不会发送真实模型请求。";
+  const userContent = `界面 action 提示：${action}\n用户输入：${prompt}`;
+  const messages = [
+    { role: "system", content: systemContent },
+    { role: "user", content: userContent },
+  ];
+  const dump: AgentPromptDump = {
+    sessionId: session.id,
+    modelId: session.contextUsage?.modelId || session.modelId || "gpt-4o-mini",
+    modelContextLength: session.contextUsage?.contextLength ?? 128000,
+    recordedAt: formatLocalDateTime(),
+    round: 1,
+    kind: "turn",
+    totalChars: messages.reduce((sum, message) => sum + JSON.stringify(message).length, 0),
+    filePath: "~/Library/Logs/app.orange.desktop/agent-prompts/session.json",
+    outline: messages.map((message) => `${message.role}:${message.content.length}`).join(","),
+    messages: messages.map((message, index) => ({
+      index,
+      role: message.role,
+      chars: JSON.stringify(message).length,
+      preview: message.content,
+      truncated: false,
+    })),
+  };
+
+  browserMock.promptDumps.set(session.id, dump);
 }
 
 /** 浏览器开发态模型合并逻辑，对齐桌面端：保留启用状态，并留下远端没返回的手动模型。 */
@@ -1037,6 +1092,7 @@ export const browserMock: {
   noteDiskContents: Map<string, string>;
   documentDiskContents: Map<string, string>;
   agentSkills: AgentSkill[];
+  promptDumps: Map<string, AgentPromptDump>;
 } = {
   userSettings: defaultBrowserUserSettings,
   imSettings: defaultBrowserImSettings,
@@ -1056,4 +1112,5 @@ export const browserMock: {
   noteDiskContents: new Map<string, string>(),
   documentDiskContents: new Map<string, string>(),
   agentSkills: cloneAgentSkills([...browserBuiltInSkills, ...browserCustomSkills]),
+  promptDumps: new Map<string, AgentPromptDump>(),
 };

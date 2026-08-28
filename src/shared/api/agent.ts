@@ -7,9 +7,11 @@ import {
   createBrowserAuditLog,
   logBrowserSkillContext,
   normalizeMockSnapshotSessions,
+  rememberBrowserPromptDump,
 } from "../mock/browser";
 import {
   AgentActionType,
+  AgentPromptDump,
   AgentTurnProgressEvent,
   AgentTurnRequest,
   AgentTurnResult,
@@ -46,6 +48,11 @@ export async function runAgentTurn(
   if (!isTauriRuntime()) {
     logBrowserSkillContext(browserMock.agentSkills, request);
     const nextSnapshot = runMockAgentTurn(snapshot, prompt, action, clientMessageId, explicitSkillIds, mentionedFileIds);
+    const session = nextSnapshot.sessions.find((item) => item.id === nextSnapshot.activeSessionId);
+
+    if (session) {
+      rememberBrowserPromptDump(session, prompt, action);
+    }
 
     browserMock.auditLogs = [createBrowserAuditLog(nextSnapshot, prompt), ...browserMock.auditLogs].slice(0, 20);
 
@@ -81,6 +88,15 @@ export async function compactAgentContext(snapshot: WorkspaceSnapshot, sessionId
   }
 
   return invokeLogged<WorkspaceSnapshot>("compact_agent_context", { payload: { snapshot, sessionId } });
+}
+
+/** 读取某会话最近一次发给模型的上下文预览；没有转储时返回 null。 */
+export async function loadAgentPromptDump(sessionId: string): Promise<AgentPromptDump | null> {
+  if (!isTauriRuntime()) {
+    return browserMock.promptDumps.get(sessionId) ?? null;
+  }
+
+  return invokeLogged<AgentPromptDump | null>("load_agent_prompt_dump", { payload: { sessionId } });
 }
 
 /** 接受当前会话的待确认变更，Tauri 环境中由本地层执行安全写入。 */
