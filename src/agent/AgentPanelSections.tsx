@@ -73,17 +73,25 @@ export function AgentSessionSummary({
   const contextMeter = resolveContextMeter(activeSession, modelConfig);
   const contextMeterLabel = formatContextMeterChip(contextMeter);
 
+  const contextMeterTitle = `窗口 ${formatContextWindowLabel(contextMeter)} · 占用 ${formatContextUsageLabel(contextMeter)}`;
+
   return (
     <div className="flex min-h-0 min-w-0 flex-1 flex-nowrap items-center gap-1.5 overflow-hidden" aria-label="当前会话摘要">
-      <Chip className="max-w-[46%] flex-1 rounded-full border-border bg-surface py-[5px] pr-[9px] pl-[9px] font-normal text-ink-muted">
-        <FileText size={13} />
-        <OverflowTooltipText text={currentFileLabel} logArea="agent_session_current_file_summary" />
+      <Chip className="max-w-full flex-1 rounded-full border-border bg-surface py-[5px] pr-[9px] pl-[9px] font-normal text-ink-muted">
+        <FileText size={13} className="shrink-0" />
+        <OverflowTooltipText className="min-w-0 truncate" text={currentFileLabel} logArea="agent_session_current_file_summary" />
       </Chip>
       {contextMeterLabel && (
-        <span title={`窗口 ${formatContextWindowLabel(contextMeter)} · 占用 ${formatContextUsageLabel(contextMeter)}`} aria-label={`窗口 ${formatContextWindowLabel(contextMeter)} · 占用 ${formatContextUsageLabel(contextMeter)}`}>
-          <Chip className="max-w-[34%] shrink-0 rounded-full border-border bg-surface py-[5px] pr-[9px] pl-[9px] font-normal text-ink-muted">
-            <Gauge size={13} />
+        <span
+          className="inline-flex shrink-0"
+          title={contextMeterTitle}
+          aria-label={contextMeterTitle}
+        >
+          {/* 占用标签很短，按内容单行展示。外层若是 shrink-to-fit，子级 max-w-[n%] 会把胶囊压成竖排。 */}
+          <Chip className="max-w-none rounded-full border-border bg-surface py-[5px] pr-[9px] pl-[9px] font-normal text-ink-muted">
+            <Gauge size={13} className="shrink-0" />
             <OverflowTooltipText
+              className="whitespace-nowrap"
               text={contextMeterLabel}
               logArea="agent_session_context_usage"
             />
