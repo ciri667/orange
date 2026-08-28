@@ -6,6 +6,7 @@ import { OverflowTooltipText } from "../../shared/OverflowTooltipText";
 import { SelectControl } from "../../shared/SelectControl";
 import { ToggleRow } from "../../shared/ToggleRow";
 import { Checkbox } from "../../shared/Checkbox";
+import { parseContextLengthInput } from "../../shared/providerModels";
 import {
   fieldControlClassName,
   fieldLabelClassName,
@@ -58,8 +59,14 @@ export function ModelSettingsSection({
   onSaveApiKey: (providerId: string) => void | Promise<void>;
   onRefreshProviderModels: (providerId: string) => void | Promise<void>;
   onProviderModelEnabledChange: (providerId: string, modelId: string, enabled: boolean) => void;
-  onAddProviderModel: (providerId: string, modelId: string, name: string) => string | null;
-  onUpdateProviderModel: (providerId: string, originalId: string, nextId: string, nextName: string) => string | null;
+  onAddProviderModel: (providerId: string, modelId: string, name: string, contextLength?: number) => string | null;
+  onUpdateProviderModel: (
+    providerId: string,
+    originalId: string,
+    nextId: string,
+    nextName: string,
+    contextLength?: number,
+  ) => string | null;
   onRemoveProviderModel: (providerId: string, modelId: string) => string | null;
 }) {
   const providers = settingsDraft.modelConfig.providers;
@@ -245,8 +252,10 @@ export function ModelSettingsSection({
                     provider={provider}
                     isBusy={isBusy}
                     onModelEnabledChange={(modelId, enabled) => onProviderModelEnabledChange(provider.id, modelId, enabled)}
-                    onAddModel={(modelId, name) => onAddProviderModel(provider.id, modelId, name)}
-                    onUpdateModel={(originalId, nextId, nextName) => onUpdateProviderModel(provider.id, originalId, nextId, nextName)}
+                    onAddModel={(modelId, name, contextLength) => onAddProviderModel(provider.id, modelId, name, contextLength)}
+                    onUpdateModel={(originalId, nextId, nextName, contextLength) =>
+                      onUpdateProviderModel(provider.id, originalId, nextId, nextName, contextLength)
+                    }
                     onRemoveModel={(modelId) => onRemoveProviderModel(provider.id, modelId)}
                   />
                 </div>
@@ -265,7 +274,7 @@ export function ModelSettingsSection({
   );
 }
 
-/** 单个 provider 的可用模型列表：发现的模型只启停，手动模型支持增删改。 */
+/** 单个 provider 的可用模型列表：发现的模型可启停并补窗口，手动模型支持增删改。 */
 function ProviderModelsPanel({
   provider,
   isBusy,
@@ -277,17 +286,19 @@ function ProviderModelsPanel({
   provider: LlmProviderConfig;
   isBusy: boolean;
   onModelEnabledChange: (modelId: string, enabled: boolean) => void;
-  onAddModel: (modelId: string, name: string) => string | null;
-  onUpdateModel: (originalId: string, nextId: string, nextName: string) => string | null;
+  onAddModel: (modelId: string, name: string, contextLength?: number) => string | null;
+  onUpdateModel: (originalId: string, nextId: string, nextName: string, contextLength?: number) => string | null;
   onRemoveModel: (modelId: string) => string | null;
 }) {
   const enabledCount = provider.models.filter((model) => model.enabled).length;
   const [modelSearch, setModelSearch] = useState("");
   const [addId, setAddId] = useState("");
   const [addName, setAddName] = useState("");
+  const [addContextLength, setAddContextLength] = useState("");
   const [editingId, setEditingId] = useState<string | null>(null);
   const [editId, setEditId] = useState("");
   const [editName, setEditName] = useState("");
+  const [editContextLength, setEditContextLength] = useState("");
   const [notice, setNotice] = useState("");
 
   const filteredModels = provider.models.filter((model) => {
@@ -296,17 +307,24 @@ function ProviderModelsPanel({
     return searchableText.includes(modelSearch.trim().toLowerCase());
   });
 
-  /** 开始编辑一条手动模型，把当前 ID/显示名填进草稿。 */
-  function beginEdit(modelId: string, modelName: string) {
+  /** 开始编辑一条模型，把当前 ID/显示名/窗口填进草稿。 */
+  function beginEdit(modelId: string, modelName: string, contextLength?: number) {
     setEditingId(modelId);
     setEditId(modelId);
     setEditName(modelName);
+    setEditContextLength(contextLength ? String(contextLength) : "");
     setNotice("");
   }
 
   /** 提交新增手动模型；成功后清空输入，失败则展示原因。 */
   function submitAdd() {
-    const error = onAddModel(addId, addName);
+    const parsedWindow = parseContextLengthInput(addContextLength);
+    if (!parsedWindow.ok) {
+      setNotice(parsedWindow.error);
+      return;
+    }
+
+    const error = onAddModel(addId, addName, parsedWindow.value);
 
     if (error) {
       setNotice(error);
@@ -315,16 +333,23 @@ function ProviderModelsPanel({
 
     setAddId("");
     setAddName("");
+    setAddContextLength("");
     setNotice("");
   }
 
-  /** 提交手动模型的 ID/显示名修改。 */
+  /** 提交模型的 ID/显示名/窗口修改；发现的模型只能改窗口。 */
   function submitEdit() {
     if (!editingId) {
       return;
     }
 
-    const error = onUpdateModel(editingId, editId, editName);
+    const parsedWindow = parseContextLengthInput(editContextLength);
+    if (!parsedWindow.ok) {
+      setNotice(parsedWindow.error);
+      return;
+    }
+
+    const error = onUpdateModel(editingId, editId, editName, parsedWindow.value);
 
     if (error) {
       setNotice(error);
@@ -388,7 +413,7 @@ function ProviderModelsPanel({
                   />
                 </label>
                 {isEditing ? (
-                  <div className="grid min-w-0 flex-[1_1_220px] grid-cols-2 gap-1.5 max-[820px]:grid-cols-1">
+                  <div className="grid min-w-0 flex-[1_1_220px] grid-cols-3 gap-1.5 max-[820px]:grid-cols-1">
                     <input
                       className={fieldControlClassName}
                       value={editName}
@@ -404,6 +429,7 @@ function ProviderModelsPanel({
                       }}
                       placeholder="显示名"
                       aria-label="模型显示名"
+                      disabled={!isManual}
                     />
                     <input
                       className={cn(fieldControlClassName, "font-mono")}
@@ -420,6 +446,24 @@ function ProviderModelsPanel({
                       }}
                       placeholder="模型 ID"
                       aria-label="模型 ID"
+                      disabled={!isManual}
+                    />
+                    <input
+                      className={cn(fieldControlClassName, "font-mono")}
+                      value={editContextLength}
+                      onChange={(event) => setEditContextLength(event.target.value)}
+                      onKeyDown={(event) => {
+                        if (event.key === "Enter") {
+                          event.preventDefault();
+                          submitEdit();
+                        }
+                        if (event.key === "Escape") {
+                          setEditingId(null);
+                        }
+                      }}
+                      placeholder="窗口 tokens"
+                      aria-label="上下文窗口"
+                      inputMode="numeric"
                     />
                   </div>
                 ) : (
@@ -443,28 +487,28 @@ function ProviderModelsPanel({
                     默认
                   </span>
                 )}
-                {isManual && (
-                  <div className="ml-auto flex items-center gap-1">
-                    {isEditing ? (
-                      <>
-                        <Button variant="icon" size="compact" title="保存模型" onClick={submitEdit} disabled={isBusy}>
-                          <Check size={13} />
-                        </Button>
-                        <Button variant="icon" size="compact" title="取消编辑" onClick={() => setEditingId(null)}>
-                          <X size={13} />
-                        </Button>
-                      </>
-                    ) : (
-                      <>
-                        <Button
-                          variant="icon"
-                          size="compact"
-                          title="编辑模型"
-                          onClick={() => beginEdit(model.id, model.name || model.id)}
-                          disabled={isBusy}
-                        >
-                          <Pencil size={13} />
-                        </Button>
+                <div className="ml-auto flex items-center gap-1">
+                  {isEditing ? (
+                    <>
+                      <Button variant="icon" size="compact" title="保存模型" onClick={submitEdit} disabled={isBusy}>
+                        <Check size={13} />
+                      </Button>
+                      <Button variant="icon" size="compact" title="取消编辑" onClick={() => setEditingId(null)}>
+                        <X size={13} />
+                      </Button>
+                    </>
+                  ) : (
+                    <>
+                      <Button
+                        variant="icon"
+                        size="compact"
+                        title={isManual ? "编辑模型" : "填写上下文窗口"}
+                        onClick={() => beginEdit(model.id, model.name || model.id, model.contextLength)}
+                        disabled={isBusy}
+                      >
+                        <Pencil size={13} />
+                      </Button>
+                      {isManual ? (
                         <Button
                           variant="icon"
                           size="compact"
@@ -476,10 +520,10 @@ function ProviderModelsPanel({
                         >
                           <Trash2 size={13} />
                         </Button>
-                      </>
-                    )}
-                  </div>
-                )}
+                      ) : null}
+                    </>
+                  )}
+                </div>
               </div>
             );
           })
@@ -489,7 +533,7 @@ function ProviderModelsPanel({
           </p>
         )}
       </div>
-      <div className="grid grid-cols-[minmax(0,1fr)_minmax(0,1fr)_auto] items-end gap-2 max-[820px]:grid-cols-1">
+      <div className="grid grid-cols-[minmax(0,1.1fr)_minmax(0,1fr)_minmax(0,0.9fr)_auto] items-end gap-2 max-[820px]:grid-cols-1">
         <label className={fieldLabelClassName}>
           <span>模型 ID</span>
           <input
@@ -520,6 +564,23 @@ function ProviderModelsPanel({
             }}
             placeholder="和 ID 相同可留空"
             disabled={isBusy}
+          />
+        </label>
+        <label className={fieldLabelClassName}>
+          <span>上下文窗口（可选）</span>
+          <input
+            className={cn(fieldControlClassName, "font-mono")}
+            value={addContextLength}
+            onChange={(event) => setAddContextLength(event.target.value)}
+            onKeyDown={(event) => {
+              if (event.key === "Enter") {
+                event.preventDefault();
+                submitAdd();
+              }
+            }}
+            placeholder="例如 131072"
+            disabled={isBusy}
+            inputMode="numeric"
           />
         </label>
         <Button variant="ghost" size="compact" onClick={submitAdd} disabled={isBusy || !addId.trim()}>

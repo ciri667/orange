@@ -5,14 +5,35 @@ export type ProviderModelMutationResult =
   | { ok: true; provider: LlmProviderConfig }
   | { ok: false; error: string };
 
+/** 解析用户填写的上下文窗口；空表示未设置，非法值返回错误。 */
+export function parseContextLengthInput(value: string): { ok: true; value?: number } | { ok: false; error: string } {
+  const trimmed = value.trim().replace(/,/g, "");
+  if (!trimmed) {
+    return { ok: true, value: undefined };
+  }
+
+  const parsed = Number(trimmed);
+  if (!Number.isInteger(parsed) || parsed < 1024) {
+    return { ok: false, error: "上下文窗口需为不小于 1024 的整数。" };
+  }
+
+  return { ok: true, value: parsed };
+}
+
 /** 构造一条用户手填的模型条目；未给显示名时用模型 ID。 */
-export function createManualProviderModel(id: string, name: string, updatedAt: string): LlmProviderModel {
+export function createManualProviderModel(
+  id: string,
+  name: string,
+  updatedAt: string,
+  contextLength?: number,
+): LlmProviderModel {
   return {
     id,
     name: name.trim() || id,
     enabled: true,
     source: "manual",
     updatedAt,
+    ...(contextLength && contextLength >= 1024 ? { contextLength } : {}),
   };
 }
 
@@ -22,6 +43,7 @@ export function addManualProviderModel(
   modelId: string,
   name: string,
   updatedAt: string,
+  contextLength?: number,
 ): ProviderModelMutationResult {
   const id = modelId.trim();
   const displayName = name.trim() || id;
@@ -42,7 +64,7 @@ export function addManualProviderModel(
     models.push(createManualProviderModel(defaultId, defaultId, updatedAt));
   }
 
-  models.push(createManualProviderModel(id, displayName, updatedAt));
+  models.push(createManualProviderModel(id, displayName, updatedAt, contextLength));
 
   return {
     ok: true,
@@ -62,6 +84,7 @@ export function updateManualProviderModel(
   nextId: string,
   nextName: string,
   updatedAt: string,
+  contextLength?: number,
 ): ProviderModelMutationResult {
   const id = nextId.trim();
   const name = nextName.trim() || id;
@@ -75,7 +98,7 @@ export function updateManualProviderModel(
     return { ok: false, error: `未找到模型「${originalId}」。` };
   }
 
-  if (target.source !== "manual") {
+  if (target.source !== "manual" && id !== originalId) {
     return { ok: false, error: "发现的模型不能改 ID，请停用或重新获取列表。" };
   }
 
@@ -88,9 +111,24 @@ export function updateManualProviderModel(
     provider: {
       ...provider,
       model: provider.model === originalId ? id : provider.model,
-      models: provider.models.map((model) =>
-        model.id === originalId ? { ...model, id, name, updatedAt } : model,
-      ),
+      models: provider.models.map((model) => {
+        if (model.id !== originalId) {
+          return model;
+        }
+
+        const nextModel: LlmProviderModel = {
+          ...model,
+          id: target.source === "manual" ? id : model.id,
+          name: target.source === "manual" ? name : model.name,
+          updatedAt,
+        };
+        if (contextLength && contextLength >= 1024) {
+          nextModel.contextLength = contextLength;
+        } else {
+          delete nextModel.contextLength;
+        }
+        return nextModel;
+      }),
       updatedAt,
     },
   };

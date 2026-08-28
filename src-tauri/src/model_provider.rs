@@ -342,6 +342,10 @@ pub fn merge_discovered_models(
 
         if let Some(existing_model) = existing_by_id.get(&model_id) {
             discovered_model.enabled = existing_model.enabled;
+            // 兼容服务经常不返回窗口；保留用户手填或上次发现的值。
+            if discovered_model.context_length.is_none() {
+                discovered_model.context_length = existing_model.context_length;
+            }
         } else {
             discovered_model.enabled = false;
         }
@@ -406,7 +410,7 @@ fn parse_openai_compatible_models(models: &[Value], fetched_at: &str) -> Vec<Llm
                 owned_by: read_string_field(model, &["owned_by", "ownedBy"]),
                 enabled: false,
                 source: MODEL_SOURCE_DISCOVERED.to_owned(),
-                context_length: read_u64_field(model, &["context_length", "contextLength"]),
+                context_length: read_model_context_length(model),
                 created: read_i64_field(model, &["created"]),
                 updated_at: fetched_at.to_owned(),
             })
@@ -442,6 +446,29 @@ fn read_string_field(value: &Value, keys: &[&str]) -> Option<String> {
         .map(str::trim)
         .find(|value| !value.is_empty())
         .map(str::to_owned)
+}
+
+/** 从 OpenAI 兼容模型对象里读窗口大小；兼容服务字段名很散。 */
+fn read_model_context_length(model: &Value) -> Option<u64> {
+    const KEYS: [&str; 5] = [
+        "context_length",
+        "contextLength",
+        "max_model_len",
+        "max_input_tokens",
+        "context_window",
+    ];
+    read_u64_field(model, &KEYS)
+        .or_else(|| {
+            model.get("meta").and_then(|meta| {
+                read_u64_field(meta, &["context_length", "contextLength", "n_ctx"])
+            })
+        })
+        .or_else(|| {
+            model
+                .get("info")
+                .and_then(|info| read_u64_field(info, &["context_length", "max_model_len"]))
+        })
+        .filter(|tokens| *tokens >= 1_024)
 }
 
 /** 读取对象中的第一个 u64 数值字段，兼容字符串数字。 */
@@ -932,6 +959,24 @@ mod tests {
         assert_eq!(models[0].owned_by.as_deref(), Some("openrouter"));
     }
 
+    /** vLLM / 部分兼容服务把窗口放在 max_model_len 或 meta 里。 */
+    #[test]
+    fn parse_provider_models_response_reads_context_length_aliases() {
+        let models = parse_provider_models_response(
+            r#"{
+                "data": [
+                    { "id": "glm-5.2", "max_model_len": 131072 },
+                    { "id": "local-chat", "meta": { "n_ctx": 32768 } }
+                ]
+            }"#,
+            "现在",
+        )
+        .unwrap();
+
+        assert_eq!(models[0].context_length, Some(131072));
+        assert_eq!(models[1].context_length, Some(32768));
+    }
+
     /** Ollama 原生 /api/tags 响应使用 models[]，要兼容 name/model 字段并标记 owner。 */
     #[test]
     fn parse_provider_models_response_reads_ollama_tags_models() {
@@ -997,6 +1042,35 @@ mod tests {
             .models
             .iter()
             .all(|model| model.updated_at == "现在"));
+    }
+
+    /** 远端目录没给窗口时，合并必须保住用户手填的 context_length。 */
+    #[test]
+    fn merge_discovered_models_preserves_user_context_length_when_remote_omits_it() {
+        let mut provider = test_provider("provider-a", true);
+        let mut existing = test_provider_model("glm-5.2", true, MODEL_SOURCE_MANUAL);
+        existing.context_length = Some(131_072);
+        provider.model = "glm-5.2".to_owned();
+        provider.models = vec![existing];
+
+        merge_discovered_models(
+            &mut provider,
+            vec![test_provider_model(
+                "glm-5.2",
+                false,
+                MODEL_SOURCE_DISCOVERED,
+            )],
+            "现在",
+        );
+
+        let merged = provider
+            .models
+            .iter()
+            .find(|model| model.id == "glm-5.2")
+            .unwrap();
+        assert_eq!(merged.context_length, Some(131_072));
+        assert!(merged.enabled);
+        assert_eq!(merged.source, MODEL_SOURCE_DISCOVERED);
     }
 
     /** provider.model 必须始终作为启用项保留；如果远端没返回，就补成 manual 模型。 */

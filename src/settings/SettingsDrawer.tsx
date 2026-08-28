@@ -769,9 +769,9 @@ export function SettingsDrawer({
   }
 
   /** 向指定 provider 追加一条手动模型，供自定义兼容服务补模型 ID。 */
-  function addProviderModel(providerId: string, modelId: string, name: string) {
+  function addProviderModel(providerId: string, modelId: string, name: string, contextLength?: number) {
     const error = applyProviderModelMutation(providerId, (provider) =>
-      addManualProviderModel(provider, modelId, name, formatLocalDateTime()),
+      addManualProviderModel(provider, modelId, name, formatLocalDateTime(), contextLength),
     );
 
     if (!error) {
@@ -787,9 +787,15 @@ export function SettingsDrawer({
   }
 
   /** 修改手动模型的 ID 或显示名；若改的是当前默认模型，会同步 provider.model。 */
-  function updateProviderModel(providerId: string, originalId: string, nextId: string, nextName: string) {
+  function updateProviderModel(
+    providerId: string,
+    originalId: string,
+    nextId: string,
+    nextName: string,
+    contextLength?: number,
+  ) {
     const error = applyProviderModelMutation(providerId, (provider) =>
-      updateManualProviderModel(provider, originalId, nextId, nextName, formatLocalDateTime()),
+      updateManualProviderModel(provider, originalId, nextId, nextName, formatLocalDateTime(), contextLength),
     );
 
     if (!error) {
