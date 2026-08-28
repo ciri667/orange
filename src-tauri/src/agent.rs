@@ -327,6 +327,7 @@ mod tests {
             deleted_at: None,
             model_provider_id: None,
             model_id: None,
+            context_usage: None,
         };
         let request = AgentTurnRequest {
             prompt: "已发送消息".to_owned(),

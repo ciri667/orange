@@ -392,6 +392,40 @@ export interface AgentContextSummary {
   lastCompactedMessageId?: string;
 }
 
+/** 最近一次有效的模型 usage；全零或失败响应不得覆盖。 */
+export interface AgentContextUsage {
+  modelId: string;
+  promptTokens: number;
+  completionTokens: number;
+  totalTokens: number;
+  recordedAt: string;
+  /** 记账时采用的模型窗口；Provider 未提供时为空。 */
+  contextLength?: number;
+}
+
+/** 最近一次发给模型的上下文预览；完整正文只留在应用日志目录。 */
+export interface AgentPromptDump {
+  sessionId: string;
+  modelId: string;
+  modelContextLength?: number;
+  recordedAt: string;
+  round: number;
+  kind: string;
+  totalChars: number;
+  filePath: string;
+  outline: string;
+  messages: AgentPromptDumpMessage[];
+}
+
+/** 单条发给模型的消息预览，不含完整正文。 */
+export interface AgentPromptDumpMessage {
+  index: number;
+  role: string;
+  chars: number;
+  preview: string;
+  truncated: boolean;
+}
+
 /** 跨会话记忆单条；保存前会做敏感信息脱敏，content 中可能含 `[已脱敏]` 占位。 */
 export interface AgentMemoryEntry {
   id: string;
@@ -529,6 +563,8 @@ export interface AgentSession {
   modelProviderId?: string;
   /** 会话默认使用的模型 ID；必须和 modelProviderId 指向的 provider 配套使用。 */
   modelId?: string;
+  /** 最近一次有效 usage，供界面展示占用。 */
+  contextUsage?: AgentContextUsage;
 }
 
 /** IM 会话的展示身份；通道仅保留不可逆的脱敏指纹。 */

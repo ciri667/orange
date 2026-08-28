@@ -273,6 +273,7 @@ pub(crate) fn build_im_agent_session(
         deleted_at: None,
         model_provider_id: None,
         model_id: None,
+        context_usage: None,
     }
 }
 

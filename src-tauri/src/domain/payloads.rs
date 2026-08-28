@@ -231,6 +231,13 @@ pub struct CompactAgentContextPayload {
     pub session_id: String,
 }
 
+/** 读取某会话最近一次发给模型的上下文预览。 */
+#[derive(Clone, Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LoadAgentPromptDumpPayload {
+    pub session_id: String,
+}
+
 /** 保存或更新单个知识库跨会话记忆的命令入参。 */
 #[derive(Clone, Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]

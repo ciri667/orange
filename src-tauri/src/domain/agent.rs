@@ -287,6 +287,51 @@ pub struct AgentContextSummary {
     pub last_compacted_message_id: Option<String>,
 }
 
+/** 最近一次有效的模型 usage；全零或失败响应不得覆盖。 */
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentContextUsage {
+    pub model_id: String,
+    pub prompt_tokens: u64,
+    pub completion_tokens: u64,
+    pub total_tokens: u64,
+    pub recorded_at: String,
+    /** 记账时采用的模型窗口；Provider 未提供时为空。 */
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context_length: Option<u64>,
+}
+
+/** 最近一次发给模型的上下文预览；完整正文只留在日志目录 JSON。 */
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentPromptDump {
+    pub session_id: String,
+    pub model_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model_context_length: Option<u64>,
+    pub recorded_at: String,
+    pub round: u32,
+    pub kind: String,
+    pub total_chars: usize,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub file_path: String,
+    pub outline: String,
+    pub messages: Vec<AgentPromptDumpMessage>,
+}
+
+/** 单条发给模型的消息预览；content 仅写入日志文件。 */
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentPromptDumpMessage {
+    pub index: usize,
+    pub role: String,
+    pub chars: usize,
+    pub preview: String,
+    pub truncated: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub content: Option<String>,
+}
+
 /** Agent 会话上下文容器。 */
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -322,6 +367,9 @@ pub struct AgentSession {
     /** 会话默认使用的模型 ID；和 model_provider_id 配套决定具体模型。 */
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model_id: Option<String>,
+    /** 最近一次非 abort、非 error、usage>0 的成功响应记账，供界面展示占用。 */
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context_usage: Option<AgentContextUsage>,
 }
 
 /** 跨会话记忆的分类枚举，覆盖计划文档列举的长期偏好类型。 */

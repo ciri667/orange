@@ -102,6 +102,7 @@ mod tests {
                 deleted_at: None,
                 model_provider_id: None,
                 model_id: None,
+                context_usage: None,
             }],
             active_knowledge_base_id: "kb-a".to_owned(),
             active_note_id: "note-a".to_owned(),

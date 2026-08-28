@@ -487,6 +487,7 @@ mod tests {
             deleted_at: None,
             model_provider_id: None,
             model_id: None,
+            context_usage: None,
         }
     }
 
