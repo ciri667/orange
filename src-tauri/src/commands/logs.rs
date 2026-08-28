@@ -50,6 +50,18 @@ pub async fn clear_app_event_logs(app: AppHandle) -> Result<(), String> {
     Ok(())
 }
 
+/** 读取某会话最近一次发给模型的上下文预览；没有转储时返回 null。 */
+#[tauri::command]
+pub async fn load_agent_prompt_dump(
+    app: AppHandle,
+    payload: LoadAgentPromptDumpPayload,
+) -> Result<Option<crate::domain::AgentPromptDump>, String> {
+    run_blocking("读取最近一次模型上下文", move || {
+        logging::load_agent_prompt_dump(&app, &payload.session_id)
+    })
+    .await
+}
+
 /** 打开系统应用日志目录，便于用户附带文件日志排查桌面端问题。 */
 #[tauri::command]
 pub async fn open_app_log_folder(app: AppHandle) -> Result<String, String> {

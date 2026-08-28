@@ -216,6 +216,7 @@ pub fn run() {
             commands::logs::load_request_audit_logs,
             commands::logs::load_app_event_logs,
             commands::logs::clear_app_event_logs,
+            commands::logs::load_agent_prompt_dump,
             commands::logs::open_app_log_folder,
             commands::knowledge::scan_knowledge_base,
             commands::knowledge::rescan_knowledge_base,

@@ -1,9 +1,9 @@
-use crate::domain::AppEventLog;
+use crate::domain::{AgentPromptDump, AppEventLog};
 use crate::storage;
 use chrono::{Duration as ChronoDuration, Local};
 use serde_json::Value;
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 use tauri::{AppHandle, Manager};
 
@@ -249,6 +249,85 @@ pub fn cleanup_old_file_logs(app: &AppHandle) -> Result<usize, String> {
     Ok(removed_count)
 }
 
+/** 会话 ID 用作文件名时只保留安全字符。 */
+pub fn sanitize_agent_session_id(session_id: &str) -> String {
+    let sanitized: String = session_id
+        .chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() || ch == '-' || ch == '_' {
+                ch
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    if sanitized.is_empty() {
+        "session".to_owned()
+    } else {
+        sanitized
+    }
+}
+
+/** 最近一次发给模型的上下文 JSON 路径。 */
+pub fn agent_prompt_dump_path(log_dir: &Path, session_id: &str) -> PathBuf {
+    log_dir
+        .join("agent-prompts")
+        .join(format!("{}.json", sanitize_agent_session_id(session_id)))
+}
+
+/** 把完整 prompt 转储写入应用日志目录，供开发者打开查看。 */
+pub fn persist_agent_prompt_dump(
+    app: &AppHandle,
+    dump: &AgentPromptDump,
+) -> Result<PathBuf, String> {
+    persist_agent_prompt_dump_to_dir(&app_log_dir(app)?, dump)
+}
+
+/** 纯路径版本，便于单测不依赖 Tauri AppHandle。 */
+pub fn persist_agent_prompt_dump_to_dir(
+    log_dir: &Path,
+    dump: &AgentPromptDump,
+) -> Result<PathBuf, String> {
+    let path = agent_prompt_dump_path(log_dir, &dump.session_id);
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)
+            .map_err(|error| format!("无法创建模型上下文转储目录：{error}"))?;
+    }
+    let mut stored = dump.clone();
+    stored.file_path.clear();
+    let payload = serde_json::to_vec_pretty(&stored)
+        .map_err(|error| format!("无法序列化模型上下文转储：{error}"))?;
+    fs::write(&path, payload).map_err(|error| format!("无法写入模型上下文转储：{error}"))?;
+    Ok(path)
+}
+
+/** 读取某会话最近一次发给模型的上下文预览；没有转储时返回 None。 */
+pub fn load_agent_prompt_dump(
+    app: &AppHandle,
+    session_id: &str,
+) -> Result<Option<AgentPromptDump>, String> {
+    load_agent_prompt_dump_from_dir(&app_log_dir(app)?, session_id)
+}
+
+/** 纯路径版本，IPC 预览会去掉完整正文。 */
+pub fn load_agent_prompt_dump_from_dir(
+    log_dir: &Path,
+    session_id: &str,
+) -> Result<Option<AgentPromptDump>, String> {
+    let path = agent_prompt_dump_path(log_dir, session_id);
+    if !path.exists() {
+        return Ok(None);
+    }
+    let payload = fs::read(&path).map_err(|error| format!("无法读取模型上下文转储：{error}"))?;
+    let mut dump: AgentPromptDump = serde_json::from_slice(&payload)
+        .map_err(|error| format!("无法解析模型上下文转储：{error}"))?;
+    dump.file_path = path.to_string_lossy().to_string();
+    for message in &mut dump.messages {
+        message.content = None;
+    }
+    Ok(Some(dump))
+}
+
 /** 将用户可读事件同步写入诊断日志文件，便于从系统日志目录排查。 */
 fn write_diagnostic_log(log: &AppEventLog) {
     let message = format!(
@@ -361,7 +440,13 @@ fn looks_like_absolute_path(token: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{sanitize_log_text, sanitize_relative_path};
+    use super::{
+        agent_prompt_dump_path, load_agent_prompt_dump_from_dir, persist_agent_prompt_dump_to_dir,
+        sanitize_agent_session_id, sanitize_log_text, sanitize_relative_path,
+    };
+    use crate::domain::{AgentPromptDump, AgentPromptDumpMessage};
+    use serde_json::json;
+    use std::fs;
 
     /** 日志脱敏必须移除常见 API key 片段，避免明文密钥落盘。 */
     #[test]
@@ -388,5 +473,55 @@ mod tests {
     #[test]
     fn sanitize_relative_path_removes_traversal_parts() {
         assert_eq!(sanitize_relative_path("../a/./b.md"), "a/b.md");
+    }
+
+    #[test]
+    fn sanitize_agent_session_id_strips_path_separators() {
+        assert_eq!(sanitize_agent_session_id("session/../a"), "session____a");
+        assert_eq!(sanitize_agent_session_id(""), "session");
+    }
+
+    #[test]
+    fn prompt_dump_round_trip_strips_full_content_for_ipc() {
+        let dir = std::env::temp_dir().join(format!(
+            "orange-prompt-dump-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&dir).unwrap();
+        let dump = AgentPromptDump {
+            session_id: "session-a".to_owned(),
+            model_id: "gpt-4o-mini".to_owned(),
+            model_context_length: Some(128_000),
+            recorded_at: "2026-08-28 10:00:00".to_owned(),
+            round: 1,
+            kind: "turn".to_owned(),
+            total_chars: 12,
+            file_path: String::new(),
+            outline: "system:12".to_owned(),
+            messages: vec![AgentPromptDumpMessage {
+                index: 0,
+                role: "system".to_owned(),
+                chars: 12,
+                preview: "角色说明".to_owned(),
+                truncated: false,
+                content: Some(json!({ "role": "system", "content": "角色说明" }).to_string()),
+            }],
+        };
+
+        let path = persist_agent_prompt_dump_to_dir(&dir, &dump).unwrap();
+        assert_eq!(path, agent_prompt_dump_path(&dir, "session-a"));
+        let loaded = load_agent_prompt_dump_from_dir(&dir, "session-a")
+            .unwrap()
+            .expect("dump should exist");
+        assert_eq!(loaded.model_id, "gpt-4o-mini");
+        assert_eq!(loaded.model_context_length, Some(128_000));
+        assert!(loaded.messages[0].content.is_none());
+        assert_eq!(loaded.messages[0].preview, "角色说明");
+        let stored = fs::read_to_string(&path).unwrap();
+        assert!(stored.contains("角色说明"));
+        let _ = fs::remove_dir_all(&dir);
     }
 }
