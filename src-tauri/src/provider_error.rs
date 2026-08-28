@@ -63,12 +63,20 @@ pub fn classify_provider_error(text: &str, http_status: Option<u16>) -> Provider
     {
         return ProviderErrorKind::Quota;
     }
+    if lower.contains("too many tokens, please wait")
+        || lower.contains("please wait") && lower.contains("too many tokens")
+    {
+        return ProviderErrorKind::Retryable;
+    }
     if lower.contains("context_length")
+        || lower.contains("context_length_exceeded")
         || lower.contains("context window")
         || lower.contains("maximum context")
-        || lower.contains("too many tokens")
+        || lower.contains("prompt too long")
+        || lower.contains("request_too_large")
         || lower.contains("token limit")
         || lower.contains("maximum context length")
+        || (lower.contains("too many tokens") && !lower.contains("please wait"))
     {
         return ProviderErrorKind::Overflow;
     }
@@ -97,6 +105,56 @@ pub fn parse_http_status_from_error(text: &str) -> Option<u16> {
         .take_while(|ch| ch.is_ascii_digit())
         .collect();
     status.parse().ok()
+}
+
+/** chat completions usage 字段。 */
+#[derive(Clone, Copy, Debug, Default)]
+pub struct CompletionUsage {
+    pub prompt_tokens: u64,
+    pub completion_tokens: u64,
+    pub total_tokens: u64,
+}
+
+/** 从响应解析 usage；兼容 prompt_tokens 与 input_tokens / cache。 */
+pub fn parse_completion_usage(response: &Value) -> Option<CompletionUsage> {
+    let usage = response.get("usage")?;
+    let prompt_tokens = usage
+        .get("prompt_tokens")
+        .and_then(Value::as_u64)
+        .or_else(|| usage.get("input_tokens").and_then(Value::as_u64))
+        .unwrap_or(0);
+    let cached = usage
+        .get("prompt_tokens_details")
+        .and_then(|details| details.get("cached_tokens"))
+        .and_then(Value::as_u64)
+        .or_else(|| usage.get("cache_read_input_tokens").and_then(Value::as_u64))
+        .unwrap_or(0);
+    let completion_tokens = usage
+        .get("completion_tokens")
+        .and_then(Value::as_u64)
+        .or_else(|| usage.get("output_tokens").and_then(Value::as_u64))
+        .unwrap_or(0);
+    let total_tokens = usage
+        .get("total_tokens")
+        .and_then(Value::as_u64)
+        .unwrap_or(0);
+    let prompt_tokens = prompt_tokens.saturating_add(cached);
+    if prompt_tokens == 0 && completion_tokens == 0 && total_tokens == 0 {
+        return None;
+    }
+    Some(CompletionUsage {
+        prompt_tokens,
+        completion_tokens,
+        total_tokens,
+    })
+}
+
+/** HTTP 200 但 prompt_tokens 已超模型窗口时视为静默超窗。 */
+pub fn is_silent_overflow(response: &Value, model_context_length: Option<u64>) -> bool {
+    let Some(window) = model_context_length.filter(|tokens| *tokens >= 1_024) else {
+        return false;
+    };
+    parse_completion_usage(response).is_some_and(|usage| usage.prompt_tokens > window)
 }
 
 /** 给用户看的失败说明；配额和超窗要可读，不要只说「模型请求失败」。 */
@@ -148,6 +206,18 @@ mod tests {
             ProviderErrorKind::Overflow
         );
         assert_eq!(
+            classify_provider_error("prompt too long for this model", None),
+            ProviderErrorKind::Overflow
+        );
+        assert_eq!(
+            classify_provider_error("context_length_exceeded", None),
+            ProviderErrorKind::Overflow
+        );
+        assert_eq!(
+            classify_provider_error("too many tokens, please wait", None),
+            ProviderErrorKind::Retryable
+        );
+        assert_eq!(
             classify_provider_error("模型请求失败：HTTP 429 too many requests", Some(429)),
             ProviderErrorKind::Retryable
         );
@@ -163,6 +233,27 @@ mod tests {
             classify_provider_error("模型请求失败：HTTP 400 bad request", Some(400)),
             ProviderErrorKind::Other
         );
+    }
+
+    #[test]
+    fn parse_completion_usage_reads_prompt_and_ignores_all_zero() {
+        let usage = parse_completion_usage(&json!({
+            "usage": { "prompt_tokens": 1200, "completion_tokens": 40, "total_tokens": 1240 }
+        }))
+        .unwrap();
+        assert_eq!(usage.prompt_tokens, 1200);
+        assert!(parse_completion_usage(&json!({
+            "usage": { "prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0 }
+        }))
+        .is_none());
+        assert!(is_silent_overflow(
+            &json!({ "usage": { "prompt_tokens": 9000, "completion_tokens": 1, "total_tokens": 9001 } }),
+            Some(8_192)
+        ));
+        assert!(!is_silent_overflow(
+            &json!({ "usage": { "prompt_tokens": 100, "completion_tokens": 1, "total_tokens": 101 } }),
+            Some(8_192)
+        ));
     }
 
     #[test]

@@ -69,12 +69,14 @@ impl SseBuffer {
 }
 
 /** 从 Chat Completions SSE delta 累积出的助手消息，结束时再还原成非流式 JSON。 */
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq)]
 pub struct StreamedAssistant {
     pub content: String,
     pub reasoning: String,
     pub tool_calls: Vec<Value>,
     pub finish_reason: Option<String>,
+    /** 流末 usage 块；多数兼容服务只在最后一帧给出。 */
+    pub usage: Option<Value>,
 }
 
 impl StreamedAssistant {
@@ -88,6 +90,7 @@ impl StreamedAssistant {
 
     /** 应用一个 SSE JSON 对象：支持 `delta` 增量，也兼容把完整 `message` 塞进流里的代理。 */
     pub fn apply_chunk(&mut self, chunk: &Value) {
+        self.capture_usage(chunk);
         let Some(choice) = chunk
             .get("choices")
             .and_then(Value::as_array)
@@ -138,12 +141,38 @@ impl StreamedAssistant {
             }
         });
 
-        json!({
+        let mut completion = json!({
             "choices": [{
                 "finish_reason": finish_reason,
                 "message": message
             }]
-        })
+        });
+        if let Some(usage) = &self.usage {
+            completion["usage"] = usage.clone();
+        }
+        completion
+    }
+
+    /** 只收下带 token 计数的 usage；空对象或全零不覆盖已有值。 */
+    fn capture_usage(&mut self, chunk: &Value) {
+        let Some(usage) = chunk.get("usage") else {
+            return;
+        };
+        if !usage.is_object() {
+            return;
+        }
+        let has_tokens = [
+            "prompt_tokens",
+            "completion_tokens",
+            "total_tokens",
+            "input_tokens",
+            "output_tokens",
+        ]
+        .iter()
+        .any(|key| usage.get(*key).and_then(Value::as_u64).unwrap_or(0) > 0);
+        if has_tokens {
+            self.usage = Some(usage.clone());
+        }
     }
 
     fn capture_finish_reason(&mut self, value: &Value) {
@@ -629,6 +658,33 @@ mod tests {
         assert_eq!(assistant.content, "完整回答");
         assert_eq!(assistant.reasoning, "思考过");
         assert_eq!(assistant.finish_reason.as_deref(), Some("stop"));
+    }
+
+    /** 最后一帧空 choices + usage 必须还原进 chat.completion，否则占用永远「尚未计量」。 */
+    #[test]
+    fn streamed_assistant_captures_usage_from_final_chunk() {
+        let mut assistant = StreamedAssistant::default();
+        assistant.apply_chunk(&json!({
+            "choices": [{ "delta": { "content": "你好" }, "finish_reason": "stop" }]
+        }));
+        assistant.apply_chunk(&json!({
+            "choices": [],
+            "usage": {
+                "prompt_tokens": 1900,
+                "completion_tokens": 80,
+                "total_tokens": 1980,
+                "prompt_tokens_details": { "cached_tokens": 0 }
+            }
+        }));
+        let response = assistant.into_chat_completion();
+
+        assert_eq!(assistant.content, "你好");
+        assert_eq!(response["usage"]["prompt_tokens"], 1900);
+        assert_eq!(response["usage"]["completion_tokens"], 80);
+        assert_eq!(
+            response["usage"]["prompt_tokens_details"]["cached_tokens"],
+            0
+        );
     }
 
     /** 标准 OpenAI SSE 样例必须能攒出完整回答，并在 [DONE] 处结束。 */

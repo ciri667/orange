@@ -154,7 +154,8 @@ pub async fn compact_agent_context(
     })
     .await?;
     let snapshot = hydrate_persisted_sessions_for_turn(&app, payload.snapshot).await?;
-    let snapshot = runtime::compact_agent_context_summary(snapshot, &session_id, settings).await?;
+    let snapshot =
+        runtime::compact_agent_context_summary(&app, snapshot, &session_id, settings).await?;
 
     if let Err(error) = index_snapshot_in_background(app.clone(), &snapshot).await {
         logging::write_app_event_best_effort(
@@ -548,8 +549,13 @@ pub(super) async fn compact_im_session_from_command(
     })
     .await?;
     // 模型调用不可用时压缩为确定性工作记忆，确保移动端命令始终能完成并被持久化。
-    snapshot = match runtime::compact_agent_context_summary(snapshot.clone(), &session_id, settings)
-        .await
+    snapshot = match runtime::compact_agent_context_summary(
+        &app,
+        snapshot.clone(),
+        &session_id,
+        settings,
+    )
+    .await
     {
         Ok(snapshot) => snapshot,
         Err(error) => {

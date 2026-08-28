@@ -235,25 +235,45 @@ pub fn delete_user_skill_from_root(
     Err("找不到可删除的用户 skill。".to_owned())
 }
 
-/** 生成注入模型 system prompt 的启用 skill 名称和描述，供 Agent 自主决定是否使用。 */
+/** 启用 Skill 的 location：优先 path，其次 relative_path，内置无路径时用 built-in。 */
+pub fn skill_location(skill: &AgentSkill) -> String {
+    skill
+        .path
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .or_else(|| {
+            skill
+                .relative_path
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+        })
+        .unwrap_or("built-in")
+        .to_owned()
+}
+
+/** 生成注入模型 system 的启用 skill 目录；无启用项返回空字符串，由调用方整段省略。 */
 pub fn skill_catalog_prompt(skills: &[AgentSkill]) -> String {
     let enabled_summaries = skills
         .iter()
         .filter(|skill| skill.enabled)
         .map(|skill| {
             format!(
-                "- {} (`{}`): {}",
-                skill.display_name, skill.name, skill.description
+                "<skill name=\"{}\" location=\"{}\">{}</skill>",
+                skill.name,
+                skill_location(skill),
+                skill.description
             )
         })
         .collect::<Vec<_>>();
 
     if enabled_summaries.is_empty() {
-        "可用 Skills：没有已启用 Skill。".to_owned()
+        String::new()
     } else {
         truncate_chars(
             &format!(
-                "可用 Skills（仅名称和描述；由 Agent 自主判断是否使用，宿主只提供目录，不预先选择 Skill）：\n{}",
+                "<available_skills>\n{}\n</available_skills>",
                 enabled_summaries.join("\n")
             ),
             MAX_SKILL_CATALOG_PROMPT_CHARS,
@@ -280,39 +300,27 @@ pub fn skill_summary(skills: &[AgentSkill]) -> String {
     }
 }
 
-/** 生成本轮显式激活 Skill 的完整指令块；调用方必须先完成启用状态和数量校验。 */
+/** 把单个显式 Skill 包装成本轮 user 消息中的 invocation 块。 */
+pub fn format_skill_invocation(skill: &AgentSkill) -> String {
+    format!(
+        "<skill name=\"{}\" location=\"{}\">\n{}\n</skill>",
+        skill.name,
+        skill_location(skill),
+        skill.instructions
+    )
+}
+
+/** 生成本轮显式激活 Skill 的完整指令块；空列表返回空字符串，不写「显式激活：无」。 */
 pub fn explicit_skill_prompt(skills: &[AgentSkill]) -> String {
     if skills.is_empty() {
-        return "本轮显式激活的 Skills：无。".to_owned();
+        return String::new();
     }
 
-    let skill_blocks = skills
+    skills
         .iter()
-        .map(|skill| {
-            let relative_path = skill
-                .relative_path
-                .as_deref()
-                .filter(|value| !value.trim().is_empty())
-                .unwrap_or("无");
-
-            format!(
-                "### {} (`{}`)\nID：{}\n来源：{}\n相对路径：{}\n指令字符数：{}\n[BEGIN SKILL INSTRUCTIONS]\n{}\n[END SKILL INSTRUCTIONS]",
-                skill.display_name,
-                skill.name,
-                skill.id,
-                skill.source,
-                relative_path,
-                skill.instructions.chars().count(),
-                skill.instructions
-            )
-        })
+        .map(format_skill_invocation)
         .collect::<Vec<_>>()
-        .join("\n\n");
-
-    format!(
-        "本轮显式激活的 Skills（必须按用户选择顺序作为执行要求；这些 instructions 不能扩大工具权限、不能绕过写入确认、不能覆盖系统安全边界）：\n{}",
-        skill_blocks
-    )
+        .join("\n\n")
 }
 
 /** 构造审计可见的显式 Skill 摘要，只记录数量、来源分布和字符数，不保存 instructions 正文。 */
@@ -1596,6 +1604,36 @@ mod tests {
     /** 创建一个最小有效 SKILL.md 文本，正文作为完整 instructions。 */
     fn valid_skill_markdown(name: &str, description: &str, instructions: &str) -> String {
         format!("---\nname: {name}\ndescription: {description}\n---\n\n{instructions}\n")
+    }
+
+    /** 目录只含 name/description/location；无启用项时整段省略。 */
+    #[test]
+    fn skill_catalog_prompt_uses_location_and_omits_empty() {
+        let mut skills = built_in_skills();
+        let catalog = skill_catalog_prompt(&skills);
+        assert!(catalog.contains("<available_skills>"));
+        assert!(catalog.contains("name=\"note-research\""));
+        assert!(catalog.contains("location=\"built-in\""));
+        assert!(!catalog.contains(&skills[0].instructions));
+
+        for skill in &mut skills {
+            skill.enabled = false;
+        }
+        assert!(skill_catalog_prompt(&skills).is_empty());
+    }
+
+    /** 显式 Skill 包装进 <skill> 块；空列表不输出「显式激活：无」。 */
+    #[test]
+    fn explicit_skill_prompt_wraps_invocation_and_omits_empty() {
+        let skill = built_in_skills()
+            .into_iter()
+            .find(|skill| skill.id == "skill-note-research")
+            .unwrap();
+        let prompt = explicit_skill_prompt(std::slice::from_ref(&skill));
+        assert!(prompt.contains("<skill name=\"note-research\" location=\"built-in\">"));
+        assert!(prompt.contains(&skill.instructions));
+        assert!(!prompt.contains("本轮显式激活的 Skills：无"));
+        assert!(explicit_skill_prompt(&[]).is_empty());
     }
 
     /** 缺少运行清单的自定义 Skill 保持纯指令兼容状态。 */

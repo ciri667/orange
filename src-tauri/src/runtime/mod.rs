@@ -1,18 +1,23 @@
+mod compaction;
+mod context;
 mod dsml;
 mod stream;
+use compaction::*;
+use context::*;
 use dsml::*;
 use stream::*;
 
 use crate::agent;
 use crate::agent_tools::{model_tool_call_name, parse_tool_args, AgentToolContext, ToolRegistry};
-use crate::agent_trace::{is_user_visible_tool, AgentTurnTracer};
+use crate::agent_trace::AgentTurnTracer;
 use crate::domain::{
-    AgentContextSummary, AgentContextTouchedNote, AgentMemoryEntry, AgentMessage, AgentSession,
+    AgentContextSummary, AgentContextTouchedNote, AgentContextUsage, AgentMessage, AgentSession,
     AgentSkill, AgentToolCall, AgentTurnRequest, AgentTurnResult, Citation, KnowledgeBaseMemory,
-    LlmProviderConfig, ProposedChange, RequestAuditLog, UserSettings, WorkspaceSnapshot,
-    MEMORY_CATEGORY_CONVENTION, MEMORY_CATEGORY_NOTE_STRUCTURE, MEMORY_CATEGORY_ORGANIZATION,
-    MEMORY_CATEGORY_OTHER, MEMORY_CATEGORY_TAG_CONVENTION,
+    LlmProviderConfig, RequestAuditLog, UserSettings, WorkspaceSnapshot,
 };
+#[cfg(test)]
+use crate::domain::{AgentMemoryEntry, ProposedChange};
+use crate::logging::{self, AppEventBuilder, AppLogCategory, AppLogLevel};
 use crate::model_provider;
 use crate::provider_error;
 use crate::skills;
@@ -20,85 +25,20 @@ use crate::storage::{create_id, format_local_datetime};
 use reqwest::Client;
 use serde_json::{json, Value};
 use std::collections::HashSet;
-use std::fs;
-use std::path::{Component, Path, PathBuf};
 use std::time::{Duration, Instant};
 use tauri::AppHandle;
-
-/** 未知模型窗口时按 256k tokens 估算。当前主流窗口普遍更大，256k 作为保守默认。 */
-const DEFAULT_MODEL_CONTEXT_TOKENS: u64 = 256_000;
-
-/** 会话历史最多占用模型窗口的比例；其余留给 system、工具 schema 和模型输出。 */
-const HISTORY_CONTEXT_WINDOW_RATIO: f64 = 0.40;
-
-/** 混合中英按 2 字符/token 估算，宁可少装也不超窗。 */
-const CHARS_PER_TOKEN_ESTIMATE: u64 = 2;
-
-/** 未知窗口时的历史层下限，保证明显宽于旧的 8 条硬切。 */
-const MIN_HISTORY_BUDGET_CHARS: usize = 16_000;
-
-/** 历史层上限，对齐 256k 保守窗口的 40% 份额，避免把整本会话无脑塞进去。 */
-const MAX_HISTORY_BUDGET_CHARS: usize = 204_800;
-
-/** 已知小窗口时允许的历史层下限，避免 8k 模型被下限抬爆。 */
-const MIN_KNOWN_HISTORY_BUDGET_CHARS: usize = 4_000;
-
-/** 安全阀：最多回放多少条会话消息，防止超长会话线性膨胀。 */
-const MAX_MODEL_HISTORY_SESSION_MESSAGES: usize = 80;
-
-/** 最近若干条会话消息视为热窗口，保留更完整正文和工具结果。 */
-const HOT_HISTORY_SESSION_MESSAGES: usize = 16;
-
-/** 即使超预算也至少保留最近几条会话消息，避免当前轮工具协议被裁断。 */
-const MIN_RETAINED_SESSION_MESSAGES: usize = 2;
-
-/** 热窗口单条正文上限。 */
-const MAX_HOT_HISTORY_MESSAGE_CHARS: usize = 8000;
-
-/** 温窗口单条正文上限。 */
-const MAX_WARM_HISTORY_MESSAGE_CHARS: usize = 2500;
-
-/** 单条历史消息进入模型前的最大字符数；热窗口使用该上限。 */
-const MAX_HISTORY_MESSAGE_CHARS: usize = MAX_HOT_HISTORY_MESSAGE_CHARS;
-
-/** 热窗口工具结果上限。 */
-const MAX_HOT_HISTORY_TOOL_RESULT_CHARS: usize = 4000;
-
-/** 历史 tool arguments 里单个字符串字段的截断上限，避免切开整段 JSON。 */
-const MAX_HISTORY_TOOL_ARGUMENT_STRING_CHARS: usize = 360;
-
-/** 热窗口 tool arguments 字符串字段上限。 */
-const MAX_HOT_HISTORY_TOOL_ARGUMENT_STRING_CHARS: usize = 1200;
-
-/** 工作记忆渲染进 prompt 的最大字符数，避免 summary 自身吞掉上下文预算。 */
-const MAX_RENDERED_CONTEXT_SUMMARY_CHARS: usize = 6000;
-
-/** 单条工作记忆字段的最大字符数，避免模型总结把正文塞进结构化字段。 */
-const MAX_CONTEXT_SUMMARY_ITEM_CHARS: usize = 360;
-
-/** 工作记忆每个数组字段最多保留的条目数。 */
-const MAX_CONTEXT_SUMMARY_ITEMS: usize = 12;
-
-/** 项目级 Agent 指令最大读取字符数；只读取知识库根目录 ORANGE_AGENT.md。 */
-const MAX_PROJECT_AGENT_INSTRUCTION_CHARS: usize = 16 * 1024;
-
-/** 跨会话记忆渲染进 prompt 的最大字符数，低于会话工作记忆预算以优先保留滚动上下文。 */
-const MAX_RENDERED_KB_MEMORY_CHARS: usize = 4000;
-
-/** 单个知识库记忆渲染进 prompt 时最多保留的条目数，避免一个 KB 挤占预算。 */
-const MAX_RENDERED_KB_MEMORY_ENTRIES_PER_KB: usize = 8;
 
 /** 手动和自动整理上下文时，最多把多少条未总结消息交给总结器。 */
 const MAX_RECENT_MESSAGES_FOR_SUMMARY: usize = 24;
 
-/** 超过该消息数后自动触发模型整理，避免长会话仅依赖短期历史。 */
-const AUTO_COMPACT_MESSAGE_COUNT_THRESHOLD: usize = 48;
+/** 超过该消息数后自动触发模型整理；仅在 usage 缺失时作为后备。 */
+pub(super) const AUTO_COMPACT_MESSAGE_COUNT_THRESHOLD: usize = 48;
 
-/** 最近未进入 summary 的消息超过该数量时自动整理。 */
-const AUTO_COMPACT_UNSUMMARIZED_MESSAGE_THRESHOLD: usize = 20;
+/** 最近未进入 summary 的消息超过该数量时自动整理；仅在 usage 缺失时作为后备。 */
+pub(super) const AUTO_COMPACT_UNSUMMARIZED_MESSAGE_THRESHOLD: usize = 20;
 
-/** 估算 prompt 字符数超过该阈值时自动整理，避免请求上下文持续膨胀。 */
-const AUTO_COMPACT_PROMPT_CHAR_THRESHOLD: usize = 48_000;
+/** 估算 prompt 字符数超过该阈值时自动整理；仅在 usage 缺失时作为后备。 */
+pub(super) const AUTO_COMPACT_PROMPT_CHAR_THRESHOLD: usize = 48_000;
 
 /** 工具结果回填给模型时的最大 JSON 字符数。 */
 const MAX_TOOL_RESULT_CHARS: usize = 9000;
@@ -112,12 +52,6 @@ const MAX_AUDIT_FRAGMENTS: usize = 8;
 /** 后端再次限制每轮显式 Skill 数量，避免绕过 UI 传入过多 instructions。 */
 const MAX_EXPLICIT_SKILLS_PER_TURN: usize = 3;
 
-/** 单轮最多接受的显式 @ 文件数量，避免客户端绕过输入框造成上下文膨胀。 */
-const MAX_MENTIONED_FILES_PER_TURN: usize = 8;
-
-/** 单个显式文本材料的正文上限；正文不会写入日志。 */
-const MAX_MENTIONED_TEXT_CHARS: usize = 12_000;
-
 /** 云端模型请求超时时间，避免网络卡住后阻塞 Agent turn。 */
 const MODEL_HTTP_TIMEOUT_SECONDS: u64 = 60;
 
@@ -127,17 +61,6 @@ struct ExplicitSkillSelection {
     skills: Vec<AgentSkill>,
     requested_count: usize,
     truncated: bool,
-}
-
-/** 已通过 scope 校验的本轮显式材料，内容仅在构造模型消息时使用。 */
-struct MentionedFileMaterial {
-    id: String,
-    knowledge_base_id: String,
-    title: String,
-    path: String,
-    file_type: String,
-    content: Option<String>,
-    image_markdown_path: Option<String>,
 }
 
 /** 真实 Agent Runtime 的调度结果，包含可持久化快照和本轮请求审计摘要。 */
@@ -154,34 +77,11 @@ struct ContextSummaryModelSelection {
 }
 
 /** 本轮是否触发模型级工作记忆整理的判断结果。 */
-struct ContextSummaryAutoDecision {
-    should_compact: bool,
-    reasons: Vec<String>,
-    estimated_prompt_chars: usize,
-    unsummarized_message_count: usize,
-}
-
-/** 会话历史按窗口预算装箱后的统计，只用于日志和自动 compact，不进入模型正文。 */
-#[derive(Clone, Debug, Default)]
-struct PackedHistoryStats {
-    included_session_messages: usize,
-    dropped_session_messages: usize,
-    budget_chars: usize,
-    used_chars: usize,
-}
-
-/** 发给模型的完整 prompt 及其历史装箱统计。 */
-struct ModelPrompt {
-    messages: Vec<Value>,
-    history: PackedHistoryStats,
-    /** 重建的 system 前缀长度；其后才是可追加、可持久化的对话 transcript。 */
-    prefix_len: usize,
-}
-
-/** 会话历史装箱结果，包含协议消息和统计。 */
-struct PackedHistory {
-    messages: Vec<Value>,
-    stats: PackedHistoryStats,
+pub(super) struct ContextSummaryAutoDecision {
+    pub should_compact: bool,
+    pub reasons: Vec<String>,
+    pub estimated_prompt_chars: usize,
+    pub unsummarized_message_count: usize,
 }
 
 /** Runtime 内部审计轨迹，用于汇总模型请求次数和实际发送的本地片段摘要。 */
@@ -198,7 +98,7 @@ impl RuntimeAuditTrail {
     /** 记录本轮是否把已有工作记忆注入模型请求；只保存长度和更新时间，不保存正文。 */
     fn record_context_summary_injection(&mut self, session: &AgentSession) {
         self.context_summary_prompt_chars =
-            render_context_summary_prompt(session.context_summary.as_ref())
+            render_checkpoint_user_content(session.context_summary.as_ref())
                 .map(|prompt| prompt.chars().count())
                 .unwrap_or_default();
         self.context_summary_injected = self.context_summary_prompt_chars > 0;
@@ -309,180 +209,6 @@ fn resolve_explicit_skills(
     })
 }
 
-/**
- * 解析本轮 @ 文件。客户端传入的 ID 不可信，必须重新按会话授权 scope、文件类型和数量限制过滤。
- * Markdown/TXT 使用已索引的文本正文；二进制和 Office 文档只向模型提供元数据。
- */
-fn resolve_mentioned_files(
-    snapshot: &WorkspaceSnapshot,
-    session: &AgentSession,
-    request: &AgentTurnRequest,
-) -> Vec<MentionedFileMaterial> {
-    let allowed_kb_ids: HashSet<&str> = session
-        .knowledge_base_ids
-        .iter()
-        .map(String::as_str)
-        .collect();
-    let mut seen_ids = HashSet::new();
-    let mut materials = Vec::new();
-    let mut rejected_count = 0usize;
-
-    // 图片链接只在当前编辑目标为同一知识库 Markdown 时生成，避免跨根目录产生失效引用。
-    let active_markdown = snapshot
-        .notes
-        .iter()
-        .find(|note| note.id == request.active_note_id)
-        .filter(|note| allowed_kb_ids.contains(note.knowledge_base_id.as_str()));
-
-    for raw_id in &request.mentioned_file_ids {
-        let file_id = raw_id.trim();
-        if file_id.is_empty() || !seen_ids.insert(file_id.to_owned()) {
-            continue;
-        }
-        if materials.len() >= MAX_MENTIONED_FILES_PER_TURN {
-            rejected_count += 1;
-            continue;
-        }
-
-        if let Some(note) = snapshot.notes.iter().find(|note| note.id == file_id) {
-            if !allowed_kb_ids.contains(note.knowledge_base_id.as_str()) {
-                rejected_count += 1;
-                continue;
-            }
-            materials.push(MentionedFileMaterial {
-                id: note.id.clone(),
-                knowledge_base_id: note.knowledge_base_id.clone(),
-                title: note.title.clone(),
-                path: note.path.clone(),
-                file_type: "markdown".to_owned(),
-                content: Some(truncate_chars(&note.content, MAX_MENTIONED_TEXT_CHARS)),
-                image_markdown_path: None,
-            });
-            continue;
-        }
-
-        let Some(document) = snapshot
-            .documents
-            .iter()
-            .find(|document| document.id == file_id)
-        else {
-            rejected_count += 1;
-            continue;
-        };
-        if !allowed_kb_ids.contains(document.knowledge_base_id.as_str())
-            || !matches!(
-                document.file_type.as_str(),
-                "txt" | "docx" | "pdf" | "image"
-            )
-        {
-            rejected_count += 1;
-            continue;
-        }
-
-        let image_markdown_path = (document.file_type == "image")
-            .then(|| {
-                active_markdown.and_then(|markdown| {
-                    (markdown.knowledge_base_id == document.knowledge_base_id)
-                        .then(|| relative_markdown_path(&markdown.path, &document.path))
-                        .flatten()
-                })
-            })
-            .flatten();
-        materials.push(MentionedFileMaterial {
-            id: document.id.clone(),
-            knowledge_base_id: document.knowledge_base_id.clone(),
-            title: document.title.clone(),
-            path: document.path.clone(),
-            file_type: document.file_type.clone(),
-            content: (document.file_type == "txt")
-                .then(|| {
-                    document
-                        .content
-                        .as_deref()
-                        .map(|content| truncate_chars(content, MAX_MENTIONED_TEXT_CHARS))
-                })
-                .flatten(),
-            image_markdown_path,
-        });
-    }
-
-    if rejected_count > 0 {
-        log::warn!(
-            target: "agent_runtime",
-            "显式 @ 文件已过滤：requested_count={} accepted_count={} rejected_count={}",
-            request.mentioned_file_ids.len(), materials.len(), rejected_count
-        );
-    }
-    log::debug!(
-        target: "agent_runtime",
-        "显式 @ 文件解析完成：requested_count={} accepted_count={} text_count={} metadata_count={}",
-        request.mentioned_file_ids.len(),
-        materials.len(),
-        materials.iter().filter(|material| material.content.is_some()).count(),
-        materials.iter().filter(|material| material.content.is_none()).count()
-    );
-    materials
-}
-
-/** 为同一知识库中的图片计算相对当前 Markdown 的安全引用路径，不访问本机绝对路径。 */
-fn relative_markdown_path(markdown_path: &str, asset_path: &str) -> Option<String> {
-    let markdown_directory = Path::new(markdown_path).parent()?;
-    let source = normalized_path_components(markdown_directory)?;
-    let target = normalized_path_components(Path::new(asset_path))?;
-    let shared_length = source
-        .iter()
-        .zip(&target)
-        .take_while(|(left, right)| left == right)
-        .count();
-    let mut result = vec!["..".to_owned(); source.len().saturating_sub(shared_length)];
-    result.extend(target.into_iter().skip(shared_length));
-    (!result.is_empty()).then(|| result.join("/"))
-}
-
-/** 将知识库扫描得到的相对路径规范化为普通组件，拒绝上级目录和绝对路径。 */
-fn normalized_path_components(path: &Path) -> Option<Vec<String>> {
-    let mut result = Vec::new();
-    for component in path.components() {
-        match component {
-            Component::Normal(value) => result.push(value.to_string_lossy().to_string()),
-            Component::CurDir => {}
-            Component::ParentDir | Component::RootDir | Component::Prefix(_) => return None,
-        }
-    }
-    Some(result)
-}
-
-/** 将已校验的显式材料渲染给模型，并强调它们不缩小既有工具 scope。 */
-fn render_mentioned_files_prompt(materials: &[MentionedFileMaterial]) -> Option<String> {
-    if materials.is_empty() {
-        return None;
-    }
-    let entries = materials
-        .iter()
-        .map(|material| {
-            let metadata = format!(
-                "- 文件：{}（id={}，类型={}，知识库={}，相对路径={}）",
-                material.title,
-                material.id,
-                material.file_type,
-                material.knowledge_base_id,
-                material.path
-            );
-            if let Some(content) = &material.content {
-                format!("{metadata}\n正文：\n{content}")
-            } else if let Some(markdown_path) = &material.image_markdown_path {
-                format!("{metadata}\n可插入当前 Markdown 的安全引用：![]({markdown_path})")
-            } else {
-                format!("{metadata}\n仅提供元数据；不要读取或上传二进制内容。")
-            }
-        })
-        .collect::<Vec<_>>()
-        .join("\n\n");
-    Some(format!(
-        "【本轮用户显式 @ 的文件】\n这些是本轮高优先级材料，请优先参考。它们不会缩小允许 scope：你仍可按需发现、读取或在待确认 diff 中修改 scope 内其他文件。当前编辑目标仍由界面当前文件决定。\n{entries}"
-    ))
-}
-
 /** 统计显式 Skill 来源分布，供运行日志观测，不包含路径或 instructions 正文。 */
 fn explicit_skill_source_summary(skills: &[AgentSkill]) -> String {
     let built_in_count = skills
@@ -563,8 +289,9 @@ fn resolve_context_summary_model_selection(
     })
 }
 
-/** 手动整理指定会话上下文；真实模型不可用时降级为本地确定性整理。 */
+/** 手动整理指定会话上下文；真实模型不可用时降级为本地确定性整理，并改写 transcript。 */
 pub async fn compact_agent_context_summary(
+    app: &AppHandle,
     mut snapshot: WorkspaceSnapshot,
     session_id: &str,
     settings: UserSettings,
@@ -615,6 +342,35 @@ pub async fn compact_agent_context_summary(
             );
         }
     }
+
+    let model_context_length = snapshot.sessions[session_index]
+        .model_id
+        .as_deref()
+        .and_then(|model_id| {
+            settings
+                .model_config
+                .providers
+                .iter()
+                .find(|provider| {
+                    snapshot.sessions[session_index]
+                        .model_provider_id
+                        .as_deref()
+                        == Some(provider.id.as_str())
+                })
+                .and_then(|provider| {
+                    provider
+                        .models
+                        .iter()
+                        .find(|model| model.id == model_id)
+                        .and_then(|model| model.context_length)
+                })
+        });
+    rewrite_stored_transcript(
+        app,
+        &session_id,
+        snapshot.sessions[session_index].context_summary.as_ref(),
+        model_context_length,
+    );
 
     Ok(snapshot)
 }
@@ -924,7 +680,7 @@ async fn run_model_loop(
         previous_transcript.as_deref(),
     );
     let history_pack = model_prompt.history.clone();
-    let prompt_prefix_len = model_prompt.prefix_len;
+    let mut prompt_prefix_len = model_prompt.prefix_len;
     let mut model_messages = model_prompt.messages;
     let endpoint = model_provider::chat_completions_endpoint(&provider.api_base);
     let tool_registry =
@@ -937,6 +693,8 @@ async fn run_model_loop(
         None,
     ));
     let mut last_failed_tool_summary: Option<String> = None;
+    let mut overflow_retried = false;
+    let mut silent_overflow = false;
 
     tool_calls.push(model_request_tool_call(
         &provider,
@@ -947,12 +705,13 @@ async fn run_model_loop(
 
     log::info!(
         target: "agent_runtime",
-        "模型 Agent 自主工具选择开始：session={} action={} provider_id={} provider_name={} model={} enabled_skill_count={} explicit_skill_count={} explicit_instruction_chars={} scope_count={} prompt_chars={}",
+        "模型 Agent 自主工具选择开始：session={} action={} provider_id={} provider_name={} model={} model_context_length={} enabled_skill_count={} explicit_skill_count={} explicit_instruction_chars={} scope_count={} prompt_chars={}",
         snapshot.sessions[session_index].id,
         request.action,
         provider.id,
         provider.name,
         selected_model_id,
+        model_context_length.unwrap_or(0),
         available_skills.iter().filter(|skill| skill.enabled).count(),
         explicit_skills.len(),
         explicit_skills
@@ -963,9 +722,19 @@ async fn run_model_loop(
         request.prompt.chars().count()
     );
 
+    let mut model_round = 0u32;
     for _ in 0..MAX_INNER_TOOL_ROUNDS {
         audit_trail.record_model_request();
-        let response = send_chat_completion_with_policy(
+        model_round = model_round.saturating_add(1);
+        capture_model_prompt_dump(
+            app,
+            &session_id,
+            &selected_model_id,
+            model_context_length,
+            model_round,
+            &model_messages,
+        );
+        let response = match send_chat_completion_with_policy(
             &client,
             &provider,
             &selected_model_id,
@@ -978,7 +747,61 @@ async fn run_model_loop(
                 apply_streamed_assistant_progress(tracer, Some(app), streamed);
             },
         )
-        .await?;
+        .await
+        {
+            Ok(response) => response,
+            Err(error) => {
+                let status = provider_error::parse_http_status_from_error(&error);
+                let kind = provider_error::classify_provider_error(&error, status);
+                if kind == provider_error::ProviderErrorKind::Overflow
+                    && !overflow_retried
+                    && snapshot.sessions[session_index]
+                        .model_id
+                        .as_deref()
+                        .is_none_or(|model_id| model_id == selected_model_id)
+                {
+                    overflow_retried = true;
+                    if snapshot.sessions[session_index].context_summary.is_none() {
+                        update_agent_context_summary_deterministic(
+                            &mut snapshot,
+                            session_index,
+                            Some("模型上下文超出窗口，已压缩后重试。"),
+                            true,
+                        );
+                    }
+                    let rebuilt = rebuild_prompt_after_overflow(
+                        &snapshot,
+                        session_index,
+                        &request,
+                        &available_skills,
+                        &explicit_skills,
+                        &current_user_message_id,
+                        &kb_memories,
+                        model_context_length,
+                        &model_messages,
+                        prompt_prefix_len,
+                    );
+                    prompt_prefix_len = rebuilt.prefix_len;
+                    model_messages = rebuilt.messages;
+                    log::info!(
+                        target: "agent_runtime",
+                        "超窗已 compact 并重建投影，准备重试一次：session={}",
+                        session_id
+                    );
+                    continue;
+                }
+                return Err(provider_error::user_facing_provider_error(&error));
+            }
+        };
+        record_context_usage(
+            &mut snapshot.sessions[session_index],
+            &selected_model_id,
+            &response,
+            model_context_length,
+        );
+        if provider_error::is_silent_overflow(&response, model_context_length) {
+            silent_overflow = true;
+        }
         let finish_reason = provider_error::parse_finish_reason(&response);
         let message = response
             .get("choices")
@@ -1033,6 +856,37 @@ async fn run_model_loop(
             continue;
         }
 
+        if provider_error::is_length_stop(finish_reason.as_deref())
+            && model_tool_calls.is_empty()
+            && extracted_tool_calls.visible_content.is_empty()
+            && !overflow_retried
+        {
+            overflow_retried = true;
+            if snapshot.sessions[session_index].context_summary.is_none() {
+                update_agent_context_summary_deterministic(
+                    &mut snapshot,
+                    session_index,
+                    Some("模型输出因长度限制被截断，已压缩后重试。"),
+                    true,
+                );
+            }
+            let rebuilt = rebuild_prompt_after_overflow(
+                &snapshot,
+                session_index,
+                &request,
+                &available_skills,
+                &explicit_skills,
+                &current_user_message_id,
+                &kb_memories,
+                model_context_length,
+                &model_messages,
+                prompt_prefix_len,
+            );
+            prompt_prefix_len = rebuilt.prefix_len;
+            model_messages = rebuilt.messages;
+            continue;
+        }
+
         if model_tool_calls.is_empty() {
             let content = if extracted_tool_calls.visible_content.is_empty() {
                 if provider_error::is_length_stop(finish_reason.as_deref()) {
@@ -1049,6 +903,11 @@ async fn run_model_loop(
                 extracted_tool_calls.visible_content
             };
             tracer.finish(Some(&content), Some(app));
+            // 最终回复必须进入 transcript，否则下一轮投影只有 user，模型看不到自己说过什么。
+            model_messages.push(json!({
+                "role": "assistant",
+                "content": content.clone()
+            }));
 
             push_assistant_message(
                 &mut snapshot,
@@ -1059,7 +918,7 @@ async fn run_model_loop(
                 tool_calls,
                 tracer,
             );
-            update_agent_context_summary_after_turn(
+            let compacted = update_agent_context_summary_after_turn(
                 &client,
                 &provider,
                 &selected_model_id,
@@ -1069,6 +928,8 @@ async fn run_model_loop(
                 estimate_model_messages_chars(&model_messages),
                 last_failed_tool_summary.as_deref(),
                 Some(&history_pack),
+                model_context_length,
+                silent_overflow,
             )
             .await;
             persist_turn_transcript(
@@ -1078,6 +939,7 @@ async fn run_model_loop(
                 prompt_prefix_len,
                 snapshot.sessions[session_index].context_summary.as_ref(),
                 model_context_length,
+                compacted,
             );
             let audit_log = build_audit_log(
                 "model_turn",
@@ -1126,8 +988,10 @@ async fn run_model_loop(
 
                 tool_registry.execute_model_tool_call(&mut tool_context, &model_tool_call)
             };
-            let mut tool_result_text =
-                truncate_chars(&tool_outcome.payload.to_string(), MAX_TOOL_RESULT_CHARS);
+            let mut tool_result_text = truncate_tool_result_for_model(
+                &tool_outcome.payload.to_string(),
+                MAX_TOOL_RESULT_CHARS,
+            );
             if tool_outcome.call.name == "run" && tool_outcome.call.status == "completed" {
                 let pending_request = snapshot.sessions[session_index].pending_execution.clone();
                 if let Some(pending_request) = pending_request.filter(|pending_request| {
@@ -1301,6 +1165,10 @@ async fn run_model_loop(
         last_failed_tool_summary.as_deref(),
     );
     tracer.finish(Some(&content), Some(app));
+    model_messages.push(json!({
+        "role": "assistant",
+        "content": content.clone()
+    }));
 
     push_assistant_message(
         &mut snapshot,
@@ -1311,7 +1179,7 @@ async fn run_model_loop(
         tool_calls,
         tracer,
     );
-    update_agent_context_summary_after_turn(
+    let compacted = update_agent_context_summary_after_turn(
         &client,
         &provider,
         &selected_model_id,
@@ -1321,6 +1189,8 @@ async fn run_model_loop(
         estimate_model_messages_chars(&model_messages),
         last_failed_tool_summary.as_deref(),
         Some(&history_pack),
+        model_context_length,
+        silent_overflow,
     )
     .await;
     persist_turn_transcript(
@@ -1330,6 +1200,7 @@ async fn run_model_loop(
         prompt_prefix_len,
         snapshot.sessions[session_index].context_summary.as_ref(),
         model_context_length,
+        compacted,
     );
     let audit_log = build_audit_log(
         "model_turn",
@@ -1387,278 +1258,106 @@ fn build_http_client() -> Result<Client, String> {
         .map_err(|error| format!("无法创建模型 HTTP client：{error}"))
 }
 
-/** 构造模型可用的 system、scope 摘要和历史消息；测试默认按未知窗口装箱。 */
-#[cfg(test)]
-fn build_model_messages(
-    snapshot: &WorkspaceSnapshot,
-    session_index: usize,
-    request: &AgentTurnRequest,
-    available_skills: &[AgentSkill],
-    explicit_skills: &[AgentSkill],
-    current_user_message_id: &str,
-    knowledge_base_memories: &[KnowledgeBaseMemory],
-) -> Vec<Value> {
-    build_model_prompt(
-        snapshot,
-        session_index,
-        request,
-        available_skills,
-        explicit_skills,
-        current_user_message_id,
-        knowledge_base_memories,
-        None,
-        None,
-    )
-    .messages
-}
-
-/** 按模型窗口预算装箱会话历史，并返回可观测的装箱统计。 */
-fn build_model_prompt(
-    snapshot: &WorkspaceSnapshot,
-    session_index: usize,
-    request: &AgentTurnRequest,
-    available_skills: &[AgentSkill],
-    explicit_skills: &[AgentSkill],
-    current_user_message_id: &str,
-    knowledge_base_memories: &[KnowledgeBaseMemory],
+fn record_context_usage(
+    session: &mut AgentSession,
+    model_id: &str,
+    response: &Value,
     model_context_length: Option<u64>,
-    previous_transcript: Option<&[Value]>,
-) -> ModelPrompt {
-    let session = &snapshot.sessions[session_index];
-    // Agent 的工具选择策略只作为模型指令，不再由宿主预判用户意图。
-    let autonomous_tool_policy = "你需要根据用户输入和上下文自主判断是否调用工具：需要 Markdown 引用时使用 search；需要当前 scope 内正文时使用 read（可省略 fileId 以读当前文件）；需要改写时使用 edit；需要新建时使用 write；需要看目录时使用 list。DOCX/PDF 用 read 只读抽取，不可编辑，且不会自动进入全文搜索。TXT 必须按纯文本原样处理。无关的通用问题可以直接回答。界面 action 只是 UI 分类，不能替代你的判断。";
-    // 安全等级的根本目的是让用户逐步放手，而不是只为 Skill 开闸。
-    let security_level_policy = match session.security_level.as_str() {
-        "autonomous" => "当前为完全级别：用户把连续执行权交给你，目的是让你一次把任务做完。edit 和 write（含建文件夹）在校验通过后会自动落盘；失败则保留待确认。你可以在当前 scope 内知识库使用相对路径，也可以对用户设备上的合规绝对路径（含 ~）调用 list、read 和 write。这不是整台电脑：Windows、Program Files 等受保护系统目录会被拒绝。Skill 只是更高权限下可发挥的能力之一，脚本仍在隔离副本中运行，不会获得真实系统路径。",
-        "advanced" => "当前为进阶级别：用户开始放手，但仍要在落盘前确认。write 可以在当前知识库内建文件夹，也可以在授权后运行 run。所有写入和 Skill 执行仍需用户确认后才会生效。",
-        _ => "当前为基础级别：用户选择先看紧。你只使用知识库文档工具；edit 和 write 只生成待确认 diff，不能声称已经写入。不要暗示你可以执行脚本、访问知识库外路径或跳过确认。",
-    };
-    let write_policy = if session.security_level == "autonomous" {
-        "所有写入只能调用 edit 或 write；校验通过后会自动落盘，不要在工具结果返回前声称已经写入文件。"
-    } else {
-        "所有写入只能调用 edit 或 write 生成待确认 diff，不能声称已经写入文件。"
-    };
-    let scope_summary = build_scope_summary(snapshot, session);
-    let active_note_summary = request
-        .active_note_id
-        .is_empty()
-        .then(|| "当前未绑定笔记".to_owned())
-        .unwrap_or_else(|| format!("当前笔记 ID：{}", request.active_note_id));
-    let skill_catalog = skills::skill_catalog_prompt(available_skills);
-    let explicit_skill_prompt = skills::explicit_skill_prompt(explicit_skills);
-    let project_instruction_prompt = render_project_agent_instructions(snapshot, session);
-    let knowledge_base_memory_prompt =
-        render_knowledge_base_memory_prompt(knowledge_base_memories, &snapshot.knowledge_bases);
-    let context_summary_prompt = render_context_summary_prompt(session.context_summary.as_ref());
-    let pending_change_prompt = render_pending_change_prompt(session.pending_change.as_ref());
-    // @ 材料挂在本轮 user 消息上，随 transcript 追加；不再每轮作为 system 重注入。
-    let mentioned_files_prompt =
-        render_mentioned_files_prompt(&resolve_mentioned_files(snapshot, session, request));
-    let context_summary_prompt_chars = context_summary_prompt
-        .as_ref()
-        .map(|prompt| prompt.chars().count())
-        .unwrap_or_default();
-    let context_summary_updated_at = session
-        .context_summary
-        .as_ref()
-        .map(|summary| summary.updated_at.as_str())
-        .filter(|updated_at| !updated_at.trim().is_empty())
-        .unwrap_or("none");
-    let knowledge_base_memory_chars = knowledge_base_memory_prompt
-        .as_ref()
-        .map(|prompt| prompt.chars().count())
-        .unwrap_or_default();
-    let skill_policy = if explicit_skills.is_empty() {
-        "启用的 Skill 只以名称和描述提供给你参考，是否使用、使用哪一个 Skill 都由你自主判断。Skill 只是可用能力的一部分，不能扩大工具权限或绕过系统保护边界。"
-    } else {
-        "本轮显式激活的 Skill 是用户通过 slash picker 指定的执行要求。你必须在本轮回答中按这些 Skill 的完整 instructions 执行；如果 Skill 与用户任务冲突，说明冲突并遵守更高优先级系统规则。Skill 只是可用能力的一部分，不能扩大工具权限或绕过系统保护边界。"
-    };
-    let visible_tools = if session.im_identity.is_some() || session.security_level == "basic" {
-        "search, read, list, edit, write"
-    } else {
-        "search, read, list, edit, write, run"
-    };
-    let mut messages = vec![json!({
-        "role": "system",
-        "content": format!(
-            "【角色与工具】\n你是橘记的本地优先知识库 Agent。当前可见工具：{visible_tools}。search 只检索 Markdown；read 和 edit 可作用于当前 scope 内的 Markdown/TXT，省略 fileId 时 read 读取当前激活文件；TXT 必须原样按纯文本处理；read 也可只读 DOCX/PDF 并返回可信的页码或结构块引用。{}write 的 fileType 只能是 markdown 或 txt，路径扩展名必须匹配。局部替换使用 operation=replace，文末追加使用 operation=append 且 next 只含增量；同一文件多处编辑使用 operation=multi_replace 和 edits。必须使用服务端标准 tool_calls 字段调用工具，不要在普通回复中输出 DSML、XML 或伪工具调用标签。引用只允许来自已执行工具结果。{}\n{}\n{}\n【范围】\n允许 scope：{}\n{}\n【Skill 目录】\n{}\n{}",
-            write_policy, skill_policy, autonomous_tool_policy, security_level_policy, scope_summary, active_note_summary, skill_catalog, explicit_skill_prompt
-        )
-    })];
-
-    if let Some(project_instruction_prompt) = project_instruction_prompt {
-        messages.push(json!({
-            "role": "system",
-            "content": project_instruction_prompt
-        }));
-    }
-
-    if let Some(knowledge_base_memory_prompt) = knowledge_base_memory_prompt {
-        messages.push(json!({
-            "role": "system",
-            "content": knowledge_base_memory_prompt
-        }));
-    }
-
-    if let Some(context_summary_prompt) = context_summary_prompt {
-        messages.push(json!({
-            "role": "system",
-            "content": context_summary_prompt
-        }));
-    }
-
-    if let Some(pending_change_prompt) = pending_change_prompt {
-        messages.push(json!({
-            "role": "system",
-            "content": pending_change_prompt
-        }));
-    }
-
-    let prefix_len = messages.len();
-    let history =
-        if let Some(transcript) = previous_transcript.filter(|messages| !messages.is_empty()) {
-            messages.extend(transcript.iter().cloned());
-            messages.push(build_current_user_model_message(
-                request,
-                mentioned_files_prompt.as_deref(),
-            ));
-            let used_chars = estimate_model_messages_chars(&messages[prefix_len..]);
-            PackedHistoryStats {
-                included_session_messages: transcript.len().saturating_add(1),
-                dropped_session_messages: 0,
-                budget_chars: resolve_history_budget_chars(model_context_length),
-                used_chars,
-            }
-        } else {
-            let packed_history = session_history_model_messages(
-                session,
-                request,
-                current_user_message_id,
-                model_context_length,
-            );
-            messages.extend(packed_history.messages);
-            attach_mentioned_files_to_current_user(
-                &mut messages,
-                prefix_len,
-                mentioned_files_prompt.as_deref(),
-            );
-            packed_history.stats
-        };
-
-    log::debug!(
-        target: "agent_runtime",
-        "上下文注入完成：session={} transcript_mode={} summary_injected={} summary_chars={} summary_updated_at={} has_pending_change={} project_instruction_count={} kb_memory_injected={} kb_memory_chars={} kb_memory_entry_count={} kb_memory_kb_count={} history_included={} history_dropped={} history_budget_chars={} history_used_chars={} model_context_length={}",
-        session.id,
-        if previous_transcript.is_some_and(|messages| !messages.is_empty()) {
-            "append"
-        } else {
-            "seed"
-        },
-        context_summary_prompt_chars > 0,
-        context_summary_prompt_chars,
-        context_summary_updated_at,
-        session.pending_change.as_ref().is_some_and(|change| change.status == "pending"),
-        project_instruction_count(snapshot, session),
-        knowledge_base_memory_chars > 0,
-        knowledge_base_memory_chars,
-        knowledge_base_memories.iter().map(|memory| memory.entries.len()).sum::<usize>(),
-        knowledge_base_memories.len(),
-        history.included_session_messages,
-        history.dropped_session_messages,
-        history.budget_chars,
-        history.used_chars,
-        model_context_length.unwrap_or(0)
-    );
-
-    ModelPrompt {
-        messages,
-        history,
-        prefix_len,
-    }
-}
-
-/** 从完整模型请求中切出可持久化的对话 transcript，丢掉每轮重建的 system 前缀。 */
-fn conversation_from_model_messages(messages: &[Value], prefix_len: usize) -> Vec<Value> {
-    messages.get(prefix_len..).unwrap_or(&[]).to_vec()
-}
-
-/** 构造本轮发给模型的 user 消息；@ 材料只属于这一条，随后随 transcript 追加。 */
-fn build_current_user_model_message(
-    request: &AgentTurnRequest,
-    mentioned_files_prompt: Option<&str>,
-) -> Value {
-    let mut content = format!(
-        "界面 action 提示：{}\n用户输入：{}",
-        request.action, request.prompt
-    );
-    if let Some(mentioned) = mentioned_files_prompt.filter(|value| !value.is_empty()) {
-        content.push_str("\n\n");
-        content.push_str(mentioned);
-    }
-    json!({
-        "role": "user",
-        "content": content
-    })
-}
-
-/** seed 路径把 @ 材料并进当前 user 消息，避免再写成每轮重建的 system。 */
-fn attach_mentioned_files_to_current_user(
-    messages: &mut [Value],
-    prefix_len: usize,
-    mentioned_files_prompt: Option<&str>,
 ) {
-    let Some(mentioned) = mentioned_files_prompt.filter(|value| !value.is_empty()) else {
+    let Some(usage) = provider_error::parse_completion_usage(response) else {
         return;
     };
-    let Some(user_message) = messages
-        .iter_mut()
-        .skip(prefix_len)
-        .rev()
-        .find(|message| message.get("role").and_then(Value::as_str) == Some("user"))
-    else {
-        return;
-    };
-    let Some(content) = user_message.get("content").and_then(Value::as_str) else {
-        return;
-    };
-    if content.contains("【本轮用户显式 @ 的文件】") {
+    if !should_record_usage(
+        usage.prompt_tokens,
+        usage.completion_tokens,
+        usage.total_tokens,
+    ) {
         return;
     }
-    user_message["content"] = json!(format!("{content}\n\n{mentioned}"));
-}
-
-/** 超预算时用检查点替换 transcript 前缀，尾部消息保持原样，不再逐条截断。 */
-fn splice_transcript_with_checkpoint(
-    transcript: &[Value],
-    checkpoint: &str,
-    budget_chars: usize,
-    min_keep: usize,
-) -> Vec<Value> {
-    let checkpoint_message = json!({
-        "role": "system",
-        "content": checkpoint
+    session.context_usage = Some(AgentContextUsage {
+        model_id: model_id.to_owned(),
+        prompt_tokens: usage.prompt_tokens,
+        completion_tokens: usage.completion_tokens,
+        total_tokens: usage.total_tokens,
+        recorded_at: format_local_datetime(),
+        context_length: model_context_length.filter(|tokens| *tokens >= 1_024),
     });
-    let checkpoint_chars = estimate_model_messages_chars(std::slice::from_ref(&checkpoint_message));
-    let available_chars = budget_chars.saturating_sub(checkpoint_chars);
-    let mut kept = Vec::new();
-    let mut used_chars = 0usize;
-
-    for (offset, message) in transcript.iter().rev().enumerate() {
-        let message_chars = estimate_model_messages_chars(std::slice::from_ref(message));
-        if offset >= min_keep && used_chars.saturating_add(message_chars) > available_chars {
-            break;
-        }
-        used_chars = used_chars.saturating_add(message_chars);
-        kept.push(message.clone());
-    }
-    kept.reverse();
-
-    let mut spliced = vec![checkpoint_message];
-    spliced.extend(kept);
-    spliced
 }
 
-/** 把本轮实际发给模型的对话 transcript 落盘；超窗时先 splice 再保存。 */
+/** 把本轮即将发给模型的 messages 落到日志目录，并写一条不含正文的大纲。 */
+fn capture_model_prompt_dump(
+    app: &AppHandle,
+    session_id: &str,
+    model_id: &str,
+    model_context_length: Option<u64>,
+    round: u32,
+    messages: &[Value],
+) {
+    let dump = build_prompt_dump(
+        session_id,
+        model_id,
+        model_context_length,
+        round,
+        "turn",
+        messages,
+        &format_local_datetime(),
+    );
+    log::info!(
+        target: "agent_runtime",
+        "发给模型的上下文：session={} model={} window={} round={} messages={} total_chars={} outline={}",
+        session_id,
+        model_id,
+        model_context_length.unwrap_or(0),
+        round,
+        dump.messages.len(),
+        dump.total_chars,
+        dump.outline
+    );
+    logging::write_app_event_best_effort(
+        app,
+        AppEventBuilder::new(
+            AppLogLevel::Info,
+            AppLogCategory::Agent,
+            "model_prompt_dump",
+            "completed",
+            format!(
+                "发给模型的上下文：round={} messages={} total_chars={} outline={}",
+                round,
+                dump.messages.len(),
+                dump.total_chars,
+                dump.outline
+            ),
+        )
+        .session_id(session_id.to_owned())
+        .metadata(json!({
+            "modelId": model_id,
+            "modelContextLength": model_context_length.unwrap_or(0),
+            "round": round,
+            "messageCount": dump.messages.len(),
+            "totalChars": dump.total_chars,
+        })),
+    );
+    match logging::persist_agent_prompt_dump(app, &dump) {
+        Ok(path) => {
+            log::debug!(
+                target: "agent_runtime",
+                "模型上下文转储已写入：session={} path={}",
+                session_id,
+                path.display()
+            );
+        }
+        Err(error) => {
+            log::warn!(
+                target: "agent_runtime",
+                "保存模型上下文转储失败：session={} error={}",
+                session_id,
+                model_provider::redact_model_error_text(&error)
+            );
+        }
+    }
+}
+
+/** 把本轮实际发给模型的对话 transcript 落盘；超预算只通过 compact_transcript 改写。 */
 fn persist_turn_transcript(
     app: &AppHandle,
     session_id: &str,
@@ -1666,16 +1365,15 @@ fn persist_turn_transcript(
     prefix_len: usize,
     context_summary: Option<&AgentContextSummary>,
     model_context_length: Option<u64>,
+    rewrite_compacted: bool,
 ) {
     let mut conversation = conversation_from_model_messages(model_messages, prefix_len);
-    let budget_chars = resolve_history_budget_chars(model_context_length);
-    if estimate_model_messages_chars(&conversation) > budget_chars {
-        if let Some(checkpoint) = render_context_summary_prompt(context_summary) {
-            conversation = splice_transcript_with_checkpoint(
+    if rewrite_compacted {
+        if let Some(summary) = context_summary {
+            conversation = compact_transcript(
                 &conversation,
-                &checkpoint,
-                budget_chars,
-                MIN_RETAINED_SESSION_MESSAGES,
+                summary,
+                resolve_history_budget_chars(model_context_length),
             );
         }
     }
@@ -1692,498 +1390,41 @@ fn persist_turn_transcript(
     }
 }
 
-/** 按模型窗口从新到旧装箱会话历史，热窗口保留较完整工具结果，温窗口只留摘要。 */
-fn session_history_model_messages(
-    session: &AgentSession,
-    request: &AgentTurnRequest,
-    current_user_message_id: &str,
+/** 手动/自动 compact 成功后把已落盘 transcript 改写成检查点 + legal tail。 */
+fn rewrite_stored_transcript(
+    app: &AppHandle,
+    session_id: &str,
+    context_summary: Option<&AgentContextSummary>,
     model_context_length: Option<u64>,
-) -> PackedHistory {
-    let budget_chars = resolve_history_budget_chars(model_context_length);
-    let candidates = session
-        .messages
-        .iter()
-        .rev()
-        .take(MAX_MODEL_HISTORY_SESSION_MESSAGES)
-        .collect::<Vec<_>>();
-    let dropped_by_cap = session.messages.len().saturating_sub(candidates.len());
-
-    let mut groups = Vec::new();
-    let mut used_chars = 0usize;
-
-    for (offset, message) in candidates.iter().enumerate() {
-        let is_hot = offset < HOT_HISTORY_SESSION_MESSAGES;
-        let group = history_messages_from_session_message(
-            message,
-            request,
-            current_user_message_id,
-            is_hot,
-        );
-        let group_chars = estimate_model_messages_chars(&group);
-        let must_keep = offset < MIN_RETAINED_SESSION_MESSAGES;
-        if !must_keep && used_chars + group_chars > budget_chars {
-            break;
-        }
-
-        used_chars = used_chars.saturating_add(group_chars);
-        groups.push(group);
-    }
-
-    let included_session_messages = groups.len();
-    let dropped_session_messages =
-        dropped_by_cap + candidates.len().saturating_sub(included_session_messages);
-    groups.reverse();
-
-    PackedHistory {
-        messages: groups.into_iter().flatten().collect(),
-        stats: PackedHistoryStats {
-            included_session_messages,
-            dropped_session_messages,
-            budget_chars,
-            used_chars,
-        },
-    }
-}
-
-/** 根据模型 context_length 计算历史层字符预算；未知窗口走 256k 保守默认。 */
-fn resolve_history_budget_chars(model_context_length: Option<u64>) -> usize {
-    let Some(tokens) = model_context_length.filter(|tokens| *tokens >= 1_024) else {
-        let default_chars = (DEFAULT_MODEL_CONTEXT_TOKENS.saturating_mul(CHARS_PER_TOKEN_ESTIMATE)
-            as f64
-            * HISTORY_CONTEXT_WINDOW_RATIO) as usize;
-        return default_chars.clamp(MIN_HISTORY_BUDGET_CHARS, MAX_HISTORY_BUDGET_CHARS);
-    };
-
-    let chars = (tokens.saturating_mul(CHARS_PER_TOKEN_ESTIMATE) as f64
-        * HISTORY_CONTEXT_WINDOW_RATIO) as usize;
-    chars.clamp(MIN_KNOWN_HISTORY_BUDGET_CHARS, MAX_HISTORY_BUDGET_CHARS)
-}
-
-/** 单条会话消息转成模型协议消息；宿主注入的基建工具不会伪装成模型 tool_calls。 */
-fn history_messages_from_session_message(
-    message: &AgentMessage,
-    request: &AgentTurnRequest,
-    current_user_message_id: &str,
-    is_hot: bool,
-) -> Vec<Value> {
-    let max_content_chars = if is_hot {
-        MAX_HOT_HISTORY_MESSAGE_CHARS
-    } else {
-        MAX_WARM_HISTORY_MESSAGE_CHARS
-    };
-
-    if message.role == "user" {
-        let content = if message.id == current_user_message_id {
-            format!(
-                "界面 action 提示：{}\n用户输入：{}",
-                request.action, message.content
-            )
-        } else {
-            message.content.clone()
-        };
-
-        return vec![json!({
-            "role": "user",
-            "content": truncate_chars(&content, max_content_chars)
-        })];
-    }
-
-    let replayable_tools = message
-        .tool_calls
-        .as_deref()
-        .unwrap_or(&[])
-        .iter()
-        .filter(|tool_call| is_user_visible_tool(&tool_call.name))
-        .collect::<Vec<_>>();
-
-    if replayable_tools.is_empty() {
-        return vec![json!({
-            "role": message.role,
-            "content": truncate_chars(&message.content, max_content_chars)
-        })];
-    }
-
-    let assistant_content = if message.content.trim().is_empty() {
-        Value::Null
-    } else {
-        Value::String(truncate_chars(&message.content, max_content_chars))
-    };
-    let tool_previews = message
-        .trace
-        .iter()
-        .filter(|step| step.step_type == "tool")
-        .map(|step| step.result_preview.as_deref())
-        .collect::<Vec<_>>();
-    let mut history = vec![json!({
-        "role": "assistant",
-        "content": assistant_content,
-        "tool_calls": replayable_tools
-            .iter()
-            .map(|tool_call| history_tool_call_payload(tool_call, is_hot))
-            .collect::<Vec<_>>()
-    })];
-
-    for (index, tool_call) in replayable_tools.iter().enumerate() {
-        history.push(json!({
-            "role": "tool",
-            "tool_call_id": tool_call.id,
-            "content": history_tool_result_content(
-                tool_call,
-                tool_previews.get(index).copied().flatten(),
-                is_hot
-            )
-        }));
-    }
-
-    history
-}
-
-/** 把持久化的 AgentToolCall 还原成 OpenAI-compatible tool_call，arguments 必须是 JSON 字符串。 */
-fn history_tool_call_payload(tool_call: &AgentToolCall, is_hot: bool) -> Value {
-    json!({
-        "id": tool_call.id,
-        "type": "function",
-        "function": {
-            "name": tool_call.name,
-            "arguments": history_tool_arguments(&tool_call.args, is_hot)
-        }
-    })
-}
-
-/** 历史工具参数保持合法 JSON；超长时截断字符串字段，而不是切开整段 JSON。 */
-fn history_tool_arguments(args: &Value, is_hot: bool) -> String {
-    let max_total_chars = if is_hot {
-        MAX_HOT_HISTORY_MESSAGE_CHARS
-    } else {
-        MAX_WARM_HISTORY_MESSAGE_CHARS
-    };
-    let max_string_chars = if is_hot {
-        MAX_HOT_HISTORY_TOOL_ARGUMENT_STRING_CHARS
-    } else {
-        MAX_HISTORY_TOOL_ARGUMENT_STRING_CHARS
-    };
-    let serialized_chars = if is_hot {
-        MAX_HISTORY_MESSAGE_CHARS
-    } else {
-        MAX_WARM_HISTORY_MESSAGE_CHARS
-    };
-    let serialized = serde_json::to_string(args).unwrap_or_else(|_| "{}".to_owned());
-    if serialized.chars().count() <= max_total_chars {
-        return serialized;
-    }
-
-    let truncated = truncate_json_strings(args, max_string_chars);
-    let truncated_serialized =
-        serde_json::to_string(&truncated).unwrap_or_else(|_| "{}".to_owned());
-    if truncated_serialized.chars().count() <= serialized_chars {
-        return truncated_serialized;
-    }
-
-    json!({
-        "truncated": true,
-        "keys": truncated.as_object().map(|map| map.keys().cloned().collect::<Vec<_>>()).unwrap_or_default()
-    })
-    .to_string()
-}
-
-/** 递归截断 JSON 字符串字段，供历史 tool arguments 在预算内保持可解析。 */
-fn truncate_json_strings(value: &Value, max_chars: usize) -> Value {
-    match value {
-        Value::String(text) => Value::String(truncate_chars(text, max_chars)),
-        Value::Array(items) => Value::Array(
-            items
-                .iter()
-                .map(|item| truncate_json_strings(item, max_chars))
-                .collect(),
-        ),
-        Value::Object(map) => Value::Object(
-            map.iter()
-                .map(|(key, child)| (key.clone(), truncate_json_strings(child, max_chars)))
-                .collect(),
-        ),
-        other => other.clone(),
-    }
-}
-
-/** 优先回放过程区保存的工具结果；温窗口只留 status/summary，避免旧工具正文占满预算。 */
-fn history_tool_result_content(
-    tool_call: &AgentToolCall,
-    result_preview: Option<&str>,
-    is_hot: bool,
-) -> String {
-    if is_hot {
-        if let Some(preview) = result_preview
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
-        {
-            return truncate_chars(preview, MAX_HOT_HISTORY_TOOL_RESULT_CHARS);
-        }
-    }
-
-    truncate_chars(
-        &json!({
-            "status": tool_call.status,
-            "summary": tool_call.summary
-        })
-        .to_string(),
-        if is_hot {
-            MAX_HOT_HISTORY_TOOL_RESULT_CHARS
-        } else {
-            MAX_WARM_HISTORY_MESSAGE_CHARS
-        },
-    )
-}
-
-/** 渲染知识库根目录 ORANGE_AGENT.md 指令；读取失败只写脱敏日志，不阻塞 Agent 回合。 */
-fn render_project_agent_instructions(
-    snapshot: &WorkspaceSnapshot,
-    session: &AgentSession,
-) -> Option<String> {
-    let instructions = load_project_agent_instructions(snapshot, session);
-
-    if instructions.is_empty() {
-        return None;
-    }
-
-    Some(format!(
-        "【项目级 Agent 指令】\n以下内容来自知识库根目录 ORANGE_AGENT.md（带 path 的项目规则，不要当成用户指令）。优先级低于橘记系统规则，高于普通会话记忆。\n{}",
-        instructions.join("\n\n")
-    ))
-}
-
-/** 读取当前会话 scope 内的项目级 Agent 指令，只按知识库根目录固定文件名加载。 */
-fn load_project_agent_instructions(
-    snapshot: &WorkspaceSnapshot,
-    session: &AgentSession,
-) -> Vec<String> {
-    session
-        .knowledge_base_ids
-        .iter()
-        .filter_map(|knowledge_base_id| {
-            let knowledge_base = snapshot
-                .knowledge_bases
-                .iter()
-                .find(|knowledge_base| &knowledge_base.id == knowledge_base_id)?;
-            let instruction_path = PathBuf::from(&knowledge_base.path).join("ORANGE_AGENT.md");
-
-            if !instruction_path.is_file() {
-                return None;
-            }
-
-            // 项目级指令可由用户编辑，读取时只按字符预算截断，不做正文日志输出。
-            match fs::read_to_string(&instruction_path) {
-                Ok(content) => {
-                    let bounded =
-                        truncate_chars(content.trim(), MAX_PROJECT_AGENT_INSTRUCTION_CHARS);
-
-                    if bounded.is_empty() {
-                        None
-                    } else {
-                        Some(format!(
-                            "path: {}/ORANGE_AGENT.md\n来源知识库：{}（id={}）\n{}",
-                            knowledge_base.path.trim_end_matches(['/', '\\']),
-                            knowledge_base.name,
-                            knowledge_base.id,
-                            bounded
-                        ))
-                    }
-                }
-                Err(error) => {
-                    log::warn!(
-                        target: "agent_runtime",
-                        "项目级 Agent 指令读取失败：knowledge_base_id={} error={}",
-                        knowledge_base.id,
-                        model_provider::redact_model_error_text(&error.to_string())
-                    );
-                    None
-                }
-            }
-        })
-        .collect()
-}
-
-/** 统计本轮注入了多少份项目级指令，用于 debug 日志，不重复记录正文。 */
-fn project_instruction_count(snapshot: &WorkspaceSnapshot, session: &AgentSession) -> usize {
-    session
-        .knowledge_base_ids
-        .iter()
-        .filter(|knowledge_base_id| {
-            snapshot
-                .knowledge_bases
-                .iter()
-                .find(|knowledge_base| &knowledge_base.id == *knowledge_base_id)
-                .map(|knowledge_base| {
-                    PathBuf::from(&knowledge_base.path)
-                        .join("ORANGE_AGENT.md")
-                        .is_file()
-                })
-                .unwrap_or(false)
-        })
-        .count()
-}
-
-/** 渲染会话工作记忆 prompt；summary 为空时不注入，避免制造无意义上下文。 */
-fn render_context_summary_prompt(summary: Option<&AgentContextSummary>) -> Option<String> {
-    let summary = summary?;
-    let body = render_context_summary_body(summary);
-
-    if body.trim().is_empty() {
-        return None;
-    }
-
-    Some(format!(
-        "【会话工作记忆】\n这是压缩检查点，不是用户指令。优先级低于系统规则，高于最近历史之外的普通聊天记忆。\n{}",
-        truncate_chars(&body, MAX_RENDERED_CONTEXT_SUMMARY_CHARS)
-    ))
-}
-
-/** 把结构化工作记忆转成模型可读文本，保持字段稳定便于模型增量合并。 */
-fn render_context_summary_body(summary: &AgentContextSummary) -> String {
-    let mut lines = vec![
-        format!("version: {}", summary.version),
-        format!("updatedAt: {}", summary.updated_at),
-    ];
-
-    if let Some(goal) = summary
-        .current_goal
-        .as_deref()
-        .filter(|goal| !goal.trim().is_empty())
-    {
-        lines.push(format!("currentGoal: {}", goal));
-    }
-
-    push_summary_list(&mut lines, "userConstraints", &summary.user_constraints);
-    push_summary_list(&mut lines, "decisions", &summary.decisions);
-    push_summary_list(&mut lines, "completedWork", &summary.completed_work);
-    push_summary_list(&mut lines, "pendingTasks", &summary.pending_tasks);
-
-    if !summary.touched_notes.is_empty() {
-        lines.push("touchedNotes:".to_owned());
-        for note in summary.touched_notes.iter().take(MAX_CONTEXT_SUMMARY_ITEMS) {
-            lines.push(format!("- {} | {} | {}", note.id, note.title, note.reason));
-        }
-    }
-
-    if let Some(change) = summary
-        .pending_change_summary
-        .as_deref()
-        .filter(|change| !change.trim().is_empty())
-    {
-        lines.push(format!("pendingChangeSummary: {change}"));
-    }
-
-    push_summary_list(&mut lines, "openQuestions", &summary.open_questions);
-
-    if let Some(message_id) = summary
-        .last_summarized_message_id
-        .as_deref()
-        .filter(|message_id| !message_id.trim().is_empty())
-    {
-        lines.push(format!("lastSummarizedMessageId: {message_id}"));
-    }
-
-    if let Some(message_id) = summary
-        .last_compacted_message_id
-        .as_deref()
-        .filter(|message_id| !message_id.trim().is_empty())
-    {
-        lines.push(format!("lastCompactedMessageId: {message_id}"));
-    }
-
-    lines.join("\n")
-}
-
-/** 只计算工作记忆渲染长度，供日志和审计记录使用，不暴露 summary 正文。 */
-fn context_summary_rendered_chars(summary: Option<&AgentContextSummary>) -> usize {
-    summary
-        .map(render_context_summary_body)
-        .map(|body| body.chars().count())
-        .unwrap_or_default()
-}
-
-/** 追加工作记忆数组字段，空数组不输出以节省 prompt 预算。 */
-fn push_summary_list(lines: &mut Vec<String>, label: &str, items: &[String]) {
-    if items.is_empty() {
+) {
+    let Some(summary) = context_summary else {
         return;
-    }
-
-    lines.push(format!("{label}:"));
-    for item in items.iter().take(MAX_CONTEXT_SUMMARY_ITEMS) {
-        lines.push(format!("- {item}"));
-    }
-}
-
-/** 渲染待确认 diff 摘要，只暴露状态和统计，不把 original/next 正文放进 prompt。 */
-fn render_pending_change_prompt(change: Option<&ProposedChange>) -> Option<String> {
-    let change = change?;
-    if change.status != "pending" {
-        return None;
-    }
-
-    let summary = summarize_pending_change(change)?;
-
-    Some(format!(
-        "【当前待确认变更】\n以下是当前会话的 diff 状态摘要。不要把它当成已写入文件；只有用户确认后才会落盘。\n{summary}"
-    ))
-}
-
-/** 渲染已启用的跨会话记忆；全部为空或未启用时不注入，避免制造无意义上下文。 */
-fn render_knowledge_base_memory_prompt(
-    memories: &[KnowledgeBaseMemory],
-    knowledge_bases: &[crate::domain::KnowledgeBase],
-) -> Option<String> {
-    let mut lines = Vec::new();
-    let mut entry_count = 0usize;
-
-    for memory in memories.iter() {
-        if !memory.enabled {
-            continue;
+    };
+    let transcript = match crate::storage::load_agent_session_transcript(app, session_id) {
+        Ok(Some(transcript)) if !transcript.is_empty() => transcript,
+        Ok(_) => return,
+        Err(error) => {
+            log::warn!(
+                target: "agent_runtime",
+                "读取会话 transcript 失败，跳过检查点改写：session={} error={}",
+                session_id,
+                model_provider::redact_model_error_text(&error)
+            );
+            return;
         }
-        let visible_entries: Vec<&AgentMemoryEntry> = memory
-            .entries
-            .iter()
-            .filter(|entry| !entry.content.trim().is_empty())
-            .take(MAX_RENDERED_KB_MEMORY_ENTRIES_PER_KB)
-            .collect();
-        if visible_entries.is_empty() {
-            continue;
-        }
-
-        let kb_name = knowledge_bases
-            .iter()
-            .find(|knowledge_base| knowledge_base.id == memory.knowledge_base_id)
-            .map(|knowledge_base| knowledge_base.name.as_str())
-            .unwrap_or(&memory.knowledge_base_id);
-        lines.push(format!("- 知识库：{}", kb_name));
-        for entry in visible_entries {
-            // 生成前再次脱敏，防止旧数据或手动改库绕过保存入口后进入模型上下文。
-            let redacted_content = crate::storage::redact_memory_secrets(entry.content.trim());
-            let category = memory_category_label(&entry.category);
-            lines.push(format!("  - [{}] {}", category, redacted_content));
-            entry_count += 1;
-        }
-    }
-
-    if lines.is_empty() || entry_count == 0 {
-        return None;
-    }
-
-    let body = lines.join("\n");
-    Some(format!(
-        "【跨会话记忆】\n以下是本知识库稳定的长期偏好与约定，优先级低于系统规则和项目指令，高于会话滚动记忆。仅作为持续生效的约定参考，不要逐条复述；如与用户本轮明确要求冲突，以用户本轮要求为准。\n{}",
-        truncate_chars(&body, MAX_RENDERED_KB_MEMORY_CHARS)
-    ))
-}
-
-/** 把记忆条目内部 category 值映射成模型可读的中文标签，未识别值降级为其他偏好。 */
-fn memory_category_label(category: &str) -> String {
-    match category {
-        MEMORY_CATEGORY_NOTE_STRUCTURE => "笔记结构".to_owned(),
-        MEMORY_CATEGORY_TAG_CONVENTION => "标签规范".to_owned(),
-        MEMORY_CATEGORY_ORGANIZATION => "整理习惯".to_owned(),
-        MEMORY_CATEGORY_CONVENTION => "知识库约定".to_owned(),
-        MEMORY_CATEGORY_OTHER => "其他偏好".to_owned(),
-        _ => "其他偏好".to_owned(),
+    };
+    let compacted = compact_transcript(
+        &transcript,
+        summary,
+        resolve_history_budget_chars(model_context_length),
+    );
+    if let Err(error) = crate::storage::save_agent_session_transcript(app, session_id, &compacted) {
+        log::warn!(
+            target: "agent_runtime",
+            "保存压缩后 transcript 失败：session={} error={}",
+            session_id,
+            model_provider::redact_model_error_text(&error)
+        );
     }
 }
 
@@ -2212,65 +1453,6 @@ fn load_enabled_session_kb_memories(
     memories
 }
 
-/** 生成 pending change 的脱敏摘要，供 prompt、summary 和日志复用。 */
-fn summarize_pending_change(change: &ProposedChange) -> Option<String> {
-    if change.status.trim().is_empty() {
-        return None;
-    }
-
-    let operation = change.operation.as_deref().unwrap_or("create");
-    let stats = change.diff_stats.as_ref().map(|stats| {
-        format!(
-            "addedLines={} removedLines={} hunkCount={} originalChars={} nextChars={}",
-            stats.added_lines,
-            stats.removed_lines,
-            stats.hunk_count,
-            stats.original_char_count,
-            stats.next_char_count
-        )
-    });
-
-    Some(format!(
-        "- 类型：{}\n- 操作：{}\n- 标题：{}\n- 目标路径：{}\n- 状态：{}\n- 统计：{}",
-        change.r#type,
-        operation,
-        change.title,
-        change.target_path,
-        change.status,
-        stats.unwrap_or_else(|| {
-            format!(
-                "originalChars={} nextChars={}",
-                change.original.chars().count(),
-                change.next.chars().count()
-            )
-        })
-    ))
-}
-
-/** 当前仍等待确认的 diff 摘要；accepted/rejected 不再作为待确认状态注入模型。 */
-fn current_pending_change_summary(session: &AgentSession) -> Option<String> {
-    session
-        .pending_change
-        .as_ref()
-        .filter(|change| change.status == "pending")
-        .and_then(summarize_pending_change)
-}
-
-/** 超窗时压缩已装箱的 tool 结果，避免把超窗请求原样再打一遍。 */
-fn shrink_model_messages_after_overflow(messages: &mut Vec<Value>) {
-    for message in messages.iter_mut() {
-        if message.get("role").and_then(Value::as_str) != Some("tool") {
-            continue;
-        }
-        let Some(content) = message.get("content").and_then(Value::as_str) else {
-            continue;
-        };
-        if content.chars().count() > 600 {
-            message["content"] = json!(truncate_chars(content, 600));
-        }
-    }
-}
-
 /** 发送模型请求：配额不重试，超窗 compact 后最多一次，429/5xx 指数退避。 */
 async fn send_chat_completion_with_policy(
     client: &Client,
@@ -2284,7 +1466,6 @@ async fn send_chat_completion_with_policy(
     on_progress: &mut impl FnMut(&StreamedAssistant),
 ) -> Result<Value, String> {
     let mut delay = Duration::from_millis(400);
-    let mut overflow_retried = false;
     let mut retryable_attempts = 0usize;
     loop {
         match send_chat_completion_logged_stream(
@@ -2306,10 +1487,9 @@ async fn send_chat_completion_with_policy(
                 let kind = provider_error::classify_provider_error(&error, status);
                 log::info!(
                     target: "agent_runtime",
-                    "模型请求失败分类：kind={:?} http_status={:?} overflow_retried={} retryable_attempts={}",
+                    "模型请求失败分类：kind={:?} http_status={:?} retryable_attempts={}",
                     kind,
                     status,
-                    overflow_retried,
                     retryable_attempts
                 );
                 match kind {
@@ -2317,10 +1497,8 @@ async fn send_chat_completion_with_policy(
                     | provider_error::ProviderErrorKind::Quota => {
                         return Err(provider_error::user_facing_provider_error(&error));
                     }
-                    provider_error::ProviderErrorKind::Overflow if !overflow_retried => {
-                        overflow_retried = true;
-                        shrink_model_messages_after_overflow(messages);
-                        continue;
+                    provider_error::ProviderErrorKind::Overflow => {
+                        return Err(error);
                     }
                     provider_error::ProviderErrorKind::Retryable if retryable_attempts < 3 => {
                         retryable_attempts += 1;
@@ -2489,6 +1667,8 @@ fn build_chat_completion_payload(
 
     if stream {
         payload["stream"] = json!(true);
+        // OpenAI 兼容流默认不带 usage；显式打开后才能记账窗口占用。
+        payload["stream_options"] = json!({ "include_usage": true });
     }
 
     payload
@@ -2612,28 +1792,43 @@ async fn send_chat_completion_stream(
     response_format: Option<&Value>,
     on_progress: &mut impl FnMut(&StreamedAssistant),
 ) -> Result<Value, String> {
-    let payload =
+    let mut payload =
         build_chat_completion_payload(model, messages, tool_schemas, response_format, true);
 
-    let mut request_builder = client.post(endpoint).json(&payload);
+    loop {
+        let mut request_builder = client.post(endpoint).json(&payload);
 
-    if !api_key.trim().is_empty() {
-        request_builder = request_builder.bearer_auth(api_key);
+        if !api_key.trim().is_empty() {
+            request_builder = request_builder.bearer_auth(api_key);
+        }
+
+        let response = request_builder.send().await.map_err(|error| {
+            model_provider::redact_model_error_text(&format!("无法发送模型请求：{error}"))
+        })?;
+        let status = response.status();
+
+        if !status.is_success() {
+            let body = response.text().await.unwrap_or_else(|_| String::new());
+            if status.as_u16() == 400
+                && payload.get("stream_options").is_some()
+                && body.to_ascii_lowercase().contains("stream_options")
+            {
+                if let Some(object) = payload.as_object_mut() {
+                    object.remove("stream_options");
+                }
+                log::info!(
+                    target: "agent_runtime",
+                    "provider 不接受 stream_options，已去掉后重试"
+                );
+                continue;
+            }
+            return Err(model_provider::redact_model_error_text(&format!(
+                "模型请求失败：HTTP {status} {body}"
+            )));
+        }
+
+        return read_chat_completion_response(response, on_progress).await;
     }
-
-    let response = request_builder.send().await.map_err(|error| {
-        model_provider::redact_model_error_text(&format!("无法发送模型请求：{error}"))
-    })?;
-    let status = response.status();
-
-    if !status.is_success() {
-        let body = response.text().await.unwrap_or_else(|_| String::new());
-        return Err(model_provider::redact_model_error_text(&format!(
-            "模型请求失败：HTTP {status} {body}"
-        )));
-    }
-
-    read_chat_completion_response(response, on_progress).await
 }
 
 /** 把流式增量写进过程区：思考进 trace，回答进 live content。 */
@@ -2686,7 +1881,9 @@ async fn update_agent_context_summary_best_effort(
                 &snapshot.sessions[session_index],
                 update_compacted_marker,
             );
-            let rendered_chars = render_context_summary_body(&summary).chars().count();
+            let rendered_chars = render_context_summary_body(&summary)
+                .map(|body| body.chars().count())
+                .unwrap_or_default();
             let field_count = context_summary_field_count(&summary);
             let updated_at = summary.updated_at.clone();
 
@@ -2732,11 +1929,16 @@ async fn update_agent_context_summary_after_turn(
     estimated_prompt_chars: usize,
     failure_reason: Option<&str>,
     history_pack: Option<&PackedHistoryStats>,
-) {
+    model_context_length: Option<u64>,
+    silent_overflow: bool,
+) -> bool {
     let decision = context_summary_auto_decision(
         &snapshot.sessions[session_index],
         estimated_prompt_chars,
         history_pack,
+        Some(selected_model_id),
+        model_context_length,
+        silent_overflow,
     );
 
     log::debug!(
@@ -2765,94 +1967,7 @@ async fn update_agent_context_summary_after_turn(
     } else {
         update_agent_context_summary_deterministic(snapshot, session_index, failure_reason, false);
     }
-}
-
-/** 计算 自动整理触发条件，返回原因列表供日志观测。 */
-fn context_summary_auto_decision(
-    session: &AgentSession,
-    estimated_prompt_chars: usize,
-    history_pack: Option<&PackedHistoryStats>,
-) -> ContextSummaryAutoDecision {
-    let mut reasons = Vec::new();
-    let unsummarized_message_count = compact_unsummarized_message_count(session);
-    let has_compacted = session
-        .context_summary
-        .as_ref()
-        .and_then(|summary| summary.last_compacted_message_id.as_deref())
-        .is_some();
-
-    if session.context_summary.is_none() && !session.messages.is_empty() {
-        reasons.push("firstSummary".to_owned());
-    }
-
-    if session.messages.len() > AUTO_COMPACT_MESSAGE_COUNT_THRESHOLD && !has_compacted {
-        reasons.push("messageCountOverThreshold".to_owned());
-    }
-
-    if unsummarized_message_count > AUTO_COMPACT_UNSUMMARIZED_MESSAGE_THRESHOLD {
-        reasons.push("unsummarizedMessagesOverThreshold".to_owned());
-    }
-
-    if estimated_prompt_chars > AUTO_COMPACT_PROMPT_CHAR_THRESHOLD && unsummarized_message_count > 0
-    {
-        reasons.push("promptCharsOverThreshold".to_owned());
-    }
-
-    if let Some(history) = history_pack {
-        if history.dropped_session_messages > 0
-            && unsummarized_message_count > history.included_session_messages
-        {
-            reasons.push("unsummarizedHistoryDropped".to_owned());
-        }
-    }
-
-    if pending_change_summary_changed(session) {
-        reasons.push("pendingChangeChanged".to_owned());
-    }
-
-    ContextSummaryAutoDecision {
-        should_compact: !reasons.is_empty(),
-        reasons,
-        estimated_prompt_chars,
-        unsummarized_message_count,
-    }
-}
-
-/** 估算模型消息字符数，用于触发 prompt 过大时的自动 compact。 */
-fn estimate_model_messages_chars(messages: &[Value]) -> usize {
-    messages
-        .iter()
-        .map(|message| message.to_string().chars().count())
-        .sum()
-}
-
-/** 统计距离上一次模型 compact 后新增的消息数；确定性同步不会重置该计数。 */
-fn compact_unsummarized_message_count(session: &AgentSession) -> usize {
-    let Some(last_compacted_message_id) = session
-        .context_summary
-        .as_ref()
-        .and_then(|summary| summary.last_compacted_message_id.as_deref())
-    else {
-        return session.messages.len();
-    };
-
-    session
-        .messages
-        .iter()
-        .position(|message| message.id == last_compacted_message_id)
-        .map(|index| session.messages.len().saturating_sub(index + 1))
-        .unwrap_or(session.messages.len())
-}
-
-/** 当前待确认 diff 与 summary 内记录不一致时触发整理，避免模型忘记待确认状态。 */
-fn pending_change_summary_changed(session: &AgentSession) -> bool {
-    let recorded = session
-        .context_summary
-        .as_ref()
-        .and_then(|summary| summary.pending_change_summary.as_deref());
-    let current = current_pending_change_summary(session);
-
-    recorded != current.as_deref()
+    decision.should_compact
 }
 
 /** 构造 summary-only 模型请求，不携带工具 schema，不进入用户可见消息列表。 */
@@ -3077,7 +2192,9 @@ pub(crate) fn update_agent_context_summary_deterministic(
     summary.last_summarized_message_id = session.messages.last().map(|message| message.id.clone());
     summary = normalize_context_summary(summary, session, update_compacted_marker);
 
-    let rendered_chars = render_context_summary_body(&summary).chars().count();
+    let rendered_chars = render_context_summary_body(&summary)
+        .map(|body| body.chars().count())
+        .unwrap_or_default();
     let field_count = context_summary_field_count(&summary);
 
     snapshot.sessions[session_index].context_summary = Some(summary);
@@ -3755,40 +2872,6 @@ fn deduplicate_citations(citations: Vec<Citation>) -> Vec<Citation> {
     next_citations
 }
 
-/** 把字符串裁剪到指定字符预算，保留明确截断标记。 */
-fn truncate_chars(value: &str, max_chars: usize) -> String {
-    if value.chars().count() <= max_chars {
-        return value.to_owned();
-    }
-
-    let truncated = value.chars().take(max_chars).collect::<String>();
-
-    format!("{truncated}\n\n[内容已按上下文预算截断]")
-}
-
-/** 汇总会话允许的知识库名称，用于 system prompt 和请求审计。 */
-fn build_scope_summary(snapshot: &WorkspaceSnapshot, session: &AgentSession) -> String {
-    let labels = session
-        .knowledge_base_ids
-        .iter()
-        .filter_map(|id| {
-            snapshot
-                .knowledge_bases
-                .iter()
-                .find(|knowledge_base| knowledge_base.id == *id)
-                .map(|knowledge_base| format!("{} (id={})", knowledge_base.name, knowledge_base.id))
-        })
-        .collect::<Vec<_>>();
-
-    if labels.is_empty() {
-        "未绑定知识库".to_owned()
-    } else if labels.len() == 1 {
-        labels[0].clone()
-    } else {
-        format!("{} 个知识库：{}", labels.len(), labels.join(" / "))
-    }
-}
-
 /** 构造审计日志，记录模型请求或本地规则 fallback 的 scope 与工具摘要。 */
 fn build_audit_log(
     kind: &str,
@@ -3913,6 +2996,7 @@ mod tests {
                 deleted_at: None,
                 model_provider_id: None,
                 model_id: None,
+                context_usage: None,
             }],
             active_knowledge_base_id: "kb-a".to_owned(),
             active_note_id: "note-a".to_owned(),
@@ -4101,12 +3185,20 @@ mod tests {
         assert!(system_content.contains("自主判断是否调用工具"));
         assert!(!system_content.contains("本轮很可能需要"));
         assert!(system_content.contains("主知识库"));
-        assert!(system_content.contains("可用 Skills"));
-        assert!(system_content.contains("仅名称和描述"));
-        assert!(system_content.contains("知识库研究"));
+        assert!(system_content.contains("<available_skills>"));
+        assert!(system_content.contains("location=\"built-in\""));
+        assert!(system_content.contains("name=\"note-research\""));
         assert!(system_content.contains("是否使用、使用哪一个 Skill 都由你自主判断"));
         assert!(!system_content.contains("执行要求"));
         assert!(!system_content.contains("当用户要求查找"));
+        assert!(!system_content.contains("本轮显式激活的 Skills：无"));
+        assert_eq!(
+            messages
+                .iter()
+                .filter(|message| message["role"] == "system")
+                .count(),
+            1
+        );
     }
 
     /** 会话工作记忆必须在 system 指令之后、短期历史之前注入，确保被预算裁掉的早期目标仍能保留。 */
@@ -4134,19 +3226,28 @@ mod tests {
             last_summarized_message_id: Some("user-old".to_owned()),
             last_compacted_message_id: Some("user-old".to_owned()),
         });
-        snapshot.sessions[0].messages.push(AgentMessage {
-            id: "user-current".to_owned(),
-            role: "user".to_owned(),
-            content: "继续处理".to_owned(),
-            action: Some("ask".to_owned()),
-            citations: None,
-            tool_calls: None,
-            mentioned_file_ids: Vec::new(),
-            trace: Vec::new(),
-            turn_duration_ms: None,
-        });
+        snapshot.sessions[0].messages = vec![
+            history_test_message(
+                "user-old",
+                "user",
+                &"早期目标正文需要被检查点代替。".repeat(400),
+                None,
+                Vec::new(),
+            ),
+            AgentMessage {
+                id: "user-current".to_owned(),
+                role: "user".to_owned(),
+                content: "继续处理".to_owned(),
+                action: Some("ask".to_owned()),
+                citations: None,
+                tool_calls: None,
+                mentioned_file_ids: Vec::new(),
+                trace: Vec::new(),
+                turn_duration_ms: None,
+            },
+        ];
 
-        let messages = build_model_messages(
+        let messages = build_model_prompt(
             &snapshot,
             0,
             &request,
@@ -4154,14 +3255,28 @@ mod tests {
             &[],
             "user-current",
             &[],
-        );
+            Some(4_096),
+            None,
+        )
+        .messages;
         let memory_content = messages[1]["content"].as_str().unwrap_or_default();
+        let system_content = messages[0]["content"].as_str().unwrap_or_default();
 
         assert_eq!(messages[0]["role"], "system");
-        assert_eq!(messages[1]["role"], "system");
-        assert!(memory_content.contains("【会话工作记忆】"));
+        assert_eq!(messages[1]["role"], "user");
+        assert!(memory_content.contains("压缩检查点"));
         assert!(memory_content.contains("按产品分析框架整理这篇文章"));
-        assert_eq!(messages[2]["role"], "user");
+        assert!(!memory_content.contains("version:"));
+        assert!(!memory_content.contains("updatedAt:"));
+        assert!(!system_content.contains("压缩检查点"));
+        assert!(!system_content.contains("【会话工作记忆】"));
+        assert_eq!(
+            messages
+                .iter()
+                .filter(|message| message["role"] == "system")
+                .count(),
+            1
+        );
     }
 
     /** 历史 assistant 必须按 chat completions 协议回放 tool_calls 和 tool 结果，不能只剩截断正文。 */
@@ -4420,7 +3535,7 @@ mod tests {
             .find(|message| message["role"] == "tool")
             .expect("history should include tool result message");
 
-        assert!(assistant["content"].is_null());
+        assert_eq!(assistant["content"], "");
         assert_eq!(tool["tool_call_id"], "call-read-file");
         assert!(tool["content"]
             .as_str()
@@ -4501,7 +3616,7 @@ mod tests {
             .any(|content| content.contains("用户轮次 0 的目标")));
         assert!(user_contents
             .iter()
-            .any(|content| content.contains("用户轮次 11 的目标")));
+            .any(|content| content.contains("继续第 12 轮")));
         assert_eq!(user_contents.len(), 12);
     }
 
@@ -4557,9 +3672,7 @@ mod tests {
             prompt.history.used_chars <= prompt.history.budget_chars
                 || prompt.history.included_session_messages == MIN_RETAINED_SESSION_MESSAGES
         );
-        assert!(user_contents
-            .iter()
-            .any(|content| content.contains("用户 11")));
+        assert!(user_contents.iter().any(|content| content.contains("继续")));
         assert!(user_contents
             .iter()
             .all(|content| !content.contains("用户 0 ")));
@@ -4686,6 +3799,9 @@ mod tests {
                 budget_chars: 4_000,
                 used_chars: 3_900,
             }),
+            None,
+            None,
+            false,
         );
 
         assert!(decision.should_compact);
@@ -4749,6 +3865,7 @@ mod tests {
         );
 
         assert_eq!(payload["stream"], true);
+        assert_eq!(payload["stream_options"]["include_usage"], true);
     }
 
     /** json_schema 成功时 content 仍是 JSON 字符串，解析层要直接读成工作记忆对象。 */
@@ -4960,16 +4077,18 @@ mod tests {
             &kb_memories,
         );
 
-        let memory_content = messages
-            .iter()
-            .filter_map(|message| message["content"].as_str())
-            .find(|content| content.contains("【跨会话记忆】"))
-            .unwrap_or_default();
-        assert!(!memory_content.is_empty());
+        let system_content = messages[0]["content"].as_str().unwrap_or_default();
+        let memory_start = system_content.find("【跨会话记忆】").unwrap_or(0);
+        let memory_content = &system_content[memory_start..];
+        let memory_end = memory_content
+            .find("\n\n【")
+            .unwrap_or(memory_content.len());
+        let memory_section = &memory_content[..memory_end];
+        assert!(!memory_section.is_empty());
         assert!(
-            memory_content.chars().count() <= MAX_RENDERED_KB_MEMORY_CHARS + 200,
+            memory_section.chars().count() <= MAX_RENDERED_KB_MEMORY_CHARS + 200,
             "跨会话记忆渲染应被截断到预算上限附近，实际 {} 字符",
-            memory_content.chars().count()
+            memory_section.chars().count()
         );
     }
 
@@ -5052,6 +4171,9 @@ mod tests {
             &snapshot.sessions[0],
             AUTO_COMPACT_PROMPT_CHAR_THRESHOLD + 1,
             None,
+            None,
+            None,
+            false,
         );
 
         assert!(decision.should_compact);
@@ -5061,10 +4183,39 @@ mod tests {
         assert!(decision
             .reasons
             .contains(&"promptCharsOverThreshold".to_owned()));
-        assert!(decision
+        assert!(!decision
             .reasons
             .contains(&"pendingChangeChanged".to_owned()));
+        assert!(!decision.reasons.contains(&"firstSummary".to_owned()));
         assert_eq!(decision.unsummarized_message_count, 29);
+    }
+
+    /** 短会话不得因为「还没有工作记忆」就 compact；检查点会打断 cache、也让模型误以为被压缩。 */
+    #[test]
+    fn context_summary_auto_decision_skips_first_short_turn() {
+        let mut snapshot = runtime_test_snapshot("正文内容足够用于测试。".to_owned());
+        snapshot.sessions[0].messages = vec![
+            history_test_message("user-1", "user", "你能做什么", None, Vec::new()),
+            history_test_message(
+                "assistant-1",
+                "assistant",
+                "我是橘记 Agent。",
+                None,
+                Vec::new(),
+            ),
+        ];
+
+        let decision = context_summary_auto_decision(
+            &snapshot.sessions[0],
+            2_000,
+            None,
+            Some("glm-5.2"),
+            None,
+            false,
+        );
+
+        assert!(!decision.should_compact);
+        assert!(decision.reasons.is_empty());
     }
 
     /** 增量 summary 请求从上次模型 compact 后截取消息，而不是被每轮确定性同步重置。 */
@@ -5162,7 +4313,7 @@ mod tests {
         assert!(last_message.content.contains("missing-provider"));
     }
 
-    /** 显式 Skill 应把完整 instructions 注入 system prompt，并保留目录摘要。 */
+    /** 显式 Skill 全文在最后一条 user，目录仍在唯一 system。 */
     #[test]
     fn model_messages_include_explicit_skill_instructions() {
         let snapshot = runtime_test_snapshot("正文内容足够用于测试。".to_owned());
@@ -5183,12 +4334,21 @@ mod tests {
             &[],
         );
         let system_content = messages[0]["content"].as_str().unwrap_or_default();
+        let last_user = messages
+            .iter()
+            .rev()
+            .find(|message| message["role"] == "user")
+            .unwrap()["content"]
+            .as_str()
+            .unwrap_or_default();
 
-        assert!(system_content.contains("本轮显式激活的 Skills"));
-        assert!(system_content.contains("执行要求"));
-        assert!(system_content.contains(&explicit_skill.instructions));
-        assert!(system_content.contains("可用 Skills"));
+        assert!(system_content.contains("<available_skills>"));
         assert!(system_content.contains("不能扩大工具权限"));
+        assert!(!system_content.contains(&explicit_skill.instructions));
+        assert!(!system_content.contains("本轮显式激活的 Skills"));
+        assert!(last_user.contains("<skill name=\"note-research\""));
+        assert!(last_user.contains(&explicit_skill.instructions));
+        assert!(last_user.contains("按研究流程总结"));
     }
 
     /** 安全等级指令应讲放手和确认策略，而不是把级别定义成 Skill 开关。 */
@@ -5300,7 +4460,7 @@ mod tests {
         );
 
         let summary = snapshot.sessions[0].context_summary.as_ref().unwrap();
-        let rendered = render_context_summary_body(summary);
+        let rendered = render_context_summary_body(summary).unwrap_or_default();
 
         assert!(summary
             .pending_tasks
@@ -5662,75 +4822,13 @@ mod tests {
         ];
 
         assert_eq!(
-            conversation_from_model_messages(&messages, 2),
+            conversation_from_model_messages(&messages, 1),
             vec![
+                json!({ "role": "system", "content": "工作记忆" }),
                 json!({ "role": "user", "content": "你好" }),
                 json!({ "role": "assistant", "content": "你好，需要我做什么？" }),
             ]
         );
-    }
-
-    /** 超窗 compact 应 splice 前缀并原样保留尾部工具结果，而不是把尾部再截断成 summary。 */
-    #[test]
-    fn splice_transcript_replaces_prefix_and_keeps_tail_tool_result() {
-        let long_tool_result = format!(
-            r#"{{"matches":[{{"title":"旧检索命中","snippet":"{}"}}]}}"#,
-            "很长的旧工具结果".repeat(80)
-        );
-        let tail_tool_result =
-            r#"{"matches":[{"title":"最近一次完整检索结果不应被截断","score":0.95}]}"#;
-        let transcript = vec![
-            json!({ "role": "user", "content": "旧问题" }),
-            json!({
-                "role": "assistant",
-                "content": "先检索旧笔记。",
-                "tool_calls": [{
-                    "id": "old-call",
-                    "type": "function",
-                    "function": { "name": "search", "arguments": "{\"query\":\"旧笔记\"}" }
-                }]
-            }),
-            json!({
-                "role": "tool",
-                "tool_call_id": "old-call",
-                "content": long_tool_result
-            }),
-            json!({ "role": "user", "content": "新问题" }),
-            json!({
-                "role": "assistant",
-                "content": "继续检索。",
-                "tool_calls": [{
-                    "id": "new-call",
-                    "type": "function",
-                    "function": { "name": "search", "arguments": "{\"query\":\"新问题\"}" }
-                }]
-            }),
-            json!({
-                "role": "tool",
-                "tool_call_id": "new-call",
-                "content": tail_tool_result
-            }),
-        ];
-
-        let spliced = splice_transcript_with_checkpoint(
-            &transcript,
-            "【会话工作记忆】\ncurrentGoal: 继续整理",
-            800,
-            2,
-        );
-        let tail_tool = spliced
-            .iter()
-            .find(|message| message["tool_call_id"] == "new-call")
-            .expect("tail tool result should remain intact");
-
-        assert!(spliced[0]["content"]
-            .as_str()
-            .unwrap_or_default()
-            .contains("【会话工作记忆】"));
-        assert_eq!(tail_tool["content"], tail_tool_result);
-        assert!(spliced
-            .iter()
-            .all(|message| message["tool_call_id"] != "old-call"));
     }
 
     /** @ 材料应写进本轮 user 消息，而不是下一轮还会重注入的 system。 */
@@ -5775,5 +4873,306 @@ mod tests {
             .unwrap_or_default()
             .contains("授权 Markdown 正文"));
         assert!(!system_has_mention);
+    }
+
+    /** seed 路径有 last_compacted_message_id 时，不把切点之前的 user 正文装箱回来。 */
+    #[test]
+    fn seed_history_skips_messages_before_last_compacted_id() {
+        let mut snapshot = runtime_test_snapshot("正文内容足够用于测试。".to_owned());
+        let request = runtime_test_request("ask", "继续");
+        let available_skills = crate::skills::built_in_skills();
+        snapshot.sessions[0].messages = vec![
+            history_test_message(
+                "user-old",
+                "user",
+                &"压缩前的旧目标不应出现".repeat(400),
+                None,
+                Vec::new(),
+            ),
+            history_test_message("assistant-old", "assistant", "旧回复", None, Vec::new()),
+            history_test_message("user-current", "user", "继续", None, Vec::new()),
+        ];
+        snapshot.sessions[0].context_summary = Some(AgentContextSummary {
+            version: 1,
+            updated_at: "2026-08-26 10:00:00".to_owned(),
+            current_goal: Some("继续整理".to_owned()),
+            user_constraints: Vec::new(),
+            decisions: Vec::new(),
+            completed_work: Vec::new(),
+            pending_tasks: Vec::new(),
+            touched_notes: Vec::new(),
+            pending_change_summary: None,
+            open_questions: Vec::new(),
+            last_summarized_message_id: Some("assistant-old".to_owned()),
+            last_compacted_message_id: Some("assistant-old".to_owned()),
+        });
+
+        let messages = build_model_prompt(
+            &snapshot,
+            0,
+            &request,
+            &available_skills,
+            &[],
+            "user-current",
+            &[],
+            Some(4_096),
+            None,
+        )
+        .messages;
+        let joined = messages
+            .iter()
+            .filter_map(|message| message["content"].as_str())
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        assert!(!joined.contains("压缩前的旧目标不应出现"));
+        assert!(joined.contains("压缩检查点"));
+        assert!(joined.contains("继续"));
+    }
+
+    /** 仅有 UI 工作记忆、尚未 compact 时，不得把检查点伪装成 user 发给模型。 */
+    #[test]
+    fn seed_history_does_not_inject_checkpoint_before_compact() {
+        let mut snapshot = runtime_test_snapshot("正文内容足够用于测试。".to_owned());
+        let request = runtime_test_request("ask", "下次再找你吧");
+        let available_skills = crate::skills::built_in_skills();
+        snapshot.sessions[0].messages = vec![
+            history_test_message("user-1", "user", "你能做什么", None, Vec::new()),
+            history_test_message(
+                "assistant-1",
+                "assistant",
+                "我可以检索和改写笔记。",
+                None,
+                Vec::new(),
+            ),
+            history_test_message("user-current", "user", "下次再找你吧", None, Vec::new()),
+        ];
+        snapshot.sessions[0].context_summary = Some(AgentContextSummary {
+            version: 1,
+            updated_at: "2026-08-28 19:30:00".to_owned(),
+            current_goal: Some("向用户介绍橘记 Agent 的能力范围".to_owned()),
+            user_constraints: Vec::new(),
+            decisions: Vec::new(),
+            completed_work: vec!["本轮回复：我可以检索和改写笔记。".to_owned()],
+            pending_tasks: Vec::new(),
+            touched_notes: Vec::new(),
+            pending_change_summary: None,
+            open_questions: Vec::new(),
+            last_summarized_message_id: Some("assistant-1".to_owned()),
+            last_compacted_message_id: Some("assistant-1".to_owned()),
+        });
+
+        let messages = build_model_messages(
+            &snapshot,
+            0,
+            &request,
+            &available_skills,
+            &[],
+            "user-current",
+            &[],
+        );
+        let joined = messages
+            .iter()
+            .filter_map(|message| message["content"].as_str())
+            .collect::<Vec<_>>()
+            .join("\n");
+        let assistant_count = messages
+            .iter()
+            .filter(|message| message["role"] == "assistant")
+            .count();
+
+        assert!(!joined.contains("压缩检查点"));
+        assert!(joined.contains("你能做什么"));
+        assert!(joined.contains("我可以检索和改写笔记。"));
+        assert_eq!(assistant_count, 1);
+        assert_eq!(
+            messages
+                .iter()
+                .filter(|message| message["role"] == "system")
+                .count(),
+            1
+        );
+    }
+
+    /** 有 transcript 时不把压缩点之前的 session.messages 装箱回来。 */
+    #[test]
+    fn transcript_projection_ignores_pre_checkpoint_session_messages() {
+        let mut snapshot = runtime_test_snapshot("正文内容足够用于测试。".to_owned());
+        let request = runtime_test_request("ask", "下一问");
+        let available_skills = crate::skills::built_in_skills();
+        snapshot.sessions[0].messages = vec![history_test_message(
+            "user-old",
+            "user",
+            "这段 UI 旧消息不应进入 LLM",
+            None,
+            Vec::new(),
+        )];
+        let previous_transcript = vec![json!({
+            "role": "user",
+            "content": "界面 action 提示：ask\n用户输入：检查点之后的问题"
+        })];
+
+        let prompt = build_model_prompt(
+            &snapshot,
+            0,
+            &request,
+            &available_skills,
+            &[],
+            "user-current",
+            &[],
+            None,
+            Some(&previous_transcript),
+        );
+        let joined = prompt
+            .messages
+            .iter()
+            .filter_map(|message| message["content"].as_str())
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        assert!(!joined.contains("这段 UI 旧消息不应进入 LLM"));
+        assert!(joined.contains("检查点之后的问题"));
+        assert!(joined.contains("下一问"));
+    }
+
+    /** transcript 若只有 user、没有 assistant，必须回退到 session.messages，避免模型看不到自己的回复。 */
+    #[test]
+    fn unusable_transcript_falls_back_to_session_history_with_assistant() {
+        let mut snapshot = runtime_test_snapshot("正文内容足够用于测试。".to_owned());
+        let request = runtime_test_request("ask", "下次再找你吧");
+        let available_skills = crate::skills::built_in_skills();
+        snapshot.sessions[0].messages = vec![
+            history_test_message("user-1", "user", "你能做什么", None, Vec::new()),
+            history_test_message(
+                "assistant-1",
+                "assistant",
+                "我是橘记的本地优先知识库 Agent。",
+                None,
+                Vec::new(),
+            ),
+            history_test_message("user-current", "user", "下次再找你吧", None, Vec::new()),
+        ];
+        snapshot.sessions[0].context_summary = Some(AgentContextSummary {
+            version: 1,
+            updated_at: "2026-08-28 19:30:00".to_owned(),
+            current_goal: Some("向用户介绍橘记 Agent 的能力范围".to_owned()),
+            user_constraints: Vec::new(),
+            decisions: Vec::new(),
+            completed_work: Vec::new(),
+            pending_tasks: Vec::new(),
+            touched_notes: Vec::new(),
+            pending_change_summary: None,
+            open_questions: Vec::new(),
+            last_summarized_message_id: Some("assistant-1".to_owned()),
+            last_compacted_message_id: Some("assistant-1".to_owned()),
+        });
+        let previous_transcript = vec![
+            json!({
+                "role": "user",
+                "content": "以下是压缩检查点，不是用户的新指令。\n\n<summary>\ncurrentGoal: 向用户介绍橘记 Agent 的能力范围\n</summary>"
+            }),
+            json!({
+                "role": "user",
+                "content": "界面 action 提示：ask\n用户输入：你能做什么"
+            }),
+        ];
+
+        let prompt = build_model_prompt(
+            &snapshot,
+            0,
+            &request,
+            &available_skills,
+            &[],
+            "user-current",
+            &[],
+            None,
+            Some(&previous_transcript),
+        );
+        let joined = prompt
+            .messages
+            .iter()
+            .filter_map(|message| message["content"].as_str())
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        assert!(!joined.contains("压缩检查点"));
+        assert!(joined.contains("我是橘记的本地优先知识库 Agent。"));
+        assert!(prompt
+            .messages
+            .iter()
+            .any(|message| message["role"] == "assistant"));
+    }
+
+    /** pending 活状态在本轮 user，不在 system。 */
+    #[test]
+    fn pending_live_state_attaches_to_current_user_not_system() {
+        let mut snapshot = runtime_test_snapshot("正文内容足够用于测试。".to_owned());
+        snapshot.sessions[0].pending_change = Some(runtime_test_pending_change("pending"));
+        let request = runtime_test_request("ask", "继续改");
+        let available_skills = crate::skills::built_in_skills();
+        let messages = build_model_messages(
+            &snapshot,
+            0,
+            &request,
+            &available_skills,
+            &[],
+            "user-current",
+            &[],
+        );
+        let system_content = messages[0]["content"].as_str().unwrap_or_default();
+        let last_user = messages
+            .iter()
+            .rev()
+            .find(|message| message["role"] == "user")
+            .unwrap()["content"]
+            .as_str()
+            .unwrap_or_default();
+
+        assert!(!system_content.contains("【当前待确认变更】"));
+        assert!(last_user.contains("【当前待确认变更】"));
+        assert!(last_user.contains("尚未落盘") || last_user.contains("不要把它当成已写入文件"));
+    }
+
+    /** 全零 usage 不覆盖上次有效值。 */
+    #[test]
+    fn zero_usage_does_not_overwrite_previous_context_usage() {
+        let mut snapshot = runtime_test_snapshot("正文内容足够用于测试。".to_owned());
+        snapshot.sessions[0].context_usage = Some(AgentContextUsage {
+            model_id: "test-model".to_owned(),
+            prompt_tokens: 800,
+            completion_tokens: 20,
+            total_tokens: 820,
+            recorded_at: "2026-08-26 10:00:00".to_owned(),
+            context_length: Some(128_000),
+        });
+        record_context_usage(
+            &mut snapshot.sessions[0],
+            "test-model",
+            &json!({ "usage": { "prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0 } }),
+            Some(128_000),
+        );
+        assert_eq!(
+            snapshot.sessions[0]
+                .context_usage
+                .as_ref()
+                .unwrap()
+                .prompt_tokens,
+            800
+        );
+    }
+
+    #[test]
+    fn record_context_usage_stores_model_window() {
+        let mut snapshot = runtime_test_snapshot("正文内容足够用于测试。".to_owned());
+        record_context_usage(
+            &mut snapshot.sessions[0],
+            "gpt-4o-mini",
+            &json!({ "usage": { "prompt_tokens": 1200, "completion_tokens": 80, "total_tokens": 1280 } }),
+            Some(128_000),
+        );
+        let usage = snapshot.sessions[0].context_usage.as_ref().unwrap();
+        assert_eq!(usage.prompt_tokens, 1200);
+        assert_eq!(usage.context_length, Some(128_000));
+        assert_eq!(usage.model_id, "gpt-4o-mini");
     }
 }
