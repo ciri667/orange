@@ -2913,6 +2913,8 @@ mod tests {
     use super::*;
     use crate::domain::{AgentTraceStep, FolderEntry, KnowledgeBase, Note};
     use crate::storage::hash_content;
+    use std::fs;
+    use tempfile::tempdir;
 
     /** 构造 Runtime 单元测试使用的最小工作台快照。 */
     fn runtime_test_snapshot(note_content: String) -> WorkspaceSnapshot {
@@ -3940,6 +3942,147 @@ mod tests {
         assert!(memory_content.contains("【跨会话记忆】"));
         assert!(memory_content.contains("标签规范"));
         assert!(memory_content.contains("标签统一使用小写连字符"));
+    }
+
+    /** 知识库根目录 AGENTS.md 必须强制注入唯一 system，不能指望模型自己去读。 */
+    #[test]
+    fn agents_md_is_injected_into_unique_system_prompt() {
+        let dir = tempdir().unwrap();
+        fs::write(dir.path().join("AGENTS.md"), "标签必须使用小写连字符。").unwrap();
+        let mut snapshot = runtime_test_snapshot("正文内容足够用于测试。".to_owned());
+        snapshot.knowledge_bases[0].path = dir.path().to_string_lossy().into_owned();
+        let request = runtime_test_request("ask", "总结当前偏好");
+        let messages = build_model_messages(
+            &snapshot,
+            0,
+            &request,
+            &crate::skills::built_in_skills(),
+            &[],
+            "user-current",
+            &[],
+        );
+
+        let system = messages[0]["content"].as_str().unwrap_or_default();
+        assert!(system.contains("<project_context>"));
+        assert!(system.contains("【项目级 Agent 指令】"));
+        assert!(system.contains("AGENTS.md"));
+        assert!(system.contains("标签必须使用小写连字符。"));
+        assert!(system.contains("主知识库"));
+        let project_index = system.find("【项目级 Agent 指令】").unwrap();
+        let memory_index = system.find("【范围】").unwrap();
+        assert!(project_index < memory_index);
+    }
+
+    /** 没有 AGENTS.md 时，旧的 ORANGE_AGENT.md 仍应作为兼容回退注入。 */
+    #[test]
+    fn orange_agent_md_is_injected_when_agents_md_is_absent() {
+        let dir = tempdir().unwrap();
+        fs::write(dir.path().join("ORANGE_AGENT.md"), "兼容旧说明书。").unwrap();
+        let mut snapshot = runtime_test_snapshot("正文内容足够用于测试。".to_owned());
+        snapshot.knowledge_bases[0].path = dir.path().to_string_lossy().into_owned();
+        let request = runtime_test_request("ask", "总结");
+        let messages = build_model_messages(
+            &snapshot,
+            0,
+            &request,
+            &crate::skills::built_in_skills(),
+            &[],
+            "user-current",
+            &[],
+        );
+
+        let system = messages[0]["content"].as_str().unwrap_or_default();
+        assert!(system.contains("ORANGE_AGENT.md"));
+        assert!(system.contains("兼容旧说明书。"));
+    }
+
+    /** 两份都在时只注入 AGENTS.md，避免项目规则重复占用 system。 */
+    #[test]
+    fn agents_md_wins_over_legacy_orange_agent_md() {
+        let dir = tempdir().unwrap();
+        fs::write(dir.path().join("AGENTS.md"), "标准说明书。").unwrap();
+        fs::write(dir.path().join("ORANGE_AGENT.md"), "旧说明书不应出现。").unwrap();
+        let mut snapshot = runtime_test_snapshot("正文内容足够用于测试。".to_owned());
+        snapshot.knowledge_bases[0].path = dir.path().to_string_lossy().into_owned();
+        let request = runtime_test_request("ask", "总结");
+        let messages = build_model_messages(
+            &snapshot,
+            0,
+            &request,
+            &crate::skills::built_in_skills(),
+            &[],
+            "user-current",
+            &[],
+        );
+
+        let system = messages[0]["content"].as_str().unwrap_or_default();
+        assert!(system.contains("标准说明书。"));
+        assert!(!system.contains("旧说明书不应出现。"));
+    }
+
+    /** 未授权知识库的说明书不得进入当前会话的 system。 */
+    #[test]
+    fn unauthorized_knowledge_base_instruction_is_not_injected() {
+        let authorized = tempdir().unwrap();
+        let unauthorized = tempdir().unwrap();
+        fs::write(authorized.path().join("AGENTS.md"), "授权库规则。").unwrap();
+        fs::write(unauthorized.path().join("AGENTS.md"), "未授权库规则。").unwrap();
+        let mut snapshot = runtime_test_snapshot("正文内容足够用于测试。".to_owned());
+        snapshot.knowledge_bases[0].path = authorized.path().to_string_lossy().into_owned();
+        snapshot.knowledge_bases[1].path = unauthorized.path().to_string_lossy().into_owned();
+        let request = runtime_test_request("ask", "总结");
+        let messages = build_model_messages(
+            &snapshot,
+            0,
+            &request,
+            &crate::skills::built_in_skills(),
+            &[],
+            "user-current",
+            &[],
+        );
+
+        let system = messages[0]["content"].as_str().unwrap_or_default();
+        assert!(system.contains("授权库规则。"));
+        assert!(!system.contains("未授权库规则。"));
+    }
+
+    /** 根目录说明书已在 system 中时，本轮 @ 不再重复贴全文。 */
+    #[test]
+    fn mentioned_project_instruction_is_not_duplicated_in_user_message() {
+        let dir = tempdir().unwrap();
+        fs::write(dir.path().join("AGENTS.md"), "不要重复注入。").unwrap();
+        let mut snapshot = runtime_test_snapshot("正文内容足够用于测试。".to_owned());
+        snapshot.knowledge_bases[0].path = dir.path().to_string_lossy().into_owned();
+        snapshot.notes.push(Note {
+            id: "note-agents".to_owned(),
+            knowledge_base_id: "kb-a".to_owned(),
+            title: "Agent 说明书".to_owned(),
+            path: "AGENTS.md".to_owned(),
+            content_hash: hash_content("不要重复注入。"),
+            content: "不要重复注入。".to_owned(),
+            tags: Vec::new(),
+            updated_at: "刚刚".to_owned(),
+            backlinks: Vec::new(),
+        });
+        let mut request = runtime_test_request("ask", "按说明书整理");
+        request.mentioned_file_ids = vec!["note-agents".to_owned()];
+        let messages = build_model_messages(
+            &snapshot,
+            0,
+            &request,
+            &crate::skills::built_in_skills(),
+            &[],
+            "user-current",
+            &[],
+        );
+
+        let system = messages[0]["content"].as_str().unwrap_or_default();
+        let user = messages
+            .last()
+            .and_then(|message| message["content"].as_str())
+            .unwrap_or_default();
+        assert!(system.contains("不要重复注入。"));
+        assert!(!user.contains("【本轮用户显式 @ 的文件】"));
     }
 
     /** 跨会话记忆注入模型前必须再次脱敏，防止旧数据绕过保存入口。 */

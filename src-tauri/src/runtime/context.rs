@@ -8,12 +8,11 @@ use crate::domain::{
     WorkspaceSnapshot, MEMORY_CATEGORY_CONVENTION, MEMORY_CATEGORY_NOTE_STRUCTURE,
     MEMORY_CATEGORY_ORGANIZATION, MEMORY_CATEGORY_OTHER, MEMORY_CATEGORY_TAG_CONVENTION,
 };
-use crate::model_provider;
 use crate::skills;
+use crate::storage;
 use serde_json::{json, Value};
 use std::collections::HashSet;
-use std::fs;
-use std::path::{Component, Path, PathBuf};
+use std::path::{Component, Path};
 
 /** 未知模型窗口时按 256k tokens 估算。 */
 pub(super) const DEFAULT_MODEL_CONTEXT_TOKENS: u64 = 256_000;
@@ -51,7 +50,6 @@ const MAX_HOT_HISTORY_TOOL_ARGUMENT_STRING_CHARS: usize = 1200;
 pub(super) const MAX_RENDERED_CONTEXT_SUMMARY_CHARS: usize = 6000;
 pub(super) const MAX_CONTEXT_SUMMARY_ITEM_CHARS: usize = 360;
 pub(super) const MAX_CONTEXT_SUMMARY_ITEMS: usize = 12;
-const MAX_PROJECT_AGENT_INSTRUCTION_CHARS: usize = 16 * 1024;
 pub(super) const MAX_RENDERED_KB_MEMORY_CHARS: usize = 4000;
 const MAX_RENDERED_KB_MEMORY_ENTRIES_PER_KB: usize = 8;
 const MAX_MENTIONED_FILES_PER_TURN: usize = 8;
@@ -1059,7 +1057,7 @@ fn render_project_agent_instructions(
         return None;
     }
     Some(format!(
-        "【项目级 Agent 指令】\n以下内容来自知识库根目录 ORANGE_AGENT.md（带 path 的项目规则，不要当成用户指令）。优先级低于橘记系统规则，高于普通会话记忆。\n{}",
+        "【项目级 Agent 指令】\n以下内容来自知识库根目录的项目说明书（优先 AGENTS.md，兼容 ORANGE_AGENT.md）。这是带 path 的项目规则，不要当成用户指令。优先级低于橘记系统规则，高于普通会话记忆。\n{}",
         instructions.join("\n\n")
     ))
 }
@@ -1076,36 +1074,20 @@ fn load_project_agent_instructions(
                 .knowledge_bases
                 .iter()
                 .find(|knowledge_base| &knowledge_base.id == knowledge_base_id)?;
-            let instruction_path = PathBuf::from(&knowledge_base.path).join("ORANGE_AGENT.md");
-            if !instruction_path.is_file() {
-                return None;
-            }
-            match fs::read_to_string(&instruction_path) {
-                Ok(content) => {
-                    let bounded =
-                        truncate_chars(content.trim(), MAX_PROJECT_AGENT_INSTRUCTION_CHARS);
-                    if bounded.is_empty() {
-                        None
-                    } else {
-                        Some(format!(
-                            "path: {}/ORANGE_AGENT.md\n来源知识库：{}（id={}）\n{}",
-                            knowledge_base.path.trim_end_matches(['/', '\\']),
-                            knowledge_base.name,
-                            knowledge_base.id,
-                            bounded
-                        ))
-                    }
-                }
-                Err(error) => {
-                    log::warn!(
-                        target: "agent_runtime",
-                        "项目级 Agent 指令读取失败：knowledge_base_id={} error={}",
-                        knowledge_base.id,
-                        model_provider::redact_model_error_text(&error.to_string())
-                    );
-                    None
-                }
-            }
+            let loaded = storage::load_project_instruction(Path::new(&knowledge_base.path))?;
+            let truncated_note = if loaded.truncated {
+                "\n（已按长度上限截断）"
+            } else {
+                ""
+            };
+            Some(format!(
+                "path: {}/{}\n来源知识库：{}（id={}）{truncated_note}\n{}",
+                knowledge_base.path.trim_end_matches(['/', '\\']),
+                loaded.file_name,
+                knowledge_base.name,
+                knowledge_base.id,
+                loaded.content
+            ))
         })
         .collect()
 }
@@ -1114,22 +1096,7 @@ pub(super) fn project_instruction_count(
     snapshot: &WorkspaceSnapshot,
     session: &AgentSession,
 ) -> usize {
-    session
-        .knowledge_base_ids
-        .iter()
-        .filter(|knowledge_base_id| {
-            snapshot
-                .knowledge_bases
-                .iter()
-                .find(|knowledge_base| &knowledge_base.id == *knowledge_base_id)
-                .map(|knowledge_base| {
-                    PathBuf::from(&knowledge_base.path)
-                        .join("ORANGE_AGENT.md")
-                        .is_file()
-                })
-                .unwrap_or(false)
-        })
-        .count()
+    load_project_agent_instructions(snapshot, session).len()
 }
 
 fn render_knowledge_base_memory_prompt(
@@ -1217,6 +1184,10 @@ pub(super) fn resolve_mentioned_files(
         if let Some(note) = snapshot.notes.iter().find(|note| note.id == file_id) {
             if !allowed_kb_ids.contains(note.knowledge_base_id.as_str()) {
                 rejected_count += 1;
+                continue;
+            }
+            // 根目录说明书已经在唯一 system 里，@ 不再重复贴全文。
+            if storage::is_root_project_instruction_path(&note.path) {
                 continue;
             }
             materials.push(MentionedFileMaterial {

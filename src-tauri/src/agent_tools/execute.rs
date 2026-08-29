@@ -15,6 +15,7 @@ use crate::text_edit::{
 };
 use serde_json::{json, Value};
 use std::collections::HashSet;
+use std::path::Path;
 use tauri::AppHandle;
 
 /** run_skill 只创建结构化执行请求；真正启动进程由独立审批命令和沙箱运行器负责。 */
@@ -471,6 +472,13 @@ pub(crate) fn execute_search_path(
         let Ok(text) = std::str::from_utf8(&bytes) else {
             continue;
         };
+        if is_authorized_root_project_instruction(
+            entry.path(),
+            &context.snapshot.knowledge_bases,
+            &session.knowledge_base_ids,
+        ) {
+            continue;
+        }
         if !text.to_ascii_lowercase().contains(&query_lower) {
             continue;
         }
@@ -512,6 +520,27 @@ pub(crate) fn execute_search_path(
             hits.len()
         )),
     }
+}
+
+/** 完全级别 path 检索也不要把已注入 system 的根目录说明书再当知识命中。 */
+fn is_authorized_root_project_instruction(
+    path: &Path,
+    knowledge_bases: &[crate::domain::KnowledgeBase],
+    allowed_ids: &[String],
+) -> bool {
+    knowledge_bases.iter().any(|knowledge_base| {
+        if !allowed_ids.contains(&knowledge_base.id) {
+            return false;
+        }
+        path.strip_prefix(Path::new(&knowledge_base.path))
+            .ok()
+            .map(|relative| {
+                crate::storage::is_root_project_instruction_path(
+                    &relative.to_string_lossy().replace('\\', "/"),
+                )
+            })
+            .unwrap_or(false)
+    })
 }
 
 /** 执行 search_notes，并把引用同步给前端消息展示。 */
