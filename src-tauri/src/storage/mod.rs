@@ -119,6 +119,7 @@ mod history;
 mod ids;
 mod logs;
 mod memory;
+mod project_instructions;
 mod sessions;
 mod workspace;
 
@@ -129,6 +130,7 @@ pub use history::*;
 pub use ids::*;
 pub use logs::*;
 pub use memory::*;
+pub use project_instructions::*;
 pub use sessions::*;
 pub use workspace::*;
 
@@ -152,7 +154,7 @@ mod tests {
         prune_document_history_entries, query_app_event_logs, read_document_history_snapshot,
         redact_memory_secrets, rename_markdown_file, rename_text_document_file,
         resolve_existing_file_inside_root, resolve_inside_root, save_note_image_attachments,
-        scan_markdown_directory, scan_supported_documents_directory,
+        scan_markdown_directory, scan_supported_documents_directory, search_snapshot_notes,
         sort_sessions_by_updated_at_desc, store_model_api_key_in_cache, trash_markdown_file,
         trash_text_document_file_with, validate_folder_name, validate_markdown_file_name,
         validate_new_markdown_file_name, validate_new_text_document_file_name,
@@ -170,6 +172,7 @@ mod tests {
     use base64::Engine as _;
     use rusqlite::Connection;
     use serde_json::json;
+    use std::collections::HashSet;
     use std::fs;
     use std::io::Write;
     use std::path::Path;
@@ -1484,6 +1487,31 @@ mod tests {
         assert!(notes.is_empty());
         assert_eq!(folders.len(), 1);
         assert_eq!(folders[0].path, "Empty");
+    }
+
+    /** 根目录 AGENTS.md 已注入 system，快照检索不得再把它当知识命中。 */
+    #[test]
+    fn search_snapshot_notes_excludes_root_project_instruction() {
+        let mut snapshot = test_workspace_snapshot();
+        snapshot.notes[0].content = "标签必须使用小写连字符。".to_owned();
+        snapshot.notes.push(Note {
+            id: "note-agents".to_owned(),
+            knowledge_base_id: "kb-a".to_owned(),
+            title: "Agent 说明书".to_owned(),
+            path: "AGENTS.md".to_owned(),
+            content: "标签必须使用小写连字符。这是项目说明书。".to_owned(),
+            tags: Vec::new(),
+            updated_at: "2026/01/01 00:00".to_owned(),
+            backlinks: Vec::new(),
+            content_hash: String::new(),
+        });
+        let selected_ids: HashSet<&str> = ["kb-a"].into_iter().collect();
+        let citations = search_snapshot_notes(&snapshot, &selected_ids, "标签");
+
+        assert!(citations.iter().any(|citation| citation.path == "note.md"));
+        assert!(citations
+            .iter()
+            .all(|citation| citation.path != "AGENTS.md"));
     }
 
     /** DOCX 预览应从最小 fixture 中抽取标题和段落，损坏 zip 应返回可展示错误。 */

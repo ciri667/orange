@@ -433,6 +433,9 @@ pub(crate) fn search_note_fts(
         if !selected_ids.contains(knowledge_base_id.as_str()) {
             continue;
         }
+        if crate::storage::is_root_project_instruction_path(&path) {
+            continue;
+        }
 
         if let Some(knowledge_base) = snapshot
             .knowledge_bases
@@ -486,6 +489,7 @@ pub(crate) fn search_snapshot_notes(
         .notes
         .iter()
         .filter(|note| selected_ids.contains(note.knowledge_base_id.as_str()))
+        .filter(|note| !crate::storage::is_root_project_instruction_path(&note.path))
         .filter_map(|note| {
             let searchable_text = format!(
                 "{} {} {} {}",
