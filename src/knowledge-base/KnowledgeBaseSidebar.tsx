@@ -47,6 +47,7 @@ export function KnowledgeBaseSidebar({
   onCreateMarkdown,
   onCreateText,
   onCreateFolder,
+  onCreateProjectInstruction,
   onRefreshKnowledgeBase,
 }: {
   knowledgeBases: KnowledgeBase[];
@@ -74,6 +75,7 @@ export function KnowledgeBaseSidebar({
   onCreateMarkdown: (parentPath: string) => void;
   onCreateText: (parentPath: string) => void;
   onCreateFolder: (parentPath: string) => void;
+  onCreateProjectInstruction: () => void;
   onRefreshKnowledgeBase: (knowledgeBaseId: string) => void;
 }) {
   const assetCount = getKnowledgeBaseAssetCount(knowledgeBases);
@@ -172,6 +174,7 @@ export function KnowledgeBaseSidebar({
           onCreateMarkdown={onCreateMarkdown}
           onCreateText={onCreateText}
           onCreateFolder={onCreateFolder}
+          onCreateProjectInstruction={onCreateProjectInstruction}
         />
       </div>
     </aside>

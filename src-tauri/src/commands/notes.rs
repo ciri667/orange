@@ -84,7 +84,89 @@ pub async fn create_note(
     Ok(snapshot)
 }
 
-/** 用户主动新建空白 txt 文档，直接落盘并打开为当前普通文档。 */
+/** 在知识库根目录创建带模板的 AGENTS.md；已存在则拒绝覆盖。 */
+#[tauri::command]
+pub async fn create_project_instruction(
+    app: AppHandle,
+    payload: CreateProjectInstructionPayload,
+) -> Result<WorkspaceSnapshot, String> {
+    let started_at = Instant::now();
+    let mut snapshot = payload.snapshot;
+    let knowledge_base_index = snapshot
+        .knowledge_bases
+        .iter()
+        .position(|knowledge_base| knowledge_base.id == payload.knowledge_base_id)
+        .ok_or_else(|| "找不到要创建说明书的知识库".to_owned())?;
+    let knowledge_base = snapshot.knowledge_bases[knowledge_base_index].clone();
+
+    if knowledge_base.status == "error" {
+        return Err("当前知识库目录不可访问，无法创建项目说明书。".to_owned());
+    }
+
+    let root_path = PathBuf::from(&knowledge_base.path);
+    let relative_path = run_blocking("创建项目说明书", move || {
+        storage::create_project_instruction_file(&root_path)
+    })
+    .await?;
+    let created_relative_path = relative_path.clone();
+    let content = storage::project_instruction_template().to_owned();
+    let note_id = storage::create_stable_note_id(&knowledge_base.id, &relative_path);
+    let created_note_path = PathBuf::from(&knowledge_base.path).join(&relative_path);
+    let updated_at = read_file_updated_at_or_now(
+        &app,
+        "create_project_instruction",
+        &knowledge_base.id,
+        "note",
+        &note_id,
+        &relative_path,
+        &created_note_path,
+    );
+    let title = storage::extract_markdown_title(&created_note_path, &content);
+    let new_note = crate::domain::Note {
+        id: note_id.clone(),
+        knowledge_base_id: knowledge_base.id.clone(),
+        title,
+        path: relative_path,
+        content,
+        tags: Vec::new(),
+        updated_at,
+        backlinks: Vec::new(),
+        content_hash: storage::hash_content(storage::project_instruction_template()),
+    };
+
+    snapshot.notes.insert(0, new_note);
+    snapshot.knowledge_bases[knowledge_base_index].note_count += 1;
+    snapshot.knowledge_bases[knowledge_base_index].updated_at = "刚刚".to_owned();
+    if let Some(scan_report) = &mut snapshot.knowledge_bases[knowledge_base_index].scan_report {
+        scan_report.scanned_file_count += 1;
+        *scan_report
+            .scanned_by_type
+            .entry("markdown".to_owned())
+            .or_insert(0) += 1;
+    }
+    snapshot.active_knowledge_base_id = knowledge_base.id.clone();
+    snapshot.active_note_id = note_id;
+    snapshot.active_document_id.clear();
+    normalize_active_entities(&mut snapshot, Some(&knowledge_base.id));
+    index_snapshot_in_background(app.clone(), &snapshot).await?;
+
+    logging::write_app_event_best_effort(
+        &app,
+        AppEventBuilder::new(
+            AppLogLevel::Info,
+            AppLogCategory::Editor,
+            "create_project_instruction",
+            "completed",
+            "已创建知识库 Agent 说明书。",
+        )
+        .duration(started_at.elapsed())
+        .knowledge_base_id(knowledge_base.id)
+        .entity("note", snapshot.active_note_id.clone())
+        .relative_path(created_relative_path),
+    );
+
+    Ok(snapshot)
+}
 
 #[tauri::command]
 pub async fn rename_note(

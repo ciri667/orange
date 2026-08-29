@@ -1,6 +1,7 @@
 import { traceFromToolCalls } from "../../agent/agentTrace";
 import { createContentHash, createLocalId, formatLocalDateTime } from "../id";
 import { buildMarkdownDiff } from "../../diff/markdownDiff";
+import { isRootProjectInstructionPath } from "../projectInstructions";
 import type {
   AgentActionType,
   AgentMessage,
@@ -25,15 +26,15 @@ const initialKnowledgeBases: KnowledgeBase[] = [
     path: "/Users/me/Documents/Knowledge",
     description: "默认知识库，沉淀产品想法、会议纪要和个人研究。",
     status: "ready",
-    noteCount: 4,
+    noteCount: 5,
     documentCount: 4,
     updatedAt: "今天 14:18",
     isDefault: true,
     semanticIndexEnabled: false,
     scanReport: {
-      scannedFileCount: 7,
+      scannedFileCount: 8,
       scannedByType: {
-        markdown: 4,
+        markdown: 5,
         txt: 1,
         docx: 1,
         pdf: 1,
@@ -123,6 +124,32 @@ const initialKnowledgeBases: KnowledgeBase[] = [
 
 /** 浏览器开发态内置笔记，覆盖问答、检索、隐私和写入确认场景。 */
 const initialNotes: Note[] = [
+  {
+    id: "note-agents",
+    knowledgeBaseId: "kb-personal",
+    title: "Agent 说明书",
+    path: "AGENTS.md",
+    updatedAt: "今天 14:18",
+    tags: ["Agent"],
+    backlinks: [],
+    content: `# Agent 说明书
+
+这份文件是给橘记 Agent 的项目规则，不是普通笔记。
+
+## 这个知识库是什么
+
+- 个人知识库，沉淀产品想法、会议纪要和个人研究。
+
+## 笔记结构
+
+- Inbox 放未整理材料，Research 放可复用笔记，Meetings 放纪要。
+
+## Agent 不要做什么
+
+- 不要删除或大幅打乱现有结构，除非我明确要求。
+`,
+    contentHash: "",
+  },
   {
     id: "note-product-brief",
     knowledgeBaseId: "kb-personal",
@@ -481,7 +508,7 @@ function searchNotes(snapshot: WorkspaceSnapshot, session: AgentSession, prompt:
     .filter(Boolean);
 
   return snapshot.notes
-    .filter((note) => selectedKnowledgeBaseIds.has(note.knowledgeBaseId))
+    .filter((note) => selectedKnowledgeBaseIds.has(note.knowledgeBaseId) && !isRootProjectInstructionPath(note.path))
     .map((note) => {
       const knowledgeBase = snapshot.knowledgeBases.find((item) => item.id === note.knowledgeBaseId);
       const searchableText = `${note.title} ${note.path} ${note.tags.join(" ")} ${note.content}`.toLowerCase();

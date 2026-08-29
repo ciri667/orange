@@ -301,6 +301,7 @@ export function WorkspaceShell() {
     handleSubmitRename,
     handleDeleteNote,
     handleDeleteDocument,
+    handleCreateOrOpenProjectInstruction,
   } = useEditorActions({
     snapshot,
     userSettings,
@@ -616,6 +617,7 @@ export function WorkspaceShell() {
           onCreateMarkdown={(parentPath) => openCreateDialog("markdown", parentPath)}
           onCreateText={(parentPath) => openCreateDialog("text", parentPath)}
           onCreateFolder={(parentPath) => openCreateDialog("folder", parentPath)}
+          onCreateProjectInstruction={() => handleCreateOrOpenProjectInstruction()}
           onRefreshKnowledgeBase={handleRescanKnowledgeBase}
         />
         <div
@@ -720,6 +722,7 @@ export function WorkspaceShell() {
             onTurnModelSelectionChange={setTurnModelSelection}
             onSetSessionModelSelection={handleSetSessionModelSelection}
             onCompactAgentContext={handleCompactAgentContext}
+            onOpenProjectInstruction={handleSelectNote}
             onApproveExecution={handleApproveSkillExecution}
             onRejectExecution={handleRejectSkillExecution}
             onApplyChangeSet={handleApplySkillChangeSet}
@@ -732,6 +735,7 @@ export function WorkspaceShell() {
       {isSettingsOpen && (
         <SettingsDrawer
           knowledgeBases={currentSnapshot.knowledgeBases}
+          notes={currentSnapshot.notes}
           activeKnowledgeBaseId={activeKnowledgeBase.id}
           settings={userSettings}
           imSettings={imSettings}
@@ -748,6 +752,10 @@ export function WorkspaceShell() {
           onAddKnowledgeBase={handleAddKnowledgeBase}
           onRescanKnowledgeBase={handleRescanKnowledgeBase}
           onRemoveKnowledgeBase={handleRemoveKnowledgeBase}
+          onCreateOrOpenProjectInstruction={(knowledgeBaseId) => {
+            setIsSettingsOpen(false);
+            void handleCreateOrOpenProjectInstruction(knowledgeBaseId);
+          }}
           onSaveSettings={handleSaveSettings}
           onSaveImSettings={handleSaveImSettings}
           onSaveKnowledgeBaseMemory={handleSaveKnowledgeBaseMemory}

@@ -30,6 +30,7 @@ import {
   getProviderModelSelectionLabel,
 } from "../shared/modelSelection";
 import { ModelCascadeSelector } from "../shared/ModelCascadeSelector";
+import { listSessionProjectInstructions } from "../shared/projectInstructions";
 import { loadAgentPromptDump } from "../shared/api/agent";
 import { openAppLogFolder } from "../shared/api/logs";
 import {
@@ -284,6 +285,7 @@ export function AgentSessionContextPopover({
   onToggleSessionContext,
   onSetSessionModelSelection,
   onCompactAgentContext,
+  onOpenProjectInstruction,
 }: {
   activeSession: AgentSession;
   knowledgeBases: KnowledgeBase[];
@@ -295,6 +297,7 @@ export function AgentSessionContextPopover({
   onToggleSessionContext: () => void;
   onSetSessionModelSelection: (selection: string) => void;
   onCompactAgentContext: () => void;
+  onOpenProjectInstruction: (noteId: string) => void;
 }) {
   /** 已启用的 Provider 列表；未启用的 provider 不出现在选择器中。 */
   const enabledProviders = modelConfig.providers.filter((provider) => provider.enabled);
@@ -315,6 +318,10 @@ export function AgentSessionContextPopover({
     ? `${getContextSummaryFieldCount(activeSession)} 项 · ${activeSession.contextSummary.updatedAt || "刚刚"}`
     : "未整理";
   const contextMeter = resolveContextMeter(activeSession, modelConfig);
+  const projectInstructions = listSessionProjectInstructions(notes, knowledgeBases, activeSession.knowledgeBaseIds);
+  const projectInstructionLabel = projectInstructions.length
+    ? projectInstructions.map((item) => `${item.knowledgeBase.name}/${item.note.path}`).join(" · ")
+    : "未配置";
   const [promptDump, setPromptDump] = useState<AgentPromptDump | null>(null);
   const [promptDumpError, setPromptDumpError] = useState<string | null>(null);
 
@@ -407,6 +414,20 @@ export function AgentSessionContextPopover({
           <div className="rounded-control border border-border-translucent bg-surface-translucent p-[9px]">
             <span className="text-xs text-ink-muted">工作记忆</span>
             <strong className="mt-1 block text-[13px] text-ink-strong">{memoryStatus}</strong>
+          </div>
+          <div className="rounded-control border border-border-translucent bg-surface-translucent p-[9px]">
+            <span className="text-xs text-ink-muted">项目说明书</span>
+            {projectInstructions.length ? (
+              <button
+                className="mt-1 block min-w-0 border-0 bg-transparent p-0 text-left text-[13px] font-bold text-ink-strong"
+                type="button"
+                onClick={() => onOpenProjectInstruction(projectInstructions[0].note.id)}
+              >
+                <OverflowTooltipText as="span" className="block min-w-0" text={projectInstructionLabel} logArea="agent_context_project_instruction" />
+              </button>
+            ) : (
+              <strong className="mt-1 block text-[13px] text-ink-strong">{projectInstructionLabel}</strong>
+            )}
           </div>
         </div>
         {modelConfig.enabled && (

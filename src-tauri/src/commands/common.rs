@@ -3,11 +3,11 @@
 pub(super) use crate::domain::{
     AgentSession, AgentSkill, AgentTurnPayload, AgentTurnResult, AppEventLog, ChangePayload,
     ClearDocumentHistoryPayload, CompactAgentContextPayload, CreateDocumentPayload,
-    CreateFolderPayload, CreateNotePayload, DeleteAgentSkillPayload, DeleteDocumentPayload,
-    DeleteKnowledgeBaseMemoryPayload, DeleteNotePayload, DeleteSessionPayload,
-    DocumentHistoryEntry, DocumentHistoryEntryDetail, DocumentPreview, FeishuCredentialStatus,
-    FeishuGatewayStatus, FolderEntry, ImGatewayStatus, ImIntegrationSettings,
-    ImProviderCredentialStatus, ImProviderPayload, InstallAgentSkillPayload,
+    CreateFolderPayload, CreateNotePayload, CreateProjectInstructionPayload,
+    DeleteAgentSkillPayload, DeleteDocumentPayload, DeleteKnowledgeBaseMemoryPayload,
+    DeleteNotePayload, DeleteSessionPayload, DocumentHistoryEntry, DocumentHistoryEntryDetail,
+    DocumentPreview, FeishuCredentialStatus, FeishuGatewayStatus, FolderEntry, ImGatewayStatus,
+    ImIntegrationSettings, ImProviderCredentialStatus, ImProviderPayload, InstallAgentSkillPayload,
     InstallAgentSkillResult, KnowledgeBaseMemory, KnowledgeBaseSelection,
     LlmProviderModelRefreshResult, LoadAgentPromptDumpPayload, LoadAppEventLogsPayload,
     LoadDocumentHistoryEntryPayload, LoadDocumentHistoryPayload, LoadDocumentPreviewPayload,
@@ -18,8 +18,8 @@ pub(super) use crate::domain::{
     SaveImProviderSecretPayload, SaveImSettingsPayload, SaveKnowledgeBaseMemoryPayload,
     SaveModelApiKeyPayload, SaveNoteContentPayload, SaveNoteImageAttachmentsPayload,
     SaveSessionPayload, SaveUserSettingsPayload, ScanKnowledgeBasePayload, ScanReport,
-    ToggleAgentSkillPayload, UpdateSessionScopePayload, UserSettings, WorkspaceBootstrapState,
-    WorkspaceEditorState, WorkspaceSnapshot, IM_PROVIDER_FEISHU,
+    ToggleAgentSkillPayload, UpdateSessionScopePayload, UserSettings,
+    WorkspaceBootstrapState, WorkspaceEditorState, WorkspaceSnapshot, IM_PROVIDER_FEISHU,
 };
 pub(super) use crate::logging::{self, AppEventBuilder, AppLogCategory, AppLogLevel};
 pub(super) use crate::model_provider::{self, ProviderTemplate};

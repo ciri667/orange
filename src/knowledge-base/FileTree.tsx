@@ -19,6 +19,7 @@ import { cn } from "../shared/cn";
 import { logDebug } from "../shared/logger";
 import { Menu, MenuItem, MenuPanel, type MenuPanelPlacement } from "../shared/Menu";
 import { OverflowTooltipText } from "../shared/OverflowTooltipText";
+import { isRootProjectInstructionPath } from "../shared/projectInstructions";
 import type { FileTreeNode } from "../shared/types";
 
 /** 文件树行的共用外观；active 只用于当前打开的文件。 */
@@ -51,6 +52,7 @@ export function FileTree({
   onCreateMarkdown,
   onCreateText,
   onCreateFolder,
+  onCreateProjectInstruction,
 }: {
   nodes: FileTreeNode[];
   activeNoteId: string;
@@ -70,6 +72,7 @@ export function FileTree({
   onCreateMarkdown: (parentPath: string) => void;
   onCreateText: (parentPath: string) => void;
   onCreateFolder: (parentPath: string) => void;
+  onCreateProjectInstruction?: () => void;
 }) {
   // 同一时刻只允许一个文件夹行的新建菜单或文件行的操作菜单展开，路径为空表示全部收起。
   const [openCreateMenuPath, setOpenCreateMenuPath] = useState<string | null>(null);
@@ -102,6 +105,7 @@ export function FileTree({
         onCreateMarkdown={onCreateMarkdown}
         onCreateText={onCreateText}
         onCreateFolder={onCreateFolder}
+        onCreateProjectInstruction={onCreateProjectInstruction}
       />
     );
   }
@@ -142,6 +146,7 @@ export function FileTree({
                     onCreateMarkdown={onCreateMarkdown}
                     onCreateText={onCreateText}
                     onCreateFolder={onCreateFolder}
+                    onCreateProjectInstruction={node.isRoot ? onCreateProjectInstruction : undefined}
                   />
                 </div>
               </div>
@@ -166,6 +171,7 @@ export function FileTree({
                     onCreateMarkdown={onCreateMarkdown}
                     onCreateText={onCreateText}
                     onCreateFolder={onCreateFolder}
+                    onCreateProjectInstruction={onCreateProjectInstruction}
                   />
                 ) : node.isRoot ? (
                   <EmptyFolderCreateHint
@@ -174,6 +180,7 @@ export function FileTree({
                     onCreateMarkdown={onCreateMarkdown}
                     onCreateText={onCreateText}
                     onCreateFolder={onCreateFolder}
+                    onCreateProjectInstruction={onCreateProjectInstruction}
                   />
                 ) : null)}
             </li>
@@ -248,12 +255,14 @@ function EmptyFolderCreateHint({
   onCreateMarkdown,
   onCreateText,
   onCreateFolder,
+  onCreateProjectInstruction,
 }: {
   isFiltered: boolean;
   folderPath: string;
   onCreateMarkdown: (parentPath: string) => void;
   onCreateText: (parentPath: string) => void;
   onCreateFolder: (parentPath: string) => void;
+  onCreateProjectInstruction?: () => void;
 }) {
   return (
     <div className="mx-1 my-2 rounded-lg border border-dashed border-border bg-surface-translucent p-3">
@@ -273,6 +282,12 @@ function EmptyFolderCreateHint({
           <FolderPlus size={14} />
           新建目录
         </Button>
+        {onCreateProjectInstruction && (
+          <Button variant="ghost" size="compact" onClick={onCreateProjectInstruction}>
+            <FilePenLine size={14} />
+            Agent 说明书
+          </Button>
+        )}
       </div>
     </div>
   );
@@ -289,6 +304,7 @@ function CreateMenu({
   onCreateMarkdown,
   onCreateText,
   onCreateFolder,
+  onCreateProjectInstruction,
 }: {
   isOpen: boolean;
   placement: MenuPanelPlacement;
@@ -299,6 +315,7 @@ function CreateMenu({
   onCreateMarkdown: (parentPath: string) => void;
   onCreateText: (parentPath: string) => void;
   onCreateFolder: (parentPath: string) => void;
+  onCreateProjectInstruction?: () => void;
 }) {
   return (
     <Menu open={isOpen} onClose={onClose}>
@@ -341,6 +358,17 @@ function CreateMenu({
             <FolderPlus size={14} />
             新建目录
           </MenuItem>
+          {onCreateProjectInstruction && (
+            <MenuItem
+              onClick={() => {
+                onClose();
+                onCreateProjectInstruction();
+              }}
+            >
+              <FilePenLine size={14} />
+              Agent 说明书
+            </MenuItem>
+          )}
         </MenuPanel>
       )}
     </Menu>
@@ -488,6 +516,10 @@ function FileTreeIcon({ node }: { node: FileTreeNode }) {
 
 /** 将文件类型转为短标签，作为侧栏扫描时的弱信息。 */
 function formatFileTreeTypeLabel(node: FileTreeNode) {
+  if (node.fileType === "markdown" && isRootProjectInstructionPath(node.path)) {
+    return "Agent";
+  }
+
   if (node.fileType === "txt") {
     return "TXT";
   }

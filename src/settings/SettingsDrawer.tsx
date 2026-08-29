@@ -39,6 +39,7 @@ import type {
   ImIntegrationSettings,
   KnowledgeBase,
   KnowledgeBaseMemory,
+  Note,
   LlmProviderConfig,
   ModelApiKeyStatus,
   ProviderTemplate,
@@ -125,6 +126,7 @@ function updateFeishuProvider(
 /** 设置抽屉，展示多知识库、模型策略、Skills 和诊断信息。 */
 export function SettingsDrawer({
   knowledgeBases,
+  notes,
   activeKnowledgeBaseId,
   settings,
   imSettings,
@@ -141,6 +143,7 @@ export function SettingsDrawer({
   onAddKnowledgeBase,
   onRescanKnowledgeBase,
   onRemoveKnowledgeBase,
+  onCreateOrOpenProjectInstruction,
   onSaveSettings,
   onSaveImSettings,
   onSaveKnowledgeBaseMemory,
@@ -163,6 +166,7 @@ export function SettingsDrawer({
   onClose,
 }: {
   knowledgeBases: KnowledgeBase[];
+  notes: Note[];
   activeKnowledgeBaseId: string;
   settings: UserSettings;
   imSettings: ImIntegrationSettings;
@@ -179,6 +183,7 @@ export function SettingsDrawer({
   onAddKnowledgeBase: () => void;
   onRescanKnowledgeBase: (knowledgeBaseId: string) => void;
   onRemoveKnowledgeBase: (knowledgeBaseId: string) => void;
+  onCreateOrOpenProjectInstruction: (knowledgeBaseId: string) => void;
   onSaveSettings: (settings: UserSettings) => Promise<void> | void;
   onSaveImSettings: (settings: ImIntegrationSettings) => Promise<void> | void;
   onSaveKnowledgeBaseMemory: (memory: KnowledgeBaseMemory) => Promise<KnowledgeBaseMemory> | KnowledgeBaseMemory;
@@ -1025,12 +1030,14 @@ export function SettingsDrawer({
       return (
         <KnowledgeSettingsSection
           knowledgeBases={knowledgeBases}
+          notes={notes}
           activeKnowledgeBaseId={activeKnowledgeBaseId}
           isBusy={isBusy}
           onSelectKnowledgeBase={onSelectKnowledgeBase}
           onAddKnowledgeBase={onAddKnowledgeBase}
           onRescanKnowledgeBase={onRescanKnowledgeBase}
           onRemoveKnowledgeBase={onRemoveKnowledgeBase}
+          onCreateOrOpenProjectInstruction={onCreateOrOpenProjectInstruction}
         />
       );
     }

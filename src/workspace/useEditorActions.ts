@@ -2,10 +2,12 @@ import type { ConfirmDialogConfig } from "../shared/ConfirmDialog";
 import { createContentHash } from "../shared/id";
 import { logError, logInfo, logWarn } from "../shared/logger";
 import { getActiveDocument, getActiveKnowledgeBase, getActiveNote } from "../shared/selectors";
+import { findProjectInstructionNote } from "../shared/projectInstructions";
 import {
   createDocument,
   createFolder,
   createNote,
+  createProjectInstruction,
   deleteDocument,
   deleteNote,
   exportCurrentFile,
@@ -119,6 +121,7 @@ export function useEditorActions(options: EditorActionsOptions) {
       handleSubmitRenameDocument: noopAsync,
       handleDeleteNote: noopAsync,
       handleDeleteDocument: noopAsync,
+      handleCreateOrOpenProjectInstruction: noopAsync,
     };
   }
 
@@ -352,6 +355,49 @@ export function useEditorActions(options: EditorActionsOptions) {
     }
 
     commitSnapshot(nextSnapshot, nextDirtyNoteIds, nextDirtyDocumentIds);
+  }
+
+  /** 打开或创建当前知识库根目录的 AGENTS.md，不走普通新建文件名弹窗。 */
+  async function handleCreateOrOpenProjectInstruction(knowledgeBaseId = activeKnowledgeBase.id) {
+    const targetKnowledgeBase = currentSnapshot.knowledgeBases.find((item) => item.id === knowledgeBaseId);
+
+    if (!targetKnowledgeBase || targetKnowledgeBase.status === "error") {
+      setNotice("当前知识库目录不可访问，无法打开项目说明书。");
+      return;
+    }
+
+    const existing = findProjectInstructionNote(currentSnapshot.notes, knowledgeBaseId);
+
+    if (existing) {
+      activateEditorTab({ kind: "note", id: existing.id }, "tree");
+      setNotice(`已打开「${existing.title}」。`);
+      return;
+    }
+
+    if (isBusy) {
+      return;
+    }
+
+    beginBusy("正在创建 Agent 说明书...");
+    try {
+      const nextSnapshot = await createProjectInstruction(currentSnapshot, knowledgeBaseId);
+      const nextNote =
+        getActiveNote(nextSnapshot) ?? findProjectInstructionNote(nextSnapshot.notes, knowledgeBaseId);
+      commitSnapshot(nextSnapshot);
+      if (nextNote) {
+        setOpenFileTabs((currentTabs) => [
+          ...currentTabs.filter((tab) => tab.kind !== "note" || tab.id !== nextNote.id),
+          { kind: "note", id: nextNote.id },
+        ]);
+      }
+      setSearchTerm("");
+      setMarkdownViewMode("edit");
+      setNotice("已创建 AGENTS.md。");
+    } catch (error) {
+      setNotice(formatErrorMessage(error));
+    } finally {
+      endBusy();
+    }
   }
 
   /** 打开目录树新建弹窗；创建位置完全由被点击的目录节点决定。 */
@@ -941,5 +987,6 @@ export function useEditorActions(options: EditorActionsOptions) {
     handleSubmitRenameDocument,
     handleDeleteNote,
     handleDeleteDocument,
+    handleCreateOrOpenProjectInstruction,
   };
 }

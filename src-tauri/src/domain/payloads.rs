@@ -63,6 +63,14 @@ pub struct CreateNotePayload {
     pub file_name: Option<String>,
 }
 
+/** 在知识库根目录创建 AGENTS.md 项目说明书的命令入参。 */
+#[derive(Clone, Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CreateProjectInstructionPayload {
+    pub snapshot: WorkspaceSnapshot,
+    pub knowledge_base_id: String,
+}
+
 /** 用户从目录树指定目录新建 txt 文档的命令入参。 */
 #[derive(Clone, Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]

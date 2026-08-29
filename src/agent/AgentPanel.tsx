@@ -64,6 +64,7 @@ export function AgentPanel({
   onTurnModelSelectionChange,
   onSetSessionModelSelection,
   onCompactAgentContext,
+  onOpenProjectInstruction,
   onApproveExecution,
   onRejectExecution,
   onApplyChangeSet,
@@ -117,6 +118,7 @@ export function AgentPanel({
   onTurnModelSelectionChange: (selection: string) => void;
   onSetSessionModelSelection: (selection: string) => void;
   onCompactAgentContext: () => void;
+  onOpenProjectInstruction: (noteId: string) => void;
   onApproveExecution: () => void;
   onRejectExecution: () => void;
   onApplyChangeSet: () => void;
@@ -201,6 +203,7 @@ export function AgentPanel({
           onToggleSessionContext={onToggleSessionContext}
           onSetSessionModelSelection={onSetSessionModelSelection}
           onCompactAgentContext={onCompactAgentContext}
+          onOpenProjectInstruction={onOpenProjectInstruction}
         />
       )}
 

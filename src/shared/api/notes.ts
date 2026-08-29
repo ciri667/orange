@@ -17,7 +17,11 @@ import {
   validateNewMarkdownFileNameForMock,
 } from "../mock/browser";
 import {
-  KnowledgeBase,
+  findProjectInstructionNote,
+  PROJECT_INSTRUCTION_FILE_NAME,
+  PROJECT_INSTRUCTION_TEMPLATE,
+} from "../projectInstructions";
+import {
   Note,
   NoteImageAttachmentInput,
   SavedNoteImageAttachment,
@@ -95,6 +99,77 @@ export async function createNote(
 
   return invokeLogged<WorkspaceSnapshot>("create_note", {
     payload: { snapshot, knowledgeBaseId, parentPath, fileName },
+  });
+}
+
+/** 在知识库根目录创建带模板的 AGENTS.md；已存在时由调用方改为打开已有文件。 */
+export async function createProjectInstruction(
+  snapshot: WorkspaceSnapshot,
+  knowledgeBaseId: string,
+): Promise<WorkspaceSnapshot> {
+  if (findProjectInstructionNote(snapshot.notes, knowledgeBaseId)) {
+    throw new Error("项目说明书已存在，已阻止覆盖。");
+  }
+
+  if (!isTauriRuntime()) {
+    const nextSnapshot = cloneWorkspaceSnapshot(snapshot);
+    const knowledgeBase = nextSnapshot.knowledgeBases.find((item) => item.id === knowledgeBaseId);
+
+    if (!knowledgeBase) {
+      throw new Error("找不到要创建说明书的知识库。");
+    }
+
+    const existingPaths = new Set([
+      ...nextSnapshot.notes.filter((note) => note.knowledgeBaseId === knowledgeBaseId).map((note) => note.path),
+      ...nextSnapshot.documents.filter((document) => document.knowledgeBaseId === knowledgeBaseId).map((document) => document.path),
+    ]);
+
+    if ([...existingPaths].some((path) => path.replace(/\\/g, "/").toLowerCase() === PROJECT_INSTRUCTION_FILE_NAME.toLowerCase())) {
+      throw new Error("项目说明书已存在，已阻止覆盖。");
+    }
+
+    const newNote: Note = {
+      id: createLocalId("note"),
+      knowledgeBaseId,
+      title: "Agent 说明书",
+      path: PROJECT_INSTRUCTION_FILE_NAME,
+      content: PROJECT_INSTRUCTION_TEMPLATE,
+      tags: [],
+      updatedAt: "刚刚",
+      backlinks: [],
+      contentHash: createContentHash(PROJECT_INSTRUCTION_TEMPLATE),
+    };
+
+    nextSnapshot.notes = [newNote, ...nextSnapshot.notes];
+    browserMock.noteDiskContents.set(newNote.id, newNote.content);
+    nextSnapshot.knowledgeBases = nextSnapshot.knowledgeBases.map((item) =>
+      item.id === knowledgeBaseId
+        ? {
+            ...item,
+            noteCount: item.noteCount + 1,
+            updatedAt: "刚刚",
+            scanReport: item.scanReport
+              ? {
+                  ...item.scanReport,
+                  scannedFileCount: item.scanReport.scannedFileCount + 1,
+                  scannedByType: {
+                    ...item.scanReport.scannedByType,
+                    markdown: (item.scanReport.scannedByType.markdown ?? 0) + 1,
+                  },
+                }
+              : item.scanReport,
+          }
+        : item,
+    );
+    nextSnapshot.activeKnowledgeBaseId = knowledgeBaseId;
+    nextSnapshot.activeNoteId = newNote.id;
+    nextSnapshot.activeDocumentId = "";
+
+    return nextSnapshot;
+  }
+
+  return invokeLogged<WorkspaceSnapshot>("create_project_instruction", {
+    payload: { snapshot, knowledgeBaseId },
   });
 }
 

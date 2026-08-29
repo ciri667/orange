@@ -225,6 +225,7 @@ pub fn run() {
             commands::notes::delete_note,
             commands::notes::save_note_content,
             commands::notes::create_note,
+            commands::notes::create_project_instruction,
             commands::notes::save_note_image_attachments,
             commands::documents::rename_document,
             commands::documents::delete_document,
