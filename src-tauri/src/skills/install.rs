@@ -16,13 +16,13 @@ use walkdir::WalkDir;
 use zip::ZipArchive;
 
 /** 第三方 skill 安装时允许复制的最大普通文件数量。 */
-const MAX_SKILL_INSTALL_FILE_COUNT: usize = 512;
+pub const MAX_SKILL_INSTALL_FILE_COUNT: usize = 512;
 
 /** 第三方 skill 安装时允许复制的单文件最大字节数。 */
-const MAX_SKILL_INSTALL_SINGLE_FILE_BYTES: u64 = 5 * 1024 * 1024;
+pub const MAX_SKILL_INSTALL_SINGLE_FILE_BYTES: u64 = 5 * 1024 * 1024;
 
 /** 第三方 skill 安装时允许复制的总字节数。 */
-const MAX_SKILL_INSTALL_TOTAL_BYTES: u64 = 50 * 1024 * 1024;
+pub const MAX_SKILL_INSTALL_TOTAL_BYTES: u64 = 50 * 1024 * 1024;
 
 /** 远程下载的单个 SKILL.md 最大字节数。 */
 pub const MAX_REMOTE_SKILL_MARKDOWN_BYTES: usize = 1024 * 1024;
@@ -45,7 +45,10 @@ pub fn install_agent_skills_from_prepared_root(
     options: SkillInstallOptions,
 ) -> Result<InstallAgentSkillResult, String> {
     let operation_started_at = format_local_datetime();
-    let discovered_skills = discover_installable_skills(prepared_root)?;
+    let discovered_skills = filter_discovered_skills(
+        discover_installable_skills(prepared_root)?,
+        &options.skill_names,
+    )?;
 
     if discovered_skills.is_empty() {
         return Err("安装来源中没有找到有效 SKILL.md。".to_owned());
@@ -208,6 +211,8 @@ pub struct SkillInstallOptions {
     pub enable_after_install: bool,
     /** 同名目录冲突处理策略，首版支持 fail 和 replace。 */
     pub conflict_strategy: String,
+    /** 非空时只安装名称匹配的 Skill；空列表表示安装来源中的全部 Skill。 */
+    pub skill_names: Vec<String>,
 }
 
 /** 安装前在来源目录中发现的一个 SKILL.md 包。 */
@@ -276,6 +281,85 @@ fn discover_installable_skills(
     skills.sort_by(|left, right| left.target_folder_name.cmp(&right.target_folder_name));
 
     Ok(skills)
+}
+
+/** 按用户指定的 skill 名称过滤安装项，避免发现页把整个仓库装进来。 */
+fn filter_discovered_skills(
+    skills: Vec<DiscoveredInstallableSkill>,
+    skill_names: &[String],
+) -> Result<Vec<DiscoveredInstallableSkill>, String> {
+    if skill_names.is_empty() {
+        return Ok(skills);
+    }
+
+    let wanted_names = skill_names
+        .iter()
+        .map(|name| normalize_skill_name(name))
+        .filter(|name| !name.is_empty())
+        .collect::<HashSet<_>>();
+
+    if wanted_names.is_empty() {
+        return Err("指定的 Skill 名称无效。".to_owned());
+    }
+
+    let filtered = skills
+        .into_iter()
+        .filter(|skill| skill_matches_requested_name(skill, &wanted_names))
+        .collect::<Vec<_>>();
+    let found_names = filtered
+        .iter()
+        .flat_map(discovered_skill_match_names)
+        .collect::<HashSet<_>>();
+    let missing_names = skill_names
+        .iter()
+        .filter(|name| {
+            let normalized = normalize_skill_name(name);
+            !normalized.is_empty() && !found_names.contains(&normalized)
+        })
+        .cloned()
+        .collect::<Vec<_>>();
+
+    if !missing_names.is_empty() {
+        return Err(format!(
+            "安装来源中没有找到 Skill「{}」。",
+            missing_names.join("、")
+        ));
+    }
+
+    Ok(filtered)
+}
+
+/** 返回可用于匹配安装过滤的名称：frontmatter name 和来源目录名。 */
+fn discovered_skill_match_names(skill: &DiscoveredInstallableSkill) -> Vec<String> {
+    let mut names = vec![normalize_skill_name(&skill.target_folder_name)];
+
+    if let Some(folder_name) = skill
+        .source_dir
+        .file_name()
+        .and_then(|name| name.to_str())
+        .map(normalize_skill_name)
+        .filter(|name| !name.is_empty())
+    {
+        names.push(folder_name);
+    }
+
+    names
+}
+
+/** 用 frontmatter name 或来源目录名匹配用户指定的 skill。 */
+fn skill_matches_requested_name(
+    skill: &DiscoveredInstallableSkill,
+    wanted_names: &HashSet<String>,
+) -> bool {
+    if wanted_names.contains(&normalize_skill_name(&skill.target_folder_name)) {
+        return true;
+    }
+
+    skill
+        .source_dir
+        .file_name()
+        .and_then(|name| name.to_str())
+        .is_some_and(|name| wanted_names.contains(&normalize_skill_name(name)))
 }
 
 /** 判断同一安装批次内是否会写入同一个目标目录。 */

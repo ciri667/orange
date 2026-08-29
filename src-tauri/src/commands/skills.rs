@@ -209,6 +209,7 @@ pub async fn install_agent_skill(
     let source_type = payload.source_type.clone();
     let conflict_strategy = payload.conflict_strategy.clone();
     let enable_after_install = payload.enable_after_install;
+    let skill_names = payload.skill_names.clone();
     let started_at = Instant::now();
     let operation_id = storage::create_id("op");
 
@@ -226,6 +227,7 @@ pub async fn install_agent_skill(
             "sourceType": source_type.clone(),
             "conflictStrategy": conflict_strategy.clone(),
             "enableAfterInstall": enable_after_install,
+            "skillNameCount": skill_names.len(),
         })),
     );
 
@@ -236,6 +238,7 @@ pub async fn install_agent_skill(
             let install_source_type = source_type.clone();
             let install_conflict_strategy = conflict_strategy.clone();
             let install_enable_after_install = enable_after_install;
+            let install_skill_names = skill_names.clone();
 
             run_blocking("安装 Skill", move || {
                 let connection = storage::open_database(&install_app)?;
@@ -250,6 +253,7 @@ pub async fn install_agent_skill(
                         source_summary: prepared_source.source_summary().to_owned(),
                         enable_after_install: install_enable_after_install,
                         conflict_strategy: install_conflict_strategy,
+                        skill_names: install_skill_names,
                     },
                 )
             })
@@ -337,7 +341,11 @@ pub(super) async fn prepare_skill_install_source(
 ) -> Result<PreparedSkillInstallSource, String> {
     match payload.source_type.as_str() {
         "url" => {
-            prepare_url_skill_install_source(payload.source.as_deref().unwrap_or_default()).await
+            prepare_url_skill_install_source(
+                payload.source.as_deref().unwrap_or_default(),
+                &payload.skill_names,
+            )
+            .await
         }
         "localFolder" => {
             let path = match payload
@@ -387,12 +395,18 @@ pub(super) async fn prepare_skill_install_source(
 /** 下载远程 Skill 来源并转换成统一的临时目录。 */
 pub(super) async fn prepare_url_skill_install_source(
     url: &str,
+    skill_names: &[String],
 ) -> Result<PreparedSkillInstallSource, String> {
+    if let Some((owner, repo, skill_name)) =
+        skills::github_named_skill_install_target(url, skill_names)
+    {
+        if let Ok(prepared) = prepare_github_skill_directory(&owner, &repo, &skill_name).await {
+            return Ok(prepared);
+        }
+    }
+
     let download = skills::resolve_skill_url_download(url)?;
-    let response = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(30))
-        .build()
-        .map_err(|error| format!("无法创建 Skill 下载客户端：{error}"))?
+    let response = skill_http_client(30)?
         .get(&download.url)
         .header(
             reqwest::header::ACCEPT,
@@ -545,4 +559,365 @@ pub(super) fn summarize_local_install_source(path: &Path) -> String {
         .and_then(|value| value.to_str())
         .map(|name| format!("local:{name}"))
         .unwrap_or_else(|| "local".to_owned())
+}
+
+/** 在线搜索 Agent Skills；只把关键词发给 skills.sh，不上传本地笔记。 */
+#[tauri::command]
+pub async fn search_online_skills(
+    app: AppHandle,
+    payload: SearchOnlineSkillsPayload,
+) -> Result<OnlineSkillSearchResult, String> {
+    let started_at = Instant::now();
+    let (query, owner) =
+        skills::normalize_online_skill_query(&payload.query, payload.owner.as_deref())
+            .map_err(skills::online_skill_query_error_message)?;
+
+    logging::write_app_event_best_effort(
+        &app,
+        AppEventBuilder::new(
+            AppLogLevel::Info,
+            AppLogCategory::Skill,
+            "search_online_skills",
+            "started",
+            "开始搜索在线 Skills。",
+        )
+        .metadata(json!({
+            "queryChars": query.chars().count(),
+            "hasOwner": owner.is_some(),
+        })),
+    );
+
+    let result = search_online_skills_from_directory(&query, owner.as_deref()).await;
+
+    match &result {
+        Ok(search_result) => logging::write_app_event_best_effort(
+            &app,
+            AppEventBuilder::new(
+                AppLogLevel::Info,
+                AppLogCategory::Skill,
+                "search_online_skills",
+                "completed",
+                "已搜索在线 Skills。",
+            )
+            .duration(started_at.elapsed())
+            .metadata(json!({
+                "queryChars": query.chars().count(),
+                "resultCount": search_result.skills.len(),
+            })),
+        ),
+        Err(error) => logging::write_app_event_best_effort(
+            &app,
+            AppEventBuilder::new(
+                AppLogLevel::Error,
+                AppLogCategory::Skill,
+                "search_online_skills",
+                "failed",
+                error,
+            )
+            .duration(started_at.elapsed())
+            .metadata(json!({
+                "queryChars": query.chars().count(),
+            })),
+        ),
+    }
+
+    result
+}
+
+/** 读取在线 Skill 详情页简介；失败时仍返回可打开的页面地址。 */
+#[tauri::command]
+pub async fn preview_online_skill(
+    app: AppHandle,
+    payload: PreviewOnlineSkillPayload,
+) -> Result<OnlineSkillPreview, String> {
+    let started_at = Instant::now();
+    let page_url = skills::online_skill_page_url(&payload.id)
+        .ok_or_else(|| "在线 Skill 标识无效。".to_owned())?;
+    let skill_id = payload.id.trim().to_owned();
+
+    logging::write_app_event_best_effort(
+        &app,
+        AppEventBuilder::new(
+            AppLogLevel::Info,
+            AppLogCategory::Skill,
+            "preview_online_skill",
+            "started",
+            "开始预览在线 Skill。",
+        ),
+    );
+
+    let description = match fetch_online_skill_description(&page_url).await {
+        Ok(description) => description,
+        Err(error) => {
+            logging::write_app_event_best_effort(
+                &app,
+                AppEventBuilder::new(
+                    AppLogLevel::Warn,
+                    AppLogCategory::Skill,
+                    "preview_online_skill",
+                    "degraded",
+                    error,
+                )
+                .duration(started_at.elapsed()),
+            );
+            None
+        }
+    };
+
+    logging::write_app_event_best_effort(
+        &app,
+        AppEventBuilder::new(
+            AppLogLevel::Info,
+            AppLogCategory::Skill,
+            "preview_online_skill",
+            "completed",
+            "已预览在线 Skill。",
+        )
+        .duration(started_at.elapsed())
+        .metadata(json!({ "hasDescription": description.is_some() })),
+    );
+
+    Ok(OnlineSkillPreview {
+        id: skill_id,
+        page_url,
+        description,
+    })
+}
+
+/** 向 skills.sh 发起搜索并解析结果。 */
+async fn search_online_skills_from_directory(
+    query: &str,
+    owner: Option<&str>,
+) -> Result<OnlineSkillSearchResult, String> {
+    let mut search_url = reqwest::Url::parse(&format!("{}/api/search", skills::SKILLS_SH_API_BASE))
+        .map_err(|_| "在线 Skill 目录地址无效。".to_owned())?;
+    {
+        let mut query_pairs = search_url.query_pairs_mut();
+        query_pairs.append_pair("q", query);
+        query_pairs.append_pair("limit", &skills::ONLINE_SKILL_SEARCH_LIMIT.to_string());
+
+        if let Some(owner) = owner {
+            query_pairs.append_pair("owner", owner);
+        }
+    }
+
+    let response = skill_http_client(15)?
+        .get(search_url)
+        .header(reqwest::header::ACCEPT, "application/json")
+        .send()
+        .await
+        .map_err(|error| format!("搜索在线 Skills 失败：{error}"))?;
+
+    if !response.status().is_success() {
+        return Err(format!("搜索在线 Skills 失败：HTTP {}", response.status()));
+    }
+
+    let bytes =
+        read_limited_response_bytes(response, skills::MAX_REMOTE_SKILL_MARKDOWN_BYTES, false)
+            .await?;
+    let body =
+        String::from_utf8(bytes).map_err(|_| "在线 Skill 目录返回了无法解析的结果。".to_owned())?;
+    let skills = skills::parse_online_skill_search_response(query, &body)?;
+
+    Ok(OnlineSkillSearchResult {
+        query: query.to_owned(),
+        skills,
+    })
+}
+
+/** 下载 skills.sh 详情页并提取简介，页面过大时放弃简介而不是失败安装。 */
+async fn fetch_online_skill_description(page_url: &str) -> Result<Option<String>, String> {
+    let response = skill_http_client(15)?
+        .get(page_url)
+        .header(reqwest::header::ACCEPT, "text/html, */*")
+        .send()
+        .await
+        .map_err(|error| format!("读取在线 Skill 简介失败：{error}"))?;
+
+    if !response.status().is_success() {
+        return Err(format!(
+            "读取在线 Skill 简介失败：HTTP {}",
+            response.status()
+        ));
+    }
+
+    let bytes =
+        read_limited_response_bytes(response, skills::MAX_REMOTE_SKILL_MARKDOWN_BYTES, false)
+            .await?;
+    let html = String::from_utf8_lossy(&bytes);
+
+    Ok(skills::extract_html_description(&html))
+}
+
+/** 只下载 GitHub 仓库中匹配的 skill 目录，避免把整仓 zip 拉下来。 */
+async fn prepare_github_skill_directory(
+    owner: &str,
+    repo: &str,
+    skill_name: &str,
+) -> Result<PreparedSkillInstallSource, String> {
+    let api_client = skill_http_client(15)?;
+    let repo_body = github_get_text(
+        &api_client,
+        &format!("https://api.github.com/repos/{owner}/{repo}"),
+    )
+    .await?;
+    let repo_meta: skills::GitHubRepoResponse =
+        serde_json::from_str(&repo_body).map_err(|_| "无法解析 GitHub 仓库信息。".to_owned())?;
+    let branch = if repo_meta.default_branch.trim().is_empty() {
+        "main".to_owned()
+    } else {
+        repo_meta.default_branch.trim().to_owned()
+    };
+    let tree_body = github_get_text(
+        &api_client,
+        &format!("https://api.github.com/repos/{owner}/{repo}/git/trees/{branch}?recursive=1"),
+    )
+    .await?;
+    let tree: skills::GitHubTreeResponse =
+        serde_json::from_str(&tree_body).map_err(|_| "无法解析 GitHub 目录树。".to_owned())?;
+    let directory = skills::find_github_skill_directory(&tree, skill_name)
+        .map_err(|_| "GitHub 目录中没有找到指定 Skill。".to_owned())?;
+
+    if directory.files.len() > skills::MAX_SKILL_INSTALL_FILE_COUNT {
+        return Err("Skill 包文件数量超过限制，已阻止安装。".to_owned());
+    }
+
+    let mut total_bytes = 0u64;
+    let download_client = skill_http_client(30)?;
+    let temp_dir =
+        tempfile::TempDir::new().map_err(|error| format!("无法创建安装临时目录：{error}"))?;
+    let skill_root = temp_dir.path().join(skill_name);
+
+    fs::create_dir_all(&skill_root).map_err(|error| format!("无法创建临时 skill 目录：{error}"))?;
+
+    for file in directory.files {
+        if file
+            .size
+            .is_some_and(|size| size > skills::MAX_SKILL_INSTALL_SINGLE_FILE_BYTES)
+        {
+            return Err("Skill 包包含超过 5MB 的单个文件，已阻止安装。".to_owned());
+        }
+
+        let relative = skills::github_file_relative_path(&directory.prefix, &file.path)
+            .ok_or_else(|| "无法解析 GitHub Skill 文件路径。".to_owned())?;
+        let relative_path = Path::new(&relative);
+
+        if relative_path.components().any(|component| {
+            matches!(
+                component,
+                std::path::Component::ParentDir | std::path::Component::RootDir
+            )
+        }) {
+            return Err("GitHub Skill 包含不安全路径，已阻止安装。".to_owned());
+        }
+
+        let encoded_path = file
+            .path
+            .split('/')
+            .map(urlencoding_path_segment)
+            .collect::<Vec<_>>()
+            .join("/");
+        let raw_url =
+            format!("https://raw.githubusercontent.com/{owner}/{repo}/{branch}/{encoded_path}");
+        let bytes = download_github_file_bytes(
+            &download_client,
+            &raw_url,
+            skills::MAX_SKILL_INSTALL_SINGLE_FILE_BYTES as usize,
+        )
+        .await?;
+
+        total_bytes = total_bytes
+            .checked_add(bytes.len() as u64)
+            .ok_or_else(|| "Skill 包总大小超过限制，已阻止安装。".to_owned())?;
+
+        if total_bytes > skills::MAX_SKILL_INSTALL_TOTAL_BYTES {
+            return Err("Skill 包总大小超过 50MB，已阻止安装。".to_owned());
+        }
+
+        let target_path = skill_root.join(relative_path);
+
+        if let Some(parent) = target_path.parent() {
+            fs::create_dir_all(parent)
+                .map_err(|error| format!("无法创建临时 skill 目录：{error}"))?;
+        }
+
+        fs::write(&target_path, bytes)
+            .map_err(|error| format!("无法写入临时 skill 文件：{error}"))?;
+    }
+
+    Ok(PreparedSkillInstallSource::Temp {
+        source_summary: format!("github.com/{owner}/{repo}"),
+        temp_dir,
+    })
+}
+
+/** 读取 GitHub API 文本响应，要求 User-Agent 且只接受成功状态。 */
+async fn github_get_text(client: &reqwest::Client, url: &str) -> Result<String, String> {
+    let response = client
+        .get(url)
+        .header(reqwest::header::ACCEPT, "application/vnd.github+json")
+        .header("X-GitHub-Api-Version", "2022-11-28")
+        .send()
+        .await
+        .map_err(|error| format!("请求 GitHub 失败：{error}"))?;
+
+    if !response.status().is_success() {
+        return Err(format!("请求 GitHub 失败：HTTP {}", response.status()));
+    }
+
+    let bytes =
+        read_limited_response_bytes(response, skills::MAX_REMOTE_SKILL_MARKDOWN_BYTES, false)
+            .await?;
+
+    String::from_utf8(bytes).map_err(|_| "GitHub 响应不是有效 UTF-8 文本。".to_owned())
+}
+
+/** 按单文件上限下载 GitHub raw 文件。 */
+async fn download_github_file_bytes(
+    client: &reqwest::Client,
+    url: &str,
+    max_bytes: usize,
+) -> Result<Vec<u8>, String> {
+    let response = client
+        .get(url)
+        .header(reqwest::header::ACCEPT, "*/*")
+        .send()
+        .await
+        .map_err(|error| format!("下载 GitHub Skill 文件失败：{error}"))?;
+
+    if !response.status().is_success() {
+        return Err(format!(
+            "下载 GitHub Skill 文件失败：HTTP {}",
+            response.status()
+        ));
+    }
+
+    read_limited_response_bytes(response, max_bytes, false).await
+}
+
+/** 编码 GitHub raw 路径片段，保留已有的斜杠分层。 */
+fn urlencoding_path_segment(segment: &str) -> String {
+    let mut encoded = String::new();
+
+    for character in segment.chars() {
+        match character {
+            'A'..='Z' | 'a'..='z' | '0'..='9' | '-' | '_' | '.' | '~' => encoded.push(character),
+            _ => {
+                for byte in character.to_string().as_bytes() {
+                    encoded.push_str(&format!("%{byte:02X}"));
+                }
+            }
+        }
+    }
+
+    encoded
+}
+
+/** 创建带超时和 User-Agent 的 Skill 网络客户端。 */
+fn skill_http_client(timeout_secs: u64) -> Result<reqwest::Client, String> {
+    reqwest::Client::builder()
+        .timeout(Duration::from_secs(timeout_secs))
+        .user_agent("Orange-Juji/0.1 (local-first notes agent)")
+        .build()
+        .map_err(|error| format!("无法创建 Skill 网络客户端：{error}"))
 }

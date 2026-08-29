@@ -1723,6 +1723,7 @@ mod tests {
             source_summary: "local:test".to_owned(),
             enable_after_install,
             conflict_strategy: conflict_strategy.to_owned(),
+            skill_names: Vec::new(),
         }
     }
 
@@ -1840,6 +1841,48 @@ tags:
             .join(SKILL_MARKDOWN_FILE_NAME)
             .exists());
         assert!(result.installed_skills.iter().all(|skill| !skill.enabled));
+    }
+
+    /** 指定 skillNames 时只安装匹配项，不应把同包其他 skill 一并写入。 */
+    #[test]
+    fn install_filters_to_requested_skill_names() {
+        let temp_dir = tempdir().expect("create tempdir");
+        let source = temp_dir.path().join("source");
+        let root = temp_dir.path().join("skills");
+        let connection = test_connection();
+
+        write_skill_markdown(
+            &source,
+            "one",
+            &valid_skill_markdown("install-one", "安装技能一", "执行安装技能一。"),
+        );
+        write_skill_markdown(
+            &source,
+            "two",
+            &valid_skill_markdown("install-two", "安装技能二", "执行安装技能二。"),
+        );
+
+        let mut options = install_options(INSTALL_CONFLICT_FAIL, false);
+        options.skill_names = vec!["install-two".to_owned()];
+
+        let result = install_agent_skills_from_prepared_root(&connection, &root, &source, options)
+            .expect("install filtered skill");
+
+        assert_eq!(result.installed_count, 1);
+        assert_eq!(result.installed_skills[0].name, "install-two");
+        assert!(root
+            .join("install-two")
+            .join(SKILL_MARKDOWN_FILE_NAME)
+            .exists());
+        assert!(!root.join("install-one").exists());
+
+        let mut missing_options = install_options(INSTALL_CONFLICT_FAIL, false);
+        missing_options.skill_names = vec!["missing-skill".to_owned()];
+        let error =
+            install_agent_skills_from_prepared_root(&connection, &root, &source, missing_options)
+                .expect_err("missing skill should fail");
+
+        assert!(error.contains("missing-skill"));
     }
 
     /** 安装包中的 scripts 目录会保留，并提示需要运行清单与审批。 */

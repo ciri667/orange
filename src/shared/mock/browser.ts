@@ -18,6 +18,10 @@ import type {
   ImProviderSettings,
   InstallAgentSkillPayload,
   InstallAgentSkillResult,
+  OnlineSkill,
+  OnlineSkillPreview,
+  OnlineSkillSearchResult,
+  SearchOnlineSkillsPayload,
   KnowledgeBase,
   LlmProviderConfig,
   LlmProviderModel,
@@ -904,8 +908,89 @@ export function installBrowserMockSkill(payload: InstallAgentSkillPayload): Inst
   };
 }
 
+/** 浏览器开发态的在线目录样本，覆盖写作、PDF 和不可一键安装来源。 */
+const BROWSER_ONLINE_SKILLS: OnlineSkill[] = [
+  {
+    id: "vercel-labs/agent-skills/writing-guidelines",
+    skillId: "writing-guidelines",
+    name: "writing-guidelines",
+    source: "vercel-labs/agent-skills",
+    installs: 54516,
+    pageUrl: "https://skills.sh/vercel-labs/agent-skills/writing-guidelines",
+    installable: true,
+    description: "写作风格与结构指南，适合润色笔记和长文。",
+  },
+  {
+    id: "anthropics/skills/pdf",
+    skillId: "pdf",
+    name: "pdf",
+    source: "anthropics/skills",
+    installs: 186704,
+    pageUrl: "https://skills.sh/anthropics/skills/pdf",
+    installable: true,
+    description: "处理 PDF 阅读、抽取表格和合并文档。",
+  },
+  {
+    id: "claude-office-skills/skills/meeting-notes",
+    skillId: "meeting-notes",
+    name: "meeting-notes",
+    source: "claude-office-skills/skills",
+    installs: 4712,
+    pageUrl: "https://skills.sh/claude-office-skills/skills/meeting-notes",
+    installable: true,
+    description: "把会议内容整理成可检索的纪要。",
+  },
+  {
+    id: "open.feishu.cn/lark-note",
+    skillId: "lark-note",
+    name: "lark-note",
+    source: "open.feishu.cn",
+    installs: 414150,
+    pageUrl: "https://skills.sh/open.feishu.cn/lark-note",
+    installable: false,
+    description: "飞书云文档来源，当前不支持一键安装。",
+  },
+];
+
+/** 浏览器开发态模拟在线搜索，按名称、来源和简介过滤。 */
+export function searchBrowserOnlineSkills(payload: SearchOnlineSkillsPayload): OnlineSkillSearchResult {
+  const query = payload.query.trim().toLowerCase();
+  const owner = payload.owner?.trim().toLowerCase();
+
+  if (query.length < 2) {
+    throw new Error("请输入至少两个字搜索在线 Skills。");
+  }
+
+  const skills = BROWSER_ONLINE_SKILLS.filter((skill) => {
+    const searchableText = `${skill.name} ${skill.skillId} ${skill.source} ${skill.description ?? ""}`.toLowerCase();
+    const matchesQuery = searchableText.includes(query) || query === "skill";
+    const matchesOwner = !owner || skill.source.toLowerCase().startsWith(`${owner}/`) || skill.source.toLowerCase() === owner;
+
+    return matchesQuery && matchesOwner;
+  }).sort((left, right) => right.installs - left.installs);
+
+  return { query: payload.query.trim(), skills };
+}
+
+/** 浏览器开发态返回样本简介，未知 id 仍给出可打开的 skills.sh 地址。 */
+export function previewBrowserOnlineSkill(skillId: string): OnlineSkillPreview {
+  const skill = BROWSER_ONLINE_SKILLS.find((item) => item.id === skillId);
+
+  return {
+    id: skillId,
+    pageUrl: skill?.pageUrl ?? `https://skills.sh/${skillId}`,
+    description: skill?.description,
+  };
+}
+
 /** 根据安装来源生成稳定 mock 名称，避免浏览器开发态反复安装产生不可追踪 ID。 */
 export function buildBrowserInstalledSkillName(payload: InstallAgentSkillPayload) {
+  const requestedName = payload.skillNames?.find((name) => name.trim());
+
+  if (requestedName) {
+    return normalizeBrowserSkillName(requestedName) || `installed-${payload.sourceType.toLowerCase()}`;
+  }
+
   const source = payload.source?.trim();
   const sourceTail = source ? source.split(/[\\/]/).filter(Boolean).at(-1) ?? source : payload.sourceType;
   const withoutExtension = sourceTail.replace(/\.(zip|md|markdown)$/i, "");

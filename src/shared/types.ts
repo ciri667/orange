@@ -161,6 +161,39 @@ export interface InstallAgentSkillPayload {
   source?: string;
   enableAfterInstall: boolean;
   conflictStrategy: SkillInstallConflictStrategy;
+  /** 非空时只安装名称匹配的 Skill，避免发现页把整个仓库装进来。 */
+  skillNames?: string[];
+}
+
+/** skills.sh 目录中的一条可发现 Skill。 */
+export interface OnlineSkill {
+  id: string;
+  skillId: string;
+  name: string;
+  source: string;
+  installs: number;
+  pageUrl: string;
+  installable: boolean;
+  description?: string;
+}
+
+/** 在线 Skill 搜索结果。 */
+export interface OnlineSkillSearchResult {
+  query: string;
+  skills: OnlineSkill[];
+}
+
+/** 在线 Skill 预览；简介缺失时仍可展示名称和来源。 */
+export interface OnlineSkillPreview {
+  id: string;
+  pageUrl: string;
+  description?: string;
+}
+
+/** 在线搜索 Agent Skills 的请求。 */
+export interface SearchOnlineSkillsPayload {
+  query: string;
+  owner?: string;
 }
 
 /** 第三方 skill 安装结果，包含刷新后的完整列表和脱敏摘要。 */

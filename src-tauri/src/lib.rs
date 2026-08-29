@@ -206,6 +206,8 @@ pub fn run() {
             commands::skills::toggle_agent_skill,
             commands::skills::delete_agent_skill,
             commands::skills::install_agent_skill,
+            commands::skills::search_online_skills,
+            commands::skills::preview_online_skill,
             commands::settings::load_knowledge_base_memories,
             commands::settings::save_knowledge_base_memory,
             commands::settings::delete_knowledge_base_memory,

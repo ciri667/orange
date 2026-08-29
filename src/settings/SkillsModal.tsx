@@ -1,14 +1,18 @@
-import { Archive, Download, Edit3, FolderOpen, Link, Plus, Save, Search, Trash2, X } from "lucide-react";
+import { isTauri } from "@tauri-apps/api/core";
+import { openUrl } from "@tauri-apps/plugin-opener";
+import { Archive, Download, Edit3, ExternalLink, FolderOpen, Link, Plus, Save, Search, Trash2, X } from "lucide-react";
 import type { FormEvent } from "react";
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
+import { previewOnlineSkill, searchOnlineSkills } from "../shared/api/skills";
 import { Button } from "../shared/Button";
 import { cn } from "../shared/cn";
 import { ConfirmDialog, type ConfirmDialogConfig } from "../shared/ConfirmDialog";
 import { FilterChip } from "../shared/FilterChip";
 import { ListRow } from "../shared/ListRow";
-import { logError, logInfo } from "../shared/logger";
+import { logError, logInfo, logWarn } from "../shared/logger";
 import { ModalBackdrop, ModalHeader, ModalPanel } from "../shared/Modal";
 import { OverflowTooltipText } from "../shared/OverflowTooltipText";
+import { SegmentedControl, SegmentedControlItem } from "../shared/SegmentedControl";
 import { ToggleRow } from "../shared/ToggleRow";
 import { fieldControlClassName, fieldLabelClassName, fieldTextareaClassName, sectionLabelClassName } from "../shared/ui";
 import type {
@@ -16,11 +20,33 @@ import type {
   AgentSkillSource,
   InstallAgentSkillPayload,
   InstallAgentSkillResult,
+  OnlineSkill,
   SkillInstallSourceType,
 } from "../shared/types";
 
 /** Skills 列表来源筛选，all 用于展示完整合并结果。 */
 type SkillSourceFilter = "all" | AgentSkillSource;
+
+/** Skills 弹窗主面板：已安装管理本地能力，发现用于在线目录。 */
+type SkillsModalPanel = "installed" | "discover";
+
+/** 发现页推荐分类；query 使用目录能匹配的英文词，标签用中文。 */
+const DISCOVER_CHIPS: Array<{ id: string; label: string; query: string; owner?: string }> = [
+  { id: "writing", label: "写作", query: "writing" },
+  { id: "note", label: "笔记", query: "note" },
+  { id: "pdf", label: "PDF", query: "pdf" },
+  { id: "organize", label: "整理", query: "organize" },
+  { id: "translate", label: "翻译", query: "translate" },
+  { id: "official", label: "官方", query: "skill", owner: "anthropics" },
+];
+
+/** 在线搜索防抖，避免每个按键都打到 skills.sh。 */
+const DISCOVER_SEARCH_DEBOUNCE_MS = 250;
+
+/** 把搜索词和 owner 编成缓存键，空 owner 与未指定来源视为同一次搜索。 */
+function discoverSearchCacheKey(query: string, owner: string) {
+  return `${query}\0${owner}`;
+}
 
 /** 用户目录中的自定义 skill 允许用户编辑和删除。 */
 function isUserManagedSkill(skill: AgentSkill) {
@@ -93,6 +119,22 @@ export function SkillsModal({
   const [installDraft, setInstallDraft] = useState<SkillInstallDraft | null>(null);
   /** 当前等待用户确认的危险操作，使用应用内弹窗承载。 */
   const [pendingConfirmation, setPendingConfirmation] = useState<PendingSkillConfirmation | null>(null);
+  /** 已安装与发现是两个并列入口，避免在线目录冲掉本地管理。 */
+  const [panel, setPanel] = useState<SkillsModalPanel>("installed");
+  /** 发现页搜索词；空状态只展示分类芯片。 */
+  const [discoverQuery, setDiscoverQuery] = useState("");
+  /** 可选 GitHub owner，官方芯片会带上 anthropics。 */
+  const [discoverOwner, setDiscoverOwner] = useState("");
+  /** 当前选中的推荐分类，便于芯片高亮。 */
+  const [activeDiscoverChip, setActiveDiscoverChip] = useState("");
+  const [discoverResults, setDiscoverResults] = useState<OnlineSkill[]>([]);
+  const [discoverError, setDiscoverError] = useState("");
+  const [isSearching, setIsSearching] = useState(false);
+  const [selectedOnlineSkillId, setSelectedOnlineSkillId] = useState("");
+  const [onlinePreviewDescription, setOnlinePreviewDescription] = useState("");
+  const [replaceOnlineSkill, setReplaceOnlineSkill] = useState(false);
+  /** 会话内缓存已成功的在线搜索，切回已搜过的分类或关键词时不再请求。 */
+  const discoverSearchCacheRef = useRef(new Map<string, OnlineSkill[]>());
 
   /** 可用标签来自当前 skill 列表，便于用户快速按能力类别筛选。 */
   const availableTags = useMemo(
@@ -144,6 +186,189 @@ export function SkillsModal({
   );
   /** 当前详情 skill；列表过滤后仍保留原选择，避免搜索时误清空表单。 */
   const selectedSkill = skills.find((skill) => skill.id === selectedSkillId) ?? filteredSkills[0] ?? skills[0];
+  /** 发现页当前选中项；结果刷新后尽量保留原选择。 */
+  const selectedOnlineSkill =
+    discoverResults.find((skill) => skill.id === selectedOnlineSkillId) ?? discoverResults[0];
+  const installedOnlineSkill = selectedOnlineSkill
+    ? skills.find((skill) => skill.name === selectedOnlineSkill.skillId || skill.name === selectedOnlineSkill.name)
+    : undefined;
+
+  /** 切换到发现页时收起本地表单，避免两个面板抢同一详情区。 */
+  function handleSelectPanel(nextPanel: SkillsModalPanel) {
+    setPanel(nextPanel);
+    setFormDraft(null);
+    setInstallDraft(null);
+  }
+
+  /** 推荐分类写入搜索词和 owner，由防抖 effect 真正发请求。 */
+  function handleSelectDiscoverChip(chipId: string) {
+    const chip = DISCOVER_CHIPS.find((item) => item.id === chipId);
+
+    if (!chip) {
+      return;
+    }
+
+    setActiveDiscoverChip(chip.id);
+    setDiscoverQuery(chip.query);
+    setDiscoverOwner(chip.owner ?? "");
+  }
+
+  /** 在系统浏览器打开 skills.sh 详情，主窗口不跟跳。 */
+  async function handleOpenOnlineSkillPage(url: string) {
+    try {
+      if (!isTauri()) {
+        const browserWindow = globalThis.open?.(url, "_blank", "noopener,noreferrer");
+
+        if (!browserWindow) {
+          throw new Error("浏览器拦截了外部链接。");
+        }
+
+        return;
+      }
+
+      await openUrl(url);
+    } catch (error) {
+      logWarn("打开在线 Skill 页面失败。", {
+        category: "skill",
+        event: "open_online_skill_page",
+        status: "failed",
+        error,
+      });
+    }
+  }
+
+  /** 发现页安装前二次确认；默认停用，冲突时由替换开关决定。 */
+  function handleInstallOnlineSkill(skill: OnlineSkill) {
+    if (!skill.installable) {
+      return;
+    }
+
+    setPendingConfirmation({
+      title: "安装在线 Skill",
+      message: `安装第三方 Skill「${skill.name}」？安装后默认停用，请先审阅再启用。`,
+      confirmLabel: "安装 Skill",
+      cancelLabel: "取消",
+      onConfirm: async () => {
+        const result = await onInstallSkill({
+          sourceType: "url",
+          source: `https://github.com/${skill.source}`,
+          enableAfterInstall: false,
+          conflictStrategy: replaceOnlineSkill ? "replace" : "fail",
+          skillNames: [skill.skillId],
+        });
+        const firstInstalledSkill = result.installedSkills[0];
+
+        setPanel("installed");
+        setFormDraft(null);
+        setInstallDraft(null);
+
+        if (firstInstalledSkill) {
+          setSelectedSkillId(firstInstalledSkill.id);
+        }
+      },
+    });
+  }
+
+  useEffect(() => {
+    if (panel !== "discover") {
+      return;
+    }
+
+    const query = discoverQuery.trim();
+    const owner = discoverOwner.trim();
+
+    if (query.length < 2) {
+      setDiscoverResults([]);
+      setDiscoverError("");
+      setIsSearching(false);
+      return;
+    }
+
+    const cacheKey = discoverSearchCacheKey(query, owner);
+
+    // 命中会话缓存时直接还原结果，避免切回已搜过的标签再次请求。
+    if (discoverSearchCacheRef.current.has(cacheKey)) {
+      const cachedSkills = discoverSearchCacheRef.current.get(cacheKey) ?? [];
+      setDiscoverResults(cachedSkills);
+      setDiscoverError("");
+      setIsSearching(false);
+      setSelectedOnlineSkillId((currentId) =>
+        cachedSkills.some((skill) => skill.id === currentId) ? currentId : (cachedSkills[0]?.id ?? ""),
+      );
+      return;
+    }
+
+    let cancelled = false;
+    const timeoutId = window.setTimeout(() => {
+      setIsSearching(true);
+      void searchOnlineSkills({
+        query,
+        owner: owner || undefined,
+      })
+        .then((result) => {
+          // 成功结果写入缓存，即使已经切走也保留，方便马上切回来。
+          discoverSearchCacheRef.current.set(cacheKey, result.skills);
+
+          if (cancelled) {
+            return;
+          }
+
+          setDiscoverResults(result.skills);
+          setDiscoverError("");
+          setSelectedOnlineSkillId((currentId) =>
+            result.skills.some((skill) => skill.id === currentId) ? currentId : (result.skills[0]?.id ?? ""),
+          );
+        })
+        .catch((error) => {
+          if (cancelled) {
+            return;
+          }
+
+          setDiscoverResults([]);
+          setDiscoverError(error instanceof Error ? error.message : String(error));
+        })
+        .finally(() => {
+          if (!cancelled) {
+            setIsSearching(false);
+          }
+        });
+    }, DISCOVER_SEARCH_DEBOUNCE_MS);
+
+    return () => {
+      cancelled = true;
+      window.clearTimeout(timeoutId);
+    };
+  }, [discoverOwner, discoverQuery, panel]);
+
+  useEffect(() => {
+    if (panel !== "discover" || !selectedOnlineSkill) {
+      setOnlinePreviewDescription("");
+      return;
+    }
+
+    if (selectedOnlineSkill.description) {
+      setOnlinePreviewDescription(selectedOnlineSkill.description);
+      return;
+    }
+
+    let cancelled = false;
+
+    void previewOnlineSkill(selectedOnlineSkill.id)
+      .then((preview) => {
+        if (!cancelled) {
+          setOnlinePreviewDescription(preview.description ?? "");
+        }
+      })
+      .catch(() => {
+        if (!cancelled) {
+          setOnlinePreviewDescription("");
+        }
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [panel, selectedOnlineSkill]);
 
   /** 打开新建用户 skill 表单，默认启用。 */
   function handleCreateSkill() {
@@ -323,19 +548,118 @@ export function SkillsModal({
           <div className="min-w-0">
             <p className={sectionLabelClassName}>Skills</p>
             <h2 className="mt-1 mb-0 text-lg leading-tight text-ink-strong">管理 Agent Skills</h2>
-            <span className="mt-1 block text-xs text-ink-muted">启用的 Skill 会作为能力说明进入 Agent 上下文。</span>
+            <span className="mt-1 block text-xs text-ink-muted">
+              {panel === "discover" ? "从公开目录搜索并安装 Skill，安装后默认停用。" : "启用的 Skill 会作为能力说明进入 Agent 上下文。"}
+            </span>
+            <SegmentedControl className="mt-2.5" aria-label="Skills 面板">
+              <SegmentedControlItem active={panel === "installed"} onClick={() => handleSelectPanel("installed")}>
+                已安装
+              </SegmentedControlItem>
+              <SegmentedControlItem active={panel === "discover"} onClick={() => handleSelectPanel("discover")}>
+                发现
+              </SegmentedControlItem>
+            </SegmentedControl>
           </div>
           <div className="flex shrink-0 items-center gap-2">
-            <Button variant="ghost" onClick={onOpenUserSkillsFolder} disabled={isBusy}>
-              <FolderOpen size={14} />
-              打开用户 Skills 文件夹
-            </Button>
+            {panel === "installed" && (
+              <Button variant="ghost" onClick={onOpenUserSkillsFolder} disabled={isBusy}>
+                <FolderOpen size={14} />
+                打开用户 Skills 文件夹
+              </Button>
+            )}
             <Button variant="icon" title="关闭 Skills" onClick={onClose}>
               <X size={17} />
             </Button>
           </div>
         </ModalHeader>
 
+        {panel === "discover" ? (
+          <div className="grid min-h-0 overflow-hidden grid-cols-[300px_minmax(0,1fr)] max-[980px]:grid-cols-[minmax(220px,280px)_minmax(0,1fr)] max-[760px]:grid-cols-1 max-[760px]:grid-rows-[minmax(180px,38%)_minmax(0,1fr)]">
+            <aside className="grid min-h-0 grid-rows-[auto_auto_minmax(0,1fr)_auto] gap-2.5 overflow-hidden border-r border-border bg-warm-panel p-3.5 max-[760px]:border-r-0 max-[760px]:border-b">
+              <div className="flex items-center gap-[7px] rounded-[7px] border border-border bg-surface-translucent px-[9px] text-ink-muted">
+                <Search size={15} />
+                <input
+                  className="min-h-[34px] w-full border-0 bg-transparent outline-0"
+                  value={discoverQuery}
+                  onChange={(event) => {
+                    setDiscoverQuery(event.target.value);
+                    setActiveDiscoverChip("");
+                    setDiscoverOwner("");
+                  }}
+                  placeholder="搜索在线 Skills，例如 写作、PDF"
+                  aria-label="搜索在线 Skills"
+                />
+              </div>
+              <div className="flex flex-wrap gap-1.5" aria-label="推荐分类">
+                {DISCOVER_CHIPS.map((chip) => (
+                  <FilterChip active={activeDiscoverChip === chip.id} key={chip.id} onClick={() => handleSelectDiscoverChip(chip.id)}>
+                    {chip.label}
+                  </FilterChip>
+                ))}
+              </div>
+              <div className="grid min-h-0 content-start gap-2 overflow-auto">
+                {isSearching && <p className="m-0 text-[13px] text-ink-muted">正在搜索在线 Skills…</p>}
+                {!isSearching && discoverError && <p className="m-0 text-[13px] text-ink-muted">{discoverError}</p>}
+                {!isSearching && !discoverError && discoverQuery.trim().length < 2 && (
+                  <p className="m-0 text-[13px] text-ink-muted">从分类开始，或输入至少两个字搜索公开目录。</p>
+                )}
+                {!isSearching &&
+                  !discoverError &&
+                  discoverQuery.trim().length >= 2 &&
+                  !discoverResults.length && <p className="m-0 text-[13px] text-ink-muted">没有匹配的在线 Skill。</p>}
+                {discoverResults.map((skill) => {
+                  const isInstalled = skills.some((item) => item.name === skill.skillId || item.name === skill.name);
+
+                  return (
+                    <ListRow
+                      className="grid grid-cols-[minmax(0,1fr)_auto] border-border-translucent bg-surface-translucent"
+                      active={skill.id === selectedOnlineSkill?.id}
+                      key={skill.id}
+                      onClick={() => setSelectedOnlineSkillId(skill.id)}
+                    >
+                      <span className="min-w-0">
+                        <OverflowTooltipText as="strong" className="block truncate text-ink-strong" text={skill.name} logArea="skills_discover_row_name" />
+                        <OverflowTooltipText
+                          as="small"
+                          className="mt-[3px] block truncate text-xs text-ink-muted"
+                          text={`${skill.source} · ${formatInstallCount(skill.installs)}`}
+                          logArea="skills_discover_row_source"
+                        />
+                      </span>
+                      <em
+                        className={
+                          isInstalled
+                            ? "rounded-full bg-success-soft px-[7px] py-[3px] text-xs not-italic text-success"
+                            : "rounded-full bg-surface-muted px-[7px] py-[3px] text-xs not-italic text-ink-muted"
+                        }
+                      >
+                        {isInstalled ? "已安装" : skill.installable ? "可安装" : "需手动"}
+                      </em>
+                    </ListRow>
+                  );
+                })}
+              </div>
+              <p className="m-0 text-[11px] leading-normal text-ink-muted">搜索只把搜索词发给 skills.sh，不会上传笔记。</p>
+            </aside>
+            <div className="min-h-0 min-w-0 overflow-auto bg-surface p-4">
+              {selectedOnlineSkill ? (
+                <OnlineSkillPreviewPanel
+                  skill={selectedOnlineSkill}
+                  description={onlinePreviewDescription || selectedOnlineSkill.description}
+                  isBusy={isBusy}
+                  isInstalled={Boolean(installedOnlineSkill)}
+                  replaceExisting={replaceOnlineSkill}
+                  onReplaceExistingChange={setReplaceOnlineSkill}
+                  onInstall={() => handleInstallOnlineSkill(selectedOnlineSkill)}
+                  onOpenPage={() => void handleOpenOnlineSkillPage(selectedOnlineSkill.pageUrl)}
+                />
+              ) : (
+                <p className="m-0 text-[13px] text-ink-muted">选择一个在线 Skill 查看简介并安装。</p>
+              )}
+            </div>
+          </div>
+        ) : null}
+        {panel === "installed" ? (
         <div className="grid min-h-0 overflow-hidden grid-cols-[300px_minmax(0,1fr)] max-[980px]:grid-cols-[minmax(220px,280px)_minmax(0,1fr)] max-[760px]:grid-cols-1 max-[760px]:grid-rows-[minmax(180px,38%)_minmax(0,1fr)]">
           <aside className="grid min-h-0 grid-rows-[auto_auto_auto_auto_auto_auto_minmax(0,1fr)] gap-2.5 overflow-hidden border-r border-border bg-warm-panel p-3.5 max-[760px]:border-r-0 max-[760px]:border-b">
             <div className="grid grid-cols-3 gap-[7px] rounded-control border border-border-translucent bg-surface-translucent p-2.5 text-xs text-ink-muted" aria-label="Skills 摘要">
@@ -448,6 +772,7 @@ export function SkillsModal({
             )}
           </div>
         </div>
+        ) : null}
       </ModalPanel>
       {pendingConfirmation && (
         <ConfirmDialog
@@ -459,6 +784,82 @@ export function SkillsModal({
       )}
     </ModalBackdrop>
   );
+}
+
+/** 发现页右侧预览：名称、来源、安装量、简介和一键安装。 */
+function OnlineSkillPreviewPanel({
+  skill,
+  description,
+  isBusy,
+  isInstalled,
+  replaceExisting,
+  onReplaceExistingChange,
+  onInstall,
+  onOpenPage,
+}: {
+  skill: OnlineSkill;
+  description?: string;
+  isBusy: boolean;
+  isInstalled: boolean;
+  replaceExisting: boolean;
+  onReplaceExistingChange: (checked: boolean) => void;
+  onInstall: () => void;
+  onOpenPage: () => void;
+}) {
+  return (
+    <article className="grid gap-3.5">
+      <div className="flex items-start justify-between gap-3">
+        <div className="min-w-0">
+          <p className={sectionLabelClassName}>Online Skill</p>
+          <OverflowTooltipText as="h3" className="mt-1 mb-0 text-xl leading-tight text-ink-strong [overflow-wrap:anywhere]" text={skill.name} logArea="skills_discover_detail_name" />
+          <OverflowTooltipText className="mt-[3px] block text-xs text-ink-muted" text={skill.source} logArea="skills_discover_detail_source" />
+        </div>
+        <Button variant="ghost" onClick={onOpenPage} disabled={isBusy}>
+          <ExternalLink size={14} />
+          在 skills.sh 打开
+        </Button>
+      </div>
+      <p className="m-0 text-sm leading-[1.6] text-[#24323c]">{description || "暂无简介，可打开 skills.sh 查看完整说明。"}</p>
+      <section className="grid gap-1.5 rounded-[7px] border border-border-translucent bg-warm-panel p-2.5">
+        <h4 className="m-0 text-[13px] text-ink-strong">目录信息</h4>
+        <p className="m-0 text-xs leading-[1.55] text-ink-muted">{formatInstallCount(skill.installs)} · 第三方来源，安装量仅供参考。</p>
+      </section>
+      <section className="grid gap-1.5 rounded-[7px] border border-border-translucent bg-warm-panel p-2.5">
+        <h4 className="m-0 text-[13px] text-ink-strong">安装边界</h4>
+        <p className="m-0 text-xs leading-[1.55] text-ink-muted">
+          {skill.installable
+            ? "只会安装这一条 Skill，不会把整个仓库装进来。安装后默认停用，脚本仍须声明并审批后才能执行。"
+            : "此来源不是 GitHub 仓库，暂不支持一键安装。可打开 skills.sh 查看后改用链接或本地文件夹安装。"}
+        </p>
+      </section>
+      {skill.installable && isInstalled && (
+        <ToggleRow checked={replaceExisting} disabled={isBusy} onChange={onReplaceExistingChange}>
+          替换同名 Skill
+        </ToggleRow>
+      )}
+      <div className="flex min-w-0 flex-wrap justify-end gap-2">
+        <Button variant="primary" size="compact" onClick={onInstall} disabled={isBusy || !skill.installable}>
+          <Download size={14} />
+          {isInstalled ? "重新安装" : "安装 Skill"}
+        </Button>
+      </div>
+    </article>
+  );
+}
+
+/** 把安装量格式化为中文短标签。 */
+function formatInstallCount(count: number) {
+  if (count >= 10_000) {
+    const wan = count / 10_000;
+    const label = wan >= 10 ? wan.toFixed(0) : wan.toFixed(1).replace(/\.0$/, "");
+    return `${label} 万次安装`;
+  }
+
+  if (count >= 1_000) {
+    return `${(count / 1_000).toFixed(1).replace(/\.0$/, "")} 千次安装`;
+  }
+
+  return `${count} 次安装`;
 }
 
 /** Skill 详情页，展示完整说明并提供启停开关。 */

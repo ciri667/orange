@@ -7,8 +7,17 @@ import {
   cloneAgentSkills,
   installBrowserMockSkill,
   normalizeBrowserCustomSkill,
+  previewBrowserOnlineSkill,
+  searchBrowserOnlineSkills,
 } from "../mock/browser";
-import { AgentSkill, InstallAgentSkillPayload, InstallAgentSkillResult } from "../types";
+import {
+  AgentSkill,
+  InstallAgentSkillPayload,
+  InstallAgentSkillResult,
+  OnlineSkillPreview,
+  OnlineSkillSearchResult,
+  SearchOnlineSkillsPayload,
+} from "../types";
 
 /** 读取 Agent skills，桌面端来自 SQLite，浏览器开发态来自内存模拟状态。 */
 export async function loadAgentSkills(): Promise<AgentSkill[]> {
@@ -157,4 +166,55 @@ export async function installAgentSkill(payload: InstallAgentSkillPayload): Prom
     });
     throw error;
   }
+}
+
+/** 搜索 skills.sh 在线目录；浏览器开发态使用本地模拟结果。 */
+export async function searchOnlineSkills(payload: SearchOnlineSkillsPayload): Promise<OnlineSkillSearchResult> {
+  const startedAt = performance.now();
+
+  logInfo("开始搜索在线 Skills。", {
+    category: "skill",
+    event: "search_online_skills",
+    status: "started",
+    metadata: {
+      queryChars: payload.query.trim().length,
+      hasOwner: Boolean(payload.owner?.trim()),
+    },
+  });
+
+  try {
+    const result = isTauriRuntime()
+      ? await invokeLogged<OnlineSkillSearchResult>("search_online_skills", { payload })
+      : searchBrowserOnlineSkills(payload);
+
+    logInfo("在线 Skills 搜索完成。", {
+      category: "skill",
+      event: "search_online_skills",
+      status: "completed",
+      durationMs: performance.now() - startedAt,
+      metadata: {
+        resultCount: result.skills.length,
+      },
+    });
+
+    return result;
+  } catch (error) {
+    logError("在线 Skills 搜索失败。", {
+      category: "skill",
+      event: "search_online_skills",
+      status: "failed",
+      durationMs: performance.now() - startedAt,
+      error,
+    });
+    throw error;
+  }
+}
+
+/** 读取在线 Skill 简介；失败时由调用方降级为只展示名称和来源。 */
+export async function previewOnlineSkill(skillId: string): Promise<OnlineSkillPreview> {
+  if (!isTauriRuntime()) {
+    return previewBrowserOnlineSkill(skillId);
+  }
+
+  return invokeLogged<OnlineSkillPreview>("preview_online_skill", { payload: { id: skillId } });
 }

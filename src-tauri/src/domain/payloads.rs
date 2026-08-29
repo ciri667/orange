@@ -385,6 +385,25 @@ pub struct InstallAgentSkillPayload {
     #[serde(default)]
     pub enable_after_install: bool,
     pub conflict_strategy: String,
+    /** 非空时只安装名称匹配的 Skill，避免发现页把整个仓库装进来。 */
+    #[serde(default)]
+    pub skill_names: Vec<String>,
+}
+
+/** 在线搜索 Agent Skills 的命令入参；owner 用于官方等来源收窄。 */
+#[derive(Clone, Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SearchOnlineSkillsPayload {
+    pub query: String,
+    #[serde(default)]
+    pub owner: Option<String>,
+}
+
+/** 预览在线 Skill 简介的命令入参，id 为 skills.sh 的 owner/repo/skill 路径。 */
+#[derive(Clone, Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PreviewOnlineSkillPayload {
+    pub id: String,
 }
 
 /** 安装第三方 skill 后返回安装项、刷新列表和脱敏摘要。 */

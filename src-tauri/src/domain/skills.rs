@@ -102,3 +102,36 @@ pub struct SkillCompatibilityReport {
     #[serde(default)]
     pub warnings: Vec<String>,
 }
+
+/** skills.sh 目录中的一条可发现 Skill，供设置页「发现」列表展示。 */
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OnlineSkill {
+    pub id: String,
+    pub skill_id: String,
+    pub name: String,
+    pub source: String,
+    pub installs: u64,
+    pub page_url: String,
+    pub installable: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+}
+
+/** 在线 Skill 搜索结果；query 回显用户输入，便于核对防抖请求。 */
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OnlineSkillSearchResult {
+    pub query: String,
+    pub skills: Vec<OnlineSkill>,
+}
+
+/** 在线 Skill 预览；简介缺失时前端仍可展示名称和来源。 */
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OnlineSkillPreview {
+    pub id: String,
+    pub page_url: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+}
