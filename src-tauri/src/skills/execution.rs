@@ -15,6 +15,15 @@ use walkdir::WalkDir;
 /** 单次 Skill 输出最多进入可见诊断的字符数，避免脚本输出正文或密钥淹没日志。 */
 const MAX_EXECUTION_OUTPUT_CHARS: usize = 2000;
 
+/** 只 upsert 当前会话，避免 Skill 审批用过期快照覆盖其它对话线程。 */
+fn persist_session_at(
+    app: &AppHandle,
+    snapshot: &WorkspaceSnapshot,
+    session_index: usize,
+) -> Result<(), String> {
+    storage::save_snapshot_session(app, snapshot, &snapshot.sessions[session_index].id)
+}
+
 /** 审批后在隔离副本中运行 Skill，并将文件系统差异转换为待确认变更集。 */
 pub fn approve_and_execute(
     app: &AppHandle,
@@ -135,7 +144,7 @@ pub fn approve_and_execute(
             },
         )?;
     }
-    storage::save_sessions(app, &snapshot)?;
+    persist_session_at(app, &snapshot, session_index)?;
 
     Ok(snapshot)
 }
@@ -179,7 +188,7 @@ pub fn reject_execution(
         ..request
     });
     snapshot.sessions[session_index].updated_at = storage::format_local_datetime();
-    storage::save_sessions(app, &snapshot)?;
+    persist_session_at(app, &snapshot, session_index)?;
     Ok(snapshot)
 }
 
@@ -335,7 +344,7 @@ pub fn apply_change_set(
     });
     snapshot.sessions[session_index].updated_at = storage::format_local_datetime();
     storage::index_snapshot(app, &snapshot)?;
-    storage::save_sessions(app, &snapshot)?;
+    persist_session_at(app, &snapshot, session_index)?;
     // 文件已经安全落盘后，隔离区清理失败只保留待下次启动清理，不把成功应用误报为失败。
     let _ = cleanup_run_directory(app, &execution_id);
     Ok(snapshot)
@@ -399,7 +408,7 @@ pub fn reject_change_set(
         ..change_set
     });
     snapshot.sessions[session_index].updated_at = storage::format_local_datetime();
-    storage::save_sessions(app, &snapshot)?;
+    persist_session_at(app, &snapshot, session_index)?;
     Ok(snapshot)
 }
 
@@ -480,7 +489,7 @@ pub fn apply_agent_change_set(
     });
     snapshot.sessions[session_index].updated_at = storage::format_local_datetime();
     storage::index_snapshot(app, &snapshot)?;
-    storage::save_sessions(app, &snapshot)?;
+    persist_session_at(app, &snapshot, session_index)?;
     Ok(snapshot)
 }
 
@@ -503,7 +512,7 @@ pub fn reject_agent_change_set(
         ..change_set
     });
     snapshot.sessions[session_index].updated_at = storage::format_local_datetime();
-    storage::save_sessions(app, &snapshot)?;
+    persist_session_at(app, &snapshot, session_index)?;
     Ok(snapshot)
 }
 

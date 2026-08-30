@@ -280,6 +280,22 @@ pub(super) async fn index_snapshot_in_background(
     .await
 }
 
+/** 回合结束后只 upsert 本轮会话，避免过期快照把其它会话删掉或打回旧模型/权限。 */
+pub(super) async fn persist_turn_session(
+    app: &AppHandle,
+    snapshot: &WorkspaceSnapshot,
+    session_id: &str,
+) -> Result<(), String> {
+    let persist_app = app.clone();
+    let persist_snapshot = snapshot.clone();
+    let persist_session_id = session_id.to_owned();
+
+    run_blocking("保存 Agent 会话", move || {
+        storage::save_snapshot_session(&persist_app, &persist_snapshot, &persist_session_id)
+    })
+    .await
+}
+
 /** 从新建文件相对路径提取初始标题，空白正文会在重扫时继续使用文件名。 */
 pub(super) fn note_title_from_path(relative_path: &str) -> String {
     Path::new(relative_path)

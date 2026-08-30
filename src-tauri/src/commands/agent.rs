@@ -81,9 +81,33 @@ pub async fn run_agent_turn(
         return Err(error);
     }
 
-    // 每轮后刷新本地索引并持久化会话，确保消息、工具轨迹和 pending diff 可在重启后恢复。
+    // 每轮后刷新本地索引，并只 upsert 本轮会话，确保消息可恢复且不覆盖其它会话。
     if let Err(error) =
         index_snapshot_in_background(app.clone(), &runtime_result.turn_result.snapshot).await
+    {
+        logging::write_app_event_best_effort(
+            &app,
+            AppEventBuilder::new(
+                AppLogLevel::Error,
+                AppLogCategory::Agent,
+                "run_agent_turn",
+                "failed",
+                error.clone(),
+            )
+            .operation_id(operation_id)
+            .session_id(session_id)
+            .knowledge_base_id(active_knowledge_base_id)
+            .duration(started_at.elapsed()),
+        );
+
+        return Err(error);
+    }
+    if let Err(error) = persist_turn_session(
+        &app,
+        &runtime_result.turn_result.snapshot,
+        &session_id,
+    )
+    .await
     {
         logging::write_app_event_best_effort(
             &app,
@@ -174,6 +198,7 @@ pub async fn compact_agent_context(
 
         return Err(error);
     }
+    persist_turn_session(&app, &snapshot, &session_id).await?;
 
     logging::write_app_event_best_effort(
         &app,
@@ -261,7 +286,7 @@ pub(crate) async fn run_agent_turn_from_im(
     snapshot.active_note_id.clear();
     snapshot.active_document_id.clear();
 
-    storage::save_sessions(&app, &snapshot)?;
+    storage::save_snapshot_session(&app, &snapshot, &session_id)?;
 
     logging::write_app_event_best_effort(
         &app,
@@ -320,6 +345,7 @@ pub(crate) async fn run_agent_turn_from_im(
     })
     .await?;
     index_snapshot_in_background(app.clone(), &runtime_result.turn_result.snapshot).await?;
+    persist_turn_session(&app, &runtime_result.turn_result.snapshot, &session_id).await?;
 
     logging::write_app_event_best_effort(
         &app,
@@ -486,7 +512,7 @@ pub(super) async fn create_im_session_from_command(
     let session = crate::im::build_im_agent_session(new_identity, valid_scope_ids);
     let session_id = session.id.clone();
     snapshot.sessions.insert(0, session);
-    storage::save_sessions(app, &snapshot)?;
+    storage::save_snapshot_session(app, &snapshot, &session_id)?;
     storage::save_im_session_mapping(app, channel_key, &session_id)?;
 
     Ok(ImBuiltinCommandResult {
@@ -586,7 +612,7 @@ pub(super) async fn compact_im_session_from_command(
         .chars()
         .take(48)
         .collect::<String>();
-    storage::save_sessions(app, &snapshot)?;
+    storage::save_snapshot_session(app, &snapshot, &session_id)?;
     index_snapshot_in_background(app.clone(), &snapshot).await?;
 
     Ok(ImBuiltinCommandResult {
@@ -700,7 +726,7 @@ pub(crate) async fn handle_im_pending_change_command(
     match result {
         Ok(updated_snapshot) => {
             // IM 操作没有前端接收 snapshot，因此必须立即持久化会话状态，重复消息才不会二次写入。
-            if let Err(error) = storage::save_sessions(&app, &updated_snapshot) {
+            if let Err(error) = storage::save_snapshot_session(&app, &updated_snapshot, &session_id) {
                 log_im_change_approval(
                     &app,
                     "failed",
@@ -741,7 +767,7 @@ pub(crate) async fn handle_im_pending_change_command(
                     }
                     session.updated_at = storage::format_local_datetime();
                 }
-                let _ = storage::save_sessions(&app, &snapshot_before_apply);
+                let _ = storage::save_snapshot_session(&app, &snapshot_before_apply, &session_id);
                 log_im_change_approval(
                     &app,
                     "conflict",
@@ -969,7 +995,7 @@ pub async fn reject_proposed_change(
                 "completed",
                 "已拒绝 Agent diff。",
             )
-            .session_id(session_id)
+            .session_id(&session_id)
             .knowledge_base_id(rejected_knowledge_base_id)
             .entity("change", rejected_change_id)
             .relative_path(rejected_target_path)
@@ -984,6 +1010,7 @@ pub async fn reject_proposed_change(
     }
 
     index_snapshot_in_background(app.clone(), &snapshot).await?;
+    persist_turn_session(&app, &snapshot, &session_id).await?;
 
     Ok(snapshot)
 }

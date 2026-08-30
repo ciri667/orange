@@ -1002,7 +1002,7 @@ async fn run_model_loop(
                     )
                 }) {
                     // 自动批准仍先持久化结构化请求，审批执行器只从 SQLite 重载可信载荷。
-                    crate::storage::save_sessions(app, &snapshot)?;
+                    crate::storage::save_snapshot_session(app, &snapshot, &request.session_id)?;
                     let execution_app = app.clone();
                     let execution_snapshot = snapshot.clone();
                     snapshot = tauri::async_runtime::spawn_blocking(move || {
@@ -1037,7 +1037,7 @@ async fn run_model_loop(
                     &agent_security,
                 )
             {
-                crate::storage::save_sessions(app, &snapshot)?;
+                crate::storage::save_snapshot_session(app, &snapshot, &request.session_id)?;
                 let apply_app = app.clone();
                 let apply_snapshot = snapshot.clone();
                 let auto_result = tauri::async_runtime::spawn_blocking(move || {
@@ -1085,7 +1085,7 @@ async fn run_model_loop(
                     &agent_security,
                 )
             {
-                crate::storage::save_sessions(app, &snapshot)?;
+                crate::storage::save_snapshot_session(app, &snapshot, &request.session_id)?;
                 let apply_app = app.clone();
                 let apply_snapshot = snapshot.clone();
                 let auto_result = tauri::async_runtime::spawn_blocking(move || {
@@ -1102,7 +1102,7 @@ async fn run_model_loop(
                             None,
                             false,
                         );
-                        crate::storage::save_sessions(app, &snapshot)?;
+                        crate::storage::save_snapshot_session(app, &snapshot, &request.session_id)?;
                         tool_result_text = truncate_chars(
                             &json!({
                                 "status": "applied",

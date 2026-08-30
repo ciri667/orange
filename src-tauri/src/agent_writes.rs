@@ -111,6 +111,7 @@ pub fn apply_pending_change(
     });
     snapshot.sessions[session_index].updated_at = storage::format_local_datetime();
     storage::index_snapshot(app, &snapshot)?;
+    storage::save_snapshot_session(app, &snapshot, &session_id)?;
 
     logging::write_app_event_best_effort(
         app,
