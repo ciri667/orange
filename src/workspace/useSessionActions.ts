@@ -23,7 +23,6 @@ interface SessionActionsOptions extends WorkspaceChrome {
   isScopeSelectorOpen: boolean;
   agentOpen: boolean;
   setAgentOpen: (value: boolean) => void;
-  resetTurnSelection: () => void;
   setUserSettings: (settings: import("../shared/types").UserSettings) => void;
 }
 
@@ -50,7 +49,6 @@ export function useSessionActions(options: SessionActionsOptions) {
     isScopeSelectorOpen,
     agentOpen,
     setAgentOpen,
-    resetTurnSelection,
     setUserSettings,
   } = options;
 
@@ -114,7 +112,6 @@ export function useSessionActions(options: SessionActionsOptions) {
       setIsSessionListOpen(false);
       setIsSessionContextOpen(false);
       setIsScopeSelectorOpen(false);
-      resetTurnSelection();
     } catch (error) {
       setNotice(error instanceof Error ? error.message : String(error));
     } finally {
@@ -141,7 +138,6 @@ export function useSessionActions(options: SessionActionsOptions) {
       setIsSessionListOpen(false);
       setIsSessionContextOpen(false);
       setIsScopeSelectorOpen(false);
-      resetTurnSelection();
     } catch (error) {
       setNotice(error instanceof Error ? error.message : String(error));
     } finally {

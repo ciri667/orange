@@ -43,8 +43,10 @@ export function AgentPanel({
   agentSecurity,
   turnModelSelection,
   isBusy,
+  isComposerBusy = false,
   liveTurn,
   queuedFollowUp,
+  queuedFollowUpInList,
   isSessionListOpen,
   isSessionContextOpen,
   isScopeSelectorOpen,
@@ -94,10 +96,14 @@ export function AgentPanel({
   /** 本轮显式选择的 provider/model，空字符串表示跟随会话/全局默认。 */
   turnModelSelection: string;
   isBusy: boolean;
+  /** 当前正在查看的会话是否有进行中的回合或排队指令，供输入条和权限开关使用。 */
+  isComposerBusy?: boolean;
   /** 当前正在执行的过程快照；完成后由持久化助手消息接管。 */
   liveTurn?: AgentTurnProgressEvent | null;
-  /** 当前回合结束后才会发给模型的下一条用户指令；只存在于界面，未写入会话。 */
+  /** 当前会话排队指令，用于输入条；可能已经乐观写入该会话。 */
   queuedFollowUp?: string | null;
+  /** 尚未落库、需要画在消息列表里的同会话 follow-up。 */
+  queuedFollowUpInList?: string | null;
   isSessionListOpen: boolean;
   isSessionContextOpen: boolean;
   isScopeSelectorOpen: boolean;
@@ -212,7 +218,7 @@ export function AgentPanel({
         documents={documents}
         liveTurn={liveTurn}
         notes={notes}
-        queuedFollowUp={queuedFollowUp}
+        queuedFollowUp={queuedFollowUpInList}
       />
 
       {activeSession.pendingExecution?.status === "pending" && (
@@ -287,7 +293,7 @@ export function AgentPanel({
         modelConfig={modelConfig}
         agentSecurity={agentSecurity}
         turnModelSelection={turnModelSelection}
-        isBusy={isBusy}
+        isBusy={isComposerBusy}
         queuedFollowUp={queuedFollowUp}
         onPromptChange={onPromptChange}
         onSelectedSkillIdsChange={onSelectedSkillIdsChange}

@@ -1,6 +1,15 @@
 import type { AgentMentionFile } from "../agent/AgentInput";
 import { createLocalId, formatLocalDateTime } from "../shared/id";
-import type { AgentActionType, AgentMessage, AgentSession, KnowledgeBase, WorkspaceSnapshot } from "../shared/types";
+import type {
+  AgentActionType,
+  AgentMessage,
+  AgentSession,
+  FolderEntry,
+  KnowledgeBase,
+  Note,
+  WorkspaceDocument,
+  WorkspaceSnapshot,
+} from "../shared/types";
 
 /** 空白会话的默认标题；首条用户输入提交后会替换为用户原始输入。 */
 export const DEFAULT_SESSION_TITLE = "新会话";
@@ -138,17 +147,121 @@ export function buildOptimisticUserMessage(prompt: string, action: AgentActionTy
 }
 
 /** 把用户消息追加进目标会话，确保 Agent 响应前对话框已经显示用户输入。 */
-export function appendUserMessageToSession(snapshot: WorkspaceSnapshot, session: AgentSession, message: AgentMessage) {
+export function appendUserMessageToSession(
+  snapshot: WorkspaceSnapshot,
+  session: AgentSession,
+  message: AgentMessage,
+  options?: { activate?: boolean },
+) {
   const nextSession = {
     ...session,
     messages: [...session.messages, message],
+    updatedAt: formatLocalDateTime(),
+  };
+  const activate = options?.activate ?? true;
+
+  return {
+    snapshot: {
+      ...snapshot,
+      ...(activate ? { activeSessionId: nextSession.id } : {}),
+      sessions: snapshot.sessions.map((item) => (item.id === nextSession.id ? nextSession : item)),
+    },
+    session: nextSession,
+  };
+}
+
+/** 按 id 合并列表：保留当前快照里多出来的项，并按回调决定是否采用回合结果。 */
+function mergeItemsById<T extends { id: string }>(
+  current: T[],
+  incoming: T[],
+  shouldTakeIncoming: (currentItem: T | undefined, incomingItem: T) => boolean,
+): T[] {
+  const currentById = new Map(current.map((item) => [item.id, item]));
+  const incomingById = new Map(incoming.map((item) => [item.id, item]));
+  const merged: T[] = [];
+  const seen = new Set<string>();
+
+  for (const item of current) {
+    const next = incomingById.get(item.id);
+    merged.push(next && shouldTakeIncoming(item, next) ? next : item);
+    seen.add(item.id);
+  }
+
+  for (const item of incoming) {
+    if (!seen.has(item.id) && shouldTakeIncoming(currentById.get(item.id), item)) {
+      merged.push(item);
+    }
+  }
+
+  return merged;
+}
+
+/** 把一轮 Agent 结果合并进当前工作台，不抢焦点、不丢其它会话。 */
+export function mergeSessionTurn(
+  current: WorkspaceSnapshot,
+  turnSnapshot: WorkspaceSnapshot,
+  turnSessionId: string,
+  options?: { dirtyNoteIds?: Set<string>; dirtyDocumentIds?: Set<string> },
+): WorkspaceSnapshot {
+  const turnSession = turnSnapshot.sessions.find((session) => session.id === turnSessionId);
+
+  if (!turnSession) {
+    return current;
+  }
+
+  const hasTurnSession = current.sessions.some((session) => session.id === turnSessionId);
+  const sessions = hasTurnSession
+    ? current.sessions.map((session) => (session.id === turnSessionId ? turnSession : session))
+    : [turnSession, ...current.sessions];
+  const dirtyNoteIds = options?.dirtyNoteIds ?? new Set<string>();
+  const dirtyDocumentIds = options?.dirtyDocumentIds ?? new Set<string>();
+
+  return {
+    ...current,
+    sessions,
+    notes: mergeItemsById<Note>(current.notes, turnSnapshot.notes, (currentNote, incomingNote) => {
+      if (currentNote && dirtyNoteIds.has(currentNote.id)) {
+        return false;
+      }
+
+      return !currentNote || currentNote.contentHash !== incomingNote.contentHash;
+    }),
+    documents: mergeItemsById<WorkspaceDocument>(
+      current.documents,
+      turnSnapshot.documents,
+      (currentDocument, incomingDocument) => {
+        if (currentDocument && dirtyDocumentIds.has(currentDocument.id)) {
+          return false;
+        }
+
+        return !currentDocument || currentDocument.contentHash !== incomingDocument.contentHash;
+      },
+    ),
+    folders: mergeItemsById<FolderEntry>(current.folders, turnSnapshot.folders, (currentFolder) => !currentFolder),
+  };
+}
+
+/** 从会话中移除尚未进入模型的排队用户消息，取消排队时回滚乐观写入。 */
+export function removeSessionMessage(
+  snapshot: WorkspaceSnapshot,
+  sessionId: string,
+  messageId: string,
+): { snapshot: WorkspaceSnapshot; session?: AgentSession } {
+  const session = snapshot.sessions.find((item) => item.id === sessionId);
+
+  if (!session) {
+    return { snapshot };
+  }
+
+  const nextSession = {
+    ...session,
+    messages: session.messages.filter((message) => message.id !== messageId),
     updatedAt: formatLocalDateTime(),
   };
 
   return {
     snapshot: {
       ...snapshot,
-      activeSessionId: nextSession.id,
       sessions: snapshot.sessions.map((item) => (item.id === nextSession.id ? nextSession : item)),
     },
     session: nextSession,

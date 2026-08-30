@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { AgentPanel } from "../agent/AgentPanel";
 import { DocumentPane } from "../editor/DocumentPane";
 import { EditorTabBar, type EditorTabBarItem } from "../editor/EditorTabBar";
@@ -35,7 +35,7 @@ import {
   getCreatePlaceholder,
   getCreateSubmitLabel,
 } from "./fileNameUtils";
-import { buildDraftAgentSession, buildMentionableFiles, resolveActiveSessionForKnowledgeBase } from "./sessionUtils";
+import { DRAFT_SESSION_ID, buildDraftAgentSession, buildMentionableFiles, resolveActiveSessionForKnowledgeBase } from "./sessionUtils";
 import { useAgentTurn } from "./useAgentTurn";
 import { useAgentTurnDraft } from "./useAgentTurnDraft";
 import { useDocumentPreview } from "./useDocumentPreview";
@@ -62,18 +62,6 @@ interface PendingConfirmation extends ConfirmDialogConfig {
 }
 
 export function WorkspaceShell() {
-  /** Agent turn 草稿 hook 维护输入框、本轮 Provider 和显式 Skill 状态。 */
-  const {
-    agentPrompt,
-    setAgentPrompt,
-    turnModelSelection,
-    setTurnModelSelection,
-    explicitSkillIds,
-    setExplicitSkillIds,
-    mentionedFileIds,
-    setMentionedFileIds,
-    resetTurnSelection,
-  } = useAgentTurnDraft();
   /** 左侧目录搜索词，只影响当前前端文件树过滤，不写入持久化。 */
   const [searchTerm, setSearchTerm] = useState("");
   /** 目录树折叠状态由前端维护，切换知识库、重扫或恢复会话时重置。 */
@@ -86,8 +74,9 @@ export function WorkspaceShell() {
   const [isScopeSelectorOpen, setIsScopeSelectorOpen] = useState(false);
   /** 设置抽屉打开状态，打开时会刷新非阻塞诊断日志。 */
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
-  /** 全局忙碌状态覆盖文件、会话、设置和日志刷新操作。 */
+  /** 全局忙碌状态覆盖文件、会话、设置和日志刷新操作；用计数避免切会话清掉 Agent 回合。 */
   const [isBusy, setIsBusy] = useState(false);
+  const busyCountRef = useRef(0);
   /** 忙碌状态文案只展示当前操作类型，不包含路径、密钥或请求内容。 */
   const [busyLabel, setBusyLabel] = useState("");
   /** 顶部/侧栏轻量通知，展示用户操作结果和可恢复错误。 */
@@ -167,6 +156,17 @@ export function WorkspaceShell() {
     onNoticeChange: setNotice,
   });
   useReviewChangeLogger(snapshot);
+  /** Agent 输入草稿按会话隔离，切走再切回时保留该会话的模型和未发送文字。 */
+  const {
+    agentPrompt,
+    setAgentPrompt,
+    turnModelSelection,
+    setTurnModelSelection,
+    explicitSkillIds,
+    setExplicitSkillIds,
+    mentionedFileIds,
+    setMentionedFileIds,
+  } = useAgentTurnDraft(snapshot?.activeSessionId || DRAFT_SESSION_ID);
   /** 只读文档预览 hook 负责异步加载和错误状态，TXT 仍由可编辑正文面板处理。 */
   const { documentPreview, documentPreviewError, isDocumentPreviewLoading } = useDocumentPreview(snapshot);
 
@@ -361,12 +361,13 @@ export function WorkspaceShell() {
     isScopeSelectorOpen,
     agentOpen,
     setAgentOpen,
-    resetTurnSelection,
     setUserSettings,
   });
   const {
     liveTurn,
     queuedFollowUp,
+    queuedFollowUpInList,
+    isCurrentSessionBusy,
     handleClearQueuedFollowUp,
     handleSubmitPrompt,
     handleApproveSkillExecution,
@@ -391,6 +392,8 @@ export function WorkspaceShell() {
     setMentionedFileIds,
     setAuditLogs,
     setAppEventLogs,
+    dirtyNoteIds,
+    dirtyDocumentIds,
   });
   const { handleAddReviewComment, handleSubmitReviewComments, handleAcceptChange, handleRejectChange } = useReviewActions({
     snapshot,
@@ -515,15 +518,19 @@ export function WorkspaceShell() {
 
   /** 统一进入忙碌状态，附带可展示的操作说明。 */
   function beginBusy(label: string) {
+    busyCountRef.current += 1;
     setIsBusy(true);
     setBusyLabel(label);
     setNotice("");
   }
 
-  /** 统一结束忙碌状态，避免扫描或保存结束后残留旧提示。 */
+  /** 统一结束忙碌状态；有嵌套操作时保持忙碌，避免切会话清掉 Agent 回合。 */
   function endBusy() {
-    setIsBusy(false);
-    setBusyLabel("");
+    busyCountRef.current = Math.max(0, busyCountRef.current - 1);
+    if (busyCountRef.current === 0) {
+      setIsBusy(false);
+      setBusyLabel("");
+    }
   }
 
   /** 打开应用内确认弹窗，调用方只在用户确认后执行真实副作用。 */
@@ -704,8 +711,10 @@ export function WorkspaceShell() {
             agentSecurity={userSettings.agentSecurity}
             turnModelSelection={turnModelSelection}
             isBusy={isBusy}
+            isComposerBusy={isCurrentSessionBusy}
             liveTurn={liveTurn}
             queuedFollowUp={queuedFollowUp}
+            queuedFollowUpInList={queuedFollowUpInList}
             isSessionListOpen={isSessionListOpen}
             isSessionContextOpen={isSessionContextOpen}
             isScopeSelectorOpen={isScopeSelectorOpen}
