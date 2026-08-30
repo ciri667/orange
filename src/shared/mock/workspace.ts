@@ -1,6 +1,7 @@
 import { traceFromToolCalls } from "../../agent/agentTrace";
 import { createContentHash, createLocalId, formatLocalDateTime } from "../id";
 import { buildMarkdownDiff } from "../../diff/markdownDiff";
+import { extractNoteTags } from "../noteTags";
 import { isRootProjectInstructionPath } from "../projectInstructions";
 import type {
   AgentActionType,
@@ -17,6 +18,13 @@ import type {
   WorkspaceDocument,
   WorkspaceSnapshot,
 } from "../types";
+
+/** 给模拟笔记补上文末 `#标签` 行，让 tags 字段和正文保持同一来源。 */
+function mockMarkdown(body: string, tags: string[]) {
+  const content = tags.length ? `${body.trimEnd()}\n\n${tags.map((tag) => `#${tag}`).join(" ")}\n` : body;
+
+  return { content, tags: extractNoteTags(content) };
+}
 
 /** 浏览器开发态内置知识库，模拟用户连接多个本地支持文档目录。 */
 const initialKnowledgeBases: KnowledgeBase[] = [
@@ -130,9 +138,9 @@ const initialNotes: Note[] = [
     title: "Agent 说明书",
     path: "AGENTS.md",
     updatedAt: "今天 14:18",
-    tags: ["Agent"],
     backlinks: [],
-    content: `# Agent 说明书
+    ...mockMarkdown(
+      `# Agent 说明书
 
 这份文件是给橘记 Agent 的项目规则，不是普通笔记。
 
@@ -148,6 +156,8 @@ const initialNotes: Note[] = [
 
 - 不要删除或大幅打乱现有结构，除非我明确要求。
 `,
+      ["Agent"],
+    ),
     contentHash: "",
   },
   {
@@ -156,9 +166,9 @@ const initialNotes: Note[] = [
     title: "Agent 笔记应用立项",
     path: "00-Inbox/Agent 笔记应用立项.md",
     updatedAt: "今天 14:16",
-    tags: ["产品", "MVP", "Agent"],
     backlinks: ["note-research-loop", "note-privacy"],
-    content: `# Agent 笔记应用立项
+    ...mockMarkdown(
+      `# Agent 笔记应用立项
 
 ## 产品定位
 面向个人知识工作者的本地优先 Agent 笔记应用。用户选择本地 Markdown 目录作为知识库，在熟悉的笔记编辑界面中，让助手完成查找、问答、改写、生成新笔记和整理知识等操作。
@@ -168,6 +178,8 @@ const initialNotes: Note[] = [
 - 在编辑器中创建、编辑和保存笔记草稿。
 - 在 Agent 侧栏中基于知识库问答，并展示引用来源。
 - Agent 修改笔记前必须展示 diff，由用户确认后写入。`,
+      ["产品", "MVP", "Agent"],
+    ),
     contentHash: "",
   },
   {
@@ -176,9 +188,9 @@ const initialNotes: Note[] = [
     title: "个人知识循环",
     path: "01-Research/个人知识循环.md",
     updatedAt: "昨天 21:40",
-    tags: ["研究", "知识管理"],
     backlinks: ["note-product-brief"],
-    content: `# 个人知识循环
+    ...mockMarkdown(
+      `# 个人知识循环
 
 ## 捕获
 把会议、阅读、灵感和问题快速放入 Inbox，避免一开始就分类。
@@ -188,6 +200,8 @@ const initialNotes: Note[] = [
 
 ## 复用
 写作或决策时让 Agent 先从知识库中检索上下文，再给出带引用的总结。`,
+      ["研究", "知识管理"],
+    ),
     contentHash: "",
   },
   {
@@ -196,9 +210,9 @@ const initialNotes: Note[] = [
     title: "本地优先与隐私边界",
     path: "02-Architecture/本地优先与隐私边界.md",
     updatedAt: "周二 09:22",
-    tags: ["隐私", "架构", "Tauri"],
     backlinks: ["note-product-brief"],
-    content: `# 本地优先与隐私边界
+    ...mockMarkdown(
+      `# 本地优先与隐私边界
 
 ## 文件所有权
 Markdown 文件保存在用户选择的目录中，应用只负责读取、索引和在确认后写入。
@@ -208,6 +222,8 @@ Markdown 文件保存在用户选择的目录中，应用只负责读取、索�
 
 ## 写入权限
 Agent 不能静默修改本地文件。所有写入动作都必须先生成变更预览，并允许用户接受或取消。`,
+      ["隐私", "架构", "Tauri"],
+    ),
     contentHash: "",
   },
   {
@@ -216,9 +232,9 @@ Agent 不能静默修改本地文件。所有写入动作都必须先生成变�
     title: "原型评审会议纪要",
     path: "03-Meetings/原型评审会议纪要.md",
     updatedAt: "周一 17:05",
-    tags: ["会议", "原型"],
     backlinks: [],
-    content: `# 原型评审会议纪要
+    ...mockMarkdown(
+      `# 原型评审会议纪要
 
 ## 结论
 首版需要直接展示可工作的桌面工具界面，不做营销首页。
@@ -227,6 +243,8 @@ Agent 不能静默修改本地文件。所有写入动作都必须先生成变�
 - 是否需要支持多知识库切换。
 - 是否在侧栏中提供 Agent 操作历史。
 - 是否展示 Markdown 预览模式。`,
+      ["会议", "原型"],
+    ),
     contentHash: "",
   },
   {
@@ -235,9 +253,9 @@ Agent 不能静默修改本地文件。所有写入动作都必须先生成变�
     title: "Project-A 上线计划",
     path: "Release/Project-A 上线计划.md",
     updatedAt: "今天 11:20",
-    tags: ["项目", "上线", "检查清单"],
     backlinks: ["note-tech-decision"],
-    content: `# Project-A 上线计划
+    ...mockMarkdown(
+      `# Project-A 上线计划
 
 ## 发布目标
 在不影响现有用户工作流的前提下，完成知识库导入、检索索引和基础写入确认流程。
@@ -246,6 +264,8 @@ Agent 不能静默修改本地文件。所有写入动作都必须先生成变�
 - 本地文件权限需要给出明确提示。
 - 云端模型请求必须显示发送范围。
 - 跨知识库检索需要由用户显式开启。`,
+      ["项目", "上线", "检查清单"],
+    ),
     contentHash: "",
   },
   {
@@ -254,15 +274,17 @@ Agent 不能静默修改本地文件。所有写入动作都必须先生成变�
     title: "桌面端技术选型",
     path: "Architecture/桌面端技术选型.md",
     updatedAt: "昨天 18:45",
-    tags: ["Tauri", "架构", "本地文件"],
     backlinks: ["note-release-plan"],
-    content: `# 桌面端技术选型
+    ...mockMarkdown(
+      `# 桌面端技术选型
 
 ## 建议
 正式产品采用 Tauri + React + TypeScript。桌面层负责本地目录授权、文件系统读写和安全确认。
 
 ## 约束
 Web 原型只模拟目录选择和写入行为，不直接访问真实文件系统。`,
+      ["Tauri", "架构", "本地文件"],
+    ),
     contentHash: "",
   },
   {
@@ -271,15 +293,17 @@ Web 原型只模拟目录选择和写入行为，不直接访问真实文件系�
     title: "LLM 知识管理摘录",
     path: "Books/LLM 知识管理摘录.md",
     updatedAt: "昨天 22:04",
-    tags: ["阅读", "LLM", "知识管理"],
     backlinks: ["note-reading-search"],
-    content: `# LLM 知识管理摘录
+    ...mockMarkdown(
+      `# LLM 知识管理摘录
 
 ## 摘录
 好的知识工具应该帮助用户把散乱材料转化为可复用结构，而不是只保存原始片段。
 
 ## 启发
 Agent 需要给出来源和不确定性，避免让用户无法判断回答依据。`,
+      ["阅读", "LLM", "知识管理"],
+    ),
     contentHash: "",
   },
   {
@@ -288,15 +312,17 @@ Agent 需要给出来源和不确定性，避免让用户无法判断回答依�
     title: "语义检索笔记",
     path: "Papers/语义检索笔记.md",
     updatedAt: "周日 15:28",
-    tags: ["检索", "RAG", "引用"],
     backlinks: ["note-reading-llm"],
-    content: `# 语义检索笔记
+    ...mockMarkdown(
+      `# 语义检索笔记
 
 ## 检索边界
 默认检索范围应该尽可能小，跨集合检索需要让用户明确知道范围扩大。
 
 ## 引用
 回答必须保留来源笔记、路径和命中片段，方便用户回到原文验证。`,
+      ["检索", "RAG", "引用"],
+    ),
     contentHash: "",
   },
 ];
@@ -914,7 +940,7 @@ export function acceptMockProposedChange(snapshot: WorkspaceSnapshot): Workspace
       title: pendingChange.title.replace(/^创建《|》草稿$/g, "") || "Agent 新建草稿",
       path: pendingChange.targetPath,
       content: pendingChange.next,
-      tags: ["Agent", "草稿"],
+      tags: extractNoteTags(pendingChange.next),
       updatedAt: "刚刚",
       backlinks: [],
       contentHash: createContentHash(pendingChange.next),
@@ -948,6 +974,7 @@ export function acceptMockProposedChange(snapshot: WorkspaceSnapshot): Workspace
       return {
         ...note,
         content: nextContent,
+        tags: extractNoteTags(nextContent),
         updatedAt: "刚刚",
         contentHash: createContentHash(nextContent),
       };

@@ -1,5 +1,6 @@
 import { invokeLogged, isTauriRuntime } from "./runtime";
 import { createContentHash, createLocalId } from "../id";
+import { extractNoteTags } from "../noteTags";
 import { cloneWorkspaceSnapshot, createMockKnowledgeBaseSelection } from "../mock/workspace";
 import {
   browserMock,
@@ -91,17 +92,21 @@ export async function attachKnowledgeBase(
         errors: [],
       },
     };
+    const newNoteContent = `# 知识库索引
+
+这是一个浏览器开发态模拟知识库。正式桌面版会扫描 ${selection.path} 下的支持文档。
+
+#索引 #Agent
+`;
     const newNote: Note = {
       id: `note-${selection.id}`,
       knowledgeBaseId: selection.id,
       title: "知识库索引",
       path: "Index/知识库索引.md",
       updatedAt: "刚刚",
-      tags: ["索引", "Agent"],
+      tags: extractNoteTags(newNoteContent),
       backlinks: [],
-      content: `# 知识库索引
-
-这是一个浏览器开发态模拟知识库。正式桌面版会扫描 ${selection.path} 下的支持文档。`,
+      content: newNoteContent,
       contentHash: "mock-new-note",
     };
     const newFolder: FolderEntry = {

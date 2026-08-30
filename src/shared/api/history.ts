@@ -1,5 +1,6 @@
 import { invokeLogged, isTauriRuntime } from "./runtime";
 import { createContentHash } from "../id";
+import { extractNoteTags } from "../noteTags";
 import { cloneWorkspaceSnapshot } from "../mock/workspace";
 import {
   browserMock,
@@ -91,7 +92,13 @@ export async function restoreDocumentHistoryEntry(
       browserMock.noteDiskContents.set(note.id, detail.content);
       nextSnapshot.notes = nextSnapshot.notes.map((item) =>
         item.id === note.id
-          ? { ...item, content: detail.content, contentHash: createContentHash(detail.content), updatedAt: "刚刚" }
+          ? {
+              ...item,
+              content: detail.content,
+              tags: extractNoteTags(detail.content),
+              contentHash: createContentHash(detail.content),
+              updatedAt: "刚刚",
+            }
           : item,
       );
       nextSnapshot.activeNoteId = note.id;

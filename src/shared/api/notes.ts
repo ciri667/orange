@@ -21,6 +21,7 @@ import {
   PROJECT_INSTRUCTION_FILE_NAME,
   PROJECT_INSTRUCTION_TEMPLATE,
 } from "../projectInstructions";
+import { extractNoteTags } from "../noteTags";
 import {
   Note,
   NoteImageAttachmentInput,
@@ -208,7 +209,9 @@ export async function saveNoteContent(
 
     browserMock.noteDiskContents.set(note.id, content);
     nextSnapshot.notes = nextSnapshot.notes.map((item) =>
-      item.id === noteId ? { ...item, content, contentHash: createContentHash(content), updatedAt: "刚刚" } : item,
+      item.id === noteId
+        ? { ...item, content, tags: extractNoteTags(content), contentHash: createContentHash(content), updatedAt: "刚刚" }
+        : item,
     );
 
     return nextSnapshot;
