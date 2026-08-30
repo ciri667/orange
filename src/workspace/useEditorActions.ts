@@ -32,6 +32,7 @@ import {
   getNextAvailableTextDocumentName,
   joinRelativePath,
 } from "./fileNameUtils";
+import { extractNoteTags } from "../shared/noteTags";
 import { buildDraftAgentSession, resolveActiveSessionForKnowledgeBase, resolveKnowledgeBaseSessionId } from "./sessionUtils";
 import type { WorkspaceChrome } from "./workspaceChrome";
 
@@ -204,7 +205,9 @@ export function useEditorActions(options: EditorActionsOptions) {
     setSnapshot({
       ...currentSnapshot,
       notes: currentSnapshot.notes.map((note) =>
-        note.id === activeNote.id ? { ...note, content, updatedAt: "刚刚", contentHash: createContentHash(content) } : note,
+        note.id === activeNote.id
+          ? { ...note, content, tags: extractNoteTags(content), updatedAt: "刚刚", contentHash: createContentHash(content) }
+          : note,
       ),
     });
     setDirtyNoteIds((currentNoteIds) => new Set(currentNoteIds).add(activeNote.id));

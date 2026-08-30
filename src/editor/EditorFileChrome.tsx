@@ -33,6 +33,11 @@ export interface EditorMetaItem {
   icon: ReactNode;
   text: ReactNode;
   className?: string;
+  /** 有点击回调时渲染为按钮，供标签等可交互元信息使用。 */
+  onClick?: () => void;
+  title?: string;
+  ariaLabel?: string;
+  ariaExpanded?: boolean;
 }
 
 /** 编辑器和文档面板共用头部，避免两套标题 DOM 和截断逻辑分叉。 */
@@ -79,19 +84,38 @@ export function EditorEmptyHeader({
 export function EditorMetaStrip({ items }: { items: EditorMetaItem[] }) {
   return (
     <div className="flex gap-2 overflow-x-auto text-xs text-ink-muted [scrollbar-width:none] [&::-webkit-scrollbar]:hidden">
-      {items.map((item, index) => (
-        <span
-          className={cn(
-            "inline-flex shrink-0 items-center gap-1.5 rounded-full border border-[rgba(230,224,214,0.7)] bg-[rgba(251,250,247,0.72)] px-2 py-1",
-            item.className === "dirty-indicator" && "border-[rgba(var(--warning-rgb),0.28)] bg-warning-soft font-bold text-warning",
-            item.className !== "dirty-indicator" && item.className,
-          )}
-          key={index}
-        >
-          {item.icon}
-          {item.text}
-        </span>
-      ))}
+      {items.map((item, index) => {
+        const itemClassName = cn(
+          "inline-flex shrink-0 items-center gap-1.5 rounded-full border border-[rgba(230,224,214,0.7)] bg-[rgba(251,250,247,0.72)] px-2 py-1",
+          item.className === "dirty-indicator" && "border-[rgba(var(--warning-rgb),0.28)] bg-warning-soft font-bold text-warning",
+          item.className !== "dirty-indicator" && item.className,
+          item.onClick && "cursor-pointer hover:border-border-strong hover:bg-surface-hover",
+        );
+
+        if (item.onClick) {
+          return (
+            <button
+              className={itemClassName}
+              key={index}
+              type="button"
+              title={item.title}
+              aria-label={item.ariaLabel}
+              aria-expanded={item.ariaExpanded}
+              onClick={item.onClick}
+            >
+              {item.icon}
+              {item.text}
+            </button>
+          );
+        }
+
+        return (
+          <span className={itemClassName} key={index}>
+            {item.icon}
+            {item.text}
+          </span>
+        );
+      })}
     </div>
   );
 }

@@ -1,6 +1,6 @@
 import { convertFileSrc } from "@tauri-apps/api/core";
-import { Clock3, Columns2, Eye, FileText, FileType, PencilLine, Save, Tags } from "lucide-react";
-import type { ClipboardEventHandler, RefObject, UIEventHandler } from "react";
+import { ChevronDown, Clock3, Columns2, Eye, FileText, FileType, PencilLine, Save, Tags } from "lucide-react";
+import { useEffect, useMemo, useState, type ClipboardEventHandler, type RefObject, type UIEventHandler } from "react";
 import ReactMarkdown, { defaultUrlTransform } from "react-markdown";
 import type { UrlTransform } from "react-markdown";
 import rehypeSanitize, { defaultSchema } from "rehype-sanitize";
@@ -14,10 +14,13 @@ import {
   markdownRemarkPlugins,
   protectGfmTablePipesInInlineCode,
 } from "../shared/markdown";
+import { applyNoteTags, extractNoteTags } from "../shared/noteTags";
 import { SegmentedControl, SegmentedControlItem } from "../shared/SegmentedControl";
 import type { ExportFormat, KnowledgeBase, MarkdownViewMode, Note, ProposedChange } from "../shared/types";
+import { useDismissable } from "../shared/useDismissable";
 import { EditorEmptyHeader, EditorFileHeader, EditorMetaStrip, EditorMoreActionMenu } from "./EditorFileChrome";
 import { LineNumberedTextarea } from "./LineNumberedTextarea";
+import { NoteTagEditor } from "./NoteTagEditor";
 import { useSyncedMarkdownScroll } from "./useSyncedMarkdownScroll";
 
 /** 编辑器视图切换按钮配置，集中维护标签、图标和 aria 文案。 */
@@ -66,6 +69,7 @@ function getImageFilesFromClipboard(clipboardData: DataTransfer) {
 export function EditorPane({
   note,
   knowledgeBase,
+  availableTags = [],
   proposedChange,
   isBusy,
   isDirty,
@@ -87,6 +91,8 @@ export function EditorPane({
 }: {
   note?: Note;
   knowledgeBase: KnowledgeBase;
+  /** 当前知识库已有标签，供可视化编辑时作为建议。 */
+  availableTags?: string[];
   proposedChange?: ProposedChange;
   isBusy: boolean;
   isDirty: boolean;
@@ -108,6 +114,19 @@ export function EditorPane({
 }) {
   /** 分屏模式下同步源码和预览滚动；非分屏时 hook 会保持静默。 */
   const { editorRef, previewRef, handleEditorScroll, handlePreviewScroll } = useSyncedMarkdownScroll(viewMode === "split");
+  /** 标签浮层只存在于当前编辑器，关闭时不改正文。 */
+  const [tagEditorOpen, setTagEditorOpen] = useState(false);
+  const tagEditorRef = useDismissable<HTMLDivElement>(tagEditorOpen, () => setTagEditorOpen(false));
+  /** 信息栏标签始终从当前正文解析，避免和文末 #标签 脱节。 */
+  const noteTags = useMemo(() => extractNoteTags(note?.content ?? ""), [note?.content]);
+  const suggestionTags = useMemo(
+    () => Array.from(new Set(availableTags)).sort((left, right) => left.localeCompare(right, "zh-CN")),
+    [availableTags],
+  );
+
+  useEffect(() => {
+    setTagEditorOpen(false);
+  }, [note?.id]);
 
   if (!note) {
     return (
@@ -201,18 +220,40 @@ export function EditorPane({
         }
       />
 
-      <EditorMetaStrip
-        items={[
-          { icon: <Clock3 size={14} />, text: note.updatedAt },
-          { icon: <PencilLine size={14} />, text: `${stats.words} 字，约 ${stats.minutes} 分钟` },
-          { icon: <Tags size={14} />, text: note.tags.length ? note.tags.join(" / ") : "无标签" },
-          {
-            icon: <Save size={14} />,
-            text: isDirty ? "未保存草稿" : "已保存到本地",
-            className: isDirty ? "dirty-indicator" : undefined,
-          },
-        ]}
-      />
+      <div className={`relative min-w-0 ${tagEditorOpen ? "z-menu" : ""}`} ref={tagEditorRef}>
+        <EditorMetaStrip
+          items={[
+            { icon: <Clock3 size={14} />, text: note.updatedAt },
+            { icon: <PencilLine size={14} />, text: `${stats.words} 字，约 ${stats.minutes} 分钟` },
+            {
+              icon: <Tags size={14} />,
+              text: (
+                <>
+                  <span>{noteTags.length ? noteTags.join(" / ") : "无标签"}</span>
+                  <ChevronDown size={12} className={tagEditorOpen ? "rotate-180" : undefined} />
+                </>
+              ),
+              title: "编辑文档标签",
+              ariaLabel: noteTags.length ? `文档标签：${noteTags.join("、")}，点击编辑` : "文档标签，点击添加",
+              ariaExpanded: tagEditorOpen,
+              onClick: () => setTagEditorOpen((open) => !open),
+            },
+            {
+              icon: <Save size={14} />,
+              text: isDirty ? "未保存草稿" : "已保存到本地",
+              className: isDirty ? "dirty-indicator" : undefined,
+            },
+          ]}
+        />
+        {tagEditorOpen ? (
+          <NoteTagEditor
+            tags={noteTags}
+            availableTags={suggestionTags}
+            disabled={isBusy}
+            onChange={(nextTags) => onContentChange(applyNoteTags(note.content, nextTags))}
+          />
+        ) : null}
+      </div>
 
       <div className={viewMode === "split" ? "grid min-h-0 min-w-0 gap-3 grid-cols-1 min-[761px]:grid-cols-2" : "grid min-h-0 min-w-0 gap-3 grid-cols-1"}>
         {shouldShowEditor && (

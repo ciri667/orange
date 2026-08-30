@@ -652,6 +652,9 @@ export function WorkspaceShell() {
               <EditorPane
             note={activeNote}
             knowledgeBase={activeKnowledgeBase}
+            availableTags={currentSnapshot.notes
+              .filter((item) => item.knowledgeBaseId === activeKnowledgeBase.id)
+              .flatMap((item) => item.tags)}
             proposedChange={activeSession.pendingChange?.status === "pending" ? activeSession.pendingChange : undefined}
             isBusy={isBusy}
             isDirty={isActiveNoteDirty}
