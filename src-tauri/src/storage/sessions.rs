@@ -77,6 +77,7 @@ pub(crate) fn sort_sessions_by_updated_at_desc(sessions: &mut [AgentSession]) {
     });
 }
 
+#[cfg(test)]
 pub(crate) fn load_deleted_sessions_in_transaction(
     transaction: &rusqlite::Transaction<'_>,
 ) -> Result<Vec<AgentSession>, String> {
@@ -135,7 +136,20 @@ pub(crate) fn persist_session_in_transaction(
     Ok(())
 }
 
-/** 在已有 SQLite 事务中持久化当前快照的完整可见会话列表，同时保留逻辑删除记录。 */
+/** 只 upsert 给定会话，不删除表中其它行。Agent 回合和单会话保存必须走这条路径。 */
+pub(crate) fn persist_session_records_in_transaction(
+    transaction: &rusqlite::Transaction<'_>,
+    sessions: &[AgentSession],
+) -> Result<(), String> {
+    for session in sessions {
+        persist_session_in_transaction(transaction, session)?;
+    }
+
+    Ok(())
+}
+
+/** 整表重写路径仅用于测试，证明过期快照会删掉其它会话；生产路径必须 upsert。 */
+#[cfg(test)]
 pub(crate) fn persist_sessions_in_transaction(
     transaction: &rusqlite::Transaction<'_>,
     snapshot: &WorkspaceSnapshot,
@@ -175,6 +189,7 @@ pub(crate) fn persist_sessions_in_transaction(
 }
 
 /** 删除已不存在会话的模型 transcript，避免 UI 会话列表收缩后残留大 JSON。 */
+#[cfg(test)]
 pub(crate) fn cleanup_orphan_session_transcripts<'a>(
     transaction: &rusqlite::Transaction<'_>,
     keep_session_ids: impl IntoIterator<Item = &'a str>,
@@ -277,18 +292,19 @@ pub(crate) fn persist_agent_session_transcript(
     Ok(())
 }
 
-/** 保存当前快照的完整会话列表，供前端会话操作和 Agent loop 后同步状态。 */
-pub fn save_sessions(app: &AppHandle, snapshot: &WorkspaceSnapshot) -> Result<(), String> {
-    let mut connection = open_database(app)?;
-    let _write_guard = lock_database_writer()?;
-    let transaction = connection
-        .transaction_with_behavior(TransactionBehavior::Immediate)
-        .map_err(|error| format!("无法启动会话事务：{error}"))?;
+/** 只回写快照中的一个会话，避免 Agent 回合用过期列表删掉或打回其它会话。 */
+pub fn save_snapshot_session(
+    app: &AppHandle,
+    snapshot: &WorkspaceSnapshot,
+    session_id: &str,
+) -> Result<(), String> {
+    let session = snapshot
+        .sessions
+        .iter()
+        .find(|session| session.id == session_id)
+        .ok_or_else(|| "找不到要保存的会话".to_owned())?;
 
-    persist_sessions_in_transaction(&transaction, snapshot)?;
-    transaction
-        .commit()
-        .map_err(|error| format!("无法提交会话事务：{error}"))
+    save_session_records(app, std::slice::from_ref(session))
 }
 
 /** 保存单个会话，并返回已经写入快照的下一版工作台状态。 */
@@ -331,9 +347,9 @@ pub fn save_session(
         snapshot.sessions.insert(0, session.clone());
     }
 
-    snapshot.active_session_id = session.id;
+    snapshot.active_session_id = session.id.clone();
     normalize_sessions_for_snapshot(&mut snapshot);
-    save_sessions(app, &snapshot)?;
+    save_snapshot_session(app, &snapshot, &snapshot.active_session_id)?;
 
     Ok(snapshot)
 }
@@ -386,11 +402,8 @@ pub fn delete_session(
         ensure_visible_session_after_delete(&mut snapshot);
     }
 
-    let mut persisted_snapshot = snapshot.clone();
-
-    // 持久化时带上被删除会话，UI 返回值仍只包含未删除会话。
-    persisted_snapshot.sessions.insert(0, deleted_session);
-    save_sessions(app, &persisted_snapshot)?;
+    // 只把该会话标记为逻辑删除并 upsert，不能整表重写，否则并发回合会丢掉其它会话。
+    save_session_records(app, std::slice::from_ref(&deleted_session))?;
 
     Ok(snapshot)
 }
@@ -498,9 +511,7 @@ pub fn save_session_records(app: &AppHandle, sessions: &[AgentSession]) -> Resul
         .transaction_with_behavior(TransactionBehavior::Immediate)
         .map_err(|error| format!("无法启动 IM 会话迁移事务：{error}"))?;
 
-    for session in sessions {
-        persist_session_in_transaction(&transaction, session)?;
-    }
+    persist_session_records_in_transaction(&transaction, sessions)?;
 
     transaction
         .commit()
@@ -533,8 +544,9 @@ pub fn update_session_scope(
 
     session.knowledge_base_ids = next_ids;
     session.updated_at = "刚刚".to_owned();
+    let session_id = session.id.clone();
     normalize_sessions_for_snapshot(&mut snapshot);
-    save_sessions(app, &snapshot)?;
+    save_snapshot_session(app, &snapshot, &session_id)?;
 
     Ok(snapshot)
 }
@@ -545,6 +557,11 @@ pub fn restore_session_context(
     mut snapshot: WorkspaceSnapshot,
     session_id: &str,
 ) -> Result<WorkspaceSnapshot, String> {
+    // 切会话时以 SQLite 为准合并会话列表，避免带回过期回合快照、丢掉其它线程的新消息。
+    let persisted_sessions = load_sessions_for_snapshot(app, &snapshot)?;
+    if !persisted_sessions.is_empty() {
+        snapshot.sessions = persisted_sessions;
+    }
     normalize_sessions_for_snapshot(&mut snapshot);
     let session = snapshot
         .sessions
@@ -594,7 +611,6 @@ pub fn restore_session_context(
             &snapshot.active_note_id,
         );
     }
-    save_sessions(app, &snapshot)?;
 
     Ok(snapshot)
 }

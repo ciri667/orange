@@ -66,8 +66,6 @@ pub fn index_snapshot(app: &AppHandle, snapshot: &WorkspaceSnapshot) -> Result<(
         }
     }
 
-    persist_sessions_in_transaction(&transaction, snapshot)?;
-
     transaction
         .commit()
         .map_err(|error| format!("无法提交索引事务：{error}"))?;

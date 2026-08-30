@@ -152,7 +152,9 @@ mod tests {
         model_keyring_persists_until_delete, normalize_audit_log_created_at, normalize_im_settings,
         normalize_knowledge_base_memory, normalize_session_created_at,
         normalize_workspace_editor_state, parse_im_settings_payload,
-        persist_agent_session_transcript, persist_sessions_in_transaction, prune_app_event_logs,
+        persist_agent_session_transcript, persist_session_in_transaction,
+        persist_session_records_in_transaction, persist_sessions_in_transaction,
+        prune_app_event_logs,
         prune_document_history_entries, query_app_event_logs, read_document_history_snapshot,
         redact_memory_secrets, rename_markdown_file, rename_text_document_file,
         resolve_existing_file_inside_root, resolve_inside_root, save_note_image_attachments,
@@ -1758,5 +1760,105 @@ mod tests {
                 .unwrap()
                 .is_none()
         );
+    }
+
+    /** 从测试库读取一条会话 payload，供并发隔离断言复用。 */
+    fn load_test_session(connection: &Connection, session_id: &str) -> AgentSession {
+        let payload_json: String = connection
+            .query_row(
+                "SELECT payload_json FROM agent_sessions WHERE id = ?1",
+                [session_id],
+                |row| row.get(0),
+            )
+            .unwrap();
+
+        serde_json::from_str(&payload_json).unwrap()
+    }
+
+    /** 只 upsert 一个会话时，其它会话的模型、权限和消息必须原样保留。 */
+    #[test]
+    fn persist_session_records_does_not_delete_or_revert_other_sessions() {
+        let dir = tempdir().unwrap();
+        let database_path = dir.path().join("session-upsert.sqlite3");
+        let mut connection = Connection::open(&database_path).unwrap();
+        ensure_database_schema(&connection, &database_path).unwrap();
+
+        let mut session_a = test_agent_session("session-a", "2026/01/01 00:00");
+        session_a.security_level = "advanced".to_owned();
+        session_a.model_provider_id = Some("openai".to_owned());
+        session_a.model_id = Some("gpt-4.1".to_owned());
+        let mut session_b = test_agent_session("session-b", "2026/01/01 00:01");
+        session_b.security_level = "autonomous".to_owned();
+        session_b.model_provider_id = Some("anthropic".to_owned());
+        session_b.model_id = Some("claude-sonnet-4".to_owned());
+        session_b.title = "会话二".to_owned();
+
+        let transaction = connection.transaction().unwrap();
+        persist_session_records_in_transaction(&transaction, &[session_a.clone(), session_b.clone()])
+            .unwrap();
+        transaction.commit().unwrap();
+
+        session_a.title = "会话一已更新".to_owned();
+        let transaction = connection.transaction().unwrap();
+        persist_session_records_in_transaction(&transaction, &[session_a.clone()]).unwrap();
+        transaction.commit().unwrap();
+
+        let stored_a = load_test_session(&connection, "session-a");
+        let stored_b = load_test_session(&connection, "session-b");
+        let count: i64 = connection
+            .query_row("SELECT COUNT(*) FROM agent_sessions", [], |row| row.get(0))
+            .unwrap();
+
+        assert_eq!(count, 2);
+        assert_eq!(stored_a.title, "会话一已更新");
+        assert_eq!(stored_a.security_level, "advanced");
+        assert_eq!(stored_b.title, "会话二");
+        assert_eq!(stored_b.security_level, "autonomous");
+        assert_eq!(stored_b.model_provider_id.as_deref(), Some("anthropic"));
+        assert_eq!(stored_b.model_id.as_deref(), Some("claude-sonnet-4"));
+    }
+
+    /** 过期快照整表重写会删掉回合开始后新建的会话；这条路径不能再用于 Agent 落盘。 */
+    #[test]
+    fn persist_sessions_in_transaction_drops_sessions_missing_from_snapshot() {
+        let dir = tempdir().unwrap();
+        let database_path = dir.path().join("session-replace.sqlite3");
+        let mut connection = Connection::open(&database_path).unwrap();
+        ensure_database_schema(&connection, &database_path).unwrap();
+
+        let transaction = connection.transaction().unwrap();
+        persist_session_in_transaction(
+            &transaction,
+            &test_agent_session("session-a", "2026/01/01 00:00"),
+        )
+        .unwrap();
+        persist_session_in_transaction(
+            &transaction,
+            &test_agent_session("session-b", "2026/01/01 00:01"),
+        )
+        .unwrap();
+        transaction.commit().unwrap();
+
+        let mut stale_snapshot = test_workspace_snapshot();
+        stale_snapshot
+            .sessions
+            .push(test_agent_session("session-a", "2026/01/01 00:00"));
+        let transaction = connection.transaction().unwrap();
+        persist_sessions_in_transaction(&transaction, &stale_snapshot).unwrap();
+        transaction.commit().unwrap();
+
+        let count: i64 = connection
+            .query_row("SELECT COUNT(*) FROM agent_sessions", [], |row| row.get(0))
+            .unwrap();
+        let has_b: i64 = connection
+            .query_row(
+                "SELECT COUNT(*) FROM agent_sessions WHERE id = ?1",
+                ["session-b"],
+                |row| row.get(0),
+            )
+            .unwrap();
+
+        assert_eq!(count, 1);
+        assert_eq!(has_b, 0);
     }
 }
