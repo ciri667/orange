@@ -224,36 +224,6 @@ pub fn extract_markdown_title(path: &Path, content: &str) -> String {
         })
 }
 
-/** 从 Markdown 内容中提取简单标签，首版支持 frontmatter tags 和正文 #tag。 */
-pub(crate) fn extract_tags(content: &str) -> Vec<String> {
-    let mut tags = Vec::new();
-
-    for line in content.lines() {
-        let trimmed = line.trim();
-
-        // frontmatter 中的 tags: a, b 用于兼容常见 Markdown 笔记格式。
-        if let Some(raw_tags) = trimmed.strip_prefix("tags:") {
-            tags.extend(
-                raw_tags
-                    .split(',')
-                    .map(str::trim)
-                    .filter(|tag| !tag.is_empty())
-                    .map(str::to_owned),
-            );
-        }
-
-        for token in trimmed.split_whitespace() {
-            if token.starts_with('#') && token.len() > 1 {
-                tags.push(token.trim_start_matches('#').trim_matches(',').to_owned());
-            }
-        }
-    }
-
-    tags.sort();
-    tags.dedup();
-    tags
-}
-
 /** 本地扫描支持的文件类型，Markdown 进入 Agent note，其余进入普通文档模型。 */
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum SupportedDocumentKind {
