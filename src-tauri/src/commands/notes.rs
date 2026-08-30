@@ -251,6 +251,7 @@ pub async fn rename_note(
     snapshot.notes[note_index].id = next_note_id.clone();
     snapshot.notes[note_index].title = next_title;
     snapshot.notes[note_index].path = next_relative_path.clone();
+    snapshot.notes[note_index].tags = storage::extract_tags(&current_content);
     snapshot.notes[note_index].content = current_content;
     snapshot.notes[note_index].content_hash = current_hash;
     snapshot.notes[note_index].updated_at = updated_at;
@@ -448,6 +449,7 @@ pub async fn save_note_content(
         &target_path,
     );
     let next_hash = storage::hash_content(&payload.content);
+    snapshot.notes[note_index].tags = storage::extract_tags(&payload.content);
     snapshot.notes[note_index].content = payload.content;
     snapshot.notes[note_index].content_hash = next_hash;
     snapshot.notes[note_index].updated_at = updated_at;

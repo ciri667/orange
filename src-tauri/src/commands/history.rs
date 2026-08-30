@@ -329,6 +329,7 @@ pub async fn restore_document_history_entry(
         let next_hash = storage::hash_content(&detail.content);
 
         snapshot.notes[note_index].content = detail.content.clone();
+        snapshot.notes[note_index].tags = storage::extract_tags(&detail.content);
         snapshot.notes[note_index].content_hash = next_hash;
         snapshot.notes[note_index].updated_at = updated_at;
         snapshot.active_note_id = target.entity_id.clone();

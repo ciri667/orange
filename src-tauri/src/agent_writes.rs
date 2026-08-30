@@ -219,7 +219,7 @@ fn apply_create_change(
                 title: change.title.replace("创建《", "").replace("》草稿", ""),
                 path: change.target_path.clone(),
                 content: change.next.clone(),
-                tags: vec!["Agent".to_owned(), "草稿".to_owned()],
+                tags: storage::extract_tags(&change.next),
                 updated_at: "刚刚".to_owned(),
                 backlinks: Vec::new(),
                 content_hash: storage::hash_content(&change.next),
@@ -353,6 +353,7 @@ fn apply_markdown_rewrite(
     )?;
     storage::atomic_write_markdown(target_path, &next_content)?;
     snapshot.notes[note_index].content = next_content.clone();
+    snapshot.notes[note_index].tags = storage::extract_tags(&next_content);
     snapshot.notes[note_index].content_hash = storage::hash_content(&next_content);
     snapshot.notes[note_index].updated_at = "刚刚".to_owned();
     Ok(())
