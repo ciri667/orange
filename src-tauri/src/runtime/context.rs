@@ -269,7 +269,7 @@ fn build_system_prompt(
     let write_policy = if session.security_level == "autonomous" {
         "所有写入只能调用 edit 或 write；校验通过后会自动落盘，不要在工具结果返回前声称已经写入文件。"
     } else {
-        "所有写入只能调用 edit 或 write 生成待确认 diff，不能声称已经写入文件。"
+        "所有写入只能调用 edit 或 write 生成待确认 diff，不能声称已经写入文件。write 在用户确认前也必须带上完整正文 content，不会创建空文件。"
     };
     let security_level_policy = match session.security_level.as_str() {
         "autonomous" => "当前为完全级别：用户把连续执行权交给你，目的是让你一次把任务做完。edit 和 write（含建文件夹）在校验通过后会自动落盘；失败则保留待确认。你可以在当前 scope 内知识库使用相对路径，也可以对用户设备上的合规绝对路径（含 ~）调用 list、read 和 write。这不是整台电脑：Windows、Program Files 等受保护系统目录会被拒绝。Skill 只是更高权限下可发挥的能力之一，脚本仍在隔离副本中运行，不会获得真实系统路径。",
@@ -289,7 +289,7 @@ fn build_system_prompt(
     let mut parts = vec![
         format!("你是橘记的本地优先知识库 Agent。当前可见工具：{visible_tools}。"),
         format!(
-            "search 只检索 Markdown；read 和 edit 可作用于当前 scope 内的 Markdown/TXT，省略 fileId 时 read 读取当前激活文件；TXT 必须原样按纯文本处理；read 也可只读 DOCX/PDF 并返回可信的页码或结构块引用。{write_policy}write 的 fileType 只能是 markdown 或 txt，路径扩展名必须匹配。局部替换使用 operation=replace，文末追加使用 operation=append 且 next 只含增量；同一文件多处编辑使用 operation=multi_replace 和 edits。必须使用服务端标准 tool_calls 字段调用工具，不要在普通回复中输出 DSML、XML 或伪工具调用标签。引用只允许来自已执行工具结果。{skill_policy}\n{autonomous_tool_policy}\n{security_level_policy}"
+            "search 只检索 Markdown；read 和 edit 可作用于当前 scope 内的 Markdown/TXT，省略 fileId 时 read 读取当前激活文件；TXT 必须原样按纯文本处理；read 也可只读 DOCX/PDF 并返回可信的页码或结构块引用。{write_policy}write 新建文件必须带完整正文 content（也接受 next）；fileType 为 markdown 或 txt（大小写不敏感，缺省时由 .md/.txt 推断），路径用 targetPath（也接受 path），扩展名必须匹配。局部替换使用 operation=replace，文末追加使用 operation=append 且 next 只含增量；同一文件多处编辑使用 operation=multi_replace 和 edits。必须使用服务端标准 tool_calls 字段调用工具，不要在普通回复中输出 DSML、XML 或伪工具调用标签。引用只允许来自已执行工具结果。{skill_policy}\n{autonomous_tool_policy}\n{security_level_policy}"
         ),
     ];
 

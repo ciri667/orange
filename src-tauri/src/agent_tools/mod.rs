@@ -538,6 +538,121 @@ mod tests {
         assert!(context.snapshot.sessions[0].pending_change.is_none());
     }
 
+    /** 基础级别 write 新建 Markdown 应生成待确认 diff，不直接落盘。 */
+    #[test]
+    fn write_file_builds_pending_create_in_basic_session() {
+        let mut snapshot = tool_test_snapshot("正文内容足够用于测试。".to_owned());
+        snapshot.sessions[0].security_level = "basic".to_owned();
+        let registry = ToolRegistry::default();
+        let request = tool_test_request("create", "写一篇文案");
+        let mut context = tool_test_context(&mut snapshot, &request);
+        let outcome = registry.execute_named(
+            &mut context,
+            "write",
+            json!({
+                "kind": "file",
+                "targetPath": "人体工学椅推荐文案.md",
+                "fileType": "markdown",
+                "title": "小红书风格人体工学椅推荐文案",
+                "content": "这把椅子坐着很稳。"
+            }),
+        );
+
+        assert_eq!(outcome.call.status, "completed");
+        let pending = context.snapshot.sessions[0]
+            .pending_change
+            .as_ref()
+            .expect("basic write should create pending change");
+        assert_eq!(pending.status, "pending");
+        assert_eq!(pending.r#type, "create");
+        assert_eq!(pending.file_type.as_deref(), Some("markdown"));
+        assert_eq!(pending.target_path, "人体工学椅推荐文案.md");
+        assert_eq!(pending.next, "这把椅子坐着很稳。");
+        assert_eq!(pending.knowledge_base_id, "kb-a");
+    }
+
+    /** 模型常用 Markdown 大小写、path 别名和 next 正文时，基础级别仍应生成待确认 diff。 */
+    #[test]
+    fn write_file_accepts_common_aliases_in_basic_session() {
+        let mut snapshot = tool_test_snapshot("正文内容足够用于测试。".to_owned());
+        snapshot.sessions[0].security_level = "basic".to_owned();
+        let registry = ToolRegistry::default();
+        let request = tool_test_request("create", "写一篇文案");
+        let mut context = tool_test_context(&mut snapshot, &request);
+        let outcome = registry.execute_named(
+            &mut context,
+            "write",
+            json!({
+                "kind": "file",
+                "path": "人体工学椅推荐文案.md",
+                "fileType": "Markdown",
+                "title": "小红书风格人体工学椅推荐文案",
+                "next": "这把椅子坐着很稳。"
+            }),
+        );
+
+        assert_eq!(outcome.call.status, "completed", "{}", outcome.call.summary);
+        let pending = context.snapshot.sessions[0]
+            .pending_change
+            .as_ref()
+            .expect("aliased write should create pending change");
+        assert_eq!(pending.status, "pending");
+        assert_eq!(pending.file_type.as_deref(), Some("markdown"));
+        assert_eq!(pending.target_path, "人体工学椅推荐文案.md");
+        assert_eq!(pending.next, "这把椅子坐着很稳。");
+    }
+
+    /** 缺 fileType 时按 .md 扩展名推断，进阶级别同样只生成待确认 diff。 */
+    #[test]
+    fn write_file_infers_markdown_from_extension_in_advanced_session() {
+        let mut snapshot = tool_test_snapshot("正文内容足够用于测试。".to_owned());
+        snapshot.sessions[0].security_level = "advanced".to_owned();
+        let registry = ToolRegistry::default();
+        let request = tool_test_request("create", "写一篇文案");
+        let mut context = tool_test_context(&mut snapshot, &request);
+        let outcome = registry.execute_named(
+            &mut context,
+            "write",
+            json!({
+                "targetPath": "Notes/推荐文案.MD",
+                "content": "完整文案正文。"
+            }),
+        );
+
+        assert_eq!(outcome.call.status, "completed");
+        let pending = context.snapshot.sessions[0]
+            .pending_change
+            .as_ref()
+            .unwrap();
+        assert_eq!(pending.status, "pending");
+        assert_eq!(pending.file_type.as_deref(), Some("markdown"));
+        assert_eq!(pending.target_path, "Notes/推荐文案.MD");
+    }
+
+    /** 真正缺少正文时必须失败，并明确提示补 content，避免再返回笼统三合一错误。 */
+    #[test]
+    fn write_file_rejects_missing_content_with_specific_error() {
+        let mut snapshot = tool_test_snapshot("正文内容足够用于测试。".to_owned());
+        let registry = ToolRegistry::default();
+        let request = tool_test_request("create", "写一篇文案");
+        let mut context = tool_test_context(&mut snapshot, &request);
+        let outcome = registry.execute_named(
+            &mut context,
+            "write",
+            json!({
+                "kind": "file",
+                "targetPath": "人体工学椅推荐文案.md",
+                "fileType": "markdown",
+                "title": "小红书风格人体工学椅推荐文案"
+            }),
+        );
+
+        assert_eq!(outcome.call.status, "failed");
+        assert!(outcome.call.summary.contains("缺少正文"));
+        assert!(!outcome.call.summary.contains("缺少目标知识库、正文或有效 fileType"));
+        assert!(context.snapshot.sessions[0].pending_change.is_none());
+    }
+
     /** 基础级别 list/read 外部 path 必须失败。 */
     #[test]
     fn list_and_read_external_path_reject_basic_session() {

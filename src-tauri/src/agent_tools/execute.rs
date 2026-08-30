@@ -368,7 +368,7 @@ impl AgentTool for CreateFileDraftTool {
     }
 
     fn description(&self) -> &'static str {
-        "Create a pending new Markdown or TXT draft, or a pending folder. Use kind=file (default) with fileType markdown|txt and content. Use kind=folder with targetPath; basic sessions cannot create folders. Writes still require confirmation except auto-apply in full mode."
+        "Create a pending new Markdown or TXT file, or a pending folder. For kind=file (default), always pass the full document body in content and a knowledge-base relative targetPath; fileType is markdown|txt and can be inferred from .md/.txt. For kind=folder, pass targetPath; basic sessions cannot create folders. Basic/advanced modes still require the full content: they only delay disk write until the user confirms. Full mode auto-applies after validation."
     }
 
     fn parameters(&self) -> Value {
@@ -381,12 +381,22 @@ impl AgentTool for CreateFileDraftTool {
                     "description": "file creates a Markdown/TXT draft; folder creates a directory. Basic sessions reject folder."
                 },
                 "knowledgeBaseId": { "type": "string" },
-                "targetPath": { "type": "string" },
-                "fileType": { "type": "string", "enum": ["markdown", "txt", "folder"] },
+                "targetPath": {
+                    "type": "string",
+                    "description": "Knowledge-base relative path including filename and extension. Alias: path."
+                },
+                "fileType": {
+                    "type": "string",
+                    "enum": ["markdown", "txt", "folder"],
+                    "description": "markdown or txt. Case-insensitive; md is markdown. If omitted, inferred from targetPath extension."
+                },
                 "title": { "type": "string" },
-                "content": { "type": "string" }
+                "content": {
+                    "type": "string",
+                    "description": "Full document body. Required for kind=file in every security level, including confirmation modes. Do not omit it to create an empty placeholder."
+                }
             },
-            "required": ["targetPath"]
+            "required": ["targetPath", "content"]
         })
     }
 
@@ -1825,6 +1835,8 @@ pub(crate) fn execute_create_file_draft(
         .get("knowledgeBaseId")
         .or_else(|| args.get("knowledge_base_id"))
         .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
         .map(str::to_owned);
     let knowledge_base_id = if let Some(requested_knowledge_base_id) = requested_knowledge_base_id {
         if !scope_ids.contains(requested_knowledge_base_id.as_str()) {
@@ -1843,13 +1855,7 @@ pub(crate) fn execute_create_file_draft(
             .cloned()
             .unwrap_or_default()
     };
-    let target_path = args
-        .get("targetPath")
-        .or_else(|| args.get("target_path"))
-        .and_then(Value::as_str)
-        .unwrap_or("00-Inbox/Agent 草稿.md")
-        .trim()
-        .to_owned();
+    let target_path = write_target_path(args);
     if let Some(message) = pending_write_conflict(
         &snapshot.sessions[session_index],
         None,
@@ -1857,43 +1863,26 @@ pub(crate) fn execute_create_file_draft(
     ) {
         return ToolExecutionResult::failed(&message);
     }
-    let file_type = args
-        .get("fileType")
-        .or_else(|| args.get("file_type"))
-        .and_then(Value::as_str)
-        .unwrap_or_default();
-    let content = args
-        .get("content")
-        .and_then(Value::as_str)
-        .unwrap_or_default()
-        .trim()
-        .to_owned();
+    let file_type = normalize_write_file_type(write_file_type_arg(args), &target_path);
+    let content = write_file_content(args);
 
-    if knowledge_base_id.is_empty()
-        || content.is_empty()
-        || !matches!(file_type, "markdown" | "txt")
-    {
+    if knowledge_base_id.is_empty() {
         return ToolExecutionResult::failed(
-            "新建草稿工具缺少目标知识库、正文或有效 fileType（markdown/txt）。",
+            "新建草稿缺少目标知识库。请传入 knowledgeBaseId，或先在当前会话中授权一个知识库。",
         );
     }
-
-    let valid_extension = match file_type {
-        "markdown" => matches!(
-            std::path::Path::new(&target_path)
-                .extension()
-                .and_then(|value| value.to_str()),
-            Some("md") | Some("markdown")
-        ),
-        "txt" => {
-            std::path::Path::new(&target_path)
-                .extension()
-                .and_then(|value| value.to_str())
-                == Some("txt")
-        }
-        _ => false,
+    if content.is_empty() {
+        return ToolExecutionResult::failed(
+            "新建草稿缺少正文。请把完整文档放在 content 参数中（也接受 next/body）；基础/进阶级别同样需要完整正文，确认后才会落盘。",
+        );
+    }
+    let Some(file_type) = file_type else {
+        return ToolExecutionResult::failed(
+            "新建草稿缺少有效 fileType（markdown/txt）。大小写不敏感，也可由 .md/.txt 扩展名推断。",
+        );
     };
-    if !valid_extension {
+
+    if !path_extension_matches_write_file_type(&target_path, file_type) {
         return ToolExecutionResult::failed("目标路径扩展名必须与 fileType 匹配。");
     }
 
@@ -1921,6 +1910,8 @@ pub(crate) fn execute_create_file_draft(
         title: args
             .get("title")
             .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
             .map(str::to_owned)
             .unwrap_or_else(|| "创建 Agent 草稿".to_owned()),
         target_path,
@@ -1947,6 +1938,83 @@ pub(crate) fn execute_create_file_draft(
         payload: json!({ "change": &change }),
         citations: Vec::new(),
         audit_fragment,
+    }
+}
+
+/** write 的目标路径：优先 targetPath，兼容模型常用的 path。 */
+fn write_target_path(args: &Value) -> String {
+    args.get("targetPath")
+        .or_else(|| args.get("target_path"))
+        .or_else(|| args.get("path"))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or("00-Inbox/Agent 草稿.md")
+        .to_owned()
+}
+
+/** 读取模型给出的 fileType，允许非字符串值被忽略后走扩展名推断。 */
+fn write_file_type_arg(args: &Value) -> &str {
+    args.get("fileType")
+        .or_else(|| args.get("file_type"))
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+}
+
+/** 规范化 write 的 fileType；Markdown/md 等常见写法都收成 markdown/txt。 */
+fn normalize_write_file_type(raw: &str, target_path: &str) -> Option<&'static str> {
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "markdown" | "md" | "mdown" | "mkd" => Some("markdown"),
+        "txt" | "text" | "plaintext" | "plain" => Some("txt"),
+        _ => infer_write_file_type_from_path(target_path),
+    }
+}
+
+/** 按目标路径扩展名推断 markdown/txt；扩展名大小写不敏感。 */
+fn infer_write_file_type_from_path(target_path: &str) -> Option<&'static str> {
+    let extension = Path::new(target_path)
+        .extension()
+        .and_then(|value| value.to_str())
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    match extension.as_str() {
+        "md" | "markdown" | "mdown" | "mkd" => Some("markdown"),
+        "txt" => Some("txt"),
+        _ => None,
+    }
+}
+
+fn path_extension_matches_write_file_type(target_path: &str, file_type: &str) -> bool {
+    infer_write_file_type_from_path(target_path) == Some(file_type)
+}
+
+/** 读取新建正文；兼容 edit 的 next 以及 body/text 等常见别名。 */
+fn write_file_content(args: &Value) -> String {
+    const KEYS: &[&str] = &["content", "next", "body", "text", "markdown"];
+    for key in KEYS {
+        if let Some(value) = args.get(*key) {
+            let text = json_value_as_write_text(value);
+            if !text.trim().is_empty() {
+                return text.trim().to_owned();
+            }
+        }
+    }
+    String::new()
+}
+
+/** 把工具参数收成可写入正文；数组按段落拼接，对象不擅自序列化。 */
+fn json_value_as_write_text(value: &Value) -> String {
+    match value {
+        Value::String(text) => text.clone(),
+        Value::Array(items) => items
+            .iter()
+            .map(json_value_as_write_text)
+            .filter(|text| !text.trim().is_empty())
+            .collect::<Vec<_>>()
+            .join("\n\n"),
+        Value::Number(number) => number.to_string(),
+        Value::Bool(flag) => flag.to_string(),
+        Value::Null | Value::Object(_) => String::new(),
     }
 }
 
