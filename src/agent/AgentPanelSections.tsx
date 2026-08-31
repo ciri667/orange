@@ -1,4 +1,4 @@
-import { Clock, Database, FileText, FolderOpen, Gauge, Layers3, MessageSquareText, ShieldAlert, Sparkles, Trash2, X } from "lucide-react";
+import { Check, Clock, Copy, Database, FileText, FolderOpen, Gauge, Layers3, MessageSquareText, ShieldAlert, Sparkles, Trash2, X } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import ReactMarkdown from "react-markdown";
 import rehypeSanitize from "rehype-sanitize";
@@ -7,6 +7,7 @@ import { Checkbox } from "../shared/Checkbox";
 import { Chip } from "../shared/Chip";
 import { cn } from "../shared/cn";
 import { listRowClassName } from "../shared/ListRow";
+import { logWarn } from "../shared/logger";
 import {
   createMarkdownComponents,
   markdownMessageClassName,
@@ -723,14 +724,14 @@ function AgentMessageItem({
     <article
       aria-label={queued ? "排队中的下一条指令" : undefined}
       className={cn(
-        "min-w-0 rounded-xl border border-transparent bg-surface-translucent px-3 py-2.5 [&+&]:mt-2.5",
+        "group min-w-0 select-text rounded-xl border border-transparent bg-surface-translucent px-3 py-2.5 [&+&]:mt-2.5",
         message.role === "user" && "ml-[18px] bg-primary-wash text-agent-strong",
         message.role === "assistant" && "mr-2.5",
         queued && "border-dashed border-primary-border opacity-80",
       )}
     >
-      <div className={cn("flex items-center gap-1.5 text-xs font-bold text-ink-muted", message.role === "assistant" && "[&_svg]:text-agent")}>
-        {message.role === "assistant" ? <Sparkles size={14} /> : <MessageSquareText size={14} />}
+      <div className="flex items-center gap-1.5 text-xs font-bold text-ink-muted select-none">
+        {message.role === "assistant" ? <Sparkles size={14} className="text-agent" /> : <MessageSquareText size={14} />}
         <span>{message.role === "assistant" ? "橘记 Agent" : "你"}</span>
         {queued ? (
           <span className="inline-flex items-center gap-1 rounded-full border border-primary-border bg-surface px-1.5 py-px text-[11px] font-semibold text-ink-muted">
@@ -762,6 +763,7 @@ function AgentMessageItem({
       {message.content ? (
         <MessageMarkdown content={message.content} streaming={liveStatus === "running"} />
       ) : null}
+      <MessageCopyButton content={message.content} messageRole={message.role} />
       {message.role === "assistant" && !usesTurnTrace ? <ToolCallList toolCalls={message.toolCalls} /> : null}
       <CitationList citations={message.citations} />
     </article>
@@ -771,6 +773,117 @@ function AgentMessageItem({
 /** 将历史消息中的 @ 文件 ID 转成安全展示名称；文件被删除后保留可解释的占位。 */
 function getMentionedFileLabel(fileId: string, notes: Note[], documents: WorkspaceDocument[]) {
   return notes.find((note) => note.id === fileId)?.title ?? documents.find((document) => document.id === fileId)?.title ?? "已失效文件";
+}
+
+/** 复制成功后的短暂反馈时长，避免按钮文案一直停在「已复制」。 */
+const MESSAGE_COPY_RESET_MS = 1600;
+
+/** 消息正文下方的复制按钮；写入系统剪贴板的是消息原文，不含引用和过程轨迹。 */
+function MessageCopyButton({
+  content,
+  messageRole,
+}: {
+  content: string;
+  messageRole: AgentMessage["role"];
+}) {
+  const [copied, setCopied] = useState(false);
+  const resetTimerRef = useRef<number | null>(null);
+
+  useEffect(() => {
+    return () => {
+      if (resetTimerRef.current != null) {
+        window.clearTimeout(resetTimerRef.current);
+      }
+    };
+  }, []);
+
+  if (!content.trim()) {
+    return null;
+  }
+
+  return (
+    <Button
+      variant="icon"
+      size="compact"
+      className={cn(
+        "mt-1.5 border-transparent bg-transparent text-ink-soft",
+        copied
+          ? "text-success opacity-100"
+          : "opacity-[0.58] group-hover:opacity-100 focus-visible:opacity-100 hover:enabled:border-border-strong hover:enabled:bg-surface-hover hover:enabled:text-ink",
+      )}
+      title={copied ? "已复制" : "复制消息"}
+      aria-label={copied ? "已复制" : "复制消息"}
+      onClick={() => {
+        void copyMessageContent(content, messageRole, () => {
+          setCopied(true);
+          if (resetTimerRef.current != null) {
+            window.clearTimeout(resetTimerRef.current);
+          }
+          resetTimerRef.current = window.setTimeout(() => setCopied(false), MESSAGE_COPY_RESET_MS);
+        });
+      }}
+    >
+      {copied ? <Check size={13} /> : <Copy size={13} />}
+    </Button>
+  );
+}
+
+/** 复制消息原文；失败只记脱敏日志，不把正文写入诊断。 */
+async function copyMessageContent(
+  content: string,
+  messageRole: AgentMessage["role"],
+  onCopied: () => void,
+) {
+  try {
+    await copyTextToClipboard(content);
+    onCopied();
+  } catch (error) {
+    logWarn("复制消息失败", {
+      category: "frontend",
+      event: "copy_agent_message",
+      error,
+      metadata: {
+        role: messageRole,
+        contentLength: content.length,
+      },
+    });
+  }
+}
+
+/** 把文本写入系统剪贴板；优先 Clipboard API，失败时回退到隐藏 textarea。 */
+async function copyTextToClipboard(text: string) {
+  if (typeof navigator !== "undefined" && navigator.clipboard?.writeText) {
+    try {
+      await navigator.clipboard.writeText(text);
+      return;
+    } catch {
+      // 无权限或非安全上下文时走 execCommand 回退。
+    }
+  }
+
+  copyTextWithExecCommand(text);
+}
+
+/** Clipboard API 不可用时的同步回退，依赖用户点击手势。 */
+function copyTextWithExecCommand(text: string) {
+  const textarea = document.createElement("textarea");
+  textarea.value = text;
+  textarea.setAttribute("readonly", "");
+  textarea.style.position = "fixed";
+  textarea.style.top = "0";
+  textarea.style.left = "0";
+  textarea.style.opacity = "0";
+  textarea.style.pointerEvents = "none";
+  document.body.appendChild(textarea);
+  textarea.focus();
+  textarea.select();
+  textarea.setSelectionRange(0, textarea.value.length);
+  const copied = document.execCommand("copy");
+  textarea.remove();
+
+  if (!copied) {
+    throw new Error("clipboard_exec_command_failed");
+  }
 }
 
 /** 安全渲染 Agent 对话中的 GFM Markdown，避免模型内容中的 HTML 被直接执行。 */
