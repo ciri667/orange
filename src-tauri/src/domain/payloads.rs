@@ -331,6 +331,13 @@ pub struct SaveModelApiKeyPayload {
     pub api_key: String,
 }
 
+/** 用户主动查看模型密钥的命令入参；只接受 providerId，不接受 keyReference。 */
+#[derive(Clone, Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RevealModelApiKeyPayload {
+    pub provider_id: String,
+}
+
 /** 刷新指定 LLM provider 模型列表的命令入参；不包含明文 API key。 */
 #[derive(Clone, Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]

@@ -87,6 +87,14 @@ pub struct ModelApiKeyStatus {
     pub message: String,
 }
 
+/** 用户主动查看时返回的模型密钥；不得进入启动状态或审计日志。 */
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RevealedModelApiKey {
+    pub provider_id: String,
+    pub api_key: String,
+}
+
 /** 刷新 provider 模型列表后的摘要；settings 是归一化并持久化后的完整设置。 */
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]

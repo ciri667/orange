@@ -4,9 +4,9 @@ use crate::domain::{
     FeishuIntegrationSettings, FolderEntry, ImIntegrationSettings, ImProviderConfig,
     ImProviderCredentialStatus, ImProviderSettings, KnowledgeBase, KnowledgeBaseMemory,
     KnowledgeBaseSelection, LlmProviderConfig, ModelApiKeyStatus, ModelConfig, Note,
-    NoteImageAttachmentInput, RequestAuditLog, SavedNoteImageAttachment, ScanReport, UserSettings,
-    WorkspaceBootstrapState, WorkspaceDocument, WorkspaceEditorState, WorkspaceEditorTab,
-    WorkspaceSnapshot, IM_PROVIDER_FEISHU, MEMORY_CATEGORY_CONVENTION,
+    NoteImageAttachmentInput, RequestAuditLog, RevealedModelApiKey, SavedNoteImageAttachment,
+    ScanReport, UserSettings, WorkspaceBootstrapState, WorkspaceDocument, WorkspaceEditorState,
+    WorkspaceEditorTab, WorkspaceSnapshot, IM_PROVIDER_FEISHU, MEMORY_CATEGORY_CONVENTION,
     MEMORY_CATEGORY_NOTE_STRUCTURE, MEMORY_CATEGORY_ORGANIZATION, MEMORY_CATEGORY_OTHER,
     MEMORY_CATEGORY_TAG_CONVENTION, MEMORY_SOURCE_AUTO, MEMORY_SOURCE_USER,
 };
@@ -157,20 +157,22 @@ mod tests {
         prune_app_event_logs, prune_document_history_entries, query_app_event_logs,
         read_document_history_snapshot, redact_memory_secrets, rename_markdown_file,
         rename_text_document_file, resolve_existing_file_inside_root, resolve_inside_root,
-        save_note_image_attachments, scan_markdown_directory, scan_supported_documents_directory,
-        search_snapshot_notes, sort_sessions_by_updated_at_desc, store_model_api_key_in_cache,
-        trash_markdown_file, trash_text_document_file_with, validate_folder_name,
-        validate_markdown_file_name, validate_new_markdown_file_name,
-        validate_new_text_document_file_name, validate_text_document_file_name,
-        write_document_history_snapshot, BASE64_STANDARD, DEVELOPMENT_KEYRING_SERVICE,
-        MAX_DOCUMENT_HISTORY_ENTRIES_PER_FILE, PRODUCTION_KEYRING_SERVICE,
+        reveal_model_api_key, save_note_image_attachments, scan_markdown_directory,
+        scan_supported_documents_directory, search_snapshot_notes,
+        sort_sessions_by_updated_at_desc, store_model_api_key_in_cache, trash_markdown_file,
+        trash_text_document_file_with, validate_folder_name, validate_markdown_file_name,
+        validate_new_markdown_file_name, validate_new_text_document_file_name,
+        validate_text_document_file_name, write_document_history_snapshot, BASE64_STANDARD,
+        DEVELOPMENT_KEYRING_SERVICE, MAX_DOCUMENT_HISTORY_ENTRIES_PER_FILE,
+        PRODUCTION_KEYRING_SERVICE,
     };
     use crate::domain::{
         AgentMemoryEntry, AgentSession, AppEventLog, DocumentHistoryEntry,
         FeishuIntegrationSettings, ImIntegrationSettings, ImProviderSettings, KnowledgeBase,
-        KnowledgeBaseMemory, KnowledgeBaseSelection, Note, NoteImageAttachmentInput,
-        RequestAuditLog, WorkspaceDocument, WorkspaceEditorState, WorkspaceEditorTab,
-        WorkspaceSnapshot, IM_PROVIDER_FEISHU, MEMORY_CATEGORY_OTHER, MEMORY_SOURCE_USER,
+        KnowledgeBaseMemory, KnowledgeBaseSelection, LlmProviderConfig, Note,
+        NoteImageAttachmentInput, RequestAuditLog, WorkspaceDocument, WorkspaceEditorState,
+        WorkspaceEditorTab, WorkspaceSnapshot, IM_PROVIDER_FEISHU, MEMORY_CATEGORY_OTHER,
+        MEMORY_SOURCE_USER,
     };
     use base64::Engine as _;
     use rusqlite::Connection;
@@ -696,6 +698,83 @@ mod tests {
             load_model_api_key_from_cache("test-key-reference").unwrap(),
             Some("test-key-from-cache".to_owned())
         );
+    }
+
+    /** 构造 reveal 测试用的 provider；key_reference 与保存命令使用同一派生规则。 */
+    fn test_reveal_provider(id: &str) -> LlmProviderConfig {
+        LlmProviderConfig {
+            id: id.to_owned(),
+            name: format!("Provider {id}"),
+            provider: "openai-compatible".to_owned(),
+            api_base: "https://llm.example/v1".to_owned(),
+            model: "test-model".to_owned(),
+            key_reference: crate::model_provider::key_reference_for_provider(id),
+            enabled: true,
+            supports_tools: true,
+            requires_api_key: true,
+            models: Vec::new(),
+            models_fetched_at: None,
+            created_at: "刚刚".to_owned(),
+            updated_at: "刚刚".to_owned(),
+        }
+    }
+
+    /** 未出现在当前设置中的 provider 不得按任意 ID 读取 keyring。 */
+    #[test]
+    fn reveal_model_api_key_rejects_unknown_provider() {
+        let providers = vec![test_reveal_provider("provider-known")];
+        let error = reveal_model_api_key(&providers, "provider-unknown").unwrap_err();
+
+        assert_eq!(error, "找不到指定的模型 Provider。");
+        assert!(!error.contains("sk-"));
+    }
+
+    /** 空 providerId 在查找设置前就被拒绝，避免无意义的 keyring 访问。 */
+    #[test]
+    fn reveal_model_api_key_rejects_blank_provider_id() {
+        let providers = vec![test_reveal_provider("provider-known")];
+        let error = reveal_model_api_key(&providers, "   ").unwrap_err();
+
+        assert_eq!(error, "模型 Provider ID 不能为空。");
+    }
+
+    /** 已配置密钥可通过进程缓存按需揭示，错误路径不得回显明文。 */
+    #[test]
+    fn reveal_model_api_key_returns_cached_secret_for_known_provider() {
+        let provider = test_reveal_provider("provider-reveal-cached");
+        let api_key = "sk-test-reveal-cached-key";
+        store_model_api_key_in_cache(&provider.key_reference, api_key).unwrap();
+
+        let revealed = reveal_model_api_key(&[provider.clone()], &provider.id).unwrap();
+
+        assert_eq!(revealed.provider_id, provider.id);
+        assert_eq!(revealed.api_key, api_key);
+    }
+
+    /** 设置里残留的占位 key_reference 不能挡住按 providerId 派生的真实条目。 */
+    #[test]
+    fn reveal_model_api_key_uses_derived_key_reference_not_stored_placeholder() {
+        let mut provider = test_reveal_provider("provider-reveal-derived");
+        let api_key = "sk-test-reveal-derived-key";
+        let derived_reference = crate::model_provider::key_reference_for_provider(&provider.id);
+        store_model_api_key_in_cache(&derived_reference, api_key).unwrap();
+        provider.key_reference = "placeholder-not-used-for-reveal".to_owned();
+
+        let revealed = reveal_model_api_key(&[provider.clone()], &provider.id).unwrap();
+
+        assert_eq!(revealed.api_key, api_key);
+    }
+
+    /** 设置中存在 provider 但 keyring/缓存都没有密钥时，返回未配置而不是内部错误。 */
+    #[test]
+    fn reveal_model_api_key_reports_missing_secret_without_leaking_details() {
+        let provider = test_reveal_provider("provider-reveal-missing-secret");
+        let error =
+            reveal_model_api_key(&[provider], "provider-reveal-missing-secret").unwrap_err();
+
+        assert_eq!(error, "系统安全存储中尚未找到模型密钥。");
+        assert!(!error.contains("sk-"));
+        assert!(!error.contains("provider-reveal-missing-secret"));
     }
 
     /** 旧版会话如果把创建时间保存成“刚刚”，应优先从前端会话 ID 的时间戳恢复。 */

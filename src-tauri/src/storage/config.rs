@@ -772,6 +772,36 @@ pub fn load_model_api_key_statuses(
         .collect()
 }
 
+/**
+ * 按用户请求读取单个 provider 的明文模型密钥。
+ *
+ * 必须先在当前设置里找到该 provider，再用 providerId 派生 keyring 引用；
+ * 不接受前端传入的 keyReference，避免按任意 account 探测系统安全存储。
+ * 派生规则与 `save_model_api_key` 一致，防止设置里残留的占位引用读不到已保存密钥。
+ */
+pub fn reveal_model_api_key(
+    providers: &[LlmProviderConfig],
+    provider_id: &str,
+) -> Result<RevealedModelApiKey, String> {
+    let trimmed_provider_id = provider_id.trim();
+    if trimmed_provider_id.is_empty() {
+        return Err("模型 Provider ID 不能为空。".to_owned());
+    }
+
+    let provider = providers
+        .iter()
+        .find(|candidate| candidate.id == trimmed_provider_id)
+        .ok_or_else(|| "找不到指定的模型 Provider。".to_owned())?;
+    let key_reference = model_provider::key_reference_for_provider(&provider.id);
+    let api_key = load_model_api_key(&key_reference)?
+        .ok_or_else(|| "系统安全存储中尚未找到模型密钥。".to_owned())?;
+
+    Ok(RevealedModelApiKey {
+        provider_id: provider.id.clone(),
+        api_key,
+    })
+}
+
 /** 确认当前 keyring 构建使用可跨进程持久化的系统安全存储。 */
 pub(crate) fn ensure_persistent_model_keyring() -> Result<(), String> {
     if model_keyring_persists_until_delete() {
