@@ -43,7 +43,7 @@ export type AgentToolName =
   | "suggest_organization";
 
 /** Agent 工具调用状态，用于前端展示本轮 loop 的执行轨迹。 */
-export type AgentToolCallStatus = "planned" | "running" | "completed" | "failed";
+export type AgentToolCallStatus = "planned" | "running" | "completed" | "failed" | "aborted";
 
 /** 首版云端模型提供商，M3 先固定 OpenAI-compatible BYOK 协议。 */
 export type ModelProvider = "openai-compatible";
@@ -346,7 +346,7 @@ export interface AgentTraceStep {
 export interface AgentTurnProgressEvent {
   sessionId: string;
   liveMessageId: string;
-  status: "running" | "completed" | "failed";
+  status: "running" | "completed" | "failed" | "interrupted";
   steps: AgentTraceStep[];
   turnDurationMs: number;
   content?: string;
@@ -366,6 +366,8 @@ export interface AgentMessage {
   trace?: AgentTraceStep[];
   /** 本轮墙钟耗时，过程区展示「已处理 12s」。 */
   turnDurationMs?: number;
+  /** 用户中断时保留已流出前缀；旧消息缺省为 false。 */
+  interrupted?: boolean;
 }
 
 /** 审阅评论绑定到 diff 的一侧和行号，正文只进入会话消息，不进入诊断日志。 */

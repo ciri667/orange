@@ -81,8 +81,8 @@ export function getToolTraceLabel(step: AgentTraceStep): string {
   return step.name ?? "工具调用";
 }
 
-/** 与 AgentTurnTrace / liveTurn.status 相同的三态，避免纯函数依赖组件模块。 */
-export type AgentTraceTurnStatus = "running" | "completed" | "failed";
+/** 与 AgentTurnTrace / liveTurn.status 相同的状态，避免纯函数依赖组件模块。 */
+export type AgentTraceTurnStatus = "running" | "completed" | "failed" | "interrupted";
 
 /** 贴底跟滚阈值：大约两行，不做成设置项。 */
 export const TRACE_SCROLL_BOTTOM_PX = 48;
@@ -96,7 +96,7 @@ export function shouldRenderTurnTrace(
   if (steps.length > 0) {
     return true;
   }
-  if (status === "failed") {
+  if (status === "failed" || status === "interrupted") {
     return true;
   }
   return status === "running" && !content.trim();
@@ -111,7 +111,7 @@ export function nextTurnTraceExpanded(
   if (previousStatus === "running" && nextStatus === "completed") {
     return false;
   }
-  if (nextStatus === "failed" && previousStatus !== "failed") {
+  if ((nextStatus === "failed" || nextStatus === "interrupted") && previousStatus !== nextStatus) {
     return true;
   }
   return currentExpanded;
@@ -132,7 +132,7 @@ export function shouldExpandToolStep(
   if (!step || step.type !== "tool") {
     return false;
   }
-  if (step.status === "failed") {
+  if (step.status === "failed" || step.status === "aborted") {
     return true;
   }
   if (turnStatus !== "running") {

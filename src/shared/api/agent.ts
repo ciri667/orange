@@ -62,6 +62,15 @@ export async function runAgentTurn(
   return invokeLogged<AgentTurnResult>("run_agent_turn", { payload: { snapshot, request } });
 }
 
+/** 中断当前会话正在跑的 Agent 回合；没有进行中的回合时后端是空操作。 */
+export async function abortAgentTurn(sessionId: string): Promise<void> {
+  if (!isTauriRuntime()) {
+    return;
+  }
+
+  await invokeLogged<void>("abort_agent_turn", { payload: { sessionId } });
+}
+
 /** 订阅 Agent 过程事件；浏览器开发态没有 Tauri 窗口时返回空卸载函数。 */
 export async function listenAgentTurnProgress(
   onProgress: (payload: AgentTurnProgressEvent) => void,

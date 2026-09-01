@@ -369,6 +369,7 @@ export function WorkspaceShell() {
     queuedFollowUpInList,
     isCurrentSessionBusy,
     handleClearQueuedFollowUp,
+    handleAbortTurn,
     handleSubmitPrompt,
     handleApproveSkillExecution,
     handleRejectSkillExecution,
@@ -730,6 +731,7 @@ export function WorkspaceShell() {
             onSelectedSkillIdsChange={setExplicitSkillIds}
             onSelectedMentionedFileIdsChange={setMentionedFileIds}
             onSubmitPrompt={() => handleSubmitPrompt("ask")}
+            onAbortTurn={() => void handleAbortTurn()}
             onClearQueuedFollowUp={handleClearQueuedFollowUp}
             onTurnModelSelectionChange={setTurnModelSelection}
             onSetSessionModelSelection={handleSetSessionModelSelection}

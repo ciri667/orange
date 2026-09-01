@@ -11,6 +11,7 @@ import {
   PencilLine,
   Search,
   Sparkles,
+  Square,
   Wrench,
   XCircle,
 } from "lucide-react";
@@ -29,8 +30,8 @@ import {
   type TraceDetailField,
 } from "./agentTrace";
 
-/** 过程区展示状态：执行中展开，完成后默认折叠，失败保持展开。 */
-export type AgentTurnTraceStatus = "running" | "completed" | "failed";
+/** 过程区展示状态：执行中展开，完成后默认折叠，失败和中断保持展开。 */
+export type AgentTurnTraceStatus = "running" | "completed" | "failed" | "interrupted";
 
 /** 正文预览超过该长度或行数才显示展开，避免短字段也多一个按钮。 */
 const EXCERPT_COLLAPSE_CHARS = 140;
@@ -53,7 +54,16 @@ export function AgentTurnTrace({
     () => steps.some((step) => step.type === "tool" && step.status === "failed"),
     [steps],
   );
-  const resolvedStatus: AgentTurnTraceStatus = hasFailedStep && status === "completed" ? "failed" : status;
+  const hasAbortedStep = useMemo(
+    () => steps.some((step) => step.type === "tool" && step.status === "aborted"),
+    [steps],
+  );
+  const resolvedStatus: AgentTurnTraceStatus =
+    status === "interrupted" || (hasAbortedStep && status === "completed")
+      ? "interrupted"
+      : hasFailedStep && status === "completed"
+        ? "failed"
+        : status;
   const [isExpanded, setIsExpanded] = useState(resolvedStatus !== "completed");
   const [elapsedMs, setElapsedMs] = useState(durationMs ?? 0);
   const toolCount = useMemo(() => steps.filter((step) => step.type === "tool").length, [steps]);
@@ -86,7 +96,13 @@ export function AgentTurnTrace({
   const ToggleIcon = isExpanded ? ChevronDown : ChevronRight;
   const durationLabel = formatTurnDuration(elapsedMs);
   const title =
-    resolvedStatus === "running" ? "正在处理" : resolvedStatus === "failed" ? "处理失败" : "过程";
+    resolvedStatus === "running"
+      ? "正在处理"
+      : resolvedStatus === "failed"
+        ? "处理失败"
+        : resolvedStatus === "interrupted"
+          ? "已停止"
+          : "过程";
   const metaParts = [
     resolvedStatus === "running" ? durationLabel : `已处理 ${durationLabel}`,
     toolCount > 0 ? `${toolCount} 步` : null,
@@ -106,6 +122,7 @@ export function AgentTurnTrace({
             "min-w-0 text-xs font-bold text-ink",
             resolvedStatus === "running" && "text-agent-strong",
             resolvedStatus === "failed" && "text-danger",
+            resolvedStatus === "interrupted" && "text-warning",
           )}
         >
           {title}
@@ -158,6 +175,7 @@ function TraceToolStep({
   autoExpand: boolean;
 }) {
   const isFailed = step.status === "failed";
+  const isAborted = step.status === "aborted";
   const isRunning = step.status === "running";
   const [userOverride, setUserOverride] = useState<boolean | null>(null);
   const [previousAutoExpand, setPreviousAutoExpand] = useState(autoExpand);
@@ -178,6 +196,7 @@ function TraceToolStep({
       className={cn(
         "grid min-w-0 overflow-hidden rounded-xl border border-border bg-surface",
         isFailed && "border-[rgba(var(--danger-rgb),0.26)] bg-danger-soft",
+        isAborted && "border-[rgba(var(--warning-rgb),0.26)] bg-warning-soft",
         isRunning && "border-[rgba(var(--warning-rgb),0.28)] bg-warning-soft",
       )}
     >
@@ -186,6 +205,7 @@ function TraceToolStep({
           "grid min-w-0 grid-cols-[auto_auto_minmax(0,1fr)] items-start gap-[7px] border-0 bg-transparent px-2.5 py-2 text-left text-ink",
           hasDetails ? "cursor-pointer hover:bg-surface-hover" : "cursor-default",
           isFailed && "text-danger",
+          isAborted && "text-warning",
         )}
         type="button"
         aria-expanded={isExpanded}
@@ -197,6 +217,7 @@ function TraceToolStep({
             "grid size-[22px] place-items-center rounded-full bg-surface-muted text-agent",
             isRunning && "bg-white/70 text-warning",
             isFailed && "bg-white/70 text-danger",
+            isAborted && "bg-white/70 text-warning",
           )}
           aria-hidden="true"
         >
@@ -356,6 +377,10 @@ function resolveToolIcon(step: AgentTraceStep) {
 
   if (step.status === "failed") {
     return XCircle;
+  }
+
+  if (step.status === "aborted") {
+    return Square;
   }
 
   const toolName = canonicalToolName(step.name);

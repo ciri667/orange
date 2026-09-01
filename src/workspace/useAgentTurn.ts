@@ -6,6 +6,7 @@ import {
   applyAgentChangeSet,
   applySkillChangeSet,
   approveSkillExecution,
+  abortAgentTurn,
   listenAgentTurnProgress,
   loadAppEventLogs,
   loadRequestAuditLogs,
@@ -143,6 +144,7 @@ export function useAgentTurn(options: AgentTurnOptions) {
       enqueueFollowUp: noop,
       takeQueuedFollowUp: () => null as string | null,
       handleClearQueuedFollowUp: noop,
+      handleAbortTurn: noopAsync,
       handleSubmitPrompt: noopAsync,
       handleApproveSkillExecution: noopAsync,
       handleRejectSkillExecution: noopAsync,
@@ -232,6 +234,44 @@ export function useAgentTurn(options: AgentTurnOptions) {
     }
 
     setNotice("已取消排队指令。");
+  }
+
+  /** 中断当前会话正在跑的回合，并取消尚未进入模型的排队指令。 */
+  async function handleAbortTurn() {
+    const sessionId = activeSession.id;
+    const queued = queuedBySessionRef.current.get(sessionId);
+    if (queued) {
+      queuedBySessionRef.current.delete(sessionId);
+      syncQueuedFollowUps();
+      if (queued.clientMessageId && snapshotRef.current) {
+        const removed = removeSessionMessage(snapshotRef.current, queued.sessionId, queued.clientMessageId);
+        if (removed.session) {
+          try {
+            commitTurnSnapshot(await saveSession(removed.snapshot, removed.session));
+          } catch (error) {
+            setNotice(error instanceof Error ? error.message : String(error));
+          }
+        }
+      }
+    }
+
+    if (!inFlightSessionIdsRef.current.has(sessionId)) {
+      if (queued) {
+        setNotice("已取消排队指令。");
+      }
+      return;
+    }
+
+    // abort IPC 只发出取消令牌并立刻返回；回合忙碌仍由 runAgentTurn 的 finally 结束。
+    // 这里配对 beginBusy/endBusy，只把侧栏文案改成「正在停止…」，避免多留一层计数。
+    beginBusy("正在停止…");
+    try {
+      await abortAgentTurn(sessionId);
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : String(error));
+    } finally {
+      endBusy();
+    }
   }
 
   /** 提交 Agent 输入；对话线程始终绑定目标会话，不借用正在跑的其它会话。 */
@@ -550,6 +590,7 @@ export function useAgentTurn(options: AgentTurnOptions) {
     },
     takeQueuedFollowUp: () => takeNextQueuedFollowUp(activeSession.id)?.prompt ?? null,
     handleClearQueuedFollowUp,
+    handleAbortTurn,
     handleSubmitPrompt,
     handleApproveSkillExecution,
     handleRejectSkillExecution,

@@ -1,4 +1,4 @@
-import { ArrowRight, BrainCircuit, FileText, Image, Sparkles } from "lucide-react";
+import { ArrowRight, BrainCircuit, FileText, Image, Sparkles, Square } from "lucide-react";
 import {
   useMemo,
   useRef,
@@ -127,6 +127,7 @@ export function AgentInput({
   onSelectedSkillIdsChange,
   onSelectedMentionedFileIdsChange,
   onSubmitPrompt,
+  onAbortTurn,
   onClearQueuedFollowUp,
   onTurnModelSelectionChange,
   onSecurityLevelChange,
@@ -150,6 +151,8 @@ export function AgentInput({
   onSelectedSkillIdsChange: (skillIds: string[]) => void;
   onSelectedMentionedFileIdsChange?: (fileIds: string[]) => void;
   onSubmitPrompt: () => void;
+  /** 中断当前正在跑的 Agent 回合。 */
+  onAbortTurn?: () => void;
   /** 取消尚未进入模型的排队指令。 */
   onClearQueuedFollowUp?: () => void;
   onTurnModelSelectionChange: (selection: string) => void;
@@ -487,6 +490,12 @@ export function AgentInput({
       return;
     }
 
+    if (event.key === "Escape" && isBusy) {
+      event.preventDefault();
+      onAbortTurn?.();
+      return;
+    }
+
     if (event.key !== "Enter" || event.shiftKey) {
       return;
     }
@@ -580,9 +589,10 @@ export function AgentInput({
   const promptPlaceholder = queuedFollowUp
     ? "已有一条排队指令，当前回合结束后发送"
     : isBusy
-      ? "发送后将在当前回合结束后处理"
+      ? "Enter 排队到当前回合之后；Esc 停止生成"
       : "问橘记，或 @ 文件、/ Skill";
   const sendTitle = queuedFollowUp ? "已有一条排队指令" : isBusy ? "排队到当前回合之后发送" : "发送";
+  const showStopButton = isBusy;
 
   return (
     <footer className="flex min-w-0 shrink-0 flex-col gap-1 rounded-2xl border border-border-translucent bg-surface-translucent px-2.5 py-2 pr-2 shadow-[0_8px_20px_rgba(47,39,29,0.05)]">
@@ -735,17 +745,31 @@ export function AgentInput({
             />
           </div>
         )}
-        <Button
-          variant="primary"
-          size="compact"
-          className="inline-grid size-[34px] min-h-[34px] min-w-[34px] shrink-0 place-items-center rounded-full border-transparent bg-agent p-0 hover:enabled:bg-agent-strong disabled:opacity-[0.38]"
-          title={sendTitle}
-          aria-label={sendTitle}
-          onClick={onSubmitPrompt}
-          disabled={!prompt.trim() || Boolean(queuedFollowUp)}
-        >
-          <ArrowRight size={16} />
-        </Button>
+        {showStopButton ? (
+          <Button
+            variant="primary"
+            size="compact"
+            tone="danger"
+            className="inline-grid size-[34px] min-h-[34px] min-w-[34px] shrink-0 place-items-center rounded-full border-transparent bg-danger p-0 hover:enabled:bg-danger disabled:opacity-[0.38]"
+            title="停止生成"
+            aria-label="停止生成"
+            onClick={onAbortTurn}
+          >
+            <Square size={12} fill="currentColor" />
+          </Button>
+        ) : (
+          <Button
+            variant="primary"
+            size="compact"
+            className="inline-grid size-[34px] min-h-[34px] min-w-[34px] shrink-0 place-items-center rounded-full border-transparent bg-agent p-0 hover:enabled:bg-agent-strong disabled:opacity-[0.38]"
+            title={sendTitle}
+            aria-label={sendTitle}
+            onClick={onSubmitPrompt}
+            disabled={!prompt.trim() || Boolean(queuedFollowUp)}
+          >
+            <ArrowRight size={16} />
+          </Button>
+        )}
       </div>
     </footer>
   );

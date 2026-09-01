@@ -718,7 +718,11 @@ function AgentMessageItem({
   const showTurnTrace =
     message.role === "assistant" &&
     usesTurnTrace &&
-    shouldRenderTurnTrace(message.trace ?? [], liveStatus ?? "completed", message.content);
+    shouldRenderTurnTrace(
+      message.trace ?? [],
+      liveStatus ?? (message.interrupted ? "interrupted" : "completed"),
+      message.content,
+    );
 
   return (
     <article
@@ -739,6 +743,11 @@ function AgentMessageItem({
             排队中
           </span>
         ) : null}
+        {message.interrupted || liveStatus === "interrupted" ? (
+          <span className="inline-flex items-center rounded-full border border-border bg-warning-soft px-1.5 py-px text-[11px] font-semibold text-warning">
+            已停止
+          </span>
+        ) : null}
       </div>
       {message.mentionedFileIds?.length ? (
         <div className="my-2 flex flex-wrap gap-[5px]" aria-label="本轮 @ 文件">
@@ -756,7 +765,7 @@ function AgentMessageItem({
         <AgentTurnTrace
           durationMs={message.turnDurationMs}
           hasLiveAnswer={Boolean(message.content.trim())}
-          status={liveStatus ?? "completed"}
+          status={liveStatus ?? (message.interrupted ? "interrupted" : "completed")}
           steps={message.trace ?? []}
         />
       ) : null}

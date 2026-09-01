@@ -62,6 +62,7 @@ export function AgentPanel({
   onSelectedSkillIdsChange,
   onSelectedMentionedFileIdsChange,
   onSubmitPrompt,
+  onAbortTurn,
   onClearQueuedFollowUp,
   onTurnModelSelectionChange,
   onSetSessionModelSelection,
@@ -119,6 +120,8 @@ export function AgentPanel({
   onSelectedSkillIdsChange: (skillIds: string[]) => void;
   onSelectedMentionedFileIdsChange: (fileIds: string[]) => void;
   onSubmitPrompt: () => void;
+  /** 中断当前正在跑的 Agent 回合。 */
+  onAbortTurn?: () => void;
   /** 取消尚未进入模型的排队指令。 */
   onClearQueuedFollowUp?: () => void;
   onTurnModelSelectionChange: (selection: string) => void;
@@ -299,6 +302,7 @@ export function AgentPanel({
         onSelectedSkillIdsChange={onSelectedSkillIdsChange}
         onSelectedMentionedFileIdsChange={onSelectedMentionedFileIdsChange}
         onSubmitPrompt={onSubmitPrompt}
+        onAbortTurn={onAbortTurn}
         onClearQueuedFollowUp={onClearQueuedFollowUp}
         onTurnModelSelectionChange={onTurnModelSelectionChange}
         onSecurityLevelChange={onSecurityLevelChange}
