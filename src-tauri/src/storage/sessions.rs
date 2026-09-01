@@ -292,6 +292,67 @@ pub(crate) fn persist_agent_session_transcript(
     Ok(())
 }
 
+/** 删除会话级模型 transcript；没有记录时是空操作。 */
+#[allow(dead_code)]
+pub fn delete_agent_session_transcript(app: &AppHandle, session_id: &str) -> Result<(), String> {
+    let mut connection = open_database(app)?;
+    let _write_guard = lock_database_writer()?;
+    let transaction = connection
+        .transaction_with_behavior(TransactionBehavior::Immediate)
+        .map_err(|error| format!("无法启动 transcript 删除事务：{error}"))?;
+    delete_agent_session_transcript_on_connection(&transaction, session_id)?;
+    transaction
+        .commit()
+        .map_err(|error| format!("无法提交 transcript 删除事务：{error}"))
+}
+
+/** 在已有连接或事务中删除 transcript。 */
+pub(crate) fn delete_agent_session_transcript_on_connection(
+    connection: &Connection,
+    session_id: &str,
+) -> Result<(), String> {
+    connection
+        .execute(
+            "DELETE FROM agent_session_transcripts WHERE session_id = ?1",
+            params![session_id],
+        )
+        .map_err(|error| format!("无法删除会话 transcript：{error}"))?;
+
+    Ok(())
+}
+
+/** 截断会话并删除 transcript，避免下一轮把已丢弃历史继续喂给模型。 */
+pub fn rewind_agent_session(
+    app: &AppHandle,
+    mut snapshot: WorkspaceSnapshot,
+    session_id: &str,
+    message_id: &str,
+    prompt: &str,
+) -> Result<WorkspaceSnapshot, String> {
+    apply_rewind_to_snapshot(&mut snapshot, session_id, message_id, prompt)?;
+    normalize_sessions_for_snapshot(&mut snapshot);
+
+    let session = snapshot
+        .sessions
+        .iter()
+        .find(|session| session.id == session_id)
+        .ok_or_else(|| "找不到要编辑的会话。".to_owned())?
+        .clone();
+
+    let mut connection = open_database(app)?;
+    let _write_guard = lock_database_writer()?;
+    let transaction = connection
+        .transaction_with_behavior(TransactionBehavior::Immediate)
+        .map_err(|error| format!("无法启动会话回退事务：{error}"))?;
+    persist_session_in_transaction(&transaction, &session)?;
+    delete_agent_session_transcript_on_connection(&transaction, session_id)?;
+    transaction
+        .commit()
+        .map_err(|error| format!("无法提交会话回退事务：{error}"))?;
+
+    Ok(snapshot)
+}
+
 /** 只回写快照中的一个会话，避免 Agent 回合用过期列表删掉或打回其它会话。 */
 pub fn save_snapshot_session(
     app: &AppHandle,

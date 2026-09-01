@@ -121,6 +121,7 @@ mod logs;
 mod memory;
 mod note_tags;
 mod project_instructions;
+mod rewind;
 mod sessions;
 mod workspace;
 
@@ -133,6 +134,7 @@ pub use logs::*;
 pub use memory::*;
 pub use note_tags::*;
 pub use project_instructions::*;
+pub use rewind::*;
 pub use sessions::*;
 pub use workspace::*;
 
