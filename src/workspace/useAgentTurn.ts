@@ -13,10 +13,11 @@ import {
   rejectAgentChangeSet,
   rejectSkillChangeSet,
   rejectSkillExecution,
+  rewindAgentSession,
   runAgentTurn,
   saveSession,
 } from "../shared/tauriApi";
-import type { AgentActionType, AgentSession, AgentTurnProgressEvent, AppEventLog, RequestAuditLog, WorkspaceSnapshot } from "../shared/types";
+import type { AgentActionType, AgentMessage, AgentSession, AgentTurnProgressEvent, AppEventLog, RequestAuditLog, WorkspaceSnapshot } from "../shared/types";
 import { formatLocalDateTime } from "../shared/id";
 import {
   applyFirstPromptTitle,
@@ -66,6 +67,7 @@ export function useAgentTurn(options: AgentTurnOptions) {
     endBusy,
     setNotice,
     commitSnapshot,
+    requestConfirmation,
     agentPrompt,
     setAgentPrompt,
     turnModelSelection,
@@ -146,6 +148,7 @@ export function useAgentTurn(options: AgentTurnOptions) {
       handleClearQueuedFollowUp: noop,
       handleAbortTurn: noopAsync,
       handleSubmitPrompt: noopAsync,
+      handleEditUserMessageAndRerun: noopAsync,
       handleApproveSkillExecution: noopAsync,
       handleRejectSkillExecution: noopAsync,
       handleApplySkillChangeSet: noopAsync,
@@ -486,6 +489,122 @@ export function useAgentTurn(options: AgentTurnOptions) {
 
   submitPromptRef.current = handleSubmitPrompt;
 
+  /** 等到该会话的 runAgentTurn 走完 finally，避免 rewind 后被 mergeSessionTurn 写回旧消息。 */
+  function waitForSessionIdle(sessionId: string, timeoutMs = 30_000) {
+    return new Promise<void>((resolve, reject) => {
+      if (!inFlightSessionIdsRef.current.has(sessionId)) {
+        resolve();
+        return;
+      }
+
+      const startedAt = Date.now();
+      const timer = window.setInterval(() => {
+        if (!inFlightSessionIdsRef.current.has(sessionId)) {
+          window.clearInterval(timer);
+          resolve();
+          return;
+        }
+        if (Date.now() - startedAt > timeoutMs) {
+          window.clearInterval(timer);
+          reject(new Error("等待当前回合结束超时。"));
+        }
+      }, 50);
+    });
+  }
+
+  /** 丢掉该会话尚未进入模型的排队，避免 abort 收尾后又把旧指令跑起来。 */
+  function dropQueuedFollowUp(sessionId: string) {
+    if (!queuedBySessionRef.current.has(sessionId)) {
+      return;
+    }
+
+    queuedBySessionRef.current.delete(sessionId);
+    syncQueuedFollowUps();
+  }
+
+  /** 编辑一条已发送的用户消息，截断其后历史并立刻重跑。 */
+  async function handleEditUserMessageAndRerun(messageId: string, prompt: string) {
+    const nextPrompt = prompt.trim();
+    if (!nextPrompt) {
+      return;
+    }
+
+    const session = snapshotRef.current?.sessions.find((item) => item.id === activeSession.id) ?? activeSession;
+    const messageIndex = session.messages.findIndex((message) => message.id === messageId);
+    const target = messageIndex >= 0 ? session.messages[messageIndex] : undefined;
+    if (!target || target.role !== "user") {
+      setNotice("找不到要编辑的用户消息。");
+      return;
+    }
+    if (session.imIdentity) {
+      setNotice("即时通讯会话不支持编辑历史消息。");
+      return;
+    }
+
+    const removedCount = session.messages.length - messageIndex - 1;
+    const hasPending = Boolean(session.pendingChange || session.pendingChangeSet || session.pendingExecution);
+    const isTurnRunning = inFlightSessionIdsRef.current.has(session.id);
+    const runRewind = () => void executeEditUserMessageAndRerun(session.id, target, nextPrompt);
+
+    if (removedCount > 0 || hasPending || isTurnRunning) {
+      const details = [
+        removedCount > 0 ? `将删除这条之后的 ${removedCount} 条对话。` : "",
+        hasPending ? "未确认的写入和 Skill 会被放弃。" : "",
+        isTurnRunning ? "当前正在生成的回复会先停止。" : "",
+        "已经应用到知识库的文件不会自动还原。",
+      ]
+        .filter(Boolean)
+        .join("");
+
+      requestConfirmation(
+        {
+          title: "重新执行这条消息？",
+          message: details,
+          confirmLabel: "删除并重新执行",
+        },
+        runRewind,
+      );
+      return;
+    }
+
+    await executeEditUserMessageAndRerun(session.id, target, nextPrompt);
+  }
+
+  /** abort → 等空闲 → rewind → 用同一 clientMessageId 重跑，不再追加新的用户消息。 */
+  async function executeEditUserMessageAndRerun(sessionId: string, target: AgentMessage, prompt: string) {
+    beginBusy("正在重新执行…");
+    try {
+      dropQueuedFollowUp(sessionId);
+      if (inFlightSessionIdsRef.current.has(sessionId)) {
+        await abortAgentTurn(sessionId);
+        await waitForSessionIdle(sessionId);
+      }
+
+      const sourceSnapshot = snapshotRef.current ?? currentSnapshot;
+      const rewoundSnapshot = await rewindAgentSession(sourceSnapshot, sessionId, target.id, prompt);
+      commitTurnSnapshot(rewoundSnapshot);
+      setLiveTurns((current) => {
+        const next = { ...current };
+        delete next[sessionId];
+        return next;
+      });
+
+      await handleSubmitPrompt(target.action ?? "ask", prompt, rewoundSnapshot, {
+        sessionId,
+        prompt,
+        action: target.action ?? "ask",
+        modelSelection: turnModelSelection,
+        explicitSkillIds: [],
+        mentionedFileIds: target.mentionedFileIds ?? [],
+        clientMessageId: target.id,
+      });
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : String(error));
+    } finally {
+      endBusy();
+    }
+  }
+
   /** 打开设置抽屉时刷新非阻塞诊断信息，避免展示过旧的日志列表。 */
   async function handleApproveSkillExecution() {
     beginBusy("正在隔离区运行 Skill...");
@@ -592,6 +711,7 @@ export function useAgentTurn(options: AgentTurnOptions) {
     handleClearQueuedFollowUp,
     handleAbortTurn,
     handleSubmitPrompt,
+    handleEditUserMessageAndRerun,
     handleApproveSkillExecution,
     handleRejectSkillExecution,
     handleApplySkillChangeSet,

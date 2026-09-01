@@ -62,6 +62,7 @@ export function AgentPanel({
   onSelectedSkillIdsChange,
   onSelectedMentionedFileIdsChange,
   onSubmitPrompt,
+  onEditUserMessage,
   onAbortTurn,
   onClearQueuedFollowUp,
   onTurnModelSelectionChange,
@@ -120,6 +121,8 @@ export function AgentPanel({
   onSelectedSkillIdsChange: (skillIds: string[]) => void;
   onSelectedMentionedFileIdsChange: (fileIds: string[]) => void;
   onSubmitPrompt: () => void;
+  /** 编辑已发送的用户消息并截断其后历史重跑。 */
+  onEditUserMessage?: (messageId: string, prompt: string) => void;
   /** 中断当前正在跑的 Agent 回合。 */
   onAbortTurn?: () => void;
   /** 取消尚未进入模型的排队指令。 */
@@ -222,6 +225,7 @@ export function AgentPanel({
         liveTurn={liveTurn}
         notes={notes}
         queuedFollowUp={queuedFollowUpInList}
+        onEditUserMessage={onEditUserMessage}
       />
 
       {activeSession.pendingExecution?.status === "pending" && (

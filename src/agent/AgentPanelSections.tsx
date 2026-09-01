@@ -1,4 +1,4 @@
-import { Check, Clock, Copy, Database, FileText, FolderOpen, Gauge, Layers3, MessageSquareText, ShieldAlert, Sparkles, Trash2, X } from "lucide-react";
+import { Check, Clock, Copy, Database, FileText, FolderOpen, Gauge, Layers3, MessageSquareText, Pencil, ShieldAlert, Sparkles, Trash2, X } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import ReactMarkdown from "react-markdown";
 import rehypeSanitize from "rehype-sanitize";
@@ -16,7 +16,7 @@ import {
 } from "../shared/markdown";
 import { OverflowTooltipText } from "../shared/OverflowTooltipText";
 import { SegmentedControl, SegmentedControlItem } from "../shared/SegmentedControl";
-import { agentPopoverClassName, popoverHeaderClassName, sectionLabelClassName } from "../shared/ui";
+import { agentPopoverClassName, fieldTextareaClassName, popoverHeaderClassName, sectionLabelClassName } from "../shared/ui";
 import {
   getScopeSummaryLabel,
   getImSessionRecentMessageLabel,
@@ -613,6 +613,7 @@ export function AgentMessageList({
   documents,
   liveTurn,
   queuedFollowUp,
+  onEditUserMessage,
 }: {
   activeSession: AgentSession;
   notes: Note[];
@@ -620,6 +621,8 @@ export function AgentMessageList({
   liveTurn?: AgentTurnProgressEvent | null;
   /** 当前回合结束后才会发给模型的下一条用户指令。 */
   queuedFollowUp?: string | null;
+  /** 编辑已发送的用户消息并重跑；IM 会话不提供。 */
+  onEditUserMessage?: (messageId: string, prompt: string) => void;
 }) {
   const persistedIds = new Set(activeSession.messages.map((message) => message.id));
   const showLiveTurn =
@@ -666,7 +669,14 @@ export function AgentMessageList({
         </div>
       )}
       {activeSession.messages.map((message) => (
-        <AgentMessageItem documents={documents} key={message.id} message={message} notes={notes} />
+        <AgentMessageItem
+          canEdit={Boolean(onEditUserMessage) && !activeSession.imIdentity && message.role === "user"}
+          documents={documents}
+          key={message.id}
+          message={message}
+          notes={notes}
+          onEditUserMessage={onEditUserMessage}
+        />
       ))}
       {showLiveTurn && liveTurn && (
         <AgentMessageItem
@@ -705,6 +715,8 @@ function AgentMessageItem({
   documents,
   liveStatus,
   queued = false,
+  canEdit = false,
+  onEditUserMessage,
 }: {
   message: AgentMessage;
   notes: Note[];
@@ -712,7 +724,10 @@ function AgentMessageItem({
   liveStatus?: AgentTurnProgressEvent["status"];
   /** 尚未进入模型的排队用户消息，只存在于当前界面。 */
   queued?: boolean;
+  canEdit?: boolean;
+  onEditUserMessage?: (messageId: string, prompt: string) => void;
 }) {
+  const [isEditing, setIsEditing] = useState(false);
   const usesTurnTrace =
     liveStatus != null || message.turnDurationMs != null || Boolean(message.trace?.length);
   const showTurnTrace =
@@ -769,10 +784,39 @@ function AgentMessageItem({
           steps={message.trace ?? []}
         />
       ) : null}
-      {message.content ? (
-        <MessageMarkdown content={message.content} streaming={liveStatus === "running"} />
-      ) : null}
-      <MessageCopyButton content={message.content} messageRole={message.role} />
+      {isEditing ? (
+        <UserMessageEditor
+          initialContent={message.content}
+          onCancel={() => setIsEditing(false)}
+          onSubmit={(prompt) => {
+            setIsEditing(false);
+            onEditUserMessage?.(message.id, prompt);
+          }}
+        />
+      ) : (
+        <>
+          {message.content ? (
+            <MessageMarkdown content={message.content} streaming={liveStatus === "running"} />
+          ) : null}
+          {message.content.trim() || (canEdit && !queued) ? (
+            <div className="mt-1.5 flex items-center gap-0.5">
+              <MessageCopyButton content={message.content} messageRole={message.role} />
+              {canEdit && !queued ? (
+                <Button
+                  variant="icon"
+                  size="compact"
+                  className="border-transparent bg-transparent text-ink-soft opacity-[0.58] group-hover:opacity-100 focus-visible:opacity-100 hover:enabled:border-border-strong hover:enabled:bg-surface-hover hover:enabled:text-ink"
+                  title="编辑并重新执行"
+                  aria-label="编辑并重新执行"
+                  onClick={() => setIsEditing(true)}
+                >
+                  <Pencil size={13} />
+                </Button>
+              ) : null}
+            </div>
+          ) : null}
+        </>
+      )}
       {message.role === "assistant" && !usesTurnTrace ? <ToolCallList toolCalls={message.toolCalls} /> : null}
       <CitationList citations={message.citations} />
     </article>
@@ -786,6 +830,71 @@ function getMentionedFileLabel(fileId: string, notes: Note[], documents: Workspa
 
 /** 复制成功后的短暂反馈时长，避免按钮文案一直停在「已复制」。 */
 const MESSAGE_COPY_RESET_MS = 1600;
+
+/** 用户消息气泡内编辑；发送后由会话动作截断后续历史并重跑。 */
+function UserMessageEditor({
+  initialContent,
+  onCancel,
+  onSubmit,
+}: {
+  initialContent: string;
+  onCancel: () => void;
+  onSubmit: (prompt: string) => void;
+}) {
+  const [draft, setDraft] = useState(initialContent);
+  const textareaRef = useRef<HTMLTextAreaElement | null>(null);
+  const trimmed = draft.trim();
+
+  useEffect(() => {
+    const textarea = textareaRef.current;
+    if (!textarea) {
+      return;
+    }
+
+    textarea.focus();
+    textarea.select();
+  }, []);
+
+  return (
+    <form
+      className="mt-2 grid gap-2"
+      onSubmit={(event) => {
+        event.preventDefault();
+        if (!trimmed) {
+          return;
+        }
+        onSubmit(trimmed);
+      }}
+    >
+      <textarea
+        ref={textareaRef}
+        aria-label="编辑用户消息"
+        className={cn(fieldTextareaClassName, "min-h-[72px] text-sm")}
+        onChange={(event) => setDraft(event.target.value)}
+        onKeyDown={(event) => {
+          if (event.key === "Escape") {
+            event.preventDefault();
+            onCancel();
+          }
+          if (event.key === "Enter" && (event.ctrlKey || event.metaKey) && trimmed) {
+            event.preventDefault();
+            onSubmit(trimmed);
+          }
+        }}
+        rows={Math.min(8, Math.max(3, draft.split("\n").length))}
+        value={draft}
+      />
+      <div className="flex justify-end gap-2">
+        <Button type="button" variant="ghost" size="compact" onClick={onCancel}>
+          取消
+        </Button>
+        <Button type="submit" variant="primary" size="compact" disabled={!trimmed}>
+          发送
+        </Button>
+      </div>
+    </form>
+  );
+}
 
 /** 消息正文下方的复制按钮；写入系统剪贴板的是消息原文，不含引用和过程轨迹。 */
 function MessageCopyButton({
@@ -815,7 +924,7 @@ function MessageCopyButton({
       variant="icon"
       size="compact"
       className={cn(
-        "mt-1.5 border-transparent bg-transparent text-ink-soft",
+        "border-transparent bg-transparent text-ink-soft",
         copied
           ? "text-success opacity-100"
           : "opacity-[0.58] group-hover:opacity-100 focus-visible:opacity-100 hover:enabled:border-border-strong hover:enabled:bg-surface-hover hover:enabled:text-ink",
