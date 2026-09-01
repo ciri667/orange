@@ -649,7 +649,10 @@ mod tests {
 
         assert_eq!(outcome.call.status, "failed");
         assert!(outcome.call.summary.contains("缺少正文"));
-        assert!(!outcome.call.summary.contains("缺少目标知识库、正文或有效 fileType"));
+        assert!(!outcome
+            .call
+            .summary
+            .contains("缺少目标知识库、正文或有效 fileType"));
         assert!(context.snapshot.sessions[0].pending_change.is_none());
     }
 

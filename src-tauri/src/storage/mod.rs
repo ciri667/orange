@@ -154,17 +154,16 @@ mod tests {
         normalize_workspace_editor_state, parse_im_settings_payload,
         persist_agent_session_transcript, persist_session_in_transaction,
         persist_session_records_in_transaction, persist_sessions_in_transaction,
-        prune_app_event_logs,
-        prune_document_history_entries, query_app_event_logs, read_document_history_snapshot,
-        redact_memory_secrets, rename_markdown_file, rename_text_document_file,
-        resolve_existing_file_inside_root, resolve_inside_root, save_note_image_attachments,
-        scan_markdown_directory, scan_supported_documents_directory, search_snapshot_notes,
-        sort_sessions_by_updated_at_desc, store_model_api_key_in_cache, trash_markdown_file,
-        trash_text_document_file_with, validate_folder_name, validate_markdown_file_name,
-        validate_new_markdown_file_name, validate_new_text_document_file_name,
-        validate_text_document_file_name, write_document_history_snapshot, BASE64_STANDARD,
-        DEVELOPMENT_KEYRING_SERVICE, MAX_DOCUMENT_HISTORY_ENTRIES_PER_FILE,
-        PRODUCTION_KEYRING_SERVICE,
+        prune_app_event_logs, prune_document_history_entries, query_app_event_logs,
+        read_document_history_snapshot, redact_memory_secrets, rename_markdown_file,
+        rename_text_document_file, resolve_existing_file_inside_root, resolve_inside_root,
+        save_note_image_attachments, scan_markdown_directory, scan_supported_documents_directory,
+        search_snapshot_notes, sort_sessions_by_updated_at_desc, store_model_api_key_in_cache,
+        trash_markdown_file, trash_text_document_file_with, validate_folder_name,
+        validate_markdown_file_name, validate_new_markdown_file_name,
+        validate_new_text_document_file_name, validate_text_document_file_name,
+        write_document_history_snapshot, BASE64_STANDARD, DEVELOPMENT_KEYRING_SERVICE,
+        MAX_DOCUMENT_HISTORY_ENTRIES_PER_FILE, PRODUCTION_KEYRING_SERVICE,
     };
     use crate::domain::{
         AgentMemoryEntry, AgentSession, AppEventLog, DocumentHistoryEntry,
@@ -1794,8 +1793,11 @@ mod tests {
         session_b.title = "会话二".to_owned();
 
         let transaction = connection.transaction().unwrap();
-        persist_session_records_in_transaction(&transaction, &[session_a.clone(), session_b.clone()])
-            .unwrap();
+        persist_session_records_in_transaction(
+            &transaction,
+            &[session_a.clone(), session_b.clone()],
+        )
+        .unwrap();
         transaction.commit().unwrap();
 
         session_a.title = "会话一已更新".to_owned();
