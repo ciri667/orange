@@ -212,6 +212,7 @@ pub fn run() {
             commands::settings::save_knowledge_base_memory,
             commands::settings::delete_knowledge_base_memory,
             commands::settings::save_model_api_key,
+            commands::settings::reveal_model_api_key,
             commands::settings::load_model_api_key_statuses,
             commands::settings::load_llm_provider_templates,
             commands::settings::refresh_llm_provider_models,

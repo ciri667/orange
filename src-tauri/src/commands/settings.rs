@@ -250,6 +250,55 @@ pub async fn save_model_api_key(
     result
 }
 
+/** 按用户请求读取单个 provider 的明文模型密钥；审计只记录 providerId，不记录密钥。 */
+#[tauri::command]
+pub async fn reveal_model_api_key(
+    app: AppHandle,
+    payload: RevealModelApiKeyPayload,
+) -> Result<RevealedModelApiKey, String> {
+    let started_at = Instant::now();
+    let provider_id = payload.provider_id.clone();
+    let settings_app = app.clone();
+    let result = run_blocking("读取模型密钥", move || {
+        let settings = storage::load_user_settings(&settings_app)?;
+
+        storage::reveal_model_api_key(&settings.model_config.providers, &payload.provider_id)
+    })
+    .await;
+
+    match &result {
+        Ok(revealed) => logging::write_app_event_best_effort(
+            &app,
+            AppEventBuilder::new(
+                AppLogLevel::Info,
+                AppLogCategory::Security,
+                "reveal_model_api_key",
+                "completed",
+                "已按用户请求读取模型密钥。",
+            )
+            .duration(started_at.elapsed())
+            .metadata(json!({
+                "providerId": revealed.provider_id.clone(),
+                "configured": true,
+            })),
+        ),
+        Err(error) => logging::write_app_event_best_effort(
+            &app,
+            AppEventBuilder::new(
+                AppLogLevel::Error,
+                AppLogCategory::Security,
+                "reveal_model_api_key",
+                "failed",
+                error,
+            )
+            .duration(started_at.elapsed())
+            .metadata(json!({ "providerId": provider_id })),
+        ),
+    }
+
+    result
+}
+
 /** 批量读取每个 provider 的 BYOK 模型密钥状态，只返回是否已配置，不返回明文。 */
 #[tauri::command]
 pub async fn load_model_api_key_statuses(app: AppHandle) -> Result<Vec<ModelApiKeyStatus>, String> {

@@ -15,12 +15,13 @@ pub(super) use crate::domain::{
     PreviewOnlineSkillPayload, ProposedChange, RefreshLlmProviderModelsPayload,
     RemoveKnowledgeBasePayload, RenameDocumentPayload, RenameNotePayload, RequestAuditLog,
     RescanKnowledgeBasePayload, RestoreDocumentHistoryEntryPayload, RestoreSessionContextPayload,
-    SaveAgentSkillPayload, SaveDocumentContentPayload, SaveFeishuSecretPayload,
-    SaveImProviderSecretPayload, SaveImSettingsPayload, SaveKnowledgeBaseMemoryPayload,
-    SaveModelApiKeyPayload, SaveNoteContentPayload, SaveNoteImageAttachmentsPayload,
-    SaveSessionPayload, SaveUserSettingsPayload, ScanKnowledgeBasePayload, ScanReport,
-    SearchOnlineSkillsPayload, ToggleAgentSkillPayload, UpdateSessionScopePayload, UserSettings,
-    WorkspaceBootstrapState, WorkspaceEditorState, WorkspaceSnapshot, IM_PROVIDER_FEISHU,
+    RevealModelApiKeyPayload, RevealedModelApiKey, SaveAgentSkillPayload,
+    SaveDocumentContentPayload, SaveFeishuSecretPayload, SaveImProviderSecretPayload,
+    SaveImSettingsPayload, SaveKnowledgeBaseMemoryPayload, SaveModelApiKeyPayload,
+    SaveNoteContentPayload, SaveNoteImageAttachmentsPayload, SaveSessionPayload,
+    SaveUserSettingsPayload, ScanKnowledgeBasePayload, ScanReport, SearchOnlineSkillsPayload,
+    ToggleAgentSkillPayload, UpdateSessionScopePayload, UserSettings, WorkspaceBootstrapState,
+    WorkspaceEditorState, WorkspaceSnapshot, IM_PROVIDER_FEISHU,
 };
 pub(super) use crate::logging::{self, AppEventBuilder, AppLogCategory, AppLogLevel};
 pub(super) use crate::model_provider::{self, ProviderTemplate};
