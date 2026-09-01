@@ -241,6 +241,57 @@ export function mergeSessionTurn(
   };
 }
 
+/** 截断到指定用户消息并替换正文；浏览器 mock 与后端不变量对齐。 */
+export function rewindSessionToUserMessage(session: AgentSession, messageId: string, prompt: string): AgentSession {
+  if (session.imIdentity) {
+    throw new Error("即时通讯会话不支持编辑历史消息。");
+  }
+
+  const nextPrompt = prompt.trim();
+  if (!nextPrompt) {
+    throw new Error("消息不能为空。");
+  }
+
+  const messageIndex = session.messages.findIndex((message) => message.id === messageId);
+  if (messageIndex < 0) {
+    throw new Error("找不到要编辑的用户消息。");
+  }
+  if (session.messages[messageIndex].role !== "user") {
+    throw new Error("只能编辑用户消息。");
+  }
+
+  const oldContent = session.messages[messageIndex].content;
+  const isFirstUser = session.messages.find((message) => message.role === "user")?.id === messageId;
+  const messages = session.messages.slice(0, messageIndex + 1).map((message, index) =>
+    index === messageIndex ? { ...message, content: nextPrompt } : message,
+  );
+  const retainedIds = new Set(messages.map((message) => message.id));
+  const compactedId = session.contextSummary?.lastCompactedMessageId;
+  let contextSummary = session.contextSummary;
+  if (!compactedId || !retainedIds.has(compactedId)) {
+    contextSummary = undefined;
+  } else if (contextSummary) {
+    const lastSummarized = contextSummary.lastSummarizedMessageId;
+    contextSummary = {
+      ...contextSummary,
+      lastSummarizedMessageId:
+        lastSummarized && !retainedIds.has(lastSummarized) ? messages[messages.length - 1]?.id : lastSummarized,
+      pendingChangeSummary: undefined,
+    };
+  }
+
+  return {
+    ...session,
+    title: isFirstUser && session.title.trim() === oldContent.trim() ? nextPrompt : session.title,
+    messages,
+    pendingChange: undefined,
+    pendingChangeSet: undefined,
+    pendingExecution: undefined,
+    contextSummary,
+    updatedAt: formatLocalDateTime(),
+  };
+}
+
 /** 从会话中移除尚未进入模型的排队用户消息，取消排队时回滚乐观写入。 */
 export function removeSessionMessage(
   snapshot: WorkspaceSnapshot,

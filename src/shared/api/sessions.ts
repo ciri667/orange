@@ -6,6 +6,7 @@ import {
   normalizeMockSnapshotSessions,
   orderValidKnowledgeBaseIds,
 } from "../mock/browser";
+import { rewindSessionToUserMessage } from "../../workspace/sessionUtils";
 import {
   AgentSession,
   KnowledgeBase,
@@ -132,4 +133,27 @@ export async function restoreSessionContext(snapshot: WorkspaceSnapshot, session
   }
 
   return invokeLogged<WorkspaceSnapshot>("restore_session_context", { payload: { snapshot, sessionId } });
+}
+
+/** 截断会话到指定用户消息并删除模型 transcript，供随后用同一消息 ID 重跑。 */
+export async function rewindAgentSession(
+  snapshot: WorkspaceSnapshot,
+  sessionId: string,
+  messageId: string,
+  prompt: string,
+): Promise<WorkspaceSnapshot> {
+  if (!isTauriRuntime()) {
+    const nextSnapshot = cloneWorkspaceSnapshot(snapshot);
+    const sessionIndex = nextSnapshot.sessions.findIndex((session) => session.id === sessionId);
+    if (sessionIndex < 0) {
+      throw new Error("找不到要编辑的会话。");
+    }
+
+    nextSnapshot.sessions[sessionIndex] = rewindSessionToUserMessage(nextSnapshot.sessions[sessionIndex], messageId, prompt);
+    return normalizeMockSnapshotSessions(nextSnapshot);
+  }
+
+  return invokeLogged<WorkspaceSnapshot>("rewind_agent_session", {
+    payload: { snapshot, sessionId, messageId, prompt },
+  });
 }
