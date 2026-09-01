@@ -13,6 +13,7 @@ import {
   LlmProviderModelRefreshResult,
   ModelApiKeyStatus,
   ProviderTemplate,
+  RevealedModelApiKey,
   UserSettings,
 } from "../types";
 
@@ -43,6 +44,15 @@ export async function saveModelApiKey(providerId: string, apiKey: string): Promi
   }
 
   return invokeLogged<ModelApiKeyStatus>("save_model_api_key", { payload: { providerId, apiKey } });
+}
+
+/** 按用户请求读取已保存的模型密钥；浏览器开发态没有系统安全存储。 */
+export async function revealModelApiKey(providerId: string): Promise<RevealedModelApiKey> {
+  if (!isTauriRuntime()) {
+    throw new Error("浏览器开发态不能读取模型密钥，请在 Tauri 桌面端查看。");
+  }
+
+  return invokeLogged<RevealedModelApiKey>("reveal_model_api_key", { payload: { providerId } });
 }
 
 /** 批量读取每个 provider 的 BYOK 模型密钥状态；不返回明文密钥。 */

@@ -235,6 +235,7 @@ export function WorkspaceShell() {
     handleToggleSkill,
     handleDeleteSkill,
     handleOpenUserSkillsFolder,
+    handleRevealApiKey,
     handleSaveApiKey,
     handleRefreshProviderModels,
     handleRefreshAuditLogs,
@@ -779,6 +780,7 @@ export function WorkspaceShell() {
           onToggleSkill={handleToggleSkill}
           onDeleteSkill={handleDeleteSkill}
           onOpenUserSkillsFolder={handleOpenUserSkillsFolder}
+          onRevealApiKey={handleRevealApiKey}
           onSaveApiKey={handleSaveApiKey}
           onRefreshProviderModels={handleRefreshProviderModels}
           onSaveFeishuSecret={handleSaveFeishuSecret}

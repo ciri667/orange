@@ -742,6 +742,12 @@ export interface ModelApiKeyStatus {
   message: string;
 }
 
+/** 用户主动查看时返回的模型密钥；只在设置抽屉会话内短暂持有。 */
+export interface RevealedModelApiKey {
+  providerId: string;
+  apiKey: string;
+}
+
 /** 刷新单个 provider 模型列表后的结果摘要，不包含密钥或响应正文。 */
 export interface LlmProviderModelRefreshResult {
   settings: UserSettings;

@@ -12,6 +12,7 @@ import {
   openAppLogFolder,
   openUserSkillsFolder,
   refreshLlmProviderModels,
+  revealModelApiKey,
   saveAgentSkill,
   saveImProviderSecret,
   saveImSettings,
@@ -320,6 +321,24 @@ export function useWorkspaceSettingsActions({
     }
   }
 
+  /** 按用户请求读取指定 provider 的已保存密钥；明文只返回给设置抽屉，不写入全局状态。 */
+  async function handleRevealApiKey(providerId: string) {
+    beginBusy("正在读取模型密钥...");
+
+    try {
+      const revealed = await revealModelApiKey(providerId);
+
+      return revealed.apiKey;
+    } catch (error) {
+      const message = formatSettingsErrorMessage(error);
+
+      setNotice(message);
+      throw new Error(message);
+    } finally {
+      endBusy();
+    }
+  }
+
   /** 保存指定 provider 的 BYOK API key；桌面端写入系统 keyring，避免明文进入 SQLite。 */
   async function handleSaveApiKey(providerId: string, apiKey: string) {
     const trimmedApiKey = apiKey.trim();
@@ -441,6 +460,7 @@ export function useWorkspaceSettingsActions({
     handleToggleSkill,
     handleDeleteSkill,
     handleOpenUserSkillsFolder,
+    handleRevealApiKey,
     handleSaveApiKey,
     handleRefreshProviderModels,
     handleRefreshAuditLogs,

@@ -153,6 +153,7 @@ export function SettingsDrawer({
   onToggleSkill,
   onDeleteSkill,
   onOpenUserSkillsFolder,
+  onRevealApiKey,
   onSaveApiKey,
   onRefreshProviderModels,
   onSaveFeishuSecret,
@@ -193,6 +194,7 @@ export function SettingsDrawer({
   onToggleSkill: (skillId: string, enabled: boolean) => Promise<void> | void;
   onDeleteSkill: (skillId: string) => Promise<void> | void;
   onOpenUserSkillsFolder: () => Promise<void> | void;
+  onRevealApiKey: (providerId: string) => Promise<string>;
   onSaveApiKey: (providerId: string, apiKey: string) => Promise<void> | void;
   onRefreshProviderModels: (providerId: string) => Promise<UserSettings> | UserSettings;
   onSaveFeishuSecret: (appSecret: string) => Promise<void> | void;
@@ -213,6 +215,10 @@ export function SettingsDrawer({
   const [feishuSecretDraft, setFeishuSecretDraft] = useState("");
   /** 每个 provider 的 API key 草稿只保留在输入框中，保存后由外层写入系统安全存储。 */
   const [apiKeyDraftByProvider, setApiKeyDraftByProvider] = useState<Record<string, string>>({});
+  /** 当前哪些 provider 正在以明文显示密钥；关闭设置抽屉后随组件卸载丢弃。 */
+  const [apiKeyVisibleByProvider, setApiKeyVisibleByProvider] = useState<Record<string, boolean>>({});
+  /** 本次抽屉会话内已揭示或刚保存的密钥，用于再次查看和判断保存按钮是否有改动。 */
+  const [revealedApiKeyByProvider, setRevealedApiKeyByProvider] = useState<Record<string, string>>({});
   /** “新增 Provider”入口当前选中的内置模板 ID。 */
   const [selectedTemplateId, setSelectedTemplateId] = useState(providerTemplates[0]?.templateId ?? "");
   /** 待确认移除的 provider ID；非默认 provider 删除前需要用户二次确认。 */
@@ -584,6 +590,83 @@ export function SettingsDrawer({
     }));
   }
 
+  /** 密钥已写入系统安全存储后：收起明文、清空输入，并缓存新值供本次抽屉内再次查看。 */
+  function markApiKeyPersisted(providerId: string, apiKey: string) {
+    setApiKeyDraftByProvider((current) => ({ ...current, [providerId]: "" }));
+    setApiKeyVisibleByProvider((current) => ({ ...current, [providerId]: false }));
+    setRevealedApiKeyByProvider((current) => ({ ...current, [providerId]: apiKey }));
+  }
+
+  /** 切换密钥显隐；草稿为空且已配置时才向系统安全存储按需读取明文。 */
+  async function handleToggleApiKeyVisibility(providerId: string) {
+    if (isBusy) {
+      return;
+    }
+
+    const isVisible = apiKeyVisibleByProvider[providerId] === true;
+    const apiKeyDraft = apiKeyDraftByProvider[providerId] ?? "";
+    const revealedApiKey = revealedApiKeyByProvider[providerId];
+
+    if (isVisible) {
+      if (revealedApiKey !== undefined && apiKeyDraft === revealedApiKey) {
+        setApiKeyDraftByProvider((current) => ({ ...current, [providerId]: "" }));
+      }
+
+      setApiKeyVisibleByProvider((current) => ({ ...current, [providerId]: false }));
+      return;
+    }
+
+    if (apiKeyDraft.trim()) {
+      setApiKeyVisibleByProvider((current) => ({ ...current, [providerId]: true }));
+      return;
+    }
+
+    const keyStatus = modelApiKeyStatuses.find((status) => status.providerId === providerId);
+    if (!keyStatus?.configured) {
+      setApiKeyVisibleByProvider((current) => ({ ...current, [providerId]: true }));
+      return;
+    }
+
+    if (revealedApiKey) {
+      setApiKeyDraftByProvider((current) => ({ ...current, [providerId]: revealedApiKey }));
+      setApiKeyVisibleByProvider((current) => ({ ...current, [providerId]: true }));
+      return;
+    }
+
+    const startedAt = performance.now();
+
+    logInfo("设置页查看模型密钥。", {
+      category: "settings",
+      event: "model_api_key_reveal",
+      status: "started",
+      metadata: { providerId },
+    });
+
+    try {
+      const apiKey = await onRevealApiKey(providerId);
+
+      setRevealedApiKeyByProvider((current) => ({ ...current, [providerId]: apiKey }));
+      setApiKeyDraftByProvider((current) => ({ ...current, [providerId]: apiKey }));
+      setApiKeyVisibleByProvider((current) => ({ ...current, [providerId]: true }));
+      logInfo("设置页查看模型密钥完成。", {
+        category: "settings",
+        event: "model_api_key_reveal",
+        status: "completed",
+        durationMs: performance.now() - startedAt,
+        metadata: { providerId },
+      });
+    } catch (error) {
+      logError("设置页查看模型密钥失败。", {
+        category: "settings",
+        event: "model_api_key_reveal",
+        status: "failed",
+        durationMs: performance.now() - startedAt,
+        metadata: { providerId },
+        error,
+      });
+    }
+  }
+
   /** 保存指定 provider 的 BYOK key 后清空对应输入框，日志只记录是否提交了输入，不记录密钥内容。 */
   async function handleSaveApiKey(providerId: string) {
     const startedAt = performance.now();
@@ -601,7 +684,7 @@ export function SettingsDrawer({
 
     try {
       await onSaveApiKey(providerId, apiKeyDraft);
-      setApiKeyDraftByProvider((current) => ({ ...current, [providerId]: "" }));
+      markApiKeyPersisted(providerId, apiKeyDraft.trim());
       logInfo("设置页模型密钥保存完成。", {
         category: "settings",
         event: "model_api_key_save",
@@ -640,7 +723,7 @@ export function SettingsDrawer({
     try {
       if (apiKeyDraft.trim()) {
         await onSaveApiKey(providerId, apiKeyDraft);
-        setApiKeyDraftByProvider((current) => ({ ...current, [providerId]: "" }));
+        markApiKeyPersisted(providerId, apiKeyDraft.trim());
       }
 
       await handleSaveSettings();
@@ -1050,6 +1133,8 @@ export function SettingsDrawer({
           selectedTemplateId={selectedTemplateId}
           modelApiKeyStatuses={modelApiKeyStatuses}
           apiKeyDraftByProvider={apiKeyDraftByProvider}
+          apiKeyVisibleByProvider={apiKeyVisibleByProvider}
+          revealedApiKeyByProvider={revealedApiKeyByProvider}
           isBusy={isBusy}
           onSaveSettings={handleSaveSettings}
           onModelEnabledChange={(enabled) => updateModelConfig("enabled", enabled)}
@@ -1067,6 +1152,7 @@ export function SettingsDrawer({
           onApiKeyDraftChange={(providerId, apiKey) =>
             setApiKeyDraftByProvider((current) => ({ ...current, [providerId]: apiKey }))
           }
+          onToggleApiKeyVisibility={handleToggleApiKeyVisibility}
           onSaveApiKey={handleSaveApiKey}
           onRefreshProviderModels={handleRefreshProviderModels}
           onProviderModelEnabledChange={updateProviderModelEnabled}

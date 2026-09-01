@@ -1,4 +1,4 @@
-import { Check, KeyRound, Pencil, Plus, RotateCw, Save, ShieldCheck, Star, Trash2, X } from "lucide-react";
+import { Check, Eye, EyeOff, KeyRound, Pencil, Plus, RotateCw, Save, ShieldCheck, Star, Trash2, X } from "lucide-react";
 import { useState } from "react";
 import { Button } from "../../shared/Button";
 import { cn } from "../../shared/cn";
@@ -24,6 +24,8 @@ export function ModelSettingsSection({
   selectedTemplateId,
   modelApiKeyStatuses,
   apiKeyDraftByProvider,
+  apiKeyVisibleByProvider,
+  revealedApiKeyByProvider,
   isBusy,
   onSaveSettings,
   onModelEnabledChange,
@@ -34,6 +36,7 @@ export function ModelSettingsSection({
   onSetDefaultProvider,
   onRequestRemoveProvider,
   onApiKeyDraftChange,
+  onToggleApiKeyVisibility,
   onSaveApiKey,
   onRefreshProviderModels,
   onProviderModelEnabledChange,
@@ -46,6 +49,8 @@ export function ModelSettingsSection({
   selectedTemplateId: string;
   modelApiKeyStatuses: ModelApiKeyStatus[];
   apiKeyDraftByProvider: Record<string, string>;
+  apiKeyVisibleByProvider: Record<string, boolean>;
+  revealedApiKeyByProvider: Record<string, string>;
   isBusy: boolean;
   onSaveSettings: () => void | Promise<void>;
   onModelEnabledChange: (enabled: boolean) => void;
@@ -56,6 +61,7 @@ export function ModelSettingsSection({
   onSetDefaultProvider: (providerId: string) => void;
   onRequestRemoveProvider: (providerId: string) => void;
   onApiKeyDraftChange: (providerId: string, apiKey: string) => void;
+  onToggleApiKeyVisibility: (providerId: string) => void | Promise<void>;
   onSaveApiKey: (providerId: string) => void | Promise<void>;
   onRefreshProviderModels: (providerId: string) => void | Promise<void>;
   onProviderModelEnabledChange: (providerId: string, modelId: string, enabled: boolean) => void;
@@ -123,6 +129,10 @@ export function ModelSettingsSection({
             const keyStatus = modelApiKeyStatuses.find((status) => status.providerId === provider.id) ?? null;
             const isDefault = provider.id === settingsDraft.modelConfig.defaultProviderId;
             const apiKeyDraft = apiKeyDraftByProvider[provider.id] ?? "";
+            const isApiKeyVisible = apiKeyVisibleByProvider[provider.id] === true;
+            const revealedApiKey = revealedApiKeyByProvider[provider.id];
+            const trimmedApiKeyDraft = apiKeyDraft.trim();
+            const canSaveApiKey = Boolean(trimmedApiKeyDraft) && trimmedApiKeyDraft !== revealedApiKey;
             const enabledModels = provider.models.filter((model) => model.enabled);
             const selectableDefaultModels = enabledModels.some((model) => model.id === provider.model)
               ? enabledModels
@@ -227,17 +237,34 @@ export function ModelSettingsSection({
                     需要 API key（本地免鉴权服务可关闭）
                   </ToggleRow>
                   {provider.requiresApiKey && (
-                    <label className={cn(fieldLabelClassName, "col-span-full")}>
+                    <div className={cn(fieldLabelClassName, "col-span-full")}>
                       <span>API key</span>
                       <div className="grid grid-cols-[minmax(0,1fr)_auto] gap-2 max-[820px]:grid-cols-1">
-                        <input
-                          className={cn(fieldControlClassName, "tracking-[0.02em]")}
-                          value={apiKeyDraft}
-                          onChange={(event) => onApiKeyDraftChange(provider.id, event.target.value)}
-                          placeholder="sk-..."
-                          type="password"
-                        />
-                        <Button variant="ghost" size="compact" onClick={() => onSaveApiKey(provider.id)} disabled={isBusy || !apiKeyDraft.trim()}>
+                        <div className="relative min-w-0">
+                          <input
+                            className={cn(fieldControlClassName, "pr-9 tracking-[0.02em]")}
+                            value={apiKeyDraft}
+                            onChange={(event) => onApiKeyDraftChange(provider.id, event.target.value)}
+                            placeholder={keyStatus?.configured ? "已保存，输入新值可替换" : "sk-..."}
+                            type={isApiKeyVisible ? "text" : "password"}
+                            autoComplete="off"
+                            spellCheck={false}
+                            aria-label="API key"
+                          />
+                          <Button
+                            variant="icon"
+                            size="compact"
+                            className="absolute right-1.5 top-1/2 -translate-y-1/2 border-transparent bg-transparent hover:enabled:border-transparent hover:enabled:bg-surface-hover"
+                            title={isApiKeyVisible ? "隐藏密钥" : "查看密钥"}
+                            aria-label={isApiKeyVisible ? "隐藏密钥" : "查看密钥"}
+                            aria-pressed={isApiKeyVisible}
+                            onClick={() => void onToggleApiKeyVisibility(provider.id)}
+                            disabled={isBusy}
+                          >
+                            {isApiKeyVisible ? <EyeOff size={13} /> : <Eye size={13} />}
+                          </Button>
+                        </div>
+                        <Button variant="ghost" size="compact" onClick={() => onSaveApiKey(provider.id)} disabled={isBusy || !canSaveApiKey}>
                           <KeyRound size={13} />
                           保存密钥
                         </Button>
@@ -246,7 +273,7 @@ export function ModelSettingsSection({
                         <KeyRound size={13} />
                         <OverflowTooltipText text={keyStatus?.message ?? "尚未读取模型密钥状态。"} logArea="settings_model_key_status" />
                       </div>
-                    </label>
+                    </div>
                   )}
                   <ProviderModelsPanel
                     provider={provider}
