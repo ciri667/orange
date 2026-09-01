@@ -200,7 +200,8 @@ fn ensure_user_message_for_turn(
         .iter_mut()
         .find(|message| message.id == user_message_id && message.role == "user")
         .map(|message| {
-            // 乐观插入的用户消息以本轮请求为准补齐 @ 文件，保证历史回显一致。
+            // 乐观插入或 rewind 后的用户消息以本轮请求为准，避免正文和 @ 文件与请求分叉。
+            message.content = request.prompt.clone();
             message.mentioned_file_ids = request.mentioned_file_ids.clone();
         })
         .is_some()
@@ -354,6 +355,65 @@ mod tests {
                 .filter(|message| message.role == "user")
                 .count(),
             1
+        );
+        assert_eq!(session.messages[0].content, "已发送消息");
+    }
+
+    /** rewind 后同一 client_message_id 必须用本轮 prompt 覆盖旧正文。 */
+    #[test]
+    fn local_fallback_updates_rewound_user_message_content() {
+        let mut session = crate::domain::AgentSession {
+            id: "session-a".to_owned(),
+            title: "测试会话".to_owned(),
+            im_identity: None,
+            r#type: "knowledge-base".to_owned(),
+            knowledge_base_ids: vec!["kb-a".to_owned()],
+            active_note_id: None,
+            pinned_note_ids: Vec::new(),
+            messages: vec![AgentMessage {
+                id: "user-client".to_owned(),
+                role: "user".to_owned(),
+                content: "旧正文".to_owned(),
+                action: Some("ask".to_owned()),
+                citations: None,
+                tool_calls: None,
+                mentioned_file_ids: Vec::new(),
+                trace: Vec::new(),
+                turn_duration_ms: None,
+                interrupted: false,
+            }],
+            pending_change: None,
+            pending_change_set: None,
+            pending_execution: None,
+            security_level: "basic".to_owned(),
+            context_summary: None,
+            created_at: "刚刚".to_owned(),
+            updated_at: "刚刚".to_owned(),
+            deleted_at: None,
+            model_provider_id: None,
+            model_id: None,
+            context_usage: None,
+        };
+        let request = AgentTurnRequest {
+            prompt: "新正文".to_owned(),
+            action: "ask".to_owned(),
+            session_id: "session-a".to_owned(),
+            active_knowledge_base_id: "kb-a".to_owned(),
+            active_note_id: String::new(),
+            client_message_id: Some("user-client".to_owned()),
+            model_provider_id: None,
+            model_id: None,
+            explicit_skill_ids: Vec::new(),
+            mentioned_file_ids: vec!["note-a".to_owned()],
+        };
+
+        ensure_user_message_for_turn(&mut session, &request);
+
+        assert_eq!(session.messages.len(), 1);
+        assert_eq!(session.messages[0].content, "新正文");
+        assert_eq!(
+            session.messages[0].mentioned_file_ids,
+            vec!["note-a".to_owned()]
         );
     }
 }

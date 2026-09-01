@@ -186,6 +186,7 @@ pub fn run() {
             commands::sessions::delete_session,
             commands::sessions::update_session_scope,
             commands::sessions::restore_session_context,
+            commands::sessions::rewind_agent_session,
             commands::settings::load_user_settings,
             commands::settings::save_user_settings,
             commands::im::load_im_settings,

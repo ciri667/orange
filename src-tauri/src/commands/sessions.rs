@@ -81,3 +81,25 @@ pub async fn restore_session_context(
     })
     .await
 }
+
+/** 截断会话到指定用户消息并删除 transcript；进行中的回合必须先由前端停止。 */
+#[tauri::command]
+pub async fn rewind_agent_session(
+    app: AppHandle,
+    payload: RewindAgentSessionPayload,
+) -> Result<WorkspaceSnapshot, String> {
+    if runtime::is_session_turn_active(&payload.session_id) {
+        return Err("当前会话仍有进行中的回合，请先停止后再编辑。".to_owned());
+    }
+
+    run_blocking("回退 Agent 会话", move || {
+        storage::rewind_agent_session(
+            &app,
+            payload.snapshot,
+            &payload.session_id,
+            &payload.message_id,
+            &payload.prompt,
+        )
+    })
+    .await
+}

@@ -309,6 +309,16 @@ pub struct RestoreSessionContextPayload {
     pub session_id: String,
 }
 
+/** 编辑一条用户消息并截断其后历史的命令入参。 */
+#[derive(Clone, Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RewindAgentSessionPayload {
+    pub snapshot: WorkspaceSnapshot,
+    pub session_id: String,
+    pub message_id: String,
+    pub prompt: String,
+}
+
 /** 保存用户模型和隐私设置的命令入参。 */
 #[derive(Clone, Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]

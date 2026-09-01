@@ -62,6 +62,11 @@ pub fn register(session_id: &str) -> AgentCancel {
     cancel
 }
 
+/** 该会话是否仍登记了进行中的回合令牌。 */
+pub fn is_session_turn_active(session_id: &str) -> bool {
+    lock_registry().contains_key(session_id)
+}
+
 /** 取消该会话当前回合。尚无登记时写入已取消占位，避免 TOCTOU。 */
 pub fn request_abort(session_id: &str) {
     let mut registry = lock_registry();
@@ -151,6 +156,16 @@ mod tests {
     #[test]
     fn abort_unknown_session_is_not_an_error() {
         request_abort(&isolated_session("missing"));
+    }
+
+    #[test]
+    fn is_session_turn_active_tracks_register_and_unregister() {
+        let session_id = isolated_session("active");
+        assert!(!is_session_turn_active(&session_id));
+        let cancel = register(&session_id);
+        assert!(is_session_turn_active(&session_id));
+        unregister(&session_id, &cancel);
+        assert!(!is_session_turn_active(&session_id));
     }
 
     #[tokio::test]
