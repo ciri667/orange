@@ -8,9 +8,11 @@ pub async fn run_agent_turn(
 ) -> Result<AgentTurnResult, String> {
     let started_at = Instant::now();
     let operation_id = storage::create_id("op");
-    let mut snapshot = hydrate_persisted_sessions_for_turn(&app, payload.snapshot).await?;
     let request = payload.request;
     let session_id = request.session_id.clone();
+    let cancel = runtime::register_agent_cancel(&session_id);
+    let _cancel_guard = runtime::AgentCancelGuard::new(session_id.clone(), cancel.clone());
+    let mut snapshot = hydrate_persisted_sessions_for_turn(&app, payload.snapshot).await?;
     let active_knowledge_base_id = request.active_knowledge_base_id.clone();
     let request_metadata = json!({ "action": request.action.clone() });
 
@@ -54,7 +56,7 @@ pub async fn run_agent_turn(
     }
 
     let runtime_result =
-        runtime::run_agent_turn(&app, snapshot, request, settings, available_skills).await;
+        runtime::run_agent_turn(&app, snapshot, request, settings, available_skills, cancel).await;
     let audit_app = app.clone();
     let audit_log = runtime_result.audit_log.clone();
 
@@ -102,12 +104,8 @@ pub async fn run_agent_turn(
 
         return Err(error);
     }
-    if let Err(error) = persist_turn_session(
-        &app,
-        &runtime_result.turn_result.snapshot,
-        &session_id,
-    )
-    .await
+    if let Err(error) =
+        persist_turn_session(&app, &runtime_result.turn_result.snapshot, &session_id).await
     {
         logging::write_app_event_best_effort(
             &app,
@@ -134,7 +132,11 @@ pub async fn run_agent_turn(
             AppLogCategory::Agent,
             "run_agent_turn",
             "completed",
-            "Agent 已完成本轮处理。",
+            if runtime_result.audit_log.kind == "aborted_turn" {
+                "用户中断了本轮 Agent 执行。"
+            } else {
+                "Agent 已完成本轮处理。"
+            },
         )
         .operation_id(operation_id)
         .session_id(session_id)
@@ -147,6 +149,17 @@ pub async fn run_agent_turn(
     );
 
     Ok(runtime_result.turn_result)
+}
+
+/** 用户手动中断当前会话的 Agent 回合；没有进行中的回合时是空操作。 */
+#[tauri::command]
+pub async fn abort_agent_turn(payload: AbortAgentTurnPayload) -> Result<(), String> {
+    let session_id = payload.session_id.trim();
+    if session_id.is_empty() {
+        return Err("缺少会话 ID。".to_owned());
+    }
+    runtime::request_agent_abort(session_id);
+    Ok(())
 }
 
 /** 手动整理当前 Agent 会话工作记忆，成功后持久化会话快照。 */
@@ -335,8 +348,10 @@ pub(crate) async fn run_agent_turn_from_im(
         active_knowledge_base_id.clone(),
         user_message_id,
     );
+    let cancel = runtime::register_agent_cancel(&session_id);
+    let _cancel_guard = runtime::AgentCancelGuard::new(session_id.clone(), cancel.clone());
     let runtime_result =
-        runtime::run_agent_turn(&app, snapshot, request, settings, available_skills).await;
+        runtime::run_agent_turn(&app, snapshot, request, settings, available_skills, cancel).await;
     let audit_app = app.clone();
     let audit_log = runtime_result.audit_log.clone();
 
@@ -726,7 +741,8 @@ pub(crate) async fn handle_im_pending_change_command(
     match result {
         Ok(updated_snapshot) => {
             // IM 操作没有前端接收 snapshot，因此必须立即持久化会话状态，重复消息才不会二次写入。
-            if let Err(error) = storage::save_snapshot_session(&app, &updated_snapshot, &session_id) {
+            if let Err(error) = storage::save_snapshot_session(&app, &updated_snapshot, &session_id)
+            {
                 log_im_change_approval(
                     &app,
                     "failed",

@@ -1,11 +1,18 @@
+mod cancel;
 mod compaction;
 mod context;
 mod dsml;
 mod stream;
+use cancel::{is_user_abort_error, USER_ABORT_ERROR};
 use compaction::*;
 use context::*;
 use dsml::*;
 use stream::*;
+
+pub use cancel::{
+    register as register_agent_cancel, request_abort as request_agent_abort, AgentCancel,
+    AgentCancelGuard,
+};
 
 use crate::agent;
 use crate::agent_tools::{model_tool_call_name, parse_tool_args, AgentToolContext, ToolRegistry};
@@ -46,14 +53,21 @@ const MAX_TOOL_RESULT_CHARS: usize = 9000;
 /** 内层工具续跑安全帽；有 tool call 就继续，error/abort/length 在循环内立刻停。 */
 const MAX_INNER_TOOL_ROUNDS: usize = 12;
 
+/** 未派发工具的合成结果，保证 assistant(tool_calls) 都有对应 tool 消息。 */
+const ABORTED_BEFORE_DISPATCH_SUMMARY: &str = "工具调用在派发前被用户中断。";
+
 /** 请求审计最多记录的发送片段摘要数量。 */
 const MAX_AUDIT_FRAGMENTS: usize = 8;
 
 /** 后端再次限制每轮显式 Skill 数量，避免绕过 UI 传入过多 instructions。 */
 const MAX_EXPLICIT_SKILLS_PER_TURN: usize = 3;
 
-/** 云端模型请求超时时间，避免网络卡住后阻塞 Agent turn。 */
-const MODEL_HTTP_TIMEOUT_SECONDS: u64 = 60;
+/** 连接阶段超时，避免 DNS/TLS 卡住。 */
+const MODEL_HTTP_CONNECT_TIMEOUT_SECONDS: u64 = 30;
+/** 两次响应分片之间的空闲超时；长文只要还在出 token 就不会被掐断。 */
+const MODEL_HTTP_READ_TIMEOUT_SECONDS: u64 = 180;
+/** 整次请求硬顶。必须明显长于单次长文生成，否则流式读体会在写完前被整体超时掐掉。 */
+const MODEL_HTTP_TIMEOUT_SECONDS: u64 = 600;
 
 /** 本轮显式 Skill 解析结果；skills 已按用户选择顺序去重并校验 enabled。 */
 #[derive(Debug)]
@@ -382,6 +396,7 @@ pub async fn run_agent_turn(
     request: AgentTurnRequest,
     settings: UserSettings,
     available_skills: Vec<AgentSkill>,
+    cancel: AgentCancel,
 ) -> RuntimeTurnResult {
     let explicit_skill_selection =
         match resolve_explicit_skills(&request.explicit_skill_ids, &available_skills) {
@@ -544,6 +559,15 @@ pub async fn run_agent_turn(
     let live_message_id = create_id("assistant");
     let mut tracer = AgentTurnTracer::new(request.session_id.clone(), live_message_id);
     tracer.emit_started(Some(app));
+    if cancel.is_aborted() {
+        return aborted_turn_without_model(
+            app,
+            snapshot,
+            request,
+            &mut tracer,
+            RuntimeAuditTrail::default(),
+        );
+    }
 
     match run_model_loop(
         app,
@@ -556,10 +580,20 @@ pub async fn run_agent_turn(
         api_key,
         settings.agent_security.clone(),
         &mut tracer,
+        &cancel,
     )
     .await
     {
         Ok(result) => result,
+        Err(error) if cancel.is_aborted() || is_user_abort_error(&error) => {
+            aborted_turn_without_model(
+                app,
+                snapshot,
+                request,
+                &mut tracer,
+                RuntimeAuditTrail::default(),
+            )
+        }
         Err(error) => {
             tracer.mark_failed();
             let error_text = provider_error::user_facing_provider_error(&error);
@@ -629,6 +663,7 @@ async fn run_model_loop(
     api_key: String,
     agent_security: crate::domain::AgentSecuritySettings,
     tracer: &mut AgentTurnTracer,
+    cancel: &AgentCancel,
 ) -> Result<RuntimeTurnResult, String> {
     let session_index = resolve_session_index(&snapshot, &request)?;
 
@@ -724,6 +759,20 @@ async fn run_model_loop(
 
     let mut model_round = 0u32;
     for _ in 0..MAX_INNER_TOOL_ROUNDS {
+        if cancel.is_aborted() {
+            return Ok(finalize_aborted_turn(
+                app,
+                snapshot,
+                session_index,
+                &request,
+                model_messages,
+                prompt_prefix_len,
+                citations,
+                tool_calls,
+                tracer,
+                audit_trail,
+            ));
+        }
         audit_trail.record_model_request();
         model_round = model_round.saturating_add(1);
         capture_model_prompt_dump(
@@ -743,6 +792,7 @@ async fn run_model_loop(
             &mut model_messages,
             Some(&tool_schemas),
             None,
+            cancel,
             &mut |streamed| {
                 apply_streamed_assistant_progress(tracer, Some(app), streamed);
             },
@@ -750,6 +800,20 @@ async fn run_model_loop(
         .await
         {
             Ok(response) => response,
+            Err(error) if cancel.is_aborted() || is_user_abort_error(&error) => {
+                return Ok(finalize_aborted_turn(
+                    app,
+                    snapshot,
+                    session_index,
+                    &request,
+                    model_messages,
+                    prompt_prefix_len,
+                    citations,
+                    tool_calls,
+                    tracer,
+                    audit_trail,
+                ));
+            }
             Err(error) => {
                 let status = provider_error::parse_http_status_from_error(&error);
                 let kind = provider_error::classify_provider_error(&error, status);
@@ -917,6 +981,7 @@ async fn run_model_loop(
                 citations,
                 tool_calls,
                 tracer,
+                false,
             );
             let compacted = update_agent_context_summary_after_turn(
                 &client,
@@ -969,7 +1034,29 @@ async fn run_model_loop(
             tracer.push_thinking(&extracted_tool_calls.visible_content, Some(app));
         }
 
-        for model_tool_call in model_tool_calls {
+        let mut pending_tool_calls = model_tool_calls.into_iter();
+        while let Some(model_tool_call) = pending_tool_calls.next() {
+            if cancel.is_aborted() {
+                settle_undispatched_tool_calls(
+                    std::iter::once(model_tool_call).chain(pending_tool_calls),
+                    &mut model_messages,
+                    &mut tool_calls,
+                    tracer,
+                    Some(app),
+                );
+                return Ok(finalize_aborted_turn(
+                    app,
+                    snapshot,
+                    session_index,
+                    &request,
+                    model_messages,
+                    prompt_prefix_len,
+                    citations,
+                    tool_calls,
+                    tracer,
+                    audit_trail,
+                ));
+            }
             let tool_name = model_tool_call_name(&model_tool_call);
             let tool_args = parse_tool_args(&model_tool_call);
             let trace_step_id = tracer.begin_tool(
@@ -992,7 +1079,10 @@ async fn run_model_loop(
                 &tool_outcome.payload.to_string(),
                 MAX_TOOL_RESULT_CHARS,
             );
-            if tool_outcome.call.name == "run" && tool_outcome.call.status == "completed" {
+            if !cancel.is_aborted()
+                && tool_outcome.call.name == "run"
+                && tool_outcome.call.status == "completed"
+            {
                 let pending_request = snapshot.sessions[session_index].pending_execution.clone();
                 if let Some(pending_request) = pending_request.filter(|pending_request| {
                     crate::skill_execution::can_auto_execute(
@@ -1031,7 +1121,8 @@ async fn run_model_loop(
             }
             // 完全级别下，Agent 直接产出的变更集在校验通过后自动应用；
             // 校验失败（受保护目录、既有文件冲突等）会暂停自动应用，保留 pending 让用户处理。
-            if tool_outcome.call.status == "completed"
+            if !cancel.is_aborted()
+                && tool_outcome.call.status == "completed"
                 && crate::skill_execution::can_auto_apply_agent_change_set(
                     &snapshot.sessions[session_index],
                     &agent_security,
@@ -1079,7 +1170,8 @@ async fn run_model_loop(
             }
             // 完全级别下，Agent 主写入路径（改写/新建文档）校验通过后自动落盘；
             // 这是放手策略的核心，不只覆盖 Skill 或建文件夹。
-            if tool_outcome.call.status == "completed"
+            if !cancel.is_aborted()
+                && tool_outcome.call.status == "completed"
                 && crate::agent_writes::can_auto_apply_pending_change(
                     &snapshot.sessions[session_index],
                     &agent_security,
@@ -1178,6 +1270,7 @@ async fn run_model_loop(
         citations,
         tool_calls,
         tracer,
+        false,
     );
     let compacted = update_agent_context_summary_after_turn(
         &client,
@@ -1250,9 +1343,11 @@ fn reconcile_final_content_with_tool_status(
     content
 }
 
-/** 构建带超时的 HTTP client，避免模型 provider 无响应时卡住 Agent turn。 */
+/** 构建带超时的 HTTP client：连接和空闲分片分开限制，避免长文流式被整次请求超时掐断。 */
 fn build_http_client() -> Result<Client, String> {
     Client::builder()
+        .connect_timeout(Duration::from_secs(MODEL_HTTP_CONNECT_TIMEOUT_SECONDS))
+        .read_timeout(Duration::from_secs(MODEL_HTTP_READ_TIMEOUT_SECONDS))
         .timeout(Duration::from_secs(MODEL_HTTP_TIMEOUT_SECONDS))
         .build()
         .map_err(|error| format!("无法创建模型 HTTP client：{error}"))
@@ -1463,11 +1558,15 @@ async fn send_chat_completion_with_policy(
     messages: &mut Vec<Value>,
     tool_schemas: Option<&Value>,
     response_format: Option<&Value>,
+    cancel: &AgentCancel,
     on_progress: &mut impl FnMut(&StreamedAssistant),
 ) -> Result<Value, String> {
     let mut delay = Duration::from_millis(400);
     let mut retryable_attempts = 0usize;
     loop {
+        if cancel.is_aborted() {
+            return Err(USER_ABORT_ERROR.to_owned());
+        }
         match send_chat_completion_logged_stream(
             client,
             provider,
@@ -1477,12 +1576,16 @@ async fn send_chat_completion_with_policy(
             messages,
             tool_schemas,
             response_format,
+            cancel,
             on_progress,
         )
         .await
         {
             Ok(value) => return Ok(value),
             Err(error) => {
+                if cancel.is_aborted() || is_user_abort_error(&error) {
+                    return Err(USER_ABORT_ERROR.to_owned());
+                }
                 let status = provider_error::parse_http_status_from_error(&error);
                 let kind = provider_error::classify_provider_error(&error, status);
                 log::info!(
@@ -1502,7 +1605,13 @@ async fn send_chat_completion_with_policy(
                     }
                     provider_error::ProviderErrorKind::Retryable if retryable_attempts < 3 => {
                         retryable_attempts += 1;
-                        std::thread::sleep(delay);
+                        tokio::select! {
+                            biased;
+                            _ = cancel.cancelled() => {
+                                return Err(USER_ABORT_ERROR.to_owned());
+                            }
+                            _ = tokio::time::sleep(delay) => {}
+                        }
                         delay = delay.saturating_mul(2);
                         continue;
                     }
@@ -1523,6 +1632,7 @@ async fn send_chat_completion_logged_stream(
     messages: &[Value],
     tool_schemas: Option<&Value>,
     response_format: Option<&Value>,
+    cancel: &AgentCancel,
     on_progress: &mut impl FnMut(&StreamedAssistant),
 ) -> Result<Value, String> {
     let started_at = Instant::now();
@@ -1534,6 +1644,7 @@ async fn send_chat_completion_logged_stream(
         messages,
         tool_schemas,
         response_format,
+        cancel,
         on_progress,
     )
     .await;
@@ -1551,7 +1662,11 @@ async fn send_chat_completion_logged_stream(
             provider,
             model_id,
             endpoint,
-            "failed",
+            if is_user_abort_error(error) {
+                "aborted"
+            } else {
+                "failed"
+            },
             started_at.elapsed(),
             Some(error),
         ),
@@ -1790,25 +1905,43 @@ async fn send_chat_completion_stream(
     messages: &[Value],
     tool_schemas: Option<&Value>,
     response_format: Option<&Value>,
+    cancel: &AgentCancel,
     on_progress: &mut impl FnMut(&StreamedAssistant),
 ) -> Result<Value, String> {
     let mut payload =
         build_chat_completion_payload(model, messages, tool_schemas, response_format, true);
 
     loop {
+        if cancel.is_aborted() {
+            return Err(USER_ABORT_ERROR.to_owned());
+        }
         let mut request_builder = client.post(endpoint).json(&payload);
 
         if !api_key.trim().is_empty() {
             request_builder = request_builder.bearer_auth(api_key);
         }
 
-        let response = request_builder.send().await.map_err(|error| {
-            model_provider::redact_model_error_text(&format!("无法发送模型请求：{error}"))
-        })?;
+        let response = tokio::select! {
+            biased;
+            _ = cancel.cancelled() => {
+                return Err(USER_ABORT_ERROR.to_owned());
+            }
+            result = request_builder.send() => {
+                result.map_err(|error| {
+                    model_provider::redact_model_error_text(&format!("无法发送模型请求：{error}"))
+                })?
+            }
+        };
         let status = response.status();
 
         if !status.is_success() {
-            let body = response.text().await.unwrap_or_else(|_| String::new());
+            let body = tokio::select! {
+                biased;
+                _ = cancel.cancelled() => {
+                    return Err(USER_ABORT_ERROR.to_owned());
+                }
+                body = response.text() => body.unwrap_or_else(|_| String::new()),
+            };
             if status.as_u16() == 400
                 && payload.get("stream_options").is_some()
                 && body.to_ascii_lowercase().contains("stream_options")
@@ -1827,7 +1960,7 @@ async fn send_chat_completion_stream(
             )));
         }
 
-        return read_chat_completion_response(response, on_progress).await;
+        return read_chat_completion_response(response, on_progress, Some(cancel)).await;
     }
 }
 
@@ -2469,6 +2602,7 @@ fn build_user_message(request: &AgentTurnRequest, id: String) -> AgentMessage {
         mentioned_file_ids: request.mentioned_file_ids.clone(),
         trace: Vec::new(),
         turn_duration_ms: None,
+        interrupted: false,
     }
 }
 
@@ -2675,6 +2809,7 @@ fn model_error_turn(
                 .filter(|steps| !steps.is_empty())
                 .unwrap_or_default(),
             turn_duration_ms: tracer.map(|tracer| tracer.duration_ms()),
+            interrupted: false,
         });
     snapshot.sessions[session_index].updated_at = "刚刚".to_owned();
     update_agent_context_summary_deterministic(
@@ -2748,6 +2883,7 @@ fn skill_activation_error_turn(
             mentioned_file_ids: Vec::new(),
             trace: Vec::new(),
             turn_duration_ms: None,
+            interrupted: false,
         });
     snapshot.sessions[session_index].updated_at = "刚刚".to_owned();
     update_agent_context_summary_deterministic(
@@ -2841,6 +2977,7 @@ fn push_assistant_message(
     citations: Vec<Citation>,
     tool_calls: Vec<AgentToolCall>,
     tracer: &AgentTurnTracer,
+    interrupted: bool,
 ) {
     snapshot.sessions[session_index]
         .messages
@@ -2854,8 +2991,169 @@ fn push_assistant_message(
             mentioned_file_ids: Vec::new(),
             trace: tracer.steps(),
             turn_duration_ms: Some(tracer.duration_ms()),
+            interrupted,
         });
     snapshot.sessions[session_index].updated_at = "刚刚".to_owned();
+}
+
+/** 为尚未 execute 的 tool_calls 写入合成 aborted 结果，保持协议成对。 */
+fn settle_undispatched_tool_calls(
+    model_tool_calls: impl IntoIterator<Item = Value>,
+    model_messages: &mut Vec<Value>,
+    tool_calls: &mut Vec<AgentToolCall>,
+    tracer: &mut AgentTurnTracer,
+    app: Option<&AppHandle>,
+) {
+    for model_tool_call in model_tool_calls {
+        let tool_name = model_tool_call_name(&model_tool_call);
+        let tool_args = parse_tool_args(&model_tool_call);
+        let aborted_call = AgentToolCall {
+            id: create_id("tool"),
+            name: tool_name.clone(),
+            status: "aborted".to_owned(),
+            summary: ABORTED_BEFORE_DISPATCH_SUMMARY.to_owned(),
+            args: tool_args.clone(),
+        };
+        let trace_step_id =
+            tracer.begin_tool(&tool_name, ABORTED_BEFORE_DISPATCH_SUMMARY, tool_args, app);
+        tracer.finish_tool(
+            trace_step_id.as_deref(),
+            "aborted",
+            ABORTED_BEFORE_DISPATCH_SUMMARY,
+            None,
+            Some(ABORTED_BEFORE_DISPATCH_SUMMARY),
+            app,
+        );
+        tool_calls.push(aborted_call);
+        model_messages.push(json!({
+            "role": "tool",
+            "tool_call_id": model_tool_call.get("id").and_then(Value::as_str).unwrap_or("tool-call"),
+            "content": json!({ "success": false, "error": ABORTED_BEFORE_DISPATCH_SUMMARY }).to_string()
+        }));
+    }
+}
+
+fn last_message_role(messages: &[Value]) -> Option<&str> {
+    messages
+        .last()
+        .and_then(|message| message.get("role"))
+        .and_then(Value::as_str)
+}
+
+fn last_assistant_has_tool_calls(messages: &[Value]) -> bool {
+    messages.last().is_some_and(|message| {
+        message.get("role").and_then(Value::as_str) == Some("assistant")
+            && message
+                .get("tool_calls")
+                .and_then(Value::as_array)
+                .is_some_and(|calls| !calls.is_empty())
+    })
+}
+
+/** 用户中断结算：保留已流出前缀和已完成工具，不 compact、不写 usage。 */
+fn finalize_aborted_turn(
+    app: &AppHandle,
+    mut snapshot: WorkspaceSnapshot,
+    session_index: usize,
+    request: &AgentTurnRequest,
+    mut model_messages: Vec<Value>,
+    prompt_prefix_len: usize,
+    citations: Vec<Citation>,
+    tool_calls: Vec<AgentToolCall>,
+    tracer: &mut AgentTurnTracer,
+    audit_trail: RuntimeAuditTrail,
+) -> RuntimeTurnResult {
+    tracer.abort_running_tools(Some(app));
+    tracer.mark_interrupted();
+    let content = tracer
+        .live_content()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or("")
+        .to_owned();
+    tracer.finish(
+        if content.is_empty() {
+            None
+        } else {
+            Some(&content)
+        },
+        Some(app),
+    );
+
+    let should_append_interrupted_assistant = !content.is_empty()
+        && last_message_role(&model_messages) != Some("tool")
+        && !last_assistant_has_tool_calls(&model_messages);
+    if should_append_interrupted_assistant {
+        model_messages.push(json!({
+            "role": "assistant",
+            "content": content,
+            "interrupted": true
+        }));
+    }
+
+    let has_visible_tools = tool_calls
+        .iter()
+        .any(|call| crate::agent_trace::is_user_visible_tool(&call.name));
+    let has_trace = !tracer.steps().is_empty();
+    if !content.is_empty() || has_visible_tools || has_trace {
+        push_assistant_message(
+            &mut snapshot,
+            session_index,
+            &request.action,
+            content,
+            citations,
+            tool_calls,
+            tracer,
+            true,
+        );
+    }
+
+    if model_messages.len() > prompt_prefix_len {
+        persist_turn_transcript(
+            app,
+            &snapshot.sessions[session_index].id,
+            &model_messages,
+            prompt_prefix_len,
+            snapshot.sessions[session_index].context_summary.as_ref(),
+            None,
+            false,
+        );
+    }
+    let audit_log = build_audit_log(
+        "aborted_turn",
+        &snapshot,
+        session_index,
+        &request.prompt,
+        "用户中断了本轮 Agent 执行。",
+        &audit_trail,
+    );
+    RuntimeTurnResult {
+        turn_result: AgentTurnResult { snapshot },
+        audit_log,
+    }
+}
+
+/** 模型循环尚未开始时的中断：用户消息保留，通常不写 assistant。 */
+fn aborted_turn_without_model(
+    app: &AppHandle,
+    snapshot: WorkspaceSnapshot,
+    request: AgentTurnRequest,
+    tracer: &mut AgentTurnTracer,
+    audit_trail: RuntimeAuditTrail,
+) -> RuntimeTurnResult {
+    let session_index = resolve_session_index(&snapshot, &request).unwrap_or(0);
+    finalize_aborted_turn(
+        app,
+        snapshot,
+        session_index,
+        &request,
+        Vec::new(),
+        1,
+        Vec::new(),
+        Vec::new(),
+        tracer,
+        audit_trail,
+    )
 }
 
 /** 去重引用，避免 search 和 read 返回同一笔记时重复展示。 */
@@ -3025,6 +3323,7 @@ mod tests {
             mentioned_file_ids: Vec::new(),
             trace,
             turn_duration_ms: None,
+            interrupted: false,
         }
     }
 
@@ -3246,6 +3545,7 @@ mod tests {
                 mentioned_file_ids: Vec::new(),
                 trace: Vec::new(),
                 turn_duration_ms: None,
+                interrupted: false,
             },
         ];
 
@@ -3336,6 +3636,7 @@ mod tests {
                     duration_ms: Some(12),
                 }],
                 turn_duration_ms: Some(1200),
+                interrupted: false,
             },
             history_test_message("user-current", "user", "继续刚才的检索", None, Vec::new()),
         ];
@@ -3414,6 +3715,7 @@ mod tests {
                 mentioned_file_ids: Vec::new(),
                 trace: Vec::new(),
                 turn_duration_ms: None,
+                interrupted: false,
             },
             history_test_message("user-current", "user", "继续", None, Vec::new()),
         ];
@@ -3465,6 +3767,7 @@ mod tests {
             mentioned_file_ids: Vec::new(),
             trace: Vec::new(),
             turn_duration_ms: None,
+            interrupted: false,
         }];
 
         let messages = build_model_messages(
@@ -3517,6 +3820,7 @@ mod tests {
             mentioned_file_ids: Vec::new(),
             trace: Vec::new(),
             turn_duration_ms: None,
+            interrupted: false,
         }];
 
         let messages = build_model_messages(
@@ -3716,6 +4020,7 @@ mod tests {
                 duration_ms: Some(8),
             }],
             turn_duration_ms: Some(800),
+            interrupted: false,
         }];
         messages.extend((0..HOT_HISTORY_SESSION_MESSAGES).map(|index| {
             history_test_message(
@@ -4292,6 +4597,7 @@ mod tests {
                 mentioned_file_ids: Vec::new(),
                 trace: Vec::new(),
                 turn_duration_ms: None,
+                interrupted: false,
             })
             .collect();
         snapshot.sessions[0].context_summary = Some(AgentContextSummary {
@@ -4377,6 +4683,7 @@ mod tests {
                 mentioned_file_ids: Vec::new(),
                 trace: Vec::new(),
                 turn_duration_ms: None,
+                interrupted: false,
             })
             .collect();
         snapshot.sessions[0].context_summary = Some(AgentContextSummary {
@@ -4592,6 +4899,7 @@ mod tests {
             mentioned_file_ids: Vec::new(),
             trace: Vec::new(),
             turn_duration_ms: None,
+            interrupted: false,
         });
         snapshot.sessions[0].pending_change = Some(runtime_test_pending_change("pending"));
 
@@ -4803,9 +5111,52 @@ mod tests {
             Vec::new(),
             Vec::new(),
             &tracer,
+            false,
         );
 
         assert!(snapshot.sessions[0].pending_change.is_none());
+    }
+
+    #[test]
+    fn settle_undispatched_tool_calls_keeps_protocol_pairs() {
+        let mut model_messages = vec![json!({
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [{
+                "id": "call-search",
+                "type": "function",
+                "function": { "name": "search", "arguments": "{}" }
+            }]
+        })];
+        let mut tool_calls = Vec::new();
+        let mut tracer = AgentTurnTracer::new("session-a", "assistant-a");
+        settle_undispatched_tool_calls(
+            vec![json!({
+                "id": "call-search",
+                "type": "function",
+                "function": { "name": "search", "arguments": "{}" }
+            })],
+            &mut model_messages,
+            &mut tool_calls,
+            &mut tracer,
+            None,
+        );
+
+        assert_eq!(tool_calls.len(), 1);
+        assert_eq!(tool_calls[0].status, "aborted");
+        assert_eq!(model_messages[1]["role"], "tool");
+        assert_eq!(model_messages[1]["tool_call_id"], "call-search");
+        let filtered = filter_incomplete_tool_pairs(&model_messages);
+        assert_eq!(filtered.len(), 2);
+    }
+
+    #[test]
+    fn user_abort_error_is_classified_as_abort_and_not_retried() {
+        assert!(is_user_abort_error(USER_ABORT_ERROR));
+        assert_eq!(
+            provider_error::classify_provider_error(USER_ABORT_ERROR, None),
+            provider_error::ProviderErrorKind::Abort
+        );
     }
 
     /** DeepSeek 风格 DSML 工具调用应被解析为真实工具调用，并从用户可见正文中移除。 */
@@ -4908,6 +5259,7 @@ mod tests {
                     duration_ms: Some(12),
                 }],
                 turn_duration_ms: Some(1200),
+                interrupted: false,
             },
             history_test_message("user-current", "user", "继续刚才的检索", None, Vec::new()),
         ];

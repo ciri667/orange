@@ -1,9 +1,9 @@
 #![allow(unused_imports)]
 
 pub(super) use crate::domain::{
-    AgentSession, AgentSkill, AgentTurnPayload, AgentTurnResult, AppEventLog, ChangePayload,
-    ClearDocumentHistoryPayload, CompactAgentContextPayload, CreateDocumentPayload,
-    CreateFolderPayload, CreateNotePayload, CreateProjectInstructionPayload,
+    AbortAgentTurnPayload, AgentSession, AgentSkill, AgentTurnPayload, AgentTurnResult,
+    AppEventLog, ChangePayload, ClearDocumentHistoryPayload, CompactAgentContextPayload,
+    CreateDocumentPayload, CreateFolderPayload, CreateNotePayload, CreateProjectInstructionPayload,
     DeleteAgentSkillPayload, DeleteDocumentPayload, DeleteKnowledgeBaseMemoryPayload,
     DeleteNotePayload, DeleteSessionPayload, DocumentHistoryEntry, DocumentHistoryEntryDetail,
     DocumentPreview, FeishuCredentialStatus, FeishuGatewayStatus, FolderEntry, ImGatewayStatus,

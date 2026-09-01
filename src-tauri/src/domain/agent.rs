@@ -32,6 +32,7 @@ pub enum AgentToolCallStatus {
     Running,
     Completed,
     Failed,
+    Aborted,
 }
 
 /** Agent 引用来源，必须来自已执行的工具结果。 */
@@ -106,6 +107,9 @@ pub struct AgentMessage {
     /** 本轮墙钟耗时，供过程区展示「已处理 12s」。 */
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub turn_duration_ms: Option<u64>,
+    /** 用户中断时保留已流出前缀；旧会话缺省为 false。 */
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub interrupted: bool,
 }
 
 /** Agent 对可编辑文本文件提出的待确认变更；正文始终留在 diff 中，不进入日志。 */

@@ -17,6 +17,9 @@ use std::path::{Component, Path};
 /** 未知模型窗口时按 256k tokens 估算。 */
 pub(super) const DEFAULT_MODEL_CONTEXT_TOKENS: u64 = 256_000;
 
+/** 投影时追加到 interrupted assistant，避免模型把半句当成终稿。 */
+pub(super) const USER_INTERRUPT_MODEL_MARKER: &str = "[用户中断了本次生成]";
+
 /** 会话历史最多占用模型窗口的比例。 */
 pub(super) const HISTORY_CONTEXT_WINDOW_RATIO: f64 = 0.40;
 
@@ -690,7 +693,31 @@ fn normalize_projected_message(message: &Value) -> Value {
     if cloned.get("content").map(Value::is_null).unwrap_or(false) {
         cloned["content"] = json!("");
     }
+    if message_role(&cloned) == "assistant"
+        && cloned
+            .get("interrupted")
+            .and_then(Value::as_bool)
+            .unwrap_or(false)
+    {
+        let marked = apply_interrupt_marker(message_text_content(&cloned));
+        cloned["content"] = json!(marked);
+        if let Some(object) = cloned.as_object_mut() {
+            object.remove("interrupted");
+        }
+    }
     cloned
+}
+
+pub(super) fn apply_interrupt_marker(content: &str) -> String {
+    let trimmed = content.trim_end();
+    if trimmed.contains(USER_INTERRUPT_MODEL_MARKER) {
+        return content.to_owned();
+    }
+    if trimmed.is_empty() {
+        USER_INTERRUPT_MODEL_MARKER.to_owned()
+    } else {
+        format!("{trimmed}\n\n{USER_INTERRUPT_MODEL_MARKER}")
+    }
 }
 
 fn message_text_content(message: &Value) -> &str {
@@ -918,17 +945,23 @@ fn history_messages_from_session_message(
         .filter(|tool_call| is_user_visible_tool(&tool_call.name))
         .collect::<Vec<_>>();
 
+    let projected_content = if message.interrupted {
+        apply_interrupt_marker(&message.content)
+    } else {
+        message.content.clone()
+    };
+
     if replayable_tools.is_empty() {
         return vec![json!({
             "role": message.role,
-            "content": truncate_chars(&message.content, max_content_chars)
+            "content": truncate_chars(&projected_content, max_content_chars)
         })];
     }
 
-    let assistant_content = if message.content.trim().is_empty() {
+    let assistant_content = if projected_content.trim().is_empty() {
         json!("")
     } else {
-        json!(truncate_chars(&message.content, max_content_chars))
+        json!(truncate_chars(&projected_content, max_content_chars))
     };
     let tool_previews = message
         .trace
@@ -1467,6 +1500,40 @@ mod tests {
         let projected =
             project_transcript(&[json!({ "role": "assistant", "content": null })], None);
         assert_eq!(projected[0]["content"], "");
+    }
+
+    #[test]
+    fn project_transcript_keeps_interrupted_prefix_and_adds_marker() {
+        let projected = project_transcript(
+            &[json!({
+                "role": "assistant",
+                "content": "已经写到第二点",
+                "interrupted": true
+            })],
+            None,
+        );
+        let content = projected[0]["content"].as_str().unwrap_or_default();
+        assert!(content.contains("已经写到第二点"));
+        assert!(content.contains(USER_INTERRUPT_MODEL_MARKER));
+        assert!(projected[0].get("interrupted").is_none());
+    }
+
+    #[test]
+    fn filter_incomplete_tool_pairs_still_drops_interrupted_unpaired_tools() {
+        let projected = project_transcript(
+            &[
+                json!({ "role": "user", "content": "检索" }),
+                json!({
+                    "role": "assistant",
+                    "content": "先搜一下",
+                    "interrupted": true,
+                    "tool_calls": [{ "id": "call-1", "type": "function", "function": { "name": "search", "arguments": "{" } }]
+                }),
+            ],
+            None,
+        );
+        assert_eq!(projected.len(), 1);
+        assert_eq!(projected[0]["role"], "user");
     }
 
     #[test]

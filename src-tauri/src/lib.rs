@@ -241,6 +241,7 @@ pub fn run() {
             commands::documents::load_document_preview,
             export::export_current_file,
             commands::agent::run_agent_turn,
+            commands::agent::abort_agent_turn,
             commands::agent::compact_agent_context,
             commands::agent::approve_skill_execution,
             commands::agent::reject_skill_execution,

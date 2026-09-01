@@ -89,6 +89,11 @@ pub fn classify_provider_error(text: &str, http_status: Option<u16>) -> Provider
         || lower.contains("broken pipe")
         || lower.contains("error sending request")
         || lower.contains("无法发送模型请求")
+        || lower.contains("error decoding response body")
+        || lower.contains("无法读取模型流式响应")
+        || lower.contains("unexpected eof")
+        || lower.contains("connection reset")
+        || lower.contains("connection aborted")
     {
         return ProviderErrorKind::Retryable;
     }
@@ -228,6 +233,10 @@ mod tests {
         assert_eq!(
             classify_provider_error("request aborted by client", None),
             ProviderErrorKind::Abort
+        );
+        assert_eq!(
+            classify_provider_error("无法读取模型流式响应：error decoding response body", None),
+            ProviderErrorKind::Retryable
         );
         assert_eq!(
             classify_provider_error("模型请求失败：HTTP 400 bad request", Some(400)),

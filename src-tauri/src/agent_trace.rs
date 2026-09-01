@@ -69,7 +69,6 @@ impl AgentTurnTracer {
         }
     }
 
-    #[cfg(test)]
     pub fn live_content(&self) -> Option<&str> {
         self.content.as_deref()
     }
@@ -242,6 +241,30 @@ impl AgentTurnTracer {
         self.status = "failed".to_owned();
     }
 
+    pub fn mark_interrupted(&mut self) {
+        self.status = "interrupted".to_owned();
+    }
+
+    /** 把仍显示为 running 的工具步标成 aborted，避免过程区一直转圈。 */
+    pub fn abort_running_tools(&mut self, app: Option<&AppHandle>) {
+        let running_ids = self
+            .steps
+            .iter()
+            .filter(|step| step.step_type == "tool" && step.status.as_deref() == Some("running"))
+            .map(|step| step.id.clone())
+            .collect::<Vec<_>>();
+        for step_id in running_ids {
+            self.finish_tool(
+                Some(&step_id),
+                "aborted",
+                "用户中断了本次调用。",
+                None,
+                Some("用户中断了本次调用。"),
+                app,
+            );
+        }
+    }
+
     /** 结束本轮过程：仍在 running 则记为 completed，并可附带最终回答正文。 */
     pub fn finish(&mut self, content: Option<&str>, app: Option<&AppHandle>) {
         if self.status == "running" {
@@ -383,6 +406,24 @@ mod tests {
         assert!(is_user_visible_tool("search_notes"));
         assert!(is_user_visible_tool("read_file"));
         assert!(is_user_visible_tool("propose_file_change"));
+    }
+
+    #[test]
+    fn abort_running_tools_marks_them_aborted() {
+        let mut tracer = AgentTurnTracer::new("session-a", "assistant-a");
+        let step_id = tracer.begin_tool(
+            "search",
+            "正在调用 search",
+            json!({ "query": "中断" }),
+            None,
+        );
+        tracer.abort_running_tools(None);
+        tracer.mark_interrupted();
+        tracer.finish(None, None);
+
+        let steps = tracer.steps();
+        assert_eq!(steps[0].status.as_deref(), Some("aborted"));
+        assert!(step_id.is_some());
     }
 
     /** 空白思考不能生成步骤，否则过程区会出现空段落。 */

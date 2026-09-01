@@ -224,6 +224,13 @@ pub struct AgentTurnPayload {
     pub request: AgentTurnRequest,
 }
 
+/** 用户手动中断当前 Agent 回合；可与 `run_agent_turn` 并发。 */
+#[derive(Clone, Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AbortAgentTurnPayload {
+    pub session_id: String,
+}
+
 /** diff 确认或取消命令入参。 */
 #[derive(Clone, Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]

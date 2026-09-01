@@ -88,6 +88,7 @@ pub fn run_agent_turn(
             mentioned_file_ids: Vec::new(),
             trace,
             turn_duration_ms: None,
+            interrupted: false,
         });
     snapshot.sessions[session_index].updated_at = "刚刚".to_owned();
 
@@ -217,6 +218,7 @@ fn ensure_user_message_for_turn(
         mentioned_file_ids: request.mentioned_file_ids.clone(),
         trace: Vec::new(),
         turn_duration_ms: None,
+        interrupted: false,
     });
 }
 
@@ -316,6 +318,7 @@ mod tests {
                 mentioned_file_ids: Vec::new(),
                 trace: Vec::new(),
                 turn_duration_ms: None,
+                interrupted: false,
             }],
             pending_change: None,
             pending_change_set: None,

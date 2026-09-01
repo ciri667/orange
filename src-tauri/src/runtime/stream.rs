@@ -273,19 +273,55 @@ pub fn consume_sse_body(body: &str) -> Result<StreamedAssistant, String> {
     Ok(assistant)
 }
 
+/** 读下一片响应；用户取消时立刻返回，丢弃未读完的 body 以掐断连接。 */
+async fn next_response_chunk(
+    response: &mut reqwest::Response,
+    cancel: Option<&super::AgentCancel>,
+) -> Result<Option<Vec<u8>>, String> {
+    let chunk = if let Some(cancel) = cancel {
+        tokio::select! {
+            biased;
+            _ = cancel.cancelled() => {
+                return Err(super::USER_ABORT_ERROR.to_owned());
+            }
+            chunk = response.chunk() => chunk,
+        }
+    } else {
+        response.chunk().await
+    };
+    chunk
+        .map_err(format_response_body_error)
+        .map(|chunk| chunk.map(|bytes| bytes.to_vec()))
+}
+
 /** 把 reqwest 响应体按到达顺序解析：SSE 边读边回调，完整 JSON 则一次性回调。 */
 pub async fn read_chat_completion_response(
     mut response: reqwest::Response,
     mut on_progress: impl FnMut(&StreamedAssistant),
+    cancel: Option<&super::AgentCancel>,
 ) -> Result<Value, String> {
     let mut buffer = SseBuffer::default();
     let mut assistant = StreamedAssistant::default();
     let mut pending = Vec::new();
     let mut json_mode: Option<bool> = None;
 
-    while let Some(chunk) = response.chunk().await.map_err(|error| {
-        crate::model_provider::redact_model_error_text(&format!("无法读取模型流式响应：{error}"))
-    })? {
+    loop {
+        let chunk = match next_response_chunk(&mut response, cancel).await {
+            Ok(chunk) => chunk,
+            Err(error) => {
+                return complete_stream_after_body_error(
+                    assistant,
+                    buffer,
+                    pending,
+                    json_mode,
+                    on_progress,
+                    error,
+                );
+            }
+        };
+        let Some(chunk) = chunk else {
+            break;
+        };
         if json_mode.is_none() {
             pending.extend_from_slice(&chunk);
             if looks_like_json_object(&pending) {
@@ -331,6 +367,78 @@ pub async fn read_chat_completion_response(
     if assistant.is_empty() && assistant.finish_reason.is_none() {
         return Err("模型流式响应为空。".to_owned());
     }
+    on_progress(&assistant);
+    Ok(assistant.into_chat_completion())
+}
+
+/** 把 reqwest 读 body 失败展开成含 source 的文案，便于超时/断连被正确分类。 */
+fn format_response_body_error(error: reqwest::Error) -> String {
+    let mut parts = vec![error.to_string()];
+    let mut current = std::error::Error::source(&error);
+    while let Some(source) = current {
+        let text = source.to_string();
+        if !text.is_empty() && parts.iter().all(|part| !part.contains(&text)) {
+            parts.push(text);
+        }
+        current = source.source();
+    }
+    crate::model_provider::redact_model_error_text(&format!(
+        "无法读取模型流式响应：{}",
+        parts.join("：")
+    ))
+}
+
+/**
+ * 流式 body 在中途被掐断时，若已经攒到可见正文或完整 tool_calls，就保留已收到的内容。
+ * 长文生成常见于 provider 在最后一个 chunk / usage 帧关掉连接。
+ */
+fn complete_stream_after_body_error(
+    mut assistant: StreamedAssistant,
+    mut buffer: SseBuffer,
+    pending: Vec<u8>,
+    json_mode: Option<bool>,
+    mut on_progress: impl FnMut(&StreamedAssistant),
+    error: String,
+) -> Result<Value, String> {
+    if json_mode == Some(true) || (json_mode.is_none() && looks_like_json_object(&pending)) {
+        if let Ok(body) = String::from_utf8(pending.clone()) {
+            if let Ok(value) = serde_json::from_str::<Value>(body.trim()) {
+                assistant = StreamedAssistant::from_completion(&value);
+                on_progress(&assistant);
+                return Ok(value);
+            }
+        }
+    } else {
+        let pending_bytes = if json_mode.is_none() {
+            pending.as_slice()
+        } else {
+            &[]
+        };
+        if !pending_bytes.is_empty() {
+            let _ = apply_sse_events(&mut assistant, buffer.push(pending_bytes), &mut on_progress);
+        }
+        let _ = apply_sse_events(&mut assistant, buffer.flush(), &mut on_progress);
+    }
+
+    let has_visible_text =
+        !assistant.content.trim().is_empty() || !assistant.reasoning.trim().is_empty();
+    let has_complete_tools =
+        assistant.has_tool_calls() && assistant.finish_reason.as_deref() == Some("tool_calls");
+    if !has_visible_text && !has_complete_tools {
+        return Err(error);
+    }
+    if !has_complete_tools {
+        assistant.tool_calls.clear();
+    }
+    log::warn!(
+        target: "agent_runtime",
+        "模型流在已有输出后中断，已保留收到的内容：content_chars={} reasoning_chars={} tool_calls={} finish_reason={:?} error={}",
+        assistant.content.chars().count(),
+        assistant.reasoning.chars().count(),
+        assistant.tool_calls.len(),
+        assistant.finish_reason,
+        crate::logging::sanitize_log_text(&error)
+    );
     on_progress(&assistant);
     Ok(assistant.into_chat_completion())
 }
@@ -770,5 +878,94 @@ mod tests {
         assert_eq!(assistant.content, "整包回答");
         assert_eq!(assistant.reasoning, "整包思考");
         assert_eq!(assistant.finish_reason.as_deref(), Some("stop"));
+    }
+
+    /** 长文已经流出后，body 解码失败必须保留已收到正文，不能整轮报失败。 */
+    #[test]
+    fn complete_stream_after_body_error_keeps_visible_content() {
+        let mut assistant = StreamedAssistant::default();
+        assistant.content = "第一章：山谷里的灯。".to_owned();
+        let result = complete_stream_after_body_error(
+            assistant,
+            SseBuffer::default(),
+            Vec::new(),
+            Some(false),
+            |_| {},
+            "无法读取模型流式响应：error decoding response body".to_owned(),
+        )
+        .expect("partial stream should be kept");
+
+        assert_eq!(
+            result["choices"][0]["message"]["content"],
+            "第一章：山谷里的灯。"
+        );
+        assert_eq!(result["choices"][0]["finish_reason"], "stop");
+    }
+
+    /** 还没有任何可见输出时，读 body 失败仍应返回原错误，交给上层重试。 */
+    #[test]
+    fn complete_stream_after_body_error_fails_when_empty() {
+        let error = complete_stream_after_body_error(
+            StreamedAssistant::default(),
+            SseBuffer::default(),
+            Vec::new(),
+            Some(false),
+            |_| {},
+            "无法读取模型流式响应：error decoding response body".to_owned(),
+        )
+        .expect_err("empty stream must fail");
+
+        assert!(error.contains("error decoding response body"));
+    }
+
+    /** 未完成的 tool_calls 不能当成功调用执行；有正文时丢掉残缺工具、保留回答。 */
+    #[test]
+    fn complete_stream_after_body_error_drops_incomplete_tool_calls() {
+        let mut assistant = StreamedAssistant::default();
+        assistant.content = "先说明背景。".to_owned();
+        assistant.tool_calls = vec![json!({
+            "id": "call_1",
+            "type": "function",
+            "function": { "name": "search", "arguments": "{\"query\":" }
+        })];
+        let result = complete_stream_after_body_error(
+            assistant,
+            SseBuffer::default(),
+            Vec::new(),
+            Some(false),
+            |_| {},
+            "无法读取模型流式响应：error decoding response body".to_owned(),
+        )
+        .expect("visible content should be kept");
+
+        assert_eq!(result["choices"][0]["message"]["content"], "先说明背景。");
+        assert!(result["choices"][0]["message"].get("tool_calls").is_none());
+    }
+
+    /** 已经完整的 tool_calls 可以在断流后继续交给 Agent loop 执行。 */
+    #[test]
+    fn complete_stream_after_body_error_keeps_finished_tool_calls() {
+        let mut assistant = StreamedAssistant::default();
+        assistant.finish_reason = Some("tool_calls".to_owned());
+        assistant.tool_calls = vec![json!({
+            "id": "call_1",
+            "type": "function",
+            "function": { "name": "search", "arguments": "{\"query\":\"灯\"}" }
+        })];
+        let result = complete_stream_after_body_error(
+            assistant,
+            SseBuffer::default(),
+            Vec::new(),
+            Some(false),
+            |_| {},
+            "无法读取模型流式响应：error decoding response body".to_owned(),
+        )
+        .expect("finished tool calls should be kept");
+
+        assert_eq!(result["choices"][0]["finish_reason"], "tool_calls");
+        assert_eq!(
+            result["choices"][0]["message"]["tool_calls"][0]["function"]["name"],
+            "search"
+        );
     }
 }
