@@ -14,6 +14,21 @@ import type {
 /** 空白会话的默认标题；首条用户输入提交后会替换为用户原始输入。 */
 export const DEFAULT_SESSION_TITLE = "新会话";
 
+/** 同时运行的 Agent 回合上限；超出的跨会话指令进入排队。 */
+export const MAX_PARALLEL_AGENT_TURNS = 3;
+
+/** 决定这次提交是立刻开跑、同会话排队，还是因为达到并行上限排队。 */
+export function resolveAgentTurnStart(sessionId: string, inFlightSessionIds: Iterable<string>) {
+  const inFlight = inFlightSessionIds instanceof Set ? inFlightSessionIds : new Set(inFlightSessionIds);
+  if (inFlight.has(sessionId)) {
+    return "queue-same-session" as const;
+  }
+  if (inFlight.size >= MAX_PARALLEL_AGENT_TURNS) {
+    return "queue-capacity" as const;
+  }
+  return "start" as const;
+}
+
 /** 未持久化的占位会话 ID，只用于没有当前知识库会话时驱动侧栏展示。 */
 export const DRAFT_SESSION_ID = "__draft-session__";
 
@@ -201,7 +216,12 @@ export function mergeSessionTurn(
   current: WorkspaceSnapshot,
   turnSnapshot: WorkspaceSnapshot,
   turnSessionId: string,
-  options?: { dirtyNoteIds?: Set<string>; dirtyDocumentIds?: Set<string> },
+  options?: {
+    dirtyNoteIds?: Set<string>;
+    dirtyDocumentIds?: Set<string>;
+    touchedNoteIds?: Set<string>;
+    touchedDocumentIds?: Set<string>;
+  },
 ): WorkspaceSnapshot {
   const turnSession = turnSnapshot.sessions.find((session) => session.id === turnSessionId);
 
@@ -215,6 +235,8 @@ export function mergeSessionTurn(
     : [turnSession, ...current.sessions];
   const dirtyNoteIds = options?.dirtyNoteIds ?? new Set<string>();
   const dirtyDocumentIds = options?.dirtyDocumentIds ?? new Set<string>();
+  const touchedNoteIds = options?.touchedNoteIds;
+  const touchedDocumentIds = options?.touchedDocumentIds;
 
   return {
     ...current,
@@ -222,6 +244,9 @@ export function mergeSessionTurn(
     notes: mergeItemsById<Note>(current.notes, turnSnapshot.notes, (currentNote, incomingNote) => {
       if (currentNote && dirtyNoteIds.has(currentNote.id)) {
         return false;
+      }
+      if (touchedNoteIds) {
+        return !currentNote || touchedNoteIds.has(incomingNote.id);
       }
 
       return !currentNote || currentNote.contentHash !== incomingNote.contentHash;
@@ -233,12 +258,70 @@ export function mergeSessionTurn(
         if (currentDocument && dirtyDocumentIds.has(currentDocument.id)) {
           return false;
         }
+        if (touchedDocumentIds) {
+          return !currentDocument || touchedDocumentIds.has(incomingDocument.id);
+        }
 
         return !currentDocument || currentDocument.contentHash !== incomingDocument.contentHash;
       },
     ),
     folders: mergeItemsById<FolderEntry>(current.folders, turnSnapshot.folders, (currentFolder) => !currentFolder),
   };
+}
+
+/** 把知识库 ID 和相对路径收成冲突键，路径分隔符统一成 /。 */
+export function pendingWriteConflictKey(knowledgeBaseId: string, targetPath: string) {
+  return `${knowledgeBaseId}:${targetPath.replace(/\\/g, "/").replace(/^\/+/, "")}`;
+}
+
+/** 当前会话待确认写入的目标文件键，含单文件 diff 和变更集。 */
+export function collectPendingWriteKeys(session: AgentSession) {
+  const keys: string[] = [];
+  if (session.pendingChange?.status === "pending") {
+    keys.push(pendingWriteConflictKey(session.pendingChange.knowledgeBaseId, session.pendingChange.targetPath));
+  }
+  if (session.pendingChangeSet?.status === "pending") {
+    for (const operation of session.pendingChangeSet.operations) {
+      keys.push(pendingWriteConflictKey(operation.knowledgeBaseId, operation.targetPath));
+    }
+  }
+  return keys;
+}
+
+/** 是否有其它会话也在等确认同一文件。 */
+export function sessionHasPendingWriteConflict(session: AgentSession, sessions: AgentSession[]) {
+  const mine = new Set(collectPendingWriteKeys(session));
+  if (mine.size === 0) {
+    return false;
+  }
+
+  return sessions.some((other) => {
+    if (other.id === session.id) {
+      return false;
+    }
+    return collectPendingWriteKeys(other).some((key) => mine.has(key));
+  });
+}
+
+/** 本回合真正改过 hash 或新建的文件，供并行合并时避免用过期快照盖住另一路写入。 */
+export function collectTouchedFileIds(before: WorkspaceSnapshot, after: WorkspaceSnapshot) {
+  const beforeNotes = new Map(before.notes.map((note) => [note.id, note.contentHash]));
+  const beforeDocuments = new Map(before.documents.map((document) => [document.id, document.contentHash]));
+  const touchedNoteIds = new Set<string>();
+  const touchedDocumentIds = new Set<string>();
+
+  for (const note of after.notes) {
+    if (beforeNotes.get(note.id) !== note.contentHash) {
+      touchedNoteIds.add(note.id);
+    }
+  }
+  for (const document of after.documents) {
+    if (beforeDocuments.get(document.id) !== document.contentHash) {
+      touchedDocumentIds.add(document.id);
+    }
+  }
+
+  return { touchedNoteIds, touchedDocumentIds };
 }
 
 /** 截断到指定用户消息并替换正文；浏览器 mock 与后端不变量对齐。 */

@@ -72,6 +72,7 @@ export function EditorPane({
   availableTags = [],
   proposedChange,
   isBusy,
+  isReviewBusy = isBusy,
   isDirty,
   viewMode,
   onViewModeChange,
@@ -95,6 +96,8 @@ export function EditorPane({
   availableTags?: string[];
   proposedChange?: ProposedChange;
   isBusy: boolean;
+  /** 当前会话正在生成时禁用 diff 确认，不挡住其它文件保存。 */
+  isReviewBusy?: boolean;
   isDirty: boolean;
   viewMode: MarkdownViewMode;
   onViewModeChange: (mode: MarkdownViewMode) => void;
@@ -293,7 +296,7 @@ export function EditorPane({
           onReject={onRejectChange}
           onAddComment={onAddReviewComment}
           onSubmitComments={onSubmitReviewComments}
-          isBusy={isBusy}
+          isBusy={isReviewBusy}
         />
       )}
     </section>

@@ -7,12 +7,15 @@ import {
   applySkillChangeSet,
   approveSkillExecution,
   abortAgentTurn,
+  clearAgentTurnPlaceholder,
   listenAgentTurnProgress,
+  listActiveAgentSessionIds,
   loadAppEventLogs,
   loadRequestAuditLogs,
   rejectAgentChangeSet,
   rejectSkillChangeSet,
   rejectSkillExecution,
+  loadSessions,
   rewindAgentSession,
   runAgentTurn,
   saveSession,
@@ -26,10 +29,13 @@ import {
   buildDraftAgentSession,
   buildOptimisticUserMessage,
   buildTitleFromFirstPrompt,
+  collectTouchedFileIds,
   isPersistedSession,
   mergeSessionTurn,
   removeSessionMessage,
   resolveActiveSessionForKnowledgeBase,
+  MAX_PARALLEL_AGENT_TURNS,
+  resolveAgentTurnStart,
   shouldUseFirstPromptAsTitle,
 } from "./sessionUtils";
 import type { WorkspaceChrome } from "./workspaceChrome";
@@ -83,9 +89,11 @@ export function useAgentTurn(options: AgentTurnOptions) {
   const [liveTurns, setLiveTurns] = useState<Record<string, AgentTurnProgressEvent>>({});
   const inFlightSessionIdsRef = useRef(new Set<string>());
   const [inFlightSessionIds, setInFlightSessionIds] = useState<string[]>([]);
-  const runningSessionIdRef = useRef<string | null>(null);
+  const observedRunningSessionIdsRef = useRef(new Set<string>());
+  const [observedRunningSessionIds, setObservedRunningSessionIds] = useState<string[]>([]);
   const queuedBySessionRef = useRef(new Map<string, QueuedFollowUp>());
   const [queuedBySession, setQueuedBySession] = useState<Record<string, QueuedFollowUp>>({});
+  const hydrateExternalSessionRef = useRef<(sessionId: string) => Promise<void>>(async () => {});
   const snapshotRef = useRef(snapshot);
   const dirtyNoteIdsRef = useRef(dirtyNoteIds);
   const dirtyDocumentIdsRef = useRef(dirtyDocumentIds);
@@ -105,8 +113,25 @@ export function useAgentTurn(options: AgentTurnOptions) {
     let unlisten: (() => void) | undefined;
 
     void listenAgentTurnProgress((payload) => {
-      if (!disposed && inFlightSessionIdsRef.current.has(payload.sessionId)) {
-        setLiveTurns((current) => ({ ...current, [payload.sessionId]: payload }));
+      if (disposed) {
+        return;
+      }
+
+      setLiveTurns((current) => ({ ...current, [payload.sessionId]: payload }));
+      const owned = inFlightSessionIdsRef.current.has(payload.sessionId);
+      if (payload.status === "running") {
+        if (!owned && !observedRunningSessionIdsRef.current.has(payload.sessionId)) {
+          observedRunningSessionIdsRef.current.add(payload.sessionId);
+          setObservedRunningSessionIds(Array.from(observedRunningSessionIdsRef.current));
+        }
+        return;
+      }
+
+      if (observedRunningSessionIdsRef.current.delete(payload.sessionId)) {
+        setObservedRunningSessionIds(Array.from(observedRunningSessionIdsRef.current));
+      }
+      if (!owned) {
+        void hydrateExternalSessionRef.current(payload.sessionId);
       }
     }).then((stop) => {
       if (disposed) {
@@ -123,6 +148,53 @@ export function useAgentTurn(options: AgentTurnOptions) {
     };
   }, []);
 
+  useEffect(() => {
+    let disposed = false;
+
+    async function syncObservedRunningSessions() {
+      try {
+        const activeIds = await listActiveAgentSessionIds();
+        if (disposed) {
+          return;
+        }
+
+        const nextObserved = new Set<string>();
+        for (const sessionId of activeIds) {
+          if (!inFlightSessionIdsRef.current.has(sessionId)) {
+            nextObserved.add(sessionId);
+          }
+        }
+        observedRunningSessionIdsRef.current = nextObserved;
+        setObservedRunningSessionIds(Array.from(nextObserved));
+        setLiveTurns((current) => {
+          const next = { ...current };
+          for (const sessionId of Object.keys(next)) {
+            if (
+              !inFlightSessionIdsRef.current.has(sessionId) &&
+              !nextObserved.has(sessionId) &&
+              next[sessionId]?.status !== "running"
+            ) {
+              delete next[sessionId];
+            }
+          }
+          return next;
+        });
+      } catch {
+        return;
+      }
+    }
+
+    void syncObservedRunningSessions();
+    const timer = window.setInterval(() => {
+      void syncObservedRunningSessions();
+    }, 2000);
+
+    return () => {
+      disposed = true;
+      window.clearInterval(timer);
+    };
+  }, []);
+
   const noopAsync = async (..._args: unknown[]) => {};
   const noop = (..._args: unknown[]) => {};
   const activeSessionId = snapshot?.activeSessionId ?? "";
@@ -130,7 +202,9 @@ export function useAgentTurn(options: AgentTurnOptions) {
   const activeQueuedFollowUp = queuedBySession[activeSessionId] ?? null;
   const queuedFollowUp = activeQueuedFollowUp?.prompt ?? null;
   const queuedFollowUpInList = activeQueuedFollowUp && !activeQueuedFollowUp.clientMessageId ? activeQueuedFollowUp.prompt : null;
-  const isCurrentSessionBusy = inFlightSessionIds.includes(activeSessionId) || Boolean(activeQueuedFollowUp);
+  const runningSessionIds = Array.from(new Set([...inFlightSessionIds, ...observedRunningSessionIds]));
+  const isCurrentSessionBusy =
+    runningSessionIds.includes(activeSessionId) || Boolean(activeQueuedFollowUp) || liveTurn?.status === "running";
 
   /** 同步进行中的会话集合，让当前会话的输入条立即进入忙碌态。 */
   function syncInFlightSessionIds() {
@@ -143,10 +217,13 @@ export function useAgentTurn(options: AgentTurnOptions) {
       queuedFollowUp,
       queuedFollowUpInList,
       isCurrentSessionBusy,
+      inFlightSessionIds: runningSessionIds,
+      queuedSessionIds: Object.keys(queuedBySession),
       enqueueFollowUp: noop,
       takeQueuedFollowUp: () => null as string | null,
       handleClearQueuedFollowUp: noop,
       handleAbortTurn: noopAsync,
+      handlePrepareSessionForDelete: noopAsync,
       handleSubmitPrompt: noopAsync,
       handleEditUserMessageAndRerun: noopAsync,
       handleApproveSkillExecution: noopAsync,
@@ -179,8 +256,8 @@ export function useAgentTurn(options: AgentTurnOptions) {
     commitSnapshot(nextSnapshot, dirtyNotesToKeep, dirtyDocumentsToKeep);
   }
 
-  /** 当前会话已在跑时入队同会话 follow-up；已有一条则拒绝。 */
-  function enqueueFollowUp(queued: QueuedFollowUp) {
+  /** 当前会话已在跑或并行已满时入队；每个会话最多一条。 */
+  function enqueueFollowUp(queued: QueuedFollowUp, reason: "same-session" | "capacity" = "same-session") {
     if (queuedBySessionRef.current.has(queued.sessionId)) {
       setNotice("已有一条排队指令，请等当前回合结束。");
       return false;
@@ -191,7 +268,11 @@ export function useAgentTurn(options: AgentTurnOptions) {
     if (!queued.clientMessageId) {
       setAgentPrompt("");
     }
-    setNotice("当前回合结束后会处理下一条指令。");
+    setNotice(
+      reason === "capacity"
+        ? "已有 3 个任务在运行，结束后会开始这条。"
+        : "当前回合结束后会处理下一条指令。",
+    );
     return true;
   }
 
@@ -213,6 +294,44 @@ export function useAgentTurn(options: AgentTurnOptions) {
     syncQueuedFollowUps();
     return nextEntry.value[1];
   }
+
+  hydrateExternalSessionRef.current = async (sessionId: string) => {
+    const sourceSnapshot = snapshotRef.current;
+    if (!sourceSnapshot) {
+      return;
+    }
+
+    try {
+      const loadedSessions = await loadSessions(sourceSnapshot);
+      const incoming = loadedSessions.find((session) => session.id === sessionId);
+      const latest = snapshotRef.current ?? sourceSnapshot;
+      if (incoming) {
+        const sessions = latest.sessions.some((session) => session.id === sessionId)
+          ? latest.sessions.map((session) => (session.id === sessionId ? incoming : session))
+          : [incoming, ...latest.sessions];
+        commitTurnSnapshot({ ...latest, sessions });
+      }
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : String(error));
+    }
+
+    setLiveTurns((current) => {
+      const next = { ...current };
+      delete next[sessionId];
+      return next;
+    });
+
+    const queued = takeNextQueuedFollowUp(sessionId);
+    if (queued && resolveAgentTurnStart(queued.sessionId, [
+      ...inFlightSessionIdsRef.current,
+      ...observedRunningSessionIdsRef.current,
+    ]) === "start") {
+      void submitPromptRef.current(queued.action, queued.prompt, snapshotRef.current ?? sourceSnapshot, queued);
+    } else if (queued) {
+      queuedBySessionRef.current.set(queued.sessionId, queued);
+      syncQueuedFollowUps();
+    }
+  };
 
   /** 用户取消尚未进入模型的排队指令，不影响当前正在跑的回合。 */
   async function handleClearQueuedFollowUp() {
@@ -265,16 +384,28 @@ export function useAgentTurn(options: AgentTurnOptions) {
       return;
     }
 
-    // abort IPC 只发出取消令牌并立刻返回；回合忙碌仍由 runAgentTurn 的 finally 结束。
-    // 这里配对 beginBusy/endBusy，只把侧栏文案改成「正在停止…」，避免多留一层计数。
-    beginBusy("正在停止…");
     try {
       await abortAgentTurn(sessionId);
     } catch (error) {
       setNotice(error instanceof Error ? error.message : String(error));
-    } finally {
-      endBusy();
     }
+  }
+
+  /** 删除会话前先丢掉排队并停止该会话回合，避免回合结束又把会话 merge 回来。 */
+  async function handlePrepareSessionForDelete(sessionId: string) {
+    dropQueuedFollowUp(sessionId);
+    let backendActive = false;
+    try {
+      backendActive = (await listActiveAgentSessionIds()).includes(sessionId);
+    } catch {
+      backendActive = false;
+    }
+    if (!inFlightSessionIdsRef.current.has(sessionId) && !backendActive) {
+      return;
+    }
+
+    await abortAgentTurn(sessionId);
+    await waitForSessionIdle(sessionId);
   }
 
   /** 提交 Agent 输入；对话线程始终绑定目标会话，不借用正在跑的其它会话。 */
@@ -305,16 +436,22 @@ export function useAgentTurn(options: AgentTurnOptions) {
       return;
     }
 
-    if (!replay && inFlightSessionIdsRef.current.has(sourceActiveSession.id)) {
-      enqueueFollowUp({
-        sessionId: sourceActiveSession.id,
-        prompt,
-        action: turnAction,
-        modelSelection: turnModelSelectionForRun,
-        explicitSkillIds: turnExplicitSkillIds,
-        mentionedFileIds: turnMentionedFileIds,
-      });
-      return;
+    if (!replay) {
+      const startDecision = resolveAgentTurnStart(sourceActiveSession.id, [
+        ...inFlightSessionIdsRef.current,
+        ...observedRunningSessionIdsRef.current,
+      ]);
+      if (startDecision === "queue-same-session") {
+        enqueueFollowUp({
+          sessionId: sourceActiveSession.id,
+          prompt,
+          action: turnAction,
+          modelSelection: turnModelSelectionForRun,
+          explicitSkillIds: turnExplicitSkillIds,
+          mentionedFileIds: turnMentionedFileIds,
+        });
+        return;
+      }
     }
 
     const optimisticMessage = replay?.clientMessageId
@@ -327,7 +464,32 @@ export function useAgentTurn(options: AgentTurnOptions) {
     let sessionForTurn = sourceActiveSession;
     let snapshotForTurn = sourceSnapshot;
     let startedTurn = false;
+    let reservedSessionId: string | null = null;
     const viewerSessionId = snapshotRef.current?.activeSessionId ?? sourceSnapshot.activeSessionId;
+
+    if (!replay) {
+      const startDecision = resolveAgentTurnStart(sourceActiveSession.id, [
+        ...inFlightSessionIdsRef.current,
+        ...observedRunningSessionIdsRef.current,
+      ]);
+      if (startDecision === "queue-capacity") {
+        // 先把用户消息落到目标会话，再排队等空位。
+      } else if (startDecision === "start") {
+        inFlightSessionIdsRef.current.add(sourceActiveSession.id);
+        reservedSessionId = sourceActiveSession.id;
+        startedTurn = true;
+        syncInFlightSessionIds();
+      }
+    } else if (
+      !inFlightSessionIdsRef.current.has(sourceActiveSession.id) &&
+      !observedRunningSessionIdsRef.current.has(sourceActiveSession.id) &&
+      inFlightSessionIdsRef.current.size + observedRunningSessionIdsRef.current.size < MAX_PARALLEL_AGENT_TURNS
+    ) {
+      inFlightSessionIdsRef.current.add(sourceActiveSession.id);
+      reservedSessionId = sourceActiveSession.id;
+      startedTurn = true;
+      syncInFlightSessionIds();
+    }
 
     try {
       if (!replay?.clientMessageId) {
@@ -372,13 +534,23 @@ export function useAgentTurn(options: AgentTurnOptions) {
         });
         sessionForTurn = optimisticTurn.session;
         snapshotForTurn = optimisticTurn.snapshot;
+        if (reservedSessionId && reservedSessionId !== sessionForTurn.id) {
+          inFlightSessionIdsRef.current.delete(reservedSessionId);
+          inFlightSessionIdsRef.current.add(sessionForTurn.id);
+          reservedSessionId = sessionForTurn.id;
+          syncInFlightSessionIds();
+        }
         commitTurnSnapshot(snapshotForTurn);
         latestSnapshot = snapshotForTurn;
         setAgentPrompt("");
         setMentionedFileIds([]);
         snapshotForTurn = await saveSession(snapshotForTurn, sessionForTurn);
-        latestSnapshot = snapshotForTurn;
-        commitTurnSnapshot(snapshotForTurn);
+        latestSnapshot = mergeSessionTurn(snapshotRef.current ?? snapshotForTurn, snapshotForTurn, sessionForTurn.id, {
+          dirtyNoteIds: dirtyNoteIdsRef.current,
+          dirtyDocumentIds: dirtyDocumentIdsRef.current,
+        });
+        commitTurnSnapshot(latestSnapshot);
+        snapshotForTurn = latestSnapshot;
         didPersistOptimisticMessage = true;
         logInfo("用户消息已乐观落库。", {
           category: "frontend",
@@ -393,29 +565,41 @@ export function useAgentTurn(options: AgentTurnOptions) {
         });
       }
 
-      if (!replay && runningSessionIdRef.current && runningSessionIdRef.current !== sessionForTurn.id) {
-        enqueueFollowUp({
-          sessionId: sessionForTurn.id,
-          prompt,
-          action: turnAction,
-          modelSelection: turnModelSelectionForRun,
-          explicitSkillIds: turnExplicitSkillIds,
-          mentionedFileIds: turnMentionedFileIds,
-          clientMessageId: optimisticMessage.id,
-        });
+      if (reservedSessionId && reservedSessionId !== sessionForTurn.id) {
+        inFlightSessionIdsRef.current.delete(reservedSessionId);
+        inFlightSessionIdsRef.current.add(sessionForTurn.id);
+        reservedSessionId = sessionForTurn.id;
+        syncInFlightSessionIds();
+      }
+
+      if (!startedTurn) {
+        enqueueFollowUp(
+          {
+            sessionId: sessionForTurn.id,
+            prompt,
+            action: turnAction,
+            modelSelection: turnModelSelectionForRun,
+            explicitSkillIds: turnExplicitSkillIds,
+            mentionedFileIds: turnMentionedFileIds,
+            clientMessageId: optimisticMessage.id,
+          },
+          "capacity",
+        );
         return;
       }
 
-      startedTurn = true;
-      inFlightSessionIdsRef.current.add(sessionForTurn.id);
-      syncInFlightSessionIds();
-      runningSessionIdRef.current = sessionForTurn.id;
+      await clearAgentTurnPlaceholder(sessionForTurn.id);
+      const backendActiveIds = await listActiveAgentSessionIds();
+      if (backendActiveIds.includes(sessionForTurn.id)) {
+        setNotice("该会话已有进行中的回合。");
+        return;
+      }
+
       setLiveTurns((current) => {
         const next = { ...current };
         delete next[sessionForTurn.id];
         return next;
       });
-      beginBusy("Agent 正在处理...");
 
       const turnSnapshot = {
         ...snapshotForTurn,
@@ -436,9 +620,12 @@ export function useAgentTurn(options: AgentTurnOptions) {
         turnMentionedFileIds,
       );
       const viewerSnapshot = snapshotRef.current ?? result.snapshot;
+      const touched = collectTouchedFileIds(snapshotForTurn, result.snapshot);
       const mergedSnapshot = mergeSessionTurn(viewerSnapshot, result.snapshot, sessionForTurn.id, {
         dirtyNoteIds: dirtyNoteIdsRef.current,
         dirtyDocumentIds: dirtyDocumentIdsRef.current,
+        touchedNoteIds: touched.touchedNoteIds,
+        touchedDocumentIds: touched.touchedDocumentIds,
       });
 
       commitTurnSnapshot(mergedSnapshot);
@@ -467,21 +654,21 @@ export function useAgentTurn(options: AgentTurnOptions) {
       setNotice(error instanceof Error ? error.message : String(error));
     } finally {
       if (startedTurn) {
+        inFlightSessionIdsRef.current.delete(reservedSessionId ?? sessionForTurn.id);
         inFlightSessionIdsRef.current.delete(sessionForTurn.id);
         syncInFlightSessionIds();
-        if (runningSessionIdRef.current === sessionForTurn.id) {
-          runningSessionIdRef.current = null;
-        }
         setLiveTurns((current) => {
           const next = { ...current };
           delete next[sessionForTurn.id];
           return next;
         });
-        endBusy();
         const queued = takeNextQueuedFollowUp(sessionForTurn.id);
-        if (queued) {
+        if (queued && resolveAgentTurnStart(queued.sessionId, inFlightSessionIdsRef.current) === "start") {
           const replaySnapshot = snapshotRef.current ?? latestSnapshot;
           void submitPromptRef.current(queued.action, queued.prompt, replaySnapshot, queued);
+        } else if (queued) {
+          queuedBySessionRef.current.set(queued.sessionId, queued);
+          syncQueuedFollowUps();
         }
       }
     }
@@ -492,23 +679,29 @@ export function useAgentTurn(options: AgentTurnOptions) {
   /** 等到该会话的 runAgentTurn 走完 finally，避免 rewind 后被 mergeSessionTurn 写回旧消息。 */
   function waitForSessionIdle(sessionId: string, timeoutMs = 30_000) {
     return new Promise<void>((resolve, reject) => {
-      if (!inFlightSessionIdsRef.current.has(sessionId)) {
-        resolve();
-        return;
-      }
-
       const startedAt = Date.now();
-      const timer = window.setInterval(() => {
-        if (!inFlightSessionIdsRef.current.has(sessionId)) {
-          window.clearInterval(timer);
+      const tick = async () => {
+        const frontendIdle = !inFlightSessionIdsRef.current.has(sessionId);
+        let backendIdle = true;
+        try {
+          const activeIds = await listActiveAgentSessionIds();
+          backendIdle = !activeIds.includes(sessionId);
+        } catch {
+          backendIdle = frontendIdle;
+        }
+        if (frontendIdle && backendIdle) {
           resolve();
           return;
         }
         if (Date.now() - startedAt > timeoutMs) {
-          window.clearInterval(timer);
           reject(new Error("等待当前回合结束超时。"));
+          return;
         }
-      }, 50);
+        window.setTimeout(() => {
+          void tick();
+        }, 50);
+      };
+      void tick();
     });
   }
 
@@ -697,6 +890,8 @@ export function useAgentTurn(options: AgentTurnOptions) {
     queuedFollowUp,
     queuedFollowUpInList,
     isCurrentSessionBusy,
+    inFlightSessionIds: runningSessionIds,
+    queuedSessionIds: Object.keys(queuedBySession),
     enqueueFollowUp: (prompt: string) => {
       enqueueFollowUp({
         sessionId: activeSession.id,
@@ -710,6 +905,7 @@ export function useAgentTurn(options: AgentTurnOptions) {
     takeQueuedFollowUp: () => takeNextQueuedFollowUp(activeSession.id)?.prompt ?? null,
     handleClearQueuedFollowUp,
     handleAbortTurn,
+    handlePrepareSessionForDelete,
     handleSubmitPrompt,
     handleEditUserMessageAndRerun,
     handleApproveSkillExecution,

@@ -71,6 +71,24 @@ export async function abortAgentTurn(sessionId: string): Promise<void> {
   await invokeLogged<void>("abort_agent_turn", { payload: { sessionId } });
 }
 
+/** 列出后端当前 Running 的会话，避免桌面提交撞上 IM 后台回合。 */
+export async function listActiveAgentSessionIds(): Promise<string[]> {
+  if (!isTauriRuntime()) {
+    return [];
+  }
+
+  return invokeLogged<string[]>("list_active_agent_session_ids");
+}
+
+/** 清掉上一轮结束后留下的预取消占位，避免下一轮一开跑就被当成已中断。 */
+export async function clearAgentTurnPlaceholder(sessionId: string): Promise<void> {
+  if (!isTauriRuntime()) {
+    return;
+  }
+
+  await invokeLogged<void>("clear_agent_turn_placeholder", { payload: { sessionId } });
+}
+
 /** 订阅 Agent 过程事件；浏览器开发态没有 Tauri 窗口时返回空卸载函数。 */
 export async function listenAgentTurnProgress(
   onProgress: (payload: AgentTurnProgressEvent) => void,

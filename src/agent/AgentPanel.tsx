@@ -1,4 +1,5 @@
 import { History, Book, PanelRightClose, Play, Plus, ShieldAlert, X } from "lucide-react";
+import { cn } from "../shared/cn";
 import { useRef } from "react";
 import { Button } from "../shared/Button";
 import { Checkbox } from "../shared/Checkbox";
@@ -42,8 +43,9 @@ export function AgentPanel({
   modelConfig,
   agentSecurity,
   turnModelSelection,
-  isBusy,
   isComposerBusy = false,
+  inFlightSessionIds = [],
+  queuedSessionIds = [],
   liveTurn,
   queuedFollowUp,
   queuedFollowUpInList,
@@ -97,9 +99,12 @@ export function AgentPanel({
   agentSecurity: AgentSecuritySettings;
   /** 本轮显式选择的 provider/model，空字符串表示跟随会话/全局默认。 */
   turnModelSelection: string;
-  isBusy: boolean;
   /** 当前正在查看的会话是否有进行中的回合或排队指令，供输入条和权限开关使用。 */
   isComposerBusy?: boolean;
+  /** 正在跑 Agent 的会话 ID，供会话列表和标题栏显示运行态。 */
+  inFlightSessionIds?: string[];
+  /** 已排队等待开跑的会话 ID。 */
+  queuedSessionIds?: string[];
   /** 当前正在执行的过程快照；完成后由持久化助手消息接管。 */
   liveTurn?: AgentTurnProgressEvent | null;
   /** 当前会话排队指令，用于输入条；可能已经乐观写入该会话。 */
@@ -168,8 +173,23 @@ export function AgentPanel({
           <Button variant="icon" title="查看上下文" onClick={onToggleSessionContext}>
             <Book size={17} />
           </Button>
-          <Button variant="icon" title="会话历史" onClick={onToggleSessionList}>
+          <Button
+            variant="icon"
+            className="relative"
+            title={inFlightSessionIds.length ? `${inFlightSessionIds.length} 个任务运行中` : "会话历史"}
+            onClick={onToggleSessionList}
+          >
             <History size={17} />
+            {inFlightSessionIds.length > 0 && (
+              <span
+                className={cn(
+                  "absolute -top-0.5 -right-0.5 flex size-3.5 items-center justify-center rounded-full bg-accent text-[9px] font-bold text-white",
+                )}
+                aria-label={`${inFlightSessionIds.length} 个任务运行中`}
+              >
+                {inFlightSessionIds.length}
+              </span>
+            )}
           </Button>
           <Button variant="icon" title="新建会话" onClick={onCreateSession}>
             <Plus size={17} />
@@ -188,6 +208,7 @@ export function AgentPanel({
         />
         <AgentSessionSummary
           activeSession={activeSession}
+          sessions={sessions}
           currentFileLabel={currentFileLabel}
           modelConfig={modelConfig}
         />
@@ -198,6 +219,8 @@ export function AgentPanel({
           sessions={sessions}
           activeSession={activeSession}
           knowledgeBases={knowledgeBases}
+          inFlightSessionIds={inFlightSessionIds}
+          queuedSessionIds={queuedSessionIds}
           onToggleSessionList={onToggleSessionList}
           onSelectSession={onSelectSession}
           onDeleteSession={onDeleteSession}
@@ -211,7 +234,7 @@ export function AgentPanel({
           notes={notes}
           currentFileLabel={currentFileLabel}
           modelConfig={modelConfig}
-          isBusy={isBusy}
+          isBusy={isComposerBusy}
           onToggleSessionContext={onToggleSessionContext}
           onSetSessionModelSelection={onSetSessionModelSelection}
           onCompactAgentContext={onCompactAgentContext}
@@ -243,11 +266,11 @@ export function AgentPanel({
             <div className="flex items-center justify-between gap-3 py-[3px]"><dt className="m-0">凭证</dt><dd className="m-0 text-xs text-ink-muted">{activeSession.pendingExecution.credentialAliases.length ? "已声明" : "不注入"}</dd></div>
           </dl>
           <div className="flex items-center justify-end gap-2">
-            <Button variant="ghost" size="compact" tone="danger" onClick={onRejectExecution} disabled={isBusy}>
+            <Button variant="ghost" size="compact" tone="danger" onClick={onRejectExecution} disabled={isComposerBusy}>
               <X size={14} />
               拒绝
             </Button>
-            <Button variant="primary" size="compact" onClick={onApproveExecution} disabled={isBusy}>
+            <Button variant="primary" size="compact" onClick={onApproveExecution} disabled={isComposerBusy}>
               <Play size={14} />
               在隔离区运行
             </Button>
@@ -278,11 +301,11 @@ export function AgentPanel({
             <p className="text-xs text-ink-muted">另有 {activeSession.pendingChangeSet.operations.length - 8} 项。</p>
           )}
           <div className="flex items-center justify-end gap-2">
-            <Button variant="ghost" size="compact" tone="danger" onClick={onRejectChangeSet} disabled={isBusy}>
+            <Button variant="ghost" size="compact" tone="danger" onClick={onRejectChangeSet} disabled={isComposerBusy}>
               <X size={14} />
               全部拒绝
             </Button>
-            <Button variant="primary" size="compact" onClick={onApplyChangeSet} disabled={isBusy}>
+            <Button variant="primary" size="compact" onClick={onApplyChangeSet} disabled={isComposerBusy}>
               <Play size={14} />
               应用已选变更
             </Button>

@@ -333,6 +333,43 @@ export function WorkspaceShell() {
     expandFolderPaths,
   });
   const {
+    liveTurn,
+    queuedFollowUp,
+    queuedFollowUpInList,
+    isCurrentSessionBusy,
+    inFlightSessionIds,
+    queuedSessionIds,
+    handleClearQueuedFollowUp,
+    handleAbortTurn,
+    handlePrepareSessionForDelete,
+    handleSubmitPrompt,
+    handleEditUserMessageAndRerun,
+    handleApproveSkillExecution,
+    handleRejectSkillExecution,
+    handleApplySkillChangeSet,
+    handleRejectSkillChangeSet,
+    handleToggleSkillChangeOperation,
+  } = useAgentTurn({
+    snapshot,
+    userSettings,
+    beginBusy,
+    endBusy,
+    setNotice,
+    commitSnapshot,
+    requestConfirmation,
+    agentPrompt,
+    setAgentPrompt,
+    turnModelSelection,
+    explicitSkillIds,
+    setExplicitSkillIds,
+    mentionedFileIds,
+    setMentionedFileIds,
+    setAuditLogs,
+    setAppEventLogs,
+    dirtyNoteIds,
+    dirtyDocumentIds,
+  });
+  const {
     handleCreateSession,
     handleSelectSession,
     handleDeleteSession,
@@ -363,40 +400,7 @@ export function WorkspaceShell() {
     agentOpen,
     setAgentOpen,
     setUserSettings,
-  });
-  const {
-    liveTurn,
-    queuedFollowUp,
-    queuedFollowUpInList,
-    isCurrentSessionBusy,
-    handleClearQueuedFollowUp,
-    handleAbortTurn,
-    handleSubmitPrompt,
-    handleEditUserMessageAndRerun,
-    handleApproveSkillExecution,
-    handleRejectSkillExecution,
-    handleApplySkillChangeSet,
-    handleRejectSkillChangeSet,
-    handleToggleSkillChangeOperation,
-  } = useAgentTurn({
-    snapshot,
-    userSettings,
-    beginBusy,
-    endBusy,
-    setNotice,
-    commitSnapshot,
-    requestConfirmation,
-    agentPrompt,
-    setAgentPrompt,
-    turnModelSelection,
-    explicitSkillIds,
-    setExplicitSkillIds,
-    mentionedFileIds,
-    setMentionedFileIds,
-    setAuditLogs,
-    setAppEventLogs,
-    dirtyNoteIds,
-    dirtyDocumentIds,
+    prepareSessionForDelete: handlePrepareSessionForDelete,
   });
   const { handleAddReviewComment, handleSubmitReviewComments, handleAcceptChange, handleRejectChange } = useReviewActions({
     snapshot,
@@ -667,6 +671,7 @@ export function WorkspaceShell() {
               .flatMap((item) => item.tags)}
             proposedChange={activeSession.pendingChange?.status === "pending" ? activeSession.pendingChange : undefined}
             isBusy={isBusy}
+            isReviewBusy={isCurrentSessionBusy}
             isDirty={isActiveNoteDirty}
             viewMode={markdownViewMode}
             onViewModeChange={setMarkdownViewMode}
@@ -713,8 +718,9 @@ export function WorkspaceShell() {
             modelConfig={userSettings.modelConfig}
             agentSecurity={userSettings.agentSecurity}
             turnModelSelection={turnModelSelection}
-            isBusy={isBusy}
             isComposerBusy={isCurrentSessionBusy}
+            inFlightSessionIds={inFlightSessionIds}
+            queuedSessionIds={queuedSessionIds}
             liveTurn={liveTurn}
             queuedFollowUp={queuedFollowUp}
             queuedFollowUpInList={queuedFollowUpInList}

@@ -1,4 +1,4 @@
-import { Check, Clock, Copy, Database, FileText, FolderOpen, Gauge, Layers3, MessageSquareText, Pencil, ShieldAlert, Sparkles, Trash2, X } from "lucide-react";
+import { Check, Clock, Copy, Database, FileText, FolderOpen, Gauge, Layers3, Loader2, MessageSquareText, Pencil, ShieldAlert, Sparkles, Trash2, X } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import ReactMarkdown from "react-markdown";
 import rehypeSanitize from "rehype-sanitize";
@@ -40,6 +40,7 @@ import {
   formatContextWindowLabel,
   resolveContextMeter,
 } from "../shared/contextUsage";
+import { sessionHasPendingWriteConflict } from "../workspace/sessionUtils";
 import type {
   AgentMessage,
   AgentPromptDump,
@@ -63,15 +64,18 @@ import { ToolCallList } from "./ToolCallList";
 /** 会话摘要条只保留当前文件、上下文占用和待确认写入，避免和输入条、范围入口重复。 */
 export function AgentSessionSummary({
   activeSession,
+  sessions,
   currentFileLabel,
   modelConfig,
 }: {
   activeSession: AgentSession;
+  sessions: AgentSession[];
   /** 工作台当前焦点文件；它是本轮默认编辑目标，独立于会话恢复锚点。 */
   currentFileLabel: string;
   modelConfig: ModelConfig;
 }) {
-  const isPendingWrite = activeSession.pendingChange?.status === "pending";
+  const isPendingWrite = activeSession.pendingChange?.status === "pending" || activeSession.pendingChangeSet?.status === "pending";
+  const hasWriteConflict = sessionHasPendingWriteConflict(activeSession, sessions);
   const contextMeter = resolveContextMeter(activeSession, modelConfig);
   const contextMeterLabel = formatContextMeterChip(contextMeter);
 
@@ -103,7 +107,7 @@ export function AgentSessionSummary({
       {isPendingWrite && (
         <OverflowTooltipText
           className="shrink-0 rounded-control border border-[rgba(var(--danger-rgb),0.26)] bg-danger-soft px-1.5 py-0.5 text-xs text-danger"
-          text="待确认 diff"
+          text={hasWriteConflict ? "与其它会话改同一文件" : "待确认 diff"}
           logArea="agent_session_write_status"
         />
       )}
@@ -186,6 +190,8 @@ export function AgentSessionHistoryPopover({
   sessions,
   activeSession,
   knowledgeBases,
+  inFlightSessionIds = [],
+  queuedSessionIds = [],
   onToggleSessionList,
   onSelectSession,
   onDeleteSession,
@@ -193,10 +199,14 @@ export function AgentSessionHistoryPopover({
   sessions: AgentSession[];
   activeSession: AgentSession;
   knowledgeBases: KnowledgeBase[];
+  inFlightSessionIds?: string[];
+  queuedSessionIds?: string[];
   onToggleSessionList: () => void;
   onSelectSession: (sessionId: string) => void;
   onDeleteSession: (sessionId: string) => void;
 }) {
+  const runningIds = new Set(inFlightSessionIds);
+  const queuedIds = new Set(queuedSessionIds);
   return (
     <section className={agentPopoverClassName} aria-label="会话历史">
       <div className={popoverHeaderClassName}>
@@ -219,7 +229,11 @@ export function AgentSessionHistoryPopover({
           >
             <button className="grid min-w-0 gap-1 p-1 text-left" type="button" onClick={() => onSelectSession(session.id)}>
               <span className="flex min-w-0 items-center gap-1.5">
-                <MessageSquareText size={14} className="shrink-0" />
+                {runningIds.has(session.id) ? (
+                  <Loader2 size={14} className="shrink-0 animate-spin text-accent" aria-label="运行中" />
+                ) : (
+                  <MessageSquareText size={14} className="shrink-0" />
+                )}
                 <OverflowTooltipText as="strong" className="min-w-0 truncate text-ink-strong" text={session.title} logArea="agent_session_history_title" />
               </span>
               <span className="grid min-w-0 grid-cols-[minmax(0,max-content)_minmax(0,1fr)] items-center gap-x-1.5 gap-y-[3px] text-xs text-ink-muted">
@@ -253,9 +267,24 @@ export function AgentSessionHistoryPopover({
                   logArea="agent_session_history_updated_at"
                 />
               </span>
+              {runningIds.has(session.id) && (
+                <span className="rounded-control border border-primary-border bg-accent-soft px-1.5 py-0.5 text-xs text-accent-strong">
+                  运行中
+                </span>
+              )}
+              {queuedIds.has(session.id) && !runningIds.has(session.id) && (
+                <span className="rounded-control border border-border bg-surface px-1.5 py-0.5 text-xs text-ink-muted">
+                  排队
+                </span>
+              )}
               {session.pendingChange?.status === "pending" && (
                 <span className="rounded-control border border-[rgba(var(--danger-rgb),0.26)] bg-danger-soft px-1.5 py-0.5 text-xs text-danger">
-                  待确认 diff
+                  {sessionHasPendingWriteConflict(session, sessions) ? "与其它会话改同一文件" : "待确认 diff"}
+                </span>
+              )}
+              {session.pendingChangeSet?.status === "pending" && session.pendingChange?.status !== "pending" && (
+                <span className="rounded-control border border-[rgba(var(--danger-rgb),0.26)] bg-danger-soft px-1.5 py-0.5 text-xs text-danger">
+                  {sessionHasPendingWriteConflict(session, sessions) ? "与其它会话改同一文件" : "待确认变更集"}
                 </span>
               )}
             </button>

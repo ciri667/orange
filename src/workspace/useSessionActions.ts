@@ -1,3 +1,4 @@
+import { useRef } from "react";
 import { decodeModelSelection } from "../shared/modelSelection";
 import { logInfo, logWarn } from "../shared/logger";
 import { getActiveDocument, getActiveKnowledgeBase, getActiveNote } from "../shared/selectors";
@@ -24,6 +25,8 @@ interface SessionActionsOptions extends WorkspaceChrome {
   agentOpen: boolean;
   setAgentOpen: (value: boolean) => void;
   setUserSettings: (settings: import("../shared/types").UserSettings) => void;
+  /** 删除前停止该会话正在跑的回合并丢掉排队。 */
+  prepareSessionForDelete?: (sessionId: string) => Promise<void>;
 }
 
 const noopAsync = async (..._args: unknown[]) => {};
@@ -50,7 +53,10 @@ export function useSessionActions(options: SessionActionsOptions) {
     agentOpen,
     setAgentOpen,
     setUserSettings,
+    prepareSessionForDelete,
   } = options;
+  const snapshotRef = useRef(snapshot);
+  snapshotRef.current = snapshot;
 
   if (!snapshot || !userSettings) {
     return {
@@ -163,7 +169,9 @@ export function useSessionActions(options: SessionActionsOptions) {
         beginBusy("正在删除 Agent 会话...");
 
         try {
-          const nextSnapshot = await deleteSession(currentSnapshot, sessionId);
+          await prepareSessionForDelete?.(sessionId);
+          const latestSnapshot = snapshotRef.current ?? currentSnapshot;
+          const nextSnapshot = await deleteSession(latestSnapshot, sessionId);
 
           commitSnapshot(nextSnapshot);
           setIsSessionListOpen(true);
