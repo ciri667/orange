@@ -244,6 +244,8 @@ pub fn run() {
             export::export_current_file,
             commands::agent::run_agent_turn,
             commands::agent::abort_agent_turn,
+            commands::agent::list_active_agent_session_ids,
+            commands::agent::clear_agent_turn_placeholder,
             commands::agent::compact_agent_context,
             commands::agent::approve_skill_execution,
             commands::agent::reject_skill_execution,

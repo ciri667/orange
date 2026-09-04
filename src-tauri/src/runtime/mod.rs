@@ -10,8 +10,9 @@ use dsml::*;
 use stream::*;
 
 pub use cancel::{
-    is_session_turn_active, register as register_agent_cancel,
-    request_abort as request_agent_abort, AgentCancel, AgentCancelGuard,
+    clear_placeholder as clear_agent_cancel_placeholder, is_session_turn_active,
+    list_active_session_ids, request_abort as request_agent_abort,
+    try_register as register_agent_cancel, AgentCancel, AgentCancelGuard,
 };
 
 use crate::agent;

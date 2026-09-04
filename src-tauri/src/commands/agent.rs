@@ -10,7 +10,7 @@ pub async fn run_agent_turn(
     let operation_id = storage::create_id("op");
     let request = payload.request;
     let session_id = request.session_id.clone();
-    let cancel = runtime::register_agent_cancel(&session_id);
+    let cancel = runtime::register_agent_cancel(&session_id)?;
     let _cancel_guard = runtime::AgentCancelGuard::new(session_id.clone(), cancel.clone());
     let mut snapshot = hydrate_persisted_sessions_for_turn(&app, payload.snapshot).await?;
     let active_knowledge_base_id = request.active_knowledge_base_id.clone();
@@ -85,7 +85,7 @@ pub async fn run_agent_turn(
 
     // 每轮后刷新本地索引，并只 upsert 本轮会话，确保消息可恢复且不覆盖其它会话。
     if let Err(error) =
-        index_snapshot_in_background(app.clone(), &runtime_result.turn_result.snapshot).await
+        upsert_snapshot_index_in_background(app.clone(), &runtime_result.turn_result.snapshot).await
     {
         logging::write_app_event_best_effort(
             &app,
@@ -162,6 +162,23 @@ pub async fn abort_agent_turn(payload: AbortAgentTurnPayload) -> Result<(), Stri
     Ok(())
 }
 
+/** 列出当前正在跑的 Agent 会话，桌面提交前用来避开 IM 后台已占用的同一会话。 */
+#[tauri::command]
+pub fn list_active_agent_session_ids() -> Vec<String> {
+    runtime::list_active_session_ids()
+}
+
+/** 清掉已结束回合留下的预取消占位，不碰正在跑的令牌。 */
+#[tauri::command]
+pub fn clear_agent_turn_placeholder(payload: AbortAgentTurnPayload) -> Result<(), String> {
+    let session_id = payload.session_id.trim();
+    if session_id.is_empty() {
+        return Err("缺少会话 ID。".to_owned());
+    }
+    runtime::clear_agent_cancel_placeholder(session_id);
+    Ok(())
+}
+
 /** 手动整理当前 Agent 会话工作记忆，成功后持久化会话快照。 */
 #[tauri::command]
 pub async fn compact_agent_context(
@@ -171,6 +188,9 @@ pub async fn compact_agent_context(
     let started_at = Instant::now();
     let operation_id = storage::create_id("op");
     let session_id = payload.session_id.clone();
+    if runtime::is_session_turn_active(&session_id) {
+        return Err("当前会话仍有进行中的回合，请先停止后再整理上下文。".to_owned());
+    }
 
     logging::write_app_event_best_effort(
         &app,
@@ -194,7 +214,7 @@ pub async fn compact_agent_context(
     let snapshot =
         runtime::compact_agent_context_summary(&app, snapshot, &session_id, settings).await?;
 
-    if let Err(error) = index_snapshot_in_background(app.clone(), &snapshot).await {
+    if let Err(error) = upsert_snapshot_index_in_background(app.clone(), &snapshot).await {
         logging::write_app_event_best_effort(
             &app,
             AppEventBuilder::new(
@@ -281,6 +301,8 @@ pub(crate) async fn run_agent_turn_from_im(
             short_change_code(&pending_change.id),
         ));
     }
+    let cancel = runtime::register_agent_cancel(&session_id)?;
+    let _cancel_guard = runtime::AgentCancelGuard::new(session_id.clone(), cancel.clone());
     let active_knowledge_base_id = valid_scope_ids.first().cloned().unwrap_or_default();
     let user_message = crate::im::build_im_user_message(&prompt);
     let user_message_id = user_message.id.clone();
@@ -348,8 +370,6 @@ pub(crate) async fn run_agent_turn_from_im(
         active_knowledge_base_id.clone(),
         user_message_id,
     );
-    let cancel = runtime::register_agent_cancel(&session_id);
-    let _cancel_guard = runtime::AgentCancelGuard::new(session_id.clone(), cancel.clone());
     let runtime_result =
         runtime::run_agent_turn(&app, snapshot, request, settings, available_skills, cancel).await;
     let audit_app = app.clone();
@@ -359,7 +379,7 @@ pub(crate) async fn run_agent_turn_from_im(
         storage::append_request_audit_log(&audit_app, &audit_log)
     })
     .await?;
-    index_snapshot_in_background(app.clone(), &runtime_result.turn_result.snapshot).await?;
+    upsert_snapshot_index_in_background(app.clone(), &runtime_result.turn_result.snapshot).await?;
     persist_turn_session(&app, &runtime_result.turn_result.snapshot, &session_id).await?;
 
     logging::write_app_event_best_effort(
@@ -628,7 +648,7 @@ pub(super) async fn compact_im_session_from_command(
         .take(48)
         .collect::<String>();
     storage::save_snapshot_session(app, &snapshot, &session_id)?;
-    index_snapshot_in_background(app.clone(), &snapshot).await?;
+    upsert_snapshot_index_in_background(app.clone(), &snapshot).await?;
 
     Ok(ImBuiltinCommandResult {
         reply: format!(
@@ -1025,7 +1045,7 @@ pub async fn reject_proposed_change(
         );
     }
 
-    index_snapshot_in_background(app.clone(), &snapshot).await?;
+    upsert_snapshot_index_in_background(app.clone(), &snapshot).await?;
     persist_turn_session(&app, &snapshot, &session_id).await?;
 
     Ok(snapshot)
