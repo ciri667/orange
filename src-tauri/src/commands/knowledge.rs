@@ -95,7 +95,7 @@ pub async fn scan_knowledge_base(
     normalize_knowledge_base_flags(&mut snapshot);
     normalize_active_entities(&mut snapshot, Some(&knowledge_base_id));
 
-    index_snapshot_in_background(app.clone(), &snapshot).await?;
+    reindex_knowledge_base_in_background(app.clone(), &snapshot, knowledge_base_id.clone()).await?;
 
     logging::write_app_event_best_effort(
         &app,
@@ -177,7 +177,12 @@ pub async fn rescan_knowledge_base(
                 normalize_sessions_after_rescan(&mut snapshot, &payload.knowledge_base_id);
                 normalize_knowledge_base_flags(&mut snapshot);
                 normalize_active_entities(&mut snapshot, Some(&payload.knowledge_base_id));
-                index_snapshot_in_background(app.clone(), &snapshot).await?;
+                reindex_knowledge_base_in_background(
+                    app.clone(),
+                    &snapshot,
+                    payload.knowledge_base_id.clone(),
+                )
+                .await?;
 
                 logging::write_app_event_best_effort(
                     &app,
@@ -253,7 +258,8 @@ pub async fn rescan_knowledge_base(
     normalize_knowledge_base_flags(&mut snapshot);
     normalize_active_entities(&mut snapshot, Some(&payload.knowledge_base_id));
 
-    index_snapshot_in_background(app.clone(), &snapshot).await?;
+    reindex_knowledge_base_in_background(app.clone(), &snapshot, payload.knowledge_base_id.clone())
+        .await?;
 
     logging::write_app_event_best_effort(
         &app,
@@ -319,7 +325,8 @@ pub async fn remove_knowledge_base(
 
     normalize_knowledge_base_flags(&mut snapshot);
     normalize_active_entities(&mut snapshot, None);
-    index_snapshot_in_background(app.clone(), &snapshot).await?;
+    remove_knowledge_base_from_index_in_background(app.clone(), payload.knowledge_base_id.clone())
+        .await?;
 
     logging::write_app_event_best_effort(
         &app,

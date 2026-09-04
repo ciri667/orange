@@ -426,7 +426,15 @@ pub async fn restore_document_history_entry(
     }
 
     normalize_active_entities(&mut snapshot, None);
-    index_snapshot_in_background(app.clone(), &snapshot).await?;
+    if target.entity_type == "note" {
+        if let Some(note) = snapshot
+            .notes
+            .iter()
+            .find(|note| note.id == target.entity_id)
+        {
+            upsert_notes_index_in_background(app.clone(), vec![note.clone()]).await?;
+        }
+    }
 
     logging::write_app_event_best_effort(
         &app,

@@ -281,6 +281,68 @@ pub(super) async fn index_snapshot_in_background(
     .await
 }
 
+/** Agent 回合只 upsert 本回合见到的笔记，避免过期快照把其它会话新写入的笔记从 FTS 抹掉。 */
+pub(super) async fn upsert_snapshot_index_in_background(
+    app: AppHandle,
+    snapshot: &WorkspaceSnapshot,
+) -> Result<(), String> {
+    let index_app = app.clone();
+    let index_snapshot = snapshot.clone();
+
+    run_blocking("增量刷新本地检索索引", move || {
+        storage::upsert_snapshot_index(&index_app, &index_snapshot)
+    })
+    .await
+}
+
+/** 只刷新指定笔记的 FTS，避免编辑器保存用整份过期快照覆盖其它会话的写入。 */
+pub(super) async fn upsert_notes_index_in_background(
+    app: AppHandle,
+    notes: Vec<crate::domain::Note>,
+) -> Result<(), String> {
+    run_blocking("刷新笔记检索索引", move || {
+        storage::upsert_notes_index(&app, &notes)
+    })
+    .await
+}
+
+/** 删除指定笔记的 FTS 行，不重建其它知识库。 */
+pub(super) async fn remove_note_ids_from_index_in_background(
+    app: AppHandle,
+    note_ids: Vec<String>,
+) -> Result<(), String> {
+    run_blocking("删除笔记检索索引", move || {
+        storage::remove_note_ids_from_index(&app, &note_ids)
+    })
+    .await
+}
+
+/** 重扫单个知识库后只替换该库索引。 */
+pub(super) async fn reindex_knowledge_base_in_background(
+    app: AppHandle,
+    snapshot: &WorkspaceSnapshot,
+    knowledge_base_id: String,
+) -> Result<(), String> {
+    let index_app = app.clone();
+    let index_snapshot = snapshot.clone();
+
+    run_blocking("重扫知识库检索索引", move || {
+        storage::reindex_knowledge_base_notes(&index_app, &index_snapshot, &knowledge_base_id)
+    })
+    .await
+}
+
+/** 移除知识库授权时清掉该库索引。 */
+pub(super) async fn remove_knowledge_base_from_index_in_background(
+    app: AppHandle,
+    knowledge_base_id: String,
+) -> Result<(), String> {
+    run_blocking("移除知识库检索索引", move || {
+        storage::remove_knowledge_base_from_index(&app, &knowledge_base_id)
+    })
+    .await
+}
+
 /** 回合结束后只 upsert 本轮会话，避免过期快照把其它会话删掉或打回旧模型/权限。 */
 pub(super) async fn persist_turn_session(
     app: &AppHandle,

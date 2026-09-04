@@ -64,7 +64,7 @@ pub async fn create_note(
     snapshot.active_note_id = note_id;
     snapshot.active_document_id.clear();
     normalize_active_entities(&mut snapshot, Some(&knowledge_base.id));
-    index_snapshot_in_background(app.clone(), &snapshot).await?;
+    upsert_notes_index_in_background(app.clone(), vec![snapshot.notes[0].clone()]).await?;
 
     logging::write_app_event_best_effort(
         &app,
@@ -148,7 +148,7 @@ pub async fn create_project_instruction(
     snapshot.active_note_id = note_id;
     snapshot.active_document_id.clear();
     normalize_active_entities(&mut snapshot, Some(&knowledge_base.id));
-    index_snapshot_in_background(app.clone(), &snapshot).await?;
+    upsert_notes_index_in_background(app.clone(), vec![snapshot.notes[0].clone()]).await?;
 
     logging::write_app_event_best_effort(
         &app,
@@ -263,7 +263,11 @@ pub async fn rename_note(
         &next_note_id,
         &next_relative_path,
     );
-    index_snapshot_in_background(app.clone(), &snapshot).await?;
+    upsert_notes_index_in_background(app.clone(), vec![snapshot.notes[note_index].clone()]).await?;
+    if payload.note_id != next_note_id {
+        remove_note_ids_from_index_in_background(app.clone(), vec![payload.note_id.clone()])
+            .await?;
+    }
 
     logging::write_app_event_best_effort(
         &app,
@@ -336,7 +340,7 @@ pub async fn delete_note(
 
     remove_note_references_after_delete(&mut snapshot, &payload.note_id);
     normalize_active_entities(&mut snapshot, Some(&knowledge_base.id));
-    index_snapshot_in_background(app.clone(), &snapshot).await?;
+    remove_note_ids_from_index_in_background(app.clone(), vec![payload.note_id.clone()]).await?;
 
     logging::write_app_event_best_effort(
         &app,
@@ -456,7 +460,7 @@ pub async fn save_note_content(
     snapshot.active_note_id = payload.note_id;
     snapshot.active_document_id.clear();
     normalize_active_entities(&mut snapshot, None);
-    index_snapshot_in_background(app.clone(), &snapshot).await?;
+    upsert_notes_index_in_background(app.clone(), vec![snapshot.notes[note_index].clone()]).await?;
 
     logging::write_app_event_best_effort(
         &app,

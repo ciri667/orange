@@ -8,23 +8,93 @@ pub(crate) struct StoredKnowledgeBase {
     updated_at: String,
 }
 
+/** 全量重建 FTS，供知识库扫描和启动索引使用。 */
 pub fn index_snapshot(app: &AppHandle, snapshot: &WorkspaceSnapshot) -> Result<(), String> {
+    index_snapshot_with_mode(app, snapshot, IndexMode::ReplaceAll)
+}
+
+/** 只 upsert 快照中的笔记，供 Agent 回合使用，避免过期快照删掉其它会话写入的笔记。 */
+pub fn upsert_snapshot_index(app: &AppHandle, snapshot: &WorkspaceSnapshot) -> Result<(), String> {
+    index_snapshot_with_mode(app, snapshot, IndexMode::Upsert)
+}
+
+/** 只刷新给定笔记的 FTS 行，供编辑器单文件保存使用。 */
+pub fn upsert_notes_index(app: &AppHandle, notes: &[Note]) -> Result<(), String> {
+    if notes.is_empty() {
+        return Ok(());
+    }
+    let mut connection = open_database(app)?;
+    let _write_guard = lock_database_writer()?;
+    let transaction = connection
+        .transaction_with_behavior(TransactionBehavior::Immediate)
+        .map_err(|error| format!("无法启动索引事务：{error}"))?;
+    for note in notes {
+        upsert_note_index(&transaction, note)?;
+    }
+    transaction
+        .commit()
+        .map_err(|error| format!("无法提交索引事务：{error}"))?;
+    Ok(())
+}
+
+#[derive(Clone, Copy)]
+pub(crate) enum IndexMode {
+    ReplaceAll,
+    Upsert,
+}
+
+fn index_snapshot_with_mode(
+    app: &AppHandle,
+    snapshot: &WorkspaceSnapshot,
+    mode: IndexMode,
+) -> Result<(), String> {
     let index_signature = build_index_signature(snapshot);
     let mut connection = open_database(app)?;
     let _write_guard = lock_database_writer()?;
-    let should_rebuild_index = {
-        let completed_signature = COMPLETED_INDEX_SIGNATURE
-            .get_or_init(|| Mutex::new(None))
-            .lock()
-            .map_err(|_| "FTS 索引签名锁已损坏。".to_owned())?;
+    let should_rebuild_index = match mode {
+        IndexMode::Upsert => true,
+        IndexMode::ReplaceAll => {
+            let completed_signature = COMPLETED_INDEX_SIGNATURE
+                .get_or_init(|| Mutex::new(None))
+                .lock()
+                .map_err(|_| "FTS 索引签名锁已损坏。".to_owned())?;
 
-        completed_signature.as_deref() != Some(index_signature.as_str())
+            completed_signature.as_deref() != Some(index_signature.as_str())
+        }
     };
     let transaction = connection
         .transaction_with_behavior(TransactionBehavior::Immediate)
         .map_err(|error| format!("无法启动索引事务：{error}"))?;
 
     if should_rebuild_index {
+        apply_index_to_transaction(&transaction, snapshot, mode)?;
+    }
+
+    transaction
+        .commit()
+        .map_err(|error| format!("无法提交索引事务：{error}"))?;
+
+    if should_rebuild_index {
+        if matches!(mode, IndexMode::ReplaceAll) {
+            let mut completed_signature = COMPLETED_INDEX_SIGNATURE
+                .get_or_init(|| Mutex::new(None))
+                .lock()
+                .map_err(|_| "FTS 索引签名锁已损坏。".to_owned())?;
+
+            *completed_signature = Some(index_signature);
+        }
+    }
+
+    Ok(())
+}
+
+/** 在已有事务中写入索引；ReplaceAll 会清空后重建，Upsert 只覆盖快照里出现的笔记。 */
+pub(crate) fn apply_index_to_transaction(
+    transaction: &rusqlite::Transaction<'_>,
+    snapshot: &WorkspaceSnapshot,
+    mode: IndexMode,
+) -> Result<(), String> {
+    if matches!(mode, IndexMode::ReplaceAll) {
         transaction
             .execute("DELETE FROM note_fts", [])
             .map_err(|error| format!("无法清理 FTS 索引：{error}"))?;
@@ -34,51 +104,172 @@ pub fn index_snapshot(app: &AppHandle, snapshot: &WorkspaceSnapshot) -> Result<(
         transaction
             .execute("DELETE FROM knowledge_bases", [])
             .map_err(|error| format!("无法清理知识库索引：{error}"))?;
-
-        for knowledge_base in &snapshot.knowledge_bases {
-            transaction
-                .execute(
-                    "INSERT OR REPLACE INTO knowledge_bases (id, name, path, semantic_index_enabled, updated_at) VALUES (?1, ?2, ?3, ?4, ?5)",
-                    params![
-                        &knowledge_base.id,
-                        &knowledge_base.name,
-                        &knowledge_base.path,
-                        if knowledge_base.semantic_index_enabled { 1 } else { 0 },
-                        &knowledge_base.updated_at
-                    ],
-                )
-                .map_err(|error| format!("无法写入知识库索引：{error}"))?;
-        }
-
-        for note in &snapshot.notes {
-            transaction
-                .execute(
-                    "INSERT OR REPLACE INTO notes (id, knowledge_base_id, title, path, content_hash, updated_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-                    params![&note.id, &note.knowledge_base_id, &note.title, &note.path, &note.content_hash, &note.updated_at],
-                )
-                .map_err(|error| format!("无法写入笔记索引：{error}"))?;
-            transaction
-                .execute(
-                    "INSERT INTO note_fts (note_id, knowledge_base_id, title, path, body) VALUES (?1, ?2, ?3, ?4, ?5)",
-                    params![&note.id, &note.knowledge_base_id, &note.title, &note.path, &note.content],
-                )
-                .map_err(|error| format!("无法写入 FTS 索引：{error}"))?;
-        }
     }
 
+    for knowledge_base in &snapshot.knowledge_bases {
+        transaction
+            .execute(
+                "INSERT OR REPLACE INTO knowledge_bases (id, name, path, semantic_index_enabled, updated_at) VALUES (?1, ?2, ?3, ?4, ?5)",
+                params![
+                    &knowledge_base.id,
+                    &knowledge_base.name,
+                    &knowledge_base.path,
+                    if knowledge_base.semantic_index_enabled { 1 } else { 0 },
+                    &knowledge_base.updated_at
+                ],
+            )
+            .map_err(|error| format!("无法写入知识库索引：{error}"))?;
+    }
+
+    for note in &snapshot.notes {
+        upsert_note_index(transaction, note)?;
+    }
+
+    Ok(())
+}
+
+/** 从索引中删除指定笔记，供删除/重命名后的旧 ID 使用。 */
+pub fn remove_note_ids_from_index(app: &AppHandle, note_ids: &[String]) -> Result<(), String> {
+    if note_ids.is_empty() {
+        return Ok(());
+    }
+    let mut connection = open_database(app)?;
+    let _write_guard = lock_database_writer()?;
+    let transaction = connection
+        .transaction_with_behavior(TransactionBehavior::Immediate)
+        .map_err(|error| format!("无法启动索引事务：{error}"))?;
+    remove_note_ids_from_transaction(&transaction, note_ids)?;
     transaction
         .commit()
         .map_err(|error| format!("无法提交索引事务：{error}"))?;
+    Ok(())
+}
 
-    if should_rebuild_index {
-        let mut completed_signature = COMPLETED_INDEX_SIGNATURE
-            .get_or_init(|| Mutex::new(None))
-            .lock()
-            .map_err(|_| "FTS 索引签名锁已损坏。".to_owned())?;
+/** 重扫单个知识库：只替换该库的笔记索引，其它库保持不变。 */
+pub fn reindex_knowledge_base_notes(
+    app: &AppHandle,
+    snapshot: &WorkspaceSnapshot,
+    knowledge_base_id: &str,
+) -> Result<(), String> {
+    let mut connection = open_database(app)?;
+    let _write_guard = lock_database_writer()?;
+    let transaction = connection
+        .transaction_with_behavior(TransactionBehavior::Immediate)
+        .map_err(|error| format!("无法启动索引事务：{error}"))?;
+    reindex_knowledge_base_notes_in_transaction(&transaction, snapshot, knowledge_base_id)?;
+    transaction
+        .commit()
+        .map_err(|error| format!("无法提交索引事务：{error}"))?;
+    Ok(())
+}
 
-        *completed_signature = Some(index_signature);
+/** 移除知识库授权时删掉该库的笔记索引。 */
+pub fn remove_knowledge_base_from_index(
+    app: &AppHandle,
+    knowledge_base_id: &str,
+) -> Result<(), String> {
+    let mut connection = open_database(app)?;
+    let _write_guard = lock_database_writer()?;
+    let transaction = connection
+        .transaction_with_behavior(TransactionBehavior::Immediate)
+        .map_err(|error| format!("无法启动索引事务：{error}"))?;
+    remove_knowledge_base_from_transaction(&transaction, knowledge_base_id)?;
+    transaction
+        .commit()
+        .map_err(|error| format!("无法提交索引事务：{error}"))?;
+    Ok(())
+}
+
+pub(crate) fn remove_note_ids_from_transaction(
+    transaction: &rusqlite::Transaction<'_>,
+    note_ids: &[String],
+) -> Result<(), String> {
+    for note_id in note_ids {
+        transaction
+            .execute("DELETE FROM note_fts WHERE note_id = ?1", params![note_id])
+            .map_err(|error| format!("无法删除 FTS 索引：{error}"))?;
+        transaction
+            .execute("DELETE FROM notes WHERE id = ?1", params![note_id])
+            .map_err(|error| format!("无法删除笔记索引：{error}"))?;
     }
+    Ok(())
+}
 
+pub(crate) fn remove_knowledge_base_from_transaction(
+    transaction: &rusqlite::Transaction<'_>,
+    knowledge_base_id: &str,
+) -> Result<(), String> {
+    transaction
+        .execute(
+            "DELETE FROM note_fts WHERE knowledge_base_id = ?1",
+            params![knowledge_base_id],
+        )
+        .map_err(|error| format!("无法删除知识库 FTS 索引：{error}"))?;
+    transaction
+        .execute(
+            "DELETE FROM notes WHERE knowledge_base_id = ?1",
+            params![knowledge_base_id],
+        )
+        .map_err(|error| format!("无法删除知识库笔记索引：{error}"))?;
+    transaction
+        .execute(
+            "DELETE FROM knowledge_bases WHERE id = ?1",
+            params![knowledge_base_id],
+        )
+        .map_err(|error| format!("无法删除知识库索引：{error}"))?;
+    Ok(())
+}
+
+pub(crate) fn reindex_knowledge_base_notes_in_transaction(
+    transaction: &rusqlite::Transaction<'_>,
+    snapshot: &WorkspaceSnapshot,
+    knowledge_base_id: &str,
+) -> Result<(), String> {
+    remove_knowledge_base_from_transaction(transaction, knowledge_base_id)?;
+    if let Some(knowledge_base) = snapshot
+        .knowledge_bases
+        .iter()
+        .find(|item| item.id == knowledge_base_id)
+    {
+        transaction
+            .execute(
+                "INSERT OR REPLACE INTO knowledge_bases (id, name, path, semantic_index_enabled, updated_at) VALUES (?1, ?2, ?3, ?4, ?5)",
+                params![
+                    &knowledge_base.id,
+                    &knowledge_base.name,
+                    &knowledge_base.path,
+                    if knowledge_base.semantic_index_enabled { 1 } else { 0 },
+                    &knowledge_base.updated_at
+                ],
+            )
+            .map_err(|error| format!("无法写入知识库索引：{error}"))?;
+    }
+    for note in snapshot
+        .notes
+        .iter()
+        .filter(|note| note.knowledge_base_id == knowledge_base_id)
+    {
+        upsert_note_index(transaction, note)?;
+    }
+    Ok(())
+}
+
+fn upsert_note_index(transaction: &rusqlite::Transaction<'_>, note: &Note) -> Result<(), String> {
+    transaction
+        .execute("DELETE FROM note_fts WHERE note_id = ?1", params![&note.id])
+        .map_err(|error| format!("无法更新 FTS 索引：{error}"))?;
+    transaction
+        .execute(
+            "INSERT OR REPLACE INTO notes (id, knowledge_base_id, title, path, content_hash, updated_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            params![&note.id, &note.knowledge_base_id, &note.title, &note.path, &note.content_hash, &note.updated_at],
+        )
+        .map_err(|error| format!("无法写入笔记索引：{error}"))?;
+    transaction
+        .execute(
+            "INSERT INTO note_fts (note_id, knowledge_base_id, title, path, body) VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![&note.id, &note.knowledge_base_id, &note.title, &note.path, &note.content],
+        )
+        .map_err(|error| format!("无法写入 FTS 索引：{error}"))?;
     Ok(())
 }
 
@@ -554,4 +745,172 @@ pub(crate) fn extract_snippet(content: &str, prompt: &str) -> String {
         })
         .unwrap_or("命中该笔记，但暂无可展示片段。")
         .to_owned()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{apply_index_to_transaction, IndexMode};
+    use crate::domain::{KnowledgeBase, Note, WorkspaceSnapshot};
+    use crate::storage::{ensure_database_schema, hash_content};
+    use rusqlite::Connection;
+    use tempfile::tempdir;
+
+    fn test_note(id: &str, content: &str) -> Note {
+        Note {
+            id: id.to_owned(),
+            knowledge_base_id: "kb-a".to_owned(),
+            title: format!("笔记 {id}"),
+            path: format!("{id}.md"),
+            content: content.to_owned(),
+            tags: Vec::new(),
+            updated_at: "刚刚".to_owned(),
+            backlinks: Vec::new(),
+            content_hash: hash_content(content),
+        }
+    }
+
+    fn test_snapshot(notes: Vec<Note>) -> WorkspaceSnapshot {
+        WorkspaceSnapshot {
+            knowledge_bases: vec![KnowledgeBase {
+                id: "kb-a".to_owned(),
+                name: "测试知识库".to_owned(),
+                path: "/redacted".to_owned(),
+                description: String::new(),
+                status: "ready".to_owned(),
+                note_count: notes.len(),
+                document_count: 0,
+                updated_at: "刚刚".to_owned(),
+                is_default: true,
+                semantic_index_enabled: false,
+                scan_report: None,
+            }],
+            folders: Vec::new(),
+            notes,
+            documents: Vec::new(),
+            sessions: Vec::new(),
+            active_knowledge_base_id: "kb-a".to_owned(),
+            active_note_id: String::new(),
+            active_document_id: String::new(),
+            active_session_id: String::new(),
+        }
+    }
+
+    fn note_ids(connection: &Connection) -> Vec<String> {
+        let mut statement = connection
+            .prepare("SELECT id FROM notes ORDER BY id")
+            .unwrap();
+        statement
+            .query_map([], |row| row.get::<_, String>(0))
+            .unwrap()
+            .map(|row| row.unwrap())
+            .collect()
+    }
+
+    /** 过期回合快照做 upsert 时不得删掉其它会话已经写入的笔记。 */
+    #[test]
+    fn stale_turn_snapshot_does_not_wipe_other_session_notes_from_fts() {
+        let dir = tempdir().unwrap();
+        let database_path = dir.path().join("index.sqlite3");
+        let mut connection = Connection::open(&database_path).unwrap();
+        ensure_database_schema(&connection, &database_path).unwrap();
+
+        let first = test_snapshot(vec![test_note("note-a", "会话 A 旧笔记")]);
+        let transaction = connection.transaction().unwrap();
+        apply_index_to_transaction(&transaction, &first, IndexMode::ReplaceAll).unwrap();
+        transaction.commit().unwrap();
+
+        let both = test_snapshot(vec![
+            test_note("note-a", "会话 A 旧笔记"),
+            test_note("note-b", "会话 B 新笔记"),
+        ]);
+        let transaction = connection.transaction().unwrap();
+        apply_index_to_transaction(&transaction, &both, IndexMode::Upsert).unwrap();
+        transaction.commit().unwrap();
+        assert_eq!(note_ids(&connection), vec!["note-a", "note-b"]);
+
+        let stale = test_snapshot(vec![test_note("note-a", "会话 A 旧笔记")]);
+        let transaction = connection.transaction().unwrap();
+        apply_index_to_transaction(&transaction, &stale, IndexMode::Upsert).unwrap();
+        transaction.commit().unwrap();
+        assert_eq!(note_ids(&connection), vec!["note-a", "note-b"]);
+
+        let fts_count: i64 = connection
+            .query_row(
+                "SELECT count(*) FROM note_fts WHERE note_id = 'note-b'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(fts_count, 1);
+    }
+
+    /** 删除单篇笔记索引时不得动其它笔记。 */
+    #[test]
+    fn remove_note_ids_does_not_wipe_other_notes() {
+        let dir = tempdir().unwrap();
+        let database_path = dir.path().join("index-remove.sqlite3");
+        let mut connection = Connection::open(&database_path).unwrap();
+        ensure_database_schema(&connection, &database_path).unwrap();
+
+        let snapshot = test_snapshot(vec![
+            test_note("note-a", "保留"),
+            test_note("note-b", "删除"),
+        ]);
+        let transaction = connection.transaction().unwrap();
+        apply_index_to_transaction(&transaction, &snapshot, IndexMode::ReplaceAll).unwrap();
+        transaction.commit().unwrap();
+
+        let transaction = connection.transaction().unwrap();
+        super::remove_note_ids_from_transaction(&transaction, &["note-b".to_owned()]).unwrap();
+        transaction.commit().unwrap();
+        assert_eq!(note_ids(&connection), vec!["note-a"]);
+    }
+
+    /** 重扫一个知识库不得清掉另一个知识库的笔记。 */
+    #[test]
+    fn reindex_one_knowledge_base_keeps_other_kb_notes() {
+        let dir = tempdir().unwrap();
+        let database_path = dir.path().join("index-reindex.sqlite3");
+        let mut connection = Connection::open(&database_path).unwrap();
+        ensure_database_schema(&connection, &database_path).unwrap();
+
+        let mut snapshot = test_snapshot(vec![test_note("note-a", "库 A")]);
+        snapshot.knowledge_bases.push(crate::domain::KnowledgeBase {
+            id: "kb-b".to_owned(),
+            name: "知识库 B".to_owned(),
+            path: "/redacted-b".to_owned(),
+            description: String::new(),
+            status: "ready".to_owned(),
+            note_count: 1,
+            document_count: 0,
+            updated_at: "刚刚".to_owned(),
+            is_default: false,
+            semantic_index_enabled: false,
+            scan_report: None,
+        });
+        snapshot.notes.push(Note {
+            id: "note-b".to_owned(),
+            knowledge_base_id: "kb-b".to_owned(),
+            title: "库 B 笔记".to_owned(),
+            path: "b.md".to_owned(),
+            content: "库 B".to_owned(),
+            tags: Vec::new(),
+            updated_at: "刚刚".to_owned(),
+            backlinks: Vec::new(),
+            content_hash: hash_content("库 B"),
+        });
+        let transaction = connection.transaction().unwrap();
+        apply_index_to_transaction(&transaction, &snapshot, IndexMode::ReplaceAll).unwrap();
+        transaction.commit().unwrap();
+
+        snapshot
+            .notes
+            .retain(|note| note.knowledge_base_id != "kb-a");
+        snapshot.notes.insert(0, test_note("note-a2", "库 A 重扫"));
+        let transaction = connection.transaction().unwrap();
+        super::reindex_knowledge_base_notes_in_transaction(&transaction, &snapshot, "kb-a")
+            .unwrap();
+        transaction.commit().unwrap();
+        assert_eq!(note_ids(&connection), vec!["note-a2", "note-b"]);
+    }
 }

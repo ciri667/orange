@@ -63,7 +63,6 @@ pub async fn create_document(
     snapshot.active_note_id.clear();
     snapshot.active_document_id = document_id;
     normalize_active_entities(&mut snapshot, Some(&knowledge_base.id));
-    index_snapshot_in_background(app.clone(), &snapshot).await?;
 
     logging::write_app_event_best_effort(
         &app,
@@ -129,7 +128,6 @@ pub async fn create_folder(
     snapshot.knowledge_bases[knowledge_base_index].updated_at = "刚刚".to_owned();
     snapshot.active_knowledge_base_id = knowledge_base.id.clone();
     normalize_active_entities(&mut snapshot, Some(&knowledge_base.id));
-    index_snapshot_in_background(app.clone(), &snapshot).await?;
 
     logging::write_app_event_best_effort(
         &app,
@@ -248,8 +246,6 @@ pub async fn rename_document(
         snapshot.active_note_id.clear();
     }
 
-    index_snapshot_in_background(app.clone(), &snapshot).await?;
-
     logging::write_app_event_best_effort(
         &app,
         AppEventBuilder::new(
@@ -332,7 +328,6 @@ pub async fn delete_document(
     }
 
     normalize_active_entities(&mut snapshot, Some(&knowledge_base.id));
-    index_snapshot_in_background(app.clone(), &snapshot).await?;
 
     logging::write_app_event_best_effort(
         &app,
@@ -455,7 +450,6 @@ pub async fn save_document_content(
     snapshot.active_note_id.clear();
     snapshot.active_document_id = payload.document_id;
     normalize_active_entities(&mut snapshot, None);
-    index_snapshot_in_background(app.clone(), &snapshot).await?;
 
     logging::write_app_event_best_effort(
         &app,
