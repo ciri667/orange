@@ -353,6 +353,21 @@ pub fn rewind_agent_session(
     Ok(snapshot)
 }
 
+/** 保存某个会话时保留调用方正在查看的会话焦点，避免后台落库把用户切走。 */
+pub(crate) fn retain_viewer_session_id(snapshot: &mut WorkspaceSnapshot, saved_session_id: &str) {
+    let viewer_session_id = snapshot.active_session_id.clone();
+    if !viewer_session_id.is_empty()
+        && snapshot
+            .sessions
+            .iter()
+            .any(|session| session.id == viewer_session_id)
+    {
+        return;
+    }
+
+    snapshot.active_session_id = saved_session_id.to_owned();
+}
+
 /** 只回写快照中的一个会话，避免 Agent 回合用过期列表删掉或打回其它会话。 */
 pub fn save_snapshot_session(
     app: &AppHandle,
@@ -408,9 +423,9 @@ pub fn save_session(
         snapshot.sessions.insert(0, session.clone());
     }
 
-    snapshot.active_session_id = session.id.clone();
+    retain_viewer_session_id(&mut snapshot, &session.id);
     normalize_sessions_for_snapshot(&mut snapshot);
-    save_snapshot_session(app, &snapshot, &snapshot.active_session_id)?;
+    save_snapshot_session(app, &snapshot, &session.id)?;
 
     Ok(snapshot)
 }
@@ -845,4 +860,70 @@ pub(crate) fn ordered_valid_scope_ids(
         .filter(|knowledge_base| selected_ids.contains(knowledge_base.id.as_str()))
         .map(|knowledge_base| knowledge_base.id.clone())
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::retain_viewer_session_id;
+    use crate::domain::{AgentSession, WorkspaceSnapshot};
+
+    fn test_session(id: &str) -> AgentSession {
+        AgentSession {
+            id: id.to_owned(),
+            title: id.to_owned(),
+            im_identity: None,
+            r#type: "knowledge-base".to_owned(),
+            knowledge_base_ids: vec!["kb-a".to_owned()],
+            active_note_id: None,
+            pinned_note_ids: Vec::new(),
+            messages: Vec::new(),
+            pending_change: None,
+            pending_change_set: None,
+            pending_execution: None,
+            security_level: "basic".to_owned(),
+            context_summary: None,
+            created_at: "t".to_owned(),
+            updated_at: "t".to_owned(),
+            deleted_at: None,
+            model_provider_id: None,
+            model_id: None,
+            context_usage: None,
+        }
+    }
+
+    #[test]
+    fn save_session_keeps_viewer_focus_when_persisting_another_session() {
+        let mut snapshot = WorkspaceSnapshot {
+            knowledge_bases: Vec::new(),
+            folders: Vec::new(),
+            notes: Vec::new(),
+            documents: Vec::new(),
+            sessions: vec![test_session("session-a"), test_session("session-b")],
+            active_knowledge_base_id: String::new(),
+            active_note_id: String::new(),
+            active_document_id: String::new(),
+            active_session_id: "session-a".to_owned(),
+        };
+
+        retain_viewer_session_id(&mut snapshot, "session-b");
+        assert_eq!(snapshot.active_session_id, "session-a");
+    }
+
+    #[test]
+    fn save_session_adopts_saved_id_when_viewer_is_missing() {
+        let mut snapshot = WorkspaceSnapshot {
+            knowledge_bases: Vec::new(),
+            folders: Vec::new(),
+            notes: Vec::new(),
+            documents: Vec::new(),
+            sessions: vec![test_session("session-b")],
+            active_knowledge_base_id: String::new(),
+            active_note_id: String::new(),
+            active_document_id: String::new(),
+            active_session_id: "session-a".to_owned(),
+        };
+
+        retain_viewer_session_id(&mut snapshot, "session-b");
+        assert_eq!(snapshot.active_session_id, "session-b");
+    }
 }

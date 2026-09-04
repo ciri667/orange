@@ -35,7 +35,10 @@ export async function saveSession(snapshot: WorkspaceSnapshot, session: AgentSes
       nextSnapshot.sessions = [session, ...nextSnapshot.sessions];
     }
 
-    nextSnapshot.activeSessionId = session.id;
+    const viewerSessionId = snapshot.activeSessionId;
+    if (!viewerSessionId || !nextSnapshot.sessions.some((item) => item.id === viewerSessionId)) {
+      nextSnapshot.activeSessionId = session.id;
+    }
 
     return normalizeMockSnapshotSessions(nextSnapshot);
   }
