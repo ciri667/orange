@@ -97,11 +97,6 @@ pub fn try_register(session_id: &str) -> Result<AgentCancel, String> {
     }
 }
 
-/** 测试与旧调用约定：成功开始一轮，已有 Running 时直接失败。 */
-pub fn register(session_id: &str) -> AgentCancel {
-    try_register(session_id).expect(SESSION_TURN_ACTIVE_ERROR)
-}
-
 /** 该会话是否有尚未结束的 Running 回合；预取消占位不算。 */
 pub fn is_session_turn_active(session_id: &str) -> bool {
     lock_registry()
@@ -194,14 +189,14 @@ mod tests {
     fn abort_without_register_is_observed_by_later_register() {
         let session_id = isolated_session("pre-cancel");
         request_abort(&session_id);
-        let cancel = register(&session_id);
+        let cancel = try_register(&session_id).expect("register after pre-cancel");
         assert!(cancel.is_aborted());
     }
 
     #[test]
     fn abort_after_register_flips_token() {
         let session_id = isolated_session("live");
-        let cancel = register(&session_id);
+        let cancel = try_register(&session_id).expect("register");
         assert!(!cancel.is_aborted());
         request_abort(&session_id);
         assert!(cancel.is_aborted());
@@ -210,10 +205,10 @@ mod tests {
     #[test]
     fn unregister_does_not_abort_a_later_turn() {
         let session_id = isolated_session("next-turn");
-        let first = register(&session_id);
+        let first = try_register(&session_id).expect("first turn");
         request_abort(&session_id);
         unregister(&session_id, &first);
-        let second = register(&session_id);
+        let second = try_register(&session_id).expect("second turn");
         assert!(!second.is_aborted());
     }
 
@@ -226,7 +221,7 @@ mod tests {
     fn is_session_turn_active_tracks_register_and_unregister() {
         let session_id = isolated_session("active");
         assert!(!is_session_turn_active(&session_id));
-        let cancel = register(&session_id);
+        let cancel = try_register(&session_id).expect("register");
         assert!(is_session_turn_active(&session_id));
         unregister(&session_id, &cancel);
         assert!(!is_session_turn_active(&session_id));
@@ -235,7 +230,7 @@ mod tests {
     #[tokio::test]
     async fn cancelled_wakes_waiters() {
         let session_id = isolated_session("wake");
-        let cancel = register(&session_id);
+        let cancel = try_register(&session_id).expect("register");
         let waiter = cancel.clone();
         let wait = tokio::spawn(async move {
             waiter.cancelled().await;
