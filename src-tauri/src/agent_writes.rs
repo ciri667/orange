@@ -6,10 +6,48 @@ use crate::logging::{self, AppEventBuilder, AppLogCategory, AppLogLevel};
 use crate::storage;
 use crate::text_edit::{replace_unique, UniqueReplacementError};
 use serde_json::json;
+use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Instant;
 use tauri::AppHandle;
+
+/** 两路 Agent 同时确认写入时，按规范化绝对路径串行化落盘。 */
+static FILE_WRITE_LOCKS: OnceLock<Mutex<HashMap<PathBuf, Arc<Mutex<()>>>>> = OnceLock::new();
+
+/** 文件已被其它会话或编辑器改过时的稳定文案。 */
+pub const STALE_FILE_WRITE_ERROR: &str = "文件已被其它会话或编辑器更新，请重新读取后再写。";
+
+/** 对一组路径加锁后执行写入，按路径排序避免死锁。 */
+pub fn with_write_paths<T>(
+    paths: &[PathBuf],
+    f: impl FnOnce() -> Result<T, String>,
+) -> Result<T, String> {
+    let mut unique = paths.to_vec();
+    unique.sort();
+    unique.dedup();
+    let arcs = {
+        let mut table = FILE_WRITE_LOCKS
+            .get_or_init(|| Mutex::new(HashMap::new()))
+            .lock()
+            .map_err(|_| "文件写入锁已损坏。".to_owned())?;
+        unique
+            .iter()
+            .map(|path| {
+                table
+                    .entry(path.clone())
+                    .or_insert_with(|| Arc::new(Mutex::new(())))
+                    .clone()
+            })
+            .collect::<Vec<_>>()
+    };
+    let mut _guards = Vec::new();
+    for arc in &arcs {
+        _guards.push(arc.lock().map_err(|_| "文件写入锁已损坏。".to_owned())?);
+    }
+    f()
+}
 
 /** 本地完全级别会话才允许自动落盘；IM 入口永远需要人工确认。 */
 pub fn allows_autonomous_auto_apply(
@@ -63,80 +101,86 @@ pub fn apply_pending_change(
         &change.target_path,
     )?;
 
-    let change_file_type = change.file_type.as_deref().unwrap_or("markdown");
-    if !matches!(change_file_type, "markdown" | "txt") {
+    let change_file_type = change
+        .file_type
+        .clone()
+        .unwrap_or_else(|| "markdown".to_owned());
+    if !matches!(change_file_type.as_str(), "markdown" | "txt") {
         return Err("待确认变更的文件类型不受支持。".to_owned());
     }
 
-    if change.r#type == "create" {
-        apply_create_change(&mut snapshot, &change, &target_path, change_file_type)?;
-    } else if change_file_type == "txt" {
-        apply_txt_rewrite(
+    let lock_paths = vec![target_path.clone()];
+    with_write_paths(&lock_paths, move || {
+        if change.r#type == "create" {
+            apply_create_change(&mut snapshot, &change, &target_path, &change_file_type)?;
+        } else if change_file_type == "txt" {
+            apply_txt_rewrite(
+                app,
+                &mut snapshot,
+                &change,
+                &target_path,
+                &session_id,
+                &operation_id,
+                &knowledge_base_id,
+                started_at,
+            )?;
+        } else if let Some(note_id) = change.target_id.as_ref().or(change.note_id.as_ref()) {
+            apply_markdown_rewrite(
+                app,
+                &mut snapshot,
+                &change,
+                note_id,
+                &target_path,
+                &session_id,
+                &operation_id,
+                &knowledge_base_id,
+                started_at,
+            )?;
+        }
+
+        let accepted_change_id = change.id.clone();
+        let accepted_change_type = change.r#type.clone();
+        let accepted_operation = change.operation.clone();
+        let accepted_review_comment_count = change
+            .review_comments
+            .as_ref()
+            .map(|comments| comments.len())
+            .unwrap_or_default();
+        let accepted_diff_hunk_count = change.diff_stats.as_ref().map(|stats| stats.hunk_count);
+        let accepted_target_path = change.target_path.clone();
+        snapshot.sessions[session_index].pending_change = Some(ProposedChange {
+            status: "accepted".to_owned(),
+            ..change
+        });
+        snapshot.sessions[session_index].updated_at = storage::format_local_datetime();
+        storage::upsert_snapshot_index(app, &snapshot)?;
+        storage::save_snapshot_session(app, &snapshot, &session_id)?;
+
+        logging::write_app_event_best_effort(
             app,
-            &mut snapshot,
-            &change,
-            &target_path,
-            &session_id,
-            &operation_id,
-            &knowledge_base_id,
-            started_at,
-        )?;
-    } else if let Some(note_id) = change.target_id.as_ref().or(change.note_id.as_ref()) {
-        apply_markdown_rewrite(
-            app,
-            &mut snapshot,
-            &change,
-            note_id,
-            &target_path,
-            &session_id,
-            &operation_id,
-            &knowledge_base_id,
-            started_at,
-        )?;
-    }
+            AppEventBuilder::new(
+                AppLogLevel::Info,
+                AppLogCategory::Agent,
+                "apply_proposed_change",
+                "completed",
+                "已接受并写入 Agent diff。",
+            )
+            .operation_id(operation_id)
+            .session_id(session_id)
+            .knowledge_base_id(knowledge_base_id)
+            .entity("change", accepted_change_id)
+            .relative_path(accepted_target_path)
+            .duration(started_at.elapsed())
+            .metadata(json!({
+                "changeType": accepted_change_type,
+                "operation": accepted_operation,
+                "reviewCommentCount": accepted_review_comment_count,
+                "diffHunkCount": accepted_diff_hunk_count,
+            })),
+        );
 
-    let accepted_change_id = change.id.clone();
-    let accepted_change_type = change.r#type.clone();
-    let accepted_operation = change.operation.clone();
-    let accepted_review_comment_count = change
-        .review_comments
-        .as_ref()
-        .map(|comments| comments.len())
-        .unwrap_or_default();
-    let accepted_diff_hunk_count = change.diff_stats.as_ref().map(|stats| stats.hunk_count);
-    let accepted_target_path = change.target_path.clone();
-    snapshot.sessions[session_index].pending_change = Some(ProposedChange {
-        status: "accepted".to_owned(),
-        ..change
-    });
-    snapshot.sessions[session_index].updated_at = storage::format_local_datetime();
-    storage::index_snapshot(app, &snapshot)?;
-    storage::save_snapshot_session(app, &snapshot, &session_id)?;
-
-    logging::write_app_event_best_effort(
-        app,
-        AppEventBuilder::new(
-            AppLogLevel::Info,
-            AppLogCategory::Agent,
-            "apply_proposed_change",
-            "completed",
-            "已接受并写入 Agent diff。",
-        )
-        .operation_id(operation_id)
-        .session_id(session_id)
-        .knowledge_base_id(knowledge_base_id)
-        .entity("change", accepted_change_id)
-        .relative_path(accepted_target_path)
-        .duration(started_at.elapsed())
-        .metadata(json!({
-            "changeType": accepted_change_type,
-            "operation": accepted_operation,
-            "reviewCommentCount": accepted_review_comment_count,
-            "diffHunkCount": accepted_diff_hunk_count,
-        })),
-    );
-
-    Ok(snapshot)
+        Ok(snapshot)
+    })
 }
 
 /** 在落盘前执行 hash 冲突检测和唯一片段替换，确保一次确认只改一处。 */
@@ -146,9 +190,9 @@ pub fn apply_rewrite_change(
     snapshot_hash: &str,
     change: &ProposedChange,
 ) -> Result<String, String> {
-    // hash 不一致说明文件可能被外部修改，必须阻止写入并要求用户重新生成 diff。
+    // hash 不一致说明文件可能被外部修改或其它会话先落盘，必须阻止写入。
     if current_hash != change.original_hash && snapshot_hash != change.original_hash {
-        return Err("目标文件已变化，已阻止写入。请重新生成 diff。".to_owned());
+        return Err(STALE_FILE_WRITE_ERROR.to_owned());
     }
 
     if matches!(
@@ -163,7 +207,7 @@ pub fn apply_rewrite_change(
             };
 
             return Err(format!(
-                "目标文件已变化，已阻止{action_label}。请重新生成 diff。"
+                "文件已被其它会话或编辑器更新，已阻止{action_label}。请重新读取后再写。"
             ));
         }
 

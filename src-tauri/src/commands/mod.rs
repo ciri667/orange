@@ -227,7 +227,7 @@ mod tests {
         assert!(result.is_err());
         assert_eq!(
             result.unwrap_err(),
-            "目标文件已变化，已阻止写入。请重新生成 diff。"
+            crate::agent_writes::STALE_FILE_WRITE_ERROR
         );
     }
 
@@ -276,7 +276,7 @@ mod tests {
 
         assert_eq!(
             result.unwrap_err(),
-            "目标文件已变化，已阻止追加写入。请重新生成 diff。"
+            "文件已被其它会话或编辑器更新，已阻止追加写入。请重新读取后再写。"
         );
     }
 
@@ -320,7 +320,7 @@ mod tests {
 
         assert_eq!(
             result.unwrap_err(),
-            "目标文件已变化，已阻止多处编辑写入。请重新生成 diff。"
+            "文件已被其它会话或编辑器更新，已阻止多处编辑写入。请重新读取后再写。"
         );
     }
 }

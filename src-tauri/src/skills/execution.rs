@@ -311,7 +311,8 @@ pub fn apply_change_set(
                 .map_err(|_| format!("目标文件不是有效 UTF-8 文本：{}。", operation.target_path))?;
             if storage::hash_content(&text) != operation.original_hash {
                 return Err(format!(
-                    "目标文件已变化，已阻止写入：{}。",
+                    "{}：{}。",
+                    crate::agent_writes::STALE_FILE_WRITE_ERROR,
                     operation.target_path
                 ));
             }
@@ -321,33 +322,65 @@ pub fn apply_change_set(
         }
     }
 
-    let mut applied: Vec<(PathBuf, RollbackAction)> = Vec::new();
-    for (operation, target, rollback) in &prepared {
-        let result = apply_file_operation(operation, target);
-        if let Err(error) = result {
-            rollback_files(&applied);
-            return Err(format!("应用变更失败并已回滚：{error}"));
-        }
-        applied.push((target.clone(), rollback.clone()));
-    }
-
-    let affected_ids = prepared
+    let write_paths = prepared
         .iter()
-        .map(|(operation, _, _)| operation.knowledge_base_id.clone())
-        .collect::<HashSet<_>>();
-    refresh_affected_knowledge_bases(&mut snapshot, &affected_ids)?;
-    normalize_active_file_after_change_set(&mut snapshot);
-    let execution_id = change_set.execution_id.clone();
-    snapshot.sessions[session_index].pending_change_set = Some(ProposedChangeSet {
-        status: "applied".to_owned(),
-        ..change_set
-    });
-    snapshot.sessions[session_index].updated_at = storage::format_local_datetime();
-    storage::index_snapshot(app, &snapshot)?;
-    persist_session_at(app, &snapshot, session_index)?;
-    // 文件已经安全落盘后，隔离区清理失败只保留待下次启动清理，不把成功应用误报为失败。
-    let _ = cleanup_run_directory(app, &execution_id);
-    Ok(snapshot)
+        .map(|(_, target, _)| target.clone())
+        .collect::<Vec<_>>();
+    crate::agent_writes::with_write_paths(&write_paths, || {
+        ensure_prepared_files_unchanged(&prepared)?;
+        let mut applied: Vec<(PathBuf, RollbackAction)> = Vec::new();
+        for (operation, target, rollback) in &prepared {
+            let result = apply_file_operation(operation, target);
+            if let Err(error) = result {
+                rollback_files(&applied);
+                return Err(format!("应用变更失败并已回滚：{error}"));
+            }
+            applied.push((target.clone(), rollback.clone()));
+        }
+
+        let affected_ids = prepared
+            .iter()
+            .map(|(operation, _, _)| operation.knowledge_base_id.clone())
+            .collect::<HashSet<_>>();
+        refresh_affected_knowledge_bases(&mut snapshot, &affected_ids)?;
+        normalize_active_file_after_change_set(&mut snapshot);
+        let execution_id = change_set.execution_id.clone();
+        snapshot.sessions[session_index].pending_change_set = Some(ProposedChangeSet {
+            status: "applied".to_owned(),
+            ..change_set
+        });
+        snapshot.sessions[session_index].updated_at = storage::format_local_datetime();
+        storage::upsert_snapshot_index(app, &snapshot)?;
+        persist_session_at(app, &snapshot, session_index)?;
+        // 文件已经安全落盘后，隔离区清理失败只保留待下次启动清理，不把成功应用误报为失败。
+        let _ = cleanup_run_directory(app, &execution_id);
+        Ok(snapshot)
+    })
+}
+
+/** 持锁后再读一遍 hash，避免两路变更集在锁外都通过校验后互相覆盖。 */
+fn ensure_prepared_files_unchanged(
+    prepared: &[(ProposedFileOperation, PathBuf, RollbackAction)],
+) -> Result<(), String> {
+    for (operation, target, _) in prepared {
+        if operation.operation == "create_folder" || !target.exists() {
+            continue;
+        }
+        if operation.binary {
+            continue;
+        }
+        let bytes = fs::read(target).map_err(|error| format!("无法读取目标文件：{error}"))?;
+        let text = String::from_utf8(bytes)
+            .map_err(|_| format!("目标文件不是有效 UTF-8 文本：{}。", operation.target_path))?;
+        if storage::hash_content(&text) != operation.original_hash {
+            return Err(format!(
+                "{}：{}。",
+                crate::agent_writes::STALE_FILE_WRITE_ERROR,
+                operation.target_path
+            ));
+        }
+    }
+    Ok(())
 }
 
 /** 删除或移动当前文件后选择同知识库内的可用文件，避免前端保留失效焦点。 */
@@ -467,30 +500,36 @@ pub fn apply_agent_change_set(
         prepared.push((operation.clone(), target, rollback));
     }
 
-    let mut applied: Vec<(PathBuf, RollbackAction)> = Vec::new();
-    for (operation, target, rollback) in &prepared {
-        if let Err(error) = apply_file_operation(operation, target) {
-            rollback_files(&applied);
-            return Err(format!("应用变更失败并已回滚：{error}"));
-        }
-        applied.push((target.clone(), rollback.clone()));
-    }
-
-    let affected_ids = prepared
+    let write_paths = prepared
         .iter()
-        .map(|(operation, _, _)| operation.knowledge_base_id.clone())
-        .filter(|knowledge_base_id| knowledge_base_id != EXTERNAL_FILESYSTEM_SCOPE_ID)
-        .collect::<HashSet<_>>();
-    refresh_affected_knowledge_bases(&mut snapshot, &affected_ids)?;
-    normalize_active_file_after_change_set(&mut snapshot);
-    snapshot.sessions[session_index].pending_change_set = Some(ProposedChangeSet {
-        status: "applied".to_owned(),
-        ..change_set
-    });
-    snapshot.sessions[session_index].updated_at = storage::format_local_datetime();
-    storage::index_snapshot(app, &snapshot)?;
-    persist_session_at(app, &snapshot, session_index)?;
-    Ok(snapshot)
+        .map(|(_, target, _)| target.clone())
+        .collect::<Vec<_>>();
+    crate::agent_writes::with_write_paths(&write_paths, || {
+        let mut applied: Vec<(PathBuf, RollbackAction)> = Vec::new();
+        for (operation, target, rollback) in &prepared {
+            if let Err(error) = apply_file_operation(operation, target) {
+                rollback_files(&applied);
+                return Err(format!("应用变更失败并已回滚：{error}"));
+            }
+            applied.push((target.clone(), rollback.clone()));
+        }
+
+        let affected_ids = prepared
+            .iter()
+            .map(|(operation, _, _)| operation.knowledge_base_id.clone())
+            .filter(|knowledge_base_id| knowledge_base_id != EXTERNAL_FILESYSTEM_SCOPE_ID)
+            .collect::<HashSet<_>>();
+        refresh_affected_knowledge_bases(&mut snapshot, &affected_ids)?;
+        normalize_active_file_after_change_set(&mut snapshot);
+        snapshot.sessions[session_index].pending_change_set = Some(ProposedChangeSet {
+            status: "applied".to_owned(),
+            ..change_set
+        });
+        snapshot.sessions[session_index].updated_at = storage::format_local_datetime();
+        storage::upsert_snapshot_index(app, &snapshot)?;
+        persist_session_at(app, &snapshot, session_index)?;
+        Ok(snapshot)
+    })
 }
 
 /** 拒绝 Agent 变更集；只清空待确认状态，不触碰 Skill 隔离目录。 */
