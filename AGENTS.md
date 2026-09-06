@@ -18,8 +18,8 @@ New code should land in the module that already owns that concern. Do not grow t
 
 - `commands/` — Tauri IPC adapters grouped by domain (`workspace`, `knowledge`, `notes`, `documents`, `history`, `sessions`, `settings`, `skills`, `im`, `agent`, `logs`). Keep command names stable. Shared blocking/IO helpers live in `commands/common.rs`. Register commands from the domain module in `lib.rs` (for example `commands::notes::create_note`).
 - `storage/` — SQLite, FTS, filesystem scan/write, keyring, document history, and preview extraction. Public functions stay reachable as `crate::storage::…`. New persistence code belongs in the matching submodule (`ids`, `db`, `sessions`, `config`, `memory`, `logs`, `history`, `workspace`, `files`).
-- `agent_tools/` — closed-set tools (`types`, `registry`, `execute`). Do not add a 7th tool name; extend `search` / `read` / `list` / `edit` / `write` / `run`.
-- `runtime/` — agent loop in `mod.rs`, DeepSeek DSML parsing in `dsml.rs`.
+- `agent_tools/` — closed-set tools (`types`, `registry`, `execute`). The closed set is `search` / `read` / `list` / `edit` / `write` / `run` / `task`. Do not add an 8th tool name; extend those seven (for example `search` `target=path`, `write` `kind=folder`). `task` is the only orchestration tool: it spawns a read-only in-process subagent and must be dispatched by the runtime, not `AgentTool::execute`.
+- `runtime/` — agent loop in `mod.rs`, DeepSeek DSML parsing in `dsml.rs`, in-process subagent spawn in `subagent.rs` / `subagent_personas.rs`.
 - `domain/` — IPC and persistence DTOs grouped by aggregate (`knowledge`, `history`, `agent`, `session`, `settings`, `skills`, `im`, `logs`, `payloads`). Public types stay reachable as `crate::domain::…`. Prefer existing types over ad-hoc JSON maps.
 - `skills/` — catalog (built-in/custom listing), install (download/copy/conflict), execution (approve/run/change-set). Keep `crate::skills::…` and `crate::skill_execution::…`.
 - `im/` — IM provider routing; Feishu-specific code stays in `im/feishu.rs`.

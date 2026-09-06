@@ -26,6 +26,7 @@ export type AgentToolName =
   | "edit"
   | "write"
   | "run"
+  | "task"
   | "search_notes"
   | "read_file"
   | "read_document"
@@ -340,6 +341,12 @@ export interface AgentTraceStep {
   resultPreview?: string;
   error?: string;
   durationMs?: number;
+  /** 子 Agent 嵌套过程；仅 task 步骤使用。 */
+  children?: AgentTraceStep[];
+  /** task 步骤的内置角色名，例如 explore / researcher。 */
+  agent?: string;
+  /** 可续跑的子 Agent id。 */
+  taskId?: string;
 }
 
 /** 后端在 turn 执行中推送的过程快照，live 气泡和最终助手消息共用 liveMessageId。 */

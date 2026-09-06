@@ -86,6 +86,15 @@ pub struct AgentTraceStep {
     pub error: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub duration_ms: Option<u64>,
+    /** 子 Agent 嵌套过程；仅 task 步骤使用，旧轨迹缺省为空。 */
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub children: Vec<AgentTraceStep>,
+    /** task 步骤的内置角色名，例如 explore / researcher。 */
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent: Option<String>,
+    /** 可续跑的子 Agent id；后台任务和 resume 都用它。 */
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub task_id: Option<String>,
 }
 
 /** Agent 与用户的会话消息。 */
