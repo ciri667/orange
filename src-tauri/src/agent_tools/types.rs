@@ -85,6 +85,7 @@ impl ToolExecutionResult {
 }
 
 /** 已执行工具的完整外部形态，包含 UI 轨迹、模型可读 payload、引用和审计片段。 */
+#[derive(Clone, Debug)]
 pub struct ToolOutcome {
     pub call: AgentToolCall,
     pub payload: Value,

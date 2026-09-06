@@ -203,7 +203,7 @@ mod tests {
         assert!(!advanced_tools.contains(&"run_skill"));
         assert_eq!(
             advanced_tools,
-            vec!["search", "read", "list", "edit", "write", "run"]
+            vec!["search", "read", "list", "edit", "write", "task", "run"]
         );
 
         snapshot.sessions[0].security_level = "basic".to_owned();
@@ -211,7 +211,11 @@ mod tests {
         assert!(!basic_tools.contains(&"run"));
         assert!(!basic_tools.contains(&"create_folder"));
         assert!(!basic_tools.contains(&"list_path"));
-        assert_eq!(basic_tools, vec!["search", "read", "list", "edit", "write"]);
+        assert!(basic_tools.contains(&"task"));
+        assert_eq!(
+            basic_tools,
+            vec!["search", "read", "list", "edit", "write", "task"]
+        );
 
         snapshot.sessions[0].security_level = "autonomous".to_owned();
         settings.autonomous_mode_enabled = false;
@@ -223,7 +227,7 @@ mod tests {
         assert!(!autonomous_without_toggle.contains(&"read_path"));
         assert_eq!(
             autonomous_without_toggle,
-            vec!["search", "read", "list", "edit", "write"]
+            vec!["search", "read", "list", "edit", "write", "task"]
         );
 
         snapshot.sessions[0].security_level = "advanced".to_owned();
@@ -236,7 +240,60 @@ mod tests {
         });
         let im_tools = ToolRegistry::for_session(&snapshot.sessions[0], &settings).tool_names();
         assert!(!im_tools.contains(&"run"));
-        assert_eq!(im_tools, vec!["search", "read", "list", "edit", "write"]);
+        assert!(im_tools.contains(&"task"));
+        assert_eq!(
+            im_tools,
+            vec!["search", "read", "list", "edit", "write", "task"]
+        );
+    }
+
+    /** 子 Agent 注册表只有只读工具，不能再委派或写入。 */
+    #[test]
+    fn subagent_registry_is_read_only_and_cannot_task() {
+        let names = ToolRegistry::for_subagent().tool_names();
+        assert_eq!(names, vec!["search", "read", "list"]);
+        assert!(!names.contains(&"task"));
+        assert!(!names.contains(&"edit"));
+        assert!(!names.contains(&"write"));
+        assert!(!names.contains(&"run"));
+    }
+
+    /** task schema 列出内置角色；同步 execute 必须失败以免评测脚本假执行。 */
+    #[test]
+    fn task_schema_lists_builtin_agents_and_sync_execute_fails() {
+        let mut snapshot = tool_test_snapshot("正文内容足够用于测试。".to_owned());
+        let settings = AgentSecuritySettings::default();
+        let registry = ToolRegistry::for_session(&snapshot.sessions[0], &settings);
+        let schemas = registry.schemas();
+        let task = schemas
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|schema| schema["function"]["name"] == "task")
+            .expect("task schema");
+        let agent_desc = task["function"]["parameters"]["properties"]["agent"]["description"]
+            .as_str()
+            .expect("agent description");
+        assert!(agent_desc.contains("explore"));
+        assert!(agent_desc.contains("researcher"));
+        assert!(agent_desc.contains("writer"));
+        assert!(task["function"]["parameters"]["properties"]["task_id"].is_object());
+        assert!(task["function"]["parameters"]["properties"]["background"].is_object());
+
+        let request = tool_test_request("ask", "委派");
+        let mut context = tool_test_context(&mut snapshot, &request);
+        let outcome = registry.execute_named(
+            &mut context,
+            "task",
+            json!({
+                "description": "找认证笔记",
+                "prompt": "列出与登录有关的笔记",
+                "agent": "explore"
+            }),
+        );
+        assert_eq!(outcome.call.status, "failed");
+        assert!(outcome.call.summary.contains("runtime"));
+        assert!(context.snapshot.sessions[0].pending_change.is_none());
     }
 
     /** 任何级别 schema 都不应再出现分身工具名。 */

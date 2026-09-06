@@ -405,6 +405,52 @@ impl AgentTool for CreateFileDraftTool {
     }
 }
 
+/** task 工具只向模型暴露 schema；真正的子 Agent 循环由 runtime 异步派发。 */
+pub(crate) struct TaskTool;
+
+impl AgentTool for TaskTool {
+    fn name(&self) -> &'static str {
+        "task"
+    }
+
+    fn description(&self) -> &'static str {
+        "Delegate a complex, multi-hop knowledge-base task to an isolated subagent. The subagent does not see this conversation, so prompt must be self-contained. Built-in agents: explore (fast read-only recon), researcher (deeper read-only handoff), writer (edit/write pending diffs merged into the parent change set). You may also pass a user-defined agent from the orange home agents directory. Launch independent tasks together in one assistant message (up to 3 read-only tasks run in parallel). Use task_id to resume a previous subagent session. Set background=true only for independent read-only work; you will be notified when it finishes — do not poll. Do not use task for a single known-path read, a single keyword search, or editing the current note yourself. Return value is the subagent's final report only, not its intermediate traces."
+    }
+
+    fn parameters(&self) -> Value {
+        json!({
+            "type": "object",
+            "properties": {
+                "description": {
+                    "type": "string",
+                    "description": "A short 3-5 word label for the task, shown in the UI timeline."
+                },
+                "prompt": {
+                    "type": "string",
+                    "description": "Self-contained instructions for the subagent. Include goal, scope, thoroughness, and what the final report must contain. The subagent cannot see the parent conversation. Required even when resuming with task_id."
+                },
+                "agent": {
+                    "type": "string",
+                    "description": "explore: fast recon of notes and folders (read-only). researcher: deeper multi-hop reading (read-only). writer: draft edit/write pending diffs. You may also pass a user-defined agent name from ~/.orange/agents."
+                },
+                "task_id": {
+                    "type": "string",
+                    "description": "Resume a previous subagent session instead of starting fresh. Continues that child's messages and tool outputs."
+                },
+                "background": {
+                    "type": "boolean",
+                    "description": "Run a read-only subagent in the background and return immediately. Do not sleep or poll; a notice arrives when it finishes. Writer agents cannot use background."
+                }
+            },
+            "required": ["description", "prompt", "agent"]
+        })
+    }
+
+    fn execute(&self, _context: &mut AgentToolContext<'_>, _args: &Value) -> ToolExecutionResult {
+        ToolExecutionResult::failed("task 必须由 Agent runtime 派发，不能同步执行。")
+    }
+}
+
 /** 闭集 search：默认笔记 FTS；完全级别可用 target=path 扫描目录。 */
 pub(crate) fn execute_search(
     context: &mut AgentToolContext<'_>,

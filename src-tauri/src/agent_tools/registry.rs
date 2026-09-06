@@ -1,6 +1,6 @@
 use super::execute::{
     CreateFileDraftTool, ListTreeTool, ProposeFileChangeTool, ReadFileTool, RunSkillTool,
-    SearchNotesTool,
+    SearchNotesTool, TaskTool,
 };
 use super::types::*;
 use crate::domain::{AgentSecuritySettings, AgentSession, AgentToolCall};
@@ -37,11 +37,37 @@ impl ToolRegistry {
             && settings.advanced_execution_enabled
             && (session.security_level != "autonomous" || settings.autonomous_mode_enabled);
 
+        registry.tools.push(Box::new(TaskTool));
+
         if can_run_skills {
             registry.tools.push(Box::new(RunSkillTool));
         }
 
         registry
+    }
+
+    /** 子 Agent 只读闭集：search/read/list，不含 task/edit/write/run。 */
+    pub fn for_subagent() -> Self {
+        Self::for_subagent_tools(&["search", "read", "list"])
+    }
+
+    /** 按角色白名单构造子 Agent 工具集；未知名忽略，task/run 永远不会注册。 */
+    pub fn for_subagent_tools(names: &[impl AsRef<str>]) -> Self {
+        let mut tools: Vec<Box<dyn AgentTool>> = Vec::new();
+        for name in names {
+            match name.as_ref() {
+                "search" => tools.push(Box::new(SearchNotesTool)),
+                "read" => tools.push(Box::new(ReadFileTool)),
+                "list" => tools.push(Box::new(ListTreeTool)),
+                "edit" => tools.push(Box::new(ProposeFileChangeTool)),
+                "write" => tools.push(Box::new(CreateFileDraftTool)),
+                _ => {}
+            }
+        }
+        if tools.is_empty() {
+            return Self::for_subagent();
+        }
+        Self { tools }
     }
 
     /** 将当前注册工具转换成 OpenAI-compatible tools schema。 */
