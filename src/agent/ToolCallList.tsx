@@ -1,4 +1,4 @@
-import { BrainCircuit, CheckCircle2, ChevronDown, ChevronRight, Search, Sparkles, Wrench } from "lucide-react";
+import { Bot, BrainCircuit, CheckCircle2, ChevronDown, ChevronRight, Search, Sparkles, Wrench } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
 import { cn } from "../shared/cn";
 import { OverflowTooltipText } from "../shared/OverflowTooltipText";
@@ -84,11 +84,13 @@ export function ToolCallList({ toolCalls }: { toolCalls?: AgentToolCall[] }) {
                 ? Sparkles
                 : toolCall.name === "model_request"
                 ? BrainCircuit
-                : toolCall.name === "search" || toolCall.name === "search_notes"
-                  ? Search
-                  : toolCall.status === "completed"
-                    ? CheckCircle2
-                    : Wrench;
+                : toolCall.name === "task"
+                  ? Bot
+                  : toolCall.name === "search" || toolCall.name === "search_notes"
+                    ? Search
+                    : toolCall.status === "completed"
+                      ? CheckCircle2
+                      : Wrench;
 
             return (
               <div

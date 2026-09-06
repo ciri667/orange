@@ -1,5 +1,6 @@
 import {
   BookOpen,
+  Bot,
   CheckCircle2,
   ChevronDown,
   ChevronRight,
@@ -239,6 +240,34 @@ function TraceToolStep({
         <div className="grid min-w-0 gap-2.5 border-t border-border bg-surface-warm px-3 py-2.5 pb-3">
           {step.error && <p className="m-0 rounded-lg bg-white/70 px-[9px] py-[7px] text-xs leading-normal text-danger">{step.error}</p>}
           <TraceToolFields fields={details.fields} />
+          {(step.children?.length ?? 0) > 0 && (
+            <div className="grid min-w-0 gap-2 border-l-[1.5px] border-border pl-2.5" aria-label="子 Agent 过程">
+              {step.children?.map((child, index) =>
+                child.type === "thinking" ? (
+                  <p
+                    className="m-0 text-[12.5px] leading-[1.65] text-ink-muted italic whitespace-pre-wrap [overflow-wrap:anywhere]"
+                    key={child.id}
+                  >
+                    {child.content}
+                    {shouldShowThinkingCaret(step.children ?? [], index, isRunning ? "running" : "completed", false) ? (
+                      <TraceStreamingCaret />
+                    ) : null}
+                  </p>
+                ) : (
+                  <TraceToolStep
+                    autoExpand={shouldExpandToolStep(
+                      step.children ?? [],
+                      index,
+                      isRunning ? "running" : "completed",
+                      false,
+                    )}
+                    key={child.id}
+                    step={child}
+                  />
+                ),
+              )}
+            </div>
+          )}
         </div>
       )}
     </div>
@@ -384,6 +413,10 @@ function resolveToolIcon(step: AgentTraceStep) {
   }
 
   const toolName = canonicalToolName(step.name);
+
+  if (toolName === "task") {
+    return Bot;
+  }
 
   if (toolName === "search" || step.name === "search_session_messages") {
     return Search;

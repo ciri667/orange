@@ -520,8 +520,8 @@ export function createMockKnowledgeBaseSelection(count: number): KnowledgeBaseSe
 }
 
 /** 浏览器 mock 没有真实模型，只响应显式工具入口，避免假装 Agent 已完成自主判断。 */
-function shouldUseSearchTool(action: AgentActionType) {
-  return action === "find";
+function shouldUseSearchTool(action: AgentActionType, prompt = "") {
+  return action === "find" || /检索|调研|子\s*Agent/i.test(prompt);
 }
 
 /** 根据当前会话范围执行 mock 检索工具，返回可追溯引用。 */
@@ -853,7 +853,7 @@ export function runMockAgentTurn(
     } else {
       content = `建议继续把《${activeNote.title}》保留在「${activeKnowledgeBase.name}」中，并补充更稳定的标签和相关链接。该建议不涉及写入；若要落盘请确认后再用 edit 或 write。`;
     }
-  } else if (shouldUseSearchTool(action)) {
+  } else if (shouldUseSearchTool(action, prompt)) {
     citations = searchNotes(nextSnapshot, session, prompt);
     toolCalls.push(
       createToolCall("search", `在 ${getScopeLabel(nextSnapshot, session)} 中检索到 ${citations.length} 条候选引用`, {
@@ -873,6 +873,55 @@ export function runMockAgentTurn(
     content = citations.length
       ? `我调用了检索工具，并只在 ${getScopeLabel(nextSnapshot, session)} 范围内组织回答：本地优先的关键是把 Markdown 文件作为用户拥有的主数据源，索引和模型请求都只是辅助层；写入必须先形成 diff，确认后才落盘。`
       : `我调用了检索工具，但在 ${getScopeLabel(nextSnapshot, session)} 中没有找到足够相关的笔记。`;
+    const childSteps = attachMockWriteTracePreview(traceFromToolCalls(toolCalls), session.pendingChange);
+    const childToolCount = childSteps.filter((step) => step.type === "tool").length;
+    const taskCall = createToolCall("task", `探索 · 检索相关笔记 · ${childToolCount} 步 · 1s`, {
+      agent: "explore",
+      description: "检索相关笔记",
+      prompt,
+    });
+    session.messages.push({
+      id: createLocalId("assistant"),
+      role: "assistant",
+      content,
+      action,
+      citations,
+      toolCalls: [taskCall],
+      trace: [
+        {
+          id: createLocalId("trace"),
+          type: "thinking",
+          timestamp: formatLocalDateTime(),
+          content: "这个问题需要多跳检索，交给 explore 子 Agent，避免把中间阅读塞进当前窗口。",
+        },
+        {
+          id: createLocalId("trace"),
+          type: "tool",
+          timestamp: formatLocalDateTime(),
+          name: "task",
+          agent: "explore",
+          status: "completed",
+          summary: `探索 · 检索相关笔记 · ${childToolCount} 步 · 1s`,
+          args: { agent: "explore", description: "检索相关笔记", prompt },
+          resultPreview: content,
+          durationMs: 1200,
+          children: childSteps,
+        },
+      ],
+      turnDurationMs: 1800,
+    });
+    const estimatedChars = session.messages.reduce((sum, message) => sum + message.content.length, 0) + 800;
+    const promptTokens = Math.max(1, Math.round(estimatedChars / 2));
+    session.contextUsage = {
+      modelId: session.modelId || "gpt-4o-mini",
+      promptTokens,
+      completionTokens: 80,
+      totalTokens: promptTokens + 80,
+      contextLength: 128000,
+      recordedAt: formatLocalDateTime(),
+    };
+    session.updatedAt = "刚刚";
+    return nextSnapshot;
   } else {
     content = explicitSkillIdList.length
       ? `浏览器开发态未调用真实模型，但已模拟显式 Skill 激活（${explicitSkillIdList.length} 个）。桌面端会把所选 Skill instructions 注入本轮模型上下文。`

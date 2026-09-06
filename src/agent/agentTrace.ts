@@ -60,6 +60,8 @@ const TOOL_LABELS: Partial<Record<string, string>> = {
   create_file_draft: "创建文件草稿",
   suggest_organization: "生成整理建议",
   review_change: "审阅变更",
+  task: "委派子 Agent",
+  writer: "写作子 Agent",
 };
 
 /** 判断工具是否应出现在 Codex 风格过程区。 */
@@ -165,6 +167,13 @@ export function getTraceScrollFingerprint(steps: AgentTraceStep[]): string {
   const lastThinking = [...steps].reverse().find((step) => step.type === "thinking");
   const runningTool = steps.find((step) => step.type === "tool" && step.status === "running");
   const lastStep = steps[steps.length - 1];
+  const nestedRunning = steps
+    .flatMap((step) => step.children ?? [])
+    .find((step) => step.type === "tool" && step.status === "running");
+  const nestedThinking = [...steps]
+    .reverse()
+    .flatMap((step) => [...(step.children ?? [])].reverse())
+    .find((step) => step.type === "thinking");
   return [
     String(steps.length),
     lastThinking?.content ?? "",
@@ -173,6 +182,10 @@ export function getTraceScrollFingerprint(steps: AgentTraceStep[]): string {
     runningTool?.summary ?? "",
     lastStep?.id ?? "",
     lastStep?.status ?? "",
+    lastStep?.resultPreview ?? "",
+    String(lastStep?.children?.length ?? 0),
+    nestedRunning?.id ?? "",
+    nestedThinking?.content ?? "",
   ].join("\0");
 }
 
@@ -231,6 +244,8 @@ const TOOL_KIND_LABELS: Partial<Record<string, string>> = {
   create_file_draft: "新建",
   suggest_organization: "整理",
   review_change: "审阅",
+  task: "委派",
+  writer: "写作",
 };
 
 /** 参数/结果字段的中文标签，未知键回退为原字段名。 */
@@ -439,7 +454,8 @@ export function buildToolTraceDetails(step: AgentTraceStep): ToolTraceDetails {
   return {
     kindLabel,
     fields: visibleFields,
-    hasDetails: visibleFields.length > 0 || Boolean(step.error),
+    hasDetails:
+      visibleFields.length > 0 || Boolean(step.error) || (step.children?.length ?? 0) > 0,
   };
 }
 
