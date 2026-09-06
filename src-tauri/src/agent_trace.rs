@@ -43,6 +43,7 @@ pub struct AgentTurnProgressPayload {
 }
 
 /** 一轮 Agent 的过程收集器：内存攒步骤，并尽力向窗口推送增量。 */
+#[derive(Clone)]
 pub struct AgentTurnTracer {
     session_id: String,
     live_message_id: String,
@@ -127,6 +128,9 @@ impl AgentTurnTracer {
             result_preview: None,
             error: None,
             duration_ms: None,
+            children: Vec::new(),
+            agent: None,
+            task_id: None,
         });
         self.emit(app);
     }
@@ -188,6 +192,9 @@ impl AgentTurnTracer {
             result_preview: None,
             error: None,
             duration_ms: None,
+            children: Vec::new(),
+            agent: None,
+            task_id: None,
         });
         self.emit(app);
         Some(step_id)
@@ -210,7 +217,7 @@ impl AgentTurnTracer {
             .running_started
             .remove(step_id)
             .map(|started_at| u64::try_from(started_at.elapsed().as_millis()).unwrap_or(u64::MAX));
-        let Some(step) = self.steps.iter_mut().find(|step| step.id == step_id) else {
+        let Some(step) = find_step_mut(&mut self.steps, step_id) else {
             return;
         };
 
@@ -247,12 +254,8 @@ impl AgentTurnTracer {
 
     /** 把仍显示为 running 的工具步标成 aborted，避免过程区一直转圈。 */
     pub fn abort_running_tools(&mut self, app: Option<&AppHandle>) {
-        let running_ids = self
-            .steps
-            .iter()
-            .filter(|step| step.step_type == "tool" && step.status.as_deref() == Some("running"))
-            .map(|step| step.id.clone())
-            .collect::<Vec<_>>();
+        let mut running_ids = Vec::new();
+        collect_running_tool_ids(&self.steps, &mut running_ids);
         for step_id in running_ids {
             self.finish_tool(
                 Some(&step_id),
@@ -274,6 +277,170 @@ impl AgentTurnTracer {
             self.content = Some(content.to_owned());
         }
         self.emit(app);
+    }
+
+    /** 给 task 步骤补上角色名和更可读的运行中摘要。 */
+    pub fn annotate_tool(
+        &mut self,
+        step_id: Option<&str>,
+        agent: Option<&str>,
+        summary: &str,
+        app: Option<&AppHandle>,
+    ) {
+        let Some(step_id) = step_id else {
+            return;
+        };
+        let Some(step) = find_step_mut(&mut self.steps, step_id) else {
+            return;
+        };
+        if let Some(agent) = agent.map(str::trim).filter(|value| !value.is_empty()) {
+            step.agent = Some(agent.to_owned());
+        }
+        step.summary = Some(summary.to_owned());
+        self.emit(app);
+    }
+
+    /** 把可续跑的子 Agent id 记在 task 步骤上，供 UI 和 resume 对照。 */
+    pub fn set_step_task_id(
+        &mut self,
+        step_id: Option<&str>,
+        task_id: &str,
+        app: Option<&AppHandle>,
+    ) {
+        let Some(step_id) = step_id else {
+            return;
+        };
+        let Some(step) = find_step_mut(&mut self.steps, step_id) else {
+            return;
+        };
+        step.task_id = Some(task_id.to_owned());
+        self.emit(app);
+    }
+
+    /** 子 Agent 思考写入父级 task 步骤的 children。 */
+    pub fn update_nested_thinking(
+        &mut self,
+        parent_step_id: Option<&str>,
+        content: &str,
+        app: Option<&AppHandle>,
+    ) {
+        let Some(parent_step_id) = parent_step_id else {
+            self.update_thinking(content, app);
+            return;
+        };
+        let trimmed = content.trim();
+        if trimmed.is_empty() {
+            return;
+        }
+        let truncated = truncate_trace_text(trimmed, MAX_TRACE_THINKING_CHARS);
+        let Some(parent) = find_step_mut(&mut self.steps, parent_step_id) else {
+            return;
+        };
+        if let Some(step) = parent
+            .children
+            .last_mut()
+            .filter(|step| step.step_type == "thinking")
+        {
+            if step.content.as_deref() == Some(truncated.as_str()) {
+                return;
+            }
+            step.content = Some(truncated);
+            self.emit_throttled(app, false);
+            return;
+        }
+        parent.children.push(AgentTraceStep {
+            id: create_id("trace"),
+            step_type: "thinking".to_owned(),
+            timestamp: format_local_datetime(),
+            content: Some(truncated),
+            name: None,
+            status: None,
+            summary: None,
+            args: None,
+            result_preview: None,
+            error: None,
+            duration_ms: None,
+            children: Vec::new(),
+            agent: None,
+            task_id: None,
+        });
+        self.emit(app);
+    }
+
+    /** 子 Agent 工具调用写入父级 task 步骤的 children。 */
+    pub fn begin_nested_tool(
+        &mut self,
+        parent_step_id: Option<&str>,
+        name: &str,
+        summary: &str,
+        args: Value,
+        app: Option<&AppHandle>,
+    ) -> Option<String> {
+        let Some(parent_step_id) = parent_step_id else {
+            return self.begin_tool(name, summary, args, app);
+        };
+        if !is_user_visible_tool(name) {
+            return None;
+        }
+        let Some(parent) = find_step_mut(&mut self.steps, parent_step_id) else {
+            return None;
+        };
+        let step_id = create_id("trace");
+        self.running_started.insert(step_id.clone(), Instant::now());
+        parent.children.push(AgentTraceStep {
+            id: step_id.clone(),
+            step_type: "tool".to_owned(),
+            timestamp: format_local_datetime(),
+            content: None,
+            name: Some(name.to_owned()),
+            status: Some("running".to_owned()),
+            summary: Some(summary.to_owned()),
+            args: Some(sanitize_trace_args(args)),
+            result_preview: None,
+            error: None,
+            duration_ms: None,
+            children: Vec::new(),
+            agent: None,
+            task_id: None,
+        });
+        self.emit(app);
+        Some(step_id)
+    }
+
+    /** 子 Agent 终稿预览挂在父级 task 步骤上，不进入父级回答区。 */
+    pub fn set_nested_result_preview(
+        &mut self,
+        parent_step_id: Option<&str>,
+        content: &str,
+        app: Option<&AppHandle>,
+    ) {
+        let Some(parent_step_id) = parent_step_id else {
+            return;
+        };
+        let trimmed = content.trim();
+        if trimmed.is_empty() {
+            return;
+        }
+        let Some(parent) = find_step_mut(&mut self.steps, parent_step_id) else {
+            return;
+        };
+        let truncated = truncate_trace_text(trimmed, MAX_TRACE_RESULT_CHARS);
+        if parent.result_preview.as_deref() == Some(truncated.as_str()) {
+            return;
+        }
+        parent.result_preview = Some(truncated);
+        self.emit_throttled(app, false);
+    }
+
+    pub fn last_nested_step_is_thinking(&self, parent_step_id: Option<&str>) -> bool {
+        let Some(parent_step_id) = parent_step_id else {
+            return self.last_step_is_thinking();
+        };
+        self.steps
+            .iter()
+            .find(|step| step.id == parent_step_id)
+            .and_then(|step| step.children.last())
+            .is_some_and(|step| step.step_type == "thinking")
     }
 
     fn emit(&mut self, app: Option<&AppHandle>) {
@@ -354,6 +521,35 @@ fn completed_tool_step(tool_call: &AgentToolCall) -> AgentTraceStep {
             None
         },
         duration_ms: None,
+        children: Vec::new(),
+        agent: None,
+        task_id: None,
+    }
+}
+
+/** 在顶层和嵌套 children 中查找过程步骤。 */
+fn find_step_mut<'a>(
+    steps: &'a mut [AgentTraceStep],
+    step_id: &str,
+) -> Option<&'a mut AgentTraceStep> {
+    for step in steps.iter_mut() {
+        if step.id == step_id {
+            return Some(step);
+        }
+        if let Some(found) = find_step_mut(&mut step.children, step_id) {
+            return Some(found);
+        }
+    }
+    None
+}
+
+/** 收集顶层和嵌套的 running 工具，Stop 时一并标成 aborted。 */
+fn collect_running_tool_ids(steps: &[AgentTraceStep], out: &mut Vec<String>) {
+    for step in steps {
+        if step.step_type == "tool" && step.status.as_deref() == Some("running") {
+            out.push(step.id.clone());
+        }
+        collect_running_tool_ids(&step.children, out);
     }
 }
 
@@ -650,6 +846,53 @@ mod tests {
                 .map(|step| step.name.clone().unwrap_or_default())
                 .collect::<Vec<_>>(),
             vec!["search_notes".to_owned(), "read_file".to_owned()]
+        );
+    }
+
+    /** 子 Agent 的思考和工具必须挂在父级 task 步骤的 children 上，不能冒泡成父级时间线。 */
+    #[test]
+    fn nested_trace_stays_under_parent_task_step() {
+        let mut tracer = AgentTurnTracer::new("session-a", "assistant-a");
+        let parent_id = tracer.begin_tool(
+            "task",
+            "正在委派 explore",
+            json!({ "agent": "explore", "prompt": "找认证笔记" }),
+            None,
+        );
+        tracer.annotate_tool(
+            parent_id.as_deref(),
+            Some("explore"),
+            "正在委派 explore：找认证笔记",
+            None,
+        );
+        tracer.update_nested_thinking(parent_id.as_deref(), "先搜索标题。", None);
+        let child_id = tracer.begin_nested_tool(
+            parent_id.as_deref(),
+            "search",
+            "正在调用 search",
+            json!({ "query": "认证" }),
+            None,
+        );
+        tracer.finish_tool(
+            child_id.as_deref(),
+            "completed",
+            "检索到 1 条笔记",
+            Some(r#"{"hits":1}"#),
+            None,
+            None,
+        );
+        tracer.set_nested_result_preview(parent_id.as_deref(), "找到登录相关笔记。", None);
+
+        let steps = tracer.steps();
+        assert_eq!(steps.len(), 1);
+        assert_eq!(steps[0].name.as_deref(), Some("task"));
+        assert_eq!(steps[0].agent.as_deref(), Some("explore"));
+        assert_eq!(steps[0].children.len(), 2);
+        assert_eq!(steps[0].children[0].step_type, "thinking");
+        assert_eq!(steps[0].children[1].name.as_deref(), Some("search"));
+        assert_eq!(
+            steps[0].result_preview.as_deref(),
+            Some("找到登录相关笔记。")
         );
     }
 }

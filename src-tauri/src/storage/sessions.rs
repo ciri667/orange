@@ -293,7 +293,6 @@ pub(crate) fn persist_agent_session_transcript(
 }
 
 /** 删除会话级模型 transcript；没有记录时是空操作。 */
-#[allow(dead_code)]
 pub fn delete_agent_session_transcript(app: &AppHandle, session_id: &str) -> Result<(), String> {
     let mut connection = open_database(app)?;
     let _write_guard = lock_database_writer()?;

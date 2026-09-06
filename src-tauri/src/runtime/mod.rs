@@ -3,6 +3,8 @@ mod compaction;
 mod context;
 mod dsml;
 mod stream;
+mod subagent;
+mod subagent_personas;
 use cancel::{is_user_abort_error, USER_ABORT_ERROR};
 use compaction::*;
 use context::*;
@@ -33,6 +35,7 @@ use crate::storage::{create_id, format_local_datetime};
 use reqwest::Client;
 use serde_json::{json, Value};
 use std::collections::HashSet;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use tauri::AppHandle;
 
@@ -49,10 +52,10 @@ pub(super) const AUTO_COMPACT_UNSUMMARIZED_MESSAGE_THRESHOLD: usize = 20;
 pub(super) const AUTO_COMPACT_PROMPT_CHAR_THRESHOLD: usize = 48_000;
 
 /** 工具结果回填给模型时的最大 JSON 字符数。 */
-const MAX_TOOL_RESULT_CHARS: usize = 9000;
+pub(super) const MAX_TOOL_RESULT_CHARS: usize = 9000;
 
 /** 内层工具续跑安全帽；有 tool call 就继续，error/abort/length 在循环内立刻停。 */
-const MAX_INNER_TOOL_ROUNDS: usize = 12;
+pub(super) const MAX_INNER_TOOL_ROUNDS: usize = 12;
 
 /** 未派发工具的合成结果，保证 assistant(tool_calls) 都有对应 tool 消息。 */
 const ABORTED_BEFORE_DISPATCH_SUMMARY: &str = "工具调用在派发前被用户中断。";
@@ -774,6 +777,12 @@ async fn run_model_loop(
                 audit_trail,
             ));
         }
+        for notice in subagent::take_subagent_notices(app, &session_id) {
+            model_messages.push(json!({
+                "role": "user",
+                "content": notice
+            }));
+        }
         audit_trail.record_model_request();
         model_round = model_round.saturating_add(1);
         capture_model_prompt_dump(
@@ -1035,11 +1044,11 @@ async fn run_model_loop(
             tracer.push_thinking(&extracted_tool_calls.visible_content, Some(app));
         }
 
-        let mut pending_tool_calls = model_tool_calls.into_iter();
-        while let Some(model_tool_call) = pending_tool_calls.next() {
+        let mut remaining_tool_calls = model_tool_calls;
+        while !remaining_tool_calls.is_empty() {
             if cancel.is_aborted() {
                 settle_undispatched_tool_calls(
-                    std::iter::once(model_tool_call).chain(pending_tool_calls),
+                    remaining_tool_calls,
                     &mut model_messages,
                     &mut tool_calls,
                     tracer,
@@ -1058,15 +1067,113 @@ async fn run_model_loop(
                     audit_trail,
                 ));
             }
+            let peek_name = model_tool_call_name(&remaining_tool_calls[0]);
+            if peek_name == "task" {
+                let window_args: Vec<Value> =
+                    remaining_tool_calls.iter().map(parse_tool_args).collect();
+                let window = subagent::parallel_window_size(&window_args);
+                if window >= 2 {
+                    let batch: Vec<Value> = remaining_tool_calls.drain(..window).collect();
+                    let mut jobs = Vec::new();
+                    for model_tool_call in &batch {
+                        let tool_args = parse_tool_args(model_tool_call);
+                        let step_id =
+                            tracer.begin_tool("task", "正在调用 task", tool_args, Some(app));
+                        jobs.push((model_tool_call.clone(), step_id));
+                    }
+                    let live_id = tracer.live_message_id().to_owned();
+                    let shared = Arc::new(Mutex::new(std::mem::replace(
+                        tracer,
+                        AgentTurnTracer::new(session_id.clone(), live_id),
+                    )));
+                    let parallel_outcomes = subagent::run_parallel_readonly(
+                        app.clone(),
+                        snapshot.clone(),
+                        session_index,
+                        request.clone(),
+                        jobs,
+                        0,
+                        cancel.clone(),
+                        shared.clone(),
+                        provider.clone(),
+                        selected_model_id.clone(),
+                        api_key.clone(),
+                        client.clone(),
+                    )
+                    .await;
+                    *tracer = Arc::try_unwrap(shared)
+                        .unwrap_or_else(|_| panic!("并行子 Agent 结束后过程区仍被持有"))
+                        .into_inner()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner());
+                    for (model_tool_call, tool_outcome) in batch.into_iter().zip(parallel_outcomes)
+                    {
+                        let tool_result_text = truncate_tool_result_for_model(
+                            &tool_outcome.payload.to_string(),
+                            MAX_TOOL_RESULT_CHARS,
+                        );
+                        audit_trail.record_sent_fragment(tool_outcome.audit_fragment.clone());
+                        citations.extend(tool_outcome.citations.clone());
+                        let tool_error = if tool_outcome.call.status == "failed" {
+                            Some(tool_outcome.call.summary.clone())
+                        } else {
+                            None
+                        };
+                        if let Some(tool_error) = tool_error {
+                            last_failed_tool_summary = Some(tool_error);
+                        }
+                        tool_calls.push(tool_outcome.call);
+                        model_messages.push(json!({
+                            "role": "tool",
+                            "tool_call_id": model_tool_call.get("id").and_then(Value::as_str).unwrap_or("tool-call"),
+                            "content": tool_result_text
+                        }));
+                    }
+                    continue;
+                }
+            }
+            let model_tool_call = remaining_tool_calls.remove(0);
             let tool_name = model_tool_call_name(&model_tool_call);
             let tool_args = parse_tool_args(&model_tool_call);
             let trace_step_id = tracer.begin_tool(
                 &tool_name,
                 &format!("正在调用 {tool_name}"),
-                tool_args,
+                tool_args.clone(),
                 Some(app),
             );
-            let tool_outcome = {
+            let tool_outcome = if tool_name == "task" {
+                let live_id = tracer.live_message_id().to_owned();
+                let shared = Arc::new(Mutex::new(std::mem::replace(
+                    tracer,
+                    AgentTurnTracer::new(session_id.clone(), live_id),
+                )));
+                let outcome = subagent::run_one_shot(subagent::SubagentRunParams {
+                    app,
+                    snapshot: &mut snapshot,
+                    session_index,
+                    request: &request,
+                    args: &tool_args,
+                    parent_depth: 0,
+                    cancel,
+                    tracer: subagent::SubagentTracer::shared(shared.clone()),
+                    parent_trace_step_id: trace_step_id.clone(),
+                    provider: &provider,
+                    selected_model_id: &selected_model_id,
+                    api_key: &api_key,
+                    client: &client,
+                    emit_progress: true,
+                })
+                .await;
+                *tracer = match Arc::try_unwrap(shared) {
+                    Ok(lock) => lock
+                        .into_inner()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner()),
+                    Err(shared) => shared
+                        .lock()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner())
+                        .clone(),
+                };
+                outcome
+            } else {
                 let mut tool_context = AgentToolContext {
                     app: Some(app),
                     snapshot: &mut snapshot,
@@ -1345,7 +1452,7 @@ fn reconcile_final_content_with_tool_status(
 }
 
 /** 构建带超时的 HTTP client：连接和空闲分片分开限制，避免长文流式被整次请求超时掐断。 */
-fn build_http_client() -> Result<Client, String> {
+pub(super) fn build_http_client() -> Result<Client, String> {
     Client::builder()
         .connect_timeout(Duration::from_secs(MODEL_HTTP_CONNECT_TIMEOUT_SECONDS))
         .read_timeout(Duration::from_secs(MODEL_HTTP_READ_TIMEOUT_SECONDS))
@@ -1550,7 +1657,7 @@ fn load_enabled_session_kb_memories(
 }
 
 /** 发送模型请求：配额不重试，超窗 compact 后最多一次，429/5xx 指数退避。 */
-async fn send_chat_completion_with_policy(
+pub(super) async fn send_chat_completion_with_policy(
     client: &Client,
     provider: &LlmProviderConfig,
     model_id: &str,
@@ -3635,6 +3742,9 @@ mod tests {
                     ),
                     error: None,
                     duration_ms: Some(12),
+                    children: Vec::new(),
+                    agent: None,
+                    task_id: None,
                 }],
                 turn_duration_ms: Some(1200),
                 interrupted: false,
@@ -4019,6 +4129,9 @@ mod tests {
                 ),
                 error: None,
                 duration_ms: Some(8),
+                children: Vec::new(),
+                agent: None,
+                task_id: None,
             }],
             turn_duration_ms: Some(800),
             interrupted: false,
@@ -5258,6 +5371,9 @@ mod tests {
                     result_preview: Some("truncated-preview".to_owned()),
                     error: None,
                     duration_ms: Some(12),
+                    children: Vec::new(),
+                    agent: None,
+                    task_id: None,
                 }],
                 turn_duration_ms: Some(1200),
                 interrupted: false,

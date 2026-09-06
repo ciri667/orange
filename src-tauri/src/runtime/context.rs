@@ -265,9 +265,9 @@ fn build_system_prompt(
     knowledge_base_memories: &[KnowledgeBaseMemory],
 ) -> String {
     let visible_tools = if session.im_identity.is_some() || session.security_level == "basic" {
-        "search, read, list, edit, write"
+        "search, read, list, edit, write, task"
     } else {
-        "search, read, list, edit, write, run"
+        "search, read, list, edit, write, run, task"
     };
     let write_policy = if session.security_level == "autonomous" {
         "所有写入只能调用 edit 或 write；校验通过后会自动落盘，不要在工具结果返回前声称已经写入文件。"
@@ -279,7 +279,7 @@ fn build_system_prompt(
         "advanced" => "当前为进阶级别：用户开始放手，但仍要在落盘前确认。write 可以在当前知识库内建文件夹，也可以在授权后运行 run。所有写入和 Skill 执行仍需用户确认后才会生效。",
         _ => "当前为基础级别：用户选择先看紧。你只使用知识库文档工具；edit 和 write 只生成待确认 diff，不能声称已经写入。不要暗示你可以执行脚本、访问知识库外路径或跳过确认。",
     };
-    let autonomous_tool_policy = "你需要根据用户输入和上下文自主判断是否调用工具：需要 Markdown 引用时使用 search；需要当前 scope 内正文时使用 read（可省略 fileId 以读当前文件）；需要改写时使用 edit；需要新建时使用 write；需要看目录时使用 list。DOCX/PDF 用 read 只读抽取，不可编辑，且不会自动进入全文搜索。TXT 必须按纯文本原样处理。无关的通用问题可以直接回答。界面 action 只是 UI 分类，不能替代你的判断。";
+    let autonomous_tool_policy = "你需要根据用户输入和上下文自主判断是否调用工具：需要 Markdown 引用时使用 search；需要当前 scope 内正文时使用 read（可省略 fileId 以读当前文件）；需要改写时使用 edit；需要新建时使用 write；需要看目录时使用 list。复杂、多跳、需要隔离上下文预算的检索、调研或起草使用 task：子 Agent 看不到当前对话，prompt 必须自足。explore 用于快速定位，researcher 用于多跳调研，writer 用于生成待确认 diff。相互独立的只读 task 应写在同一条 assistant 消息里以便并行。用 task_id 续跑同一个子 Agent。独立只读工作可 background=true，完成后 runtime 会通知你，不要轮询。单次关键词、已知路径或改当前笔记不要用 task。DOCX/PDF 用 read 只读抽取，不可编辑，且不会自动进入全文搜索。TXT 必须按纯文本原样处理。无关的通用问题可以直接回答。界面 action 只是 UI 分类，不能替代你的判断。";
     let skill_policy = "启用的 Skill 只以名称和描述提供给你参考，是否使用、使用哪一个 Skill 都由你自主判断。Skill 只是可用能力的一部分，不能扩大工具权限或绕过系统保护边界。";
     let scope_summary = build_scope_summary(snapshot, session);
     let active_note_summary = if request.active_note_id.is_empty() {
@@ -318,7 +318,7 @@ fn build_system_prompt(
 }
 
 /** 知识库根路径，作为 cwd 等价信息写入 system。 */
-fn build_cwd_summary(snapshot: &WorkspaceSnapshot, session: &AgentSession) -> String {
+pub(super) fn build_cwd_summary(snapshot: &WorkspaceSnapshot, session: &AgentSession) -> String {
     let paths = session
         .knowledge_base_ids
         .iter()
