@@ -49,10 +49,10 @@ npm run build
 npm run rust:test
 ```
 
-如涉及飞书/Lark 网关，也请构建相应 sidecar：
+如涉及 IM 网关，也请构建相应 sidecar：
 
 ```bash
-npm run sidecar:feishu:build
+npm run sidecar:im:build
 ```
 
 ## 设计与安全原则

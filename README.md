@@ -92,29 +92,31 @@ ORANGE_RELEASE_SIGNING_IDENTITY='Developer ID Application: 名称 (TEAM_ID)' npm
 
 Vite 开发服务默认监听 `http://localhost:5173/`。前端变更请至少执行 `npm run build`；涉及 Rust 或文件系统行为时，请同时执行 `npm run rust:test`。
 
-## 可选：飞书/Lark 集成
+## 可选：即时通讯集成
 
-飞书网关由独立 sidecar 提供。构建所有已注册 provider：
+IM 网关由独立 sidecar 提供。构建所有已注册 provider：
 
 ```bash
 npm run sidecar:im:build
 ```
 
-仅构建飞书 provider：
+也可按平台单独构建：
 
 ```bash
 npm run sidecar:feishu:build
+npm run sidecar:qq:build
+npm run sidecar:weixin:build
 ```
 
-产物会生成到 `src-tauri/sidecars/bin/`，该目录不提交到仓库。首次使用飞书网关或打包前，请先完成构建。
+产物会生成到 `src-tauri/sidecars/bin/`，该目录不提交到仓库。首次使用 IM 网关或打包前，请先完成构建。
 
-在飞书开发者后台还需要：
+当前支持：
 
-- 使用长连接订阅 `im.message.receive_v1`；
-- 启用 `card.action.trigger`，以接收审批卡片按钮事件；
-- 授予消息收发所需权限并发布应用的最新版本。
+- **飞书/Lark**：长连接订阅 `im.message.receive_v1` 和 `card.action.trigger`。
+- **QQ 官方机器人**：WebSocket 模式。在 [q.qq.com](https://q.qq.com) 创建机器人，填写 AppID/Secret；发送 API 可能要求配置出站 IP 白名单。
+- **个人微信**：腾讯官方 iLink / OpenClaw 接口，设置页扫码登录。需要较新的手机微信，且客户端包含 ClawBot 插件。
 
-审批卡片不可用时，可使用消息中的“详情 / 确认 / 取消 &lt;编号&gt;”文字指令作为降级方式。群聊中仅发起变更的用户可以确认或取消。
+审批卡片仅飞书可用；QQ 和微信使用“详情 / 确认 / 取消 &lt;编号&gt;”文字指令。群聊中仅发起变更的用户可以确认或取消。
 
 ## 项目结构
 
