@@ -132,10 +132,12 @@ export function WorkspaceShell() {
     setAgentSkills,
     modelApiKeyStatuses,
     setModelApiKeyStatuses,
-    feishuCredentialStatus,
-    setFeishuCredentialStatus,
-    feishuGatewayStatus,
-    setFeishuGatewayStatus,
+    imCredentialByProvider,
+    setImCredentialByProvider,
+    imGatewayByProvider,
+    setImGatewayByProvider,
+    weixinLoginStatus,
+    setWeixinLoginStatus,
     providerTemplates,
     isBooting,
     bootError,
@@ -226,10 +228,12 @@ export function WorkspaceShell() {
     handleSaveImSettings,
     handleSaveKnowledgeBaseMemory,
     handleDeleteKnowledgeBaseMemory,
-    handleSaveFeishuSecret,
-    handleStartFeishuGateway,
-    handleStopFeishuGateway,
-    handleRefreshFeishuStatus,
+    handleSaveImSecret,
+    handleStartImGateway,
+    handleStopImGateway,
+    handleRefreshImStatus,
+    handleStartWeixinLogin,
+    handleCancelWeixinLogin,
     handleSaveSkill,
     handleInstallSkill,
     handleToggleSkill,
@@ -247,14 +251,15 @@ export function WorkspaceShell() {
     endBusy,
     setNotice,
     imSettings,
-    feishuCredentialStatus,
-    feishuGatewayStatus,
+    imCredentialByProvider,
+    imGatewayByProvider,
     setUserSettings,
     setImSettings,
     setAgentSkills,
     setModelApiKeyStatuses,
-    setFeishuCredentialStatus,
-    setFeishuGatewayStatus,
+    setImCredentialByProvider,
+    setImGatewayByProvider,
+    setWeixinLoginStatus,
     setKnowledgeBaseMemories,
     setAuditLogs,
     setAppEventLogs,
@@ -764,8 +769,9 @@ export function WorkspaceShell() {
           imSettings={imSettings}
           skills={agentSkills}
           modelApiKeyStatuses={modelApiKeyStatuses}
-          feishuCredentialStatus={feishuCredentialStatus}
-          feishuGatewayStatus={feishuGatewayStatus}
+          imCredentialByProvider={imCredentialByProvider}
+          imGatewayByProvider={imGatewayByProvider}
+          weixinLoginStatus={weixinLoginStatus}
           providerTemplates={providerTemplates}
           auditLogs={auditLogs}
           appEventLogs={appEventLogs}
@@ -791,10 +797,12 @@ export function WorkspaceShell() {
           onRevealApiKey={handleRevealApiKey}
           onSaveApiKey={handleSaveApiKey}
           onRefreshProviderModels={handleRefreshProviderModels}
-          onSaveFeishuSecret={handleSaveFeishuSecret}
-          onStartFeishuGateway={handleStartFeishuGateway}
-          onStopFeishuGateway={handleStopFeishuGateway}
-          onRefreshFeishuStatus={handleRefreshFeishuStatus}
+          onSaveImSecret={handleSaveImSecret}
+          onStartImGateway={handleStartImGateway}
+          onStopImGateway={handleStopImGateway}
+          onRefreshImStatus={handleRefreshImStatus}
+          onStartWeixinLogin={handleStartWeixinLogin}
+          onCancelWeixinLogin={handleCancelWeixinLogin}
           onRefreshAuditLogs={handleRefreshAuditLogs}
           onRefreshAppEventLogs={handleRefreshAppEventLogs}
           onClearAppEventLogs={handleClearAppEventLogs}

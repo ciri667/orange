@@ -4,6 +4,7 @@ import {
   loadAgentSkills,
   loadAppEventLogs,
   loadImGatewayStatus,
+  loadImLoginStatus,
   loadImProviderCredentialStatus,
   loadImSettings,
   loadKnowledgeBaseMemories,
@@ -16,9 +17,11 @@ import {
 import type {
   AgentSkill,
   AppEventLog,
-  FeishuCredentialStatus,
-  FeishuGatewayStatus,
+  ImGatewayStatus,
   ImIntegrationSettings,
+  ImLoginStatus,
+  ImProviderCredentialStatus,
+  ImProviderId,
   KnowledgeBaseMemory,
   ModelApiKeyStatus,
   ProviderTemplate,
@@ -75,10 +78,12 @@ export function useWorkspaceBootData({ onSnapshotInitialized, onEditorStateIniti
   const [agentSkills, setAgentSkills] = useState<AgentSkill[]>([]);
   /** 模型密钥状态按 providerId 隔离，只保存是否可读，不包含明文 API key。 */
   const [modelApiKeyStatuses, setModelApiKeyStatuses] = useState<ModelApiKeyStatus[]>([]);
-  /** 飞书 appSecret 状态只说明是否可读取，不包含明文 secret。 */
-  const [feishuCredentialStatus, setFeishuCredentialStatus] = useState<FeishuCredentialStatus | null>(null);
-  /** 飞书长连接网关运行态，用于设置页手动启停和错误展示。 */
-  const [feishuGatewayStatus, setFeishuGatewayStatus] = useState<FeishuGatewayStatus | null>(null);
+  /** IM 凭证状态按 provider 隔离，只说明是否可读取。 */
+  const [imCredentialByProvider, setImCredentialByProvider] = useState<Partial<Record<ImProviderId, ImProviderCredentialStatus | null>>>({});
+  /** IM 网关运行态按 provider 隔离，用于设置页手动启停。 */
+  const [imGatewayByProvider, setImGatewayByProvider] = useState<Partial<Record<ImProviderId, ImGatewayStatus | null>>>({});
+  /** 个人微信扫码登录状态。 */
+  const [weixinLoginStatus, setWeixinLoginStatus] = useState<ImLoginStatus | null>(null);
   /** 内置 LLM Provider 模板，驱动设置页“新增 Provider”入口。 */
   const [providerTemplates, setProviderTemplates] = useState<ProviderTemplate[]>([]);
   /** 首屏初始化是否仍在进行，用于区分加载中和加载失败。 */
@@ -119,6 +124,11 @@ export function useWorkspaceBootData({ onSnapshotInitialized, onEditorStateIniti
         nextProviderTemplates,
         nextFeishuCredentialStatus,
         nextFeishuGatewayStatus,
+        nextQqCredentialStatus,
+        nextQqGatewayStatus,
+        nextWeixinCredentialStatus,
+        nextWeixinGatewayStatus,
+        nextWeixinLoginStatus,
         nextKnowledgeBaseMemories,
       ] = await Promise.all([
         loadWorkspaceState(),
@@ -157,6 +167,11 @@ export function useWorkspaceBootData({ onSnapshotInitialized, onEditorStateIniti
 
           return null;
         }),
+        loadImProviderCredentialStatus("qq").catch(() => null),
+        loadImGatewayStatus("qq").catch(() => null),
+        loadImProviderCredentialStatus("weixin").catch(() => null),
+        loadImGatewayStatus("weixin").catch(() => null),
+        loadImLoginStatus("weixin").catch(() => null),
         loadKnowledgeBaseMemories().catch((error) => {
           logWarn("读取跨会话记忆失败。", { category: "settings", event: "kb_memory_load", status: "failed", error });
 
@@ -176,8 +191,17 @@ export function useWorkspaceBootData({ onSnapshotInitialized, onEditorStateIniti
       setAgentSkills(nextAgentSkills);
       setModelApiKeyStatuses(nextModelApiKeyStatuses);
       setProviderTemplates(nextProviderTemplates);
-      setFeishuCredentialStatus(nextFeishuCredentialStatus);
-      setFeishuGatewayStatus(nextFeishuGatewayStatus);
+      setImCredentialByProvider({
+        feishu: nextFeishuCredentialStatus,
+        qq: nextQqCredentialStatus,
+        weixin: nextWeixinCredentialStatus,
+      });
+      setImGatewayByProvider({
+        feishu: nextFeishuGatewayStatus,
+        qq: nextQqGatewayStatus,
+        weixin: nextWeixinGatewayStatus,
+      });
+      setWeixinLoginStatus(nextWeixinLoginStatus);
       setKnowledgeBaseMemories(nextKnowledgeBaseMemories);
       onSnapshotInitialized(restoredSnapshot);
       onEditorStateInitialized(nextSnapshot.editorState);
@@ -190,8 +214,9 @@ export function useWorkspaceBootData({ onSnapshotInitialized, onEditorStateIniti
         setUserSettings(null);
         setImSettings(null);
         setAgentSkills([]);
-        setFeishuCredentialStatus(null);
-        setFeishuGatewayStatus(null);
+        setImCredentialByProvider({});
+        setImGatewayByProvider({});
+        setWeixinLoginStatus(null);
         setAuditLogs([]);
         setAppEventLogs([]);
         setBootError(formatBootErrorMessage(error));
@@ -234,10 +259,12 @@ export function useWorkspaceBootData({ onSnapshotInitialized, onEditorStateIniti
     setAgentSkills,
     modelApiKeyStatuses,
     setModelApiKeyStatuses,
-    feishuCredentialStatus,
-    setFeishuCredentialStatus,
-    feishuGatewayStatus,
-    setFeishuGatewayStatus,
+    imCredentialByProvider,
+    setImCredentialByProvider,
+    imGatewayByProvider,
+    setImGatewayByProvider,
+    weixinLoginStatus,
+    setWeixinLoginStatus,
     providerTemplates,
     isBooting,
     bootError,

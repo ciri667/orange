@@ -5,7 +5,9 @@ import {
   installAgentSkill,
   loadAgentSkills,
   loadAppEventLogs,
+  cancelImLogin,
   loadImGatewayStatus,
+  loadImLoginStatus,
   loadImProviderCredentialStatus,
   loadImSettings,
   loadRequestAuditLogs,
@@ -20,6 +22,7 @@ import {
   saveModelApiKey,
   saveUserSettings,
   startImGateway,
+  startImLogin,
   stopImGateway,
   toggleAgentSkill,
 } from "../shared/tauriApi";
@@ -28,9 +31,11 @@ import type {
   AppEventLog,
   AppEventLogCategory,
   AppEventLogLevel,
-  FeishuCredentialStatus,
-  FeishuGatewayStatus,
+  ImGatewayStatus,
   ImIntegrationSettings,
+  ImLoginStatus,
+  ImProviderCredentialStatus,
+  ImProviderId,
   InstallAgentSkillPayload,
   InstallAgentSkillResult,
   KnowledgeBaseMemory,
@@ -60,14 +65,19 @@ interface WorkspaceSettingsActionsOptions {
   endBusy: () => void;
   setNotice: (notice: string) => void;
   imSettings: ImIntegrationSettings | null;
-  feishuCredentialStatus: FeishuCredentialStatus | null;
-  feishuGatewayStatus: FeishuGatewayStatus | null;
+  imCredentialByProvider: Partial<Record<ImProviderId, ImProviderCredentialStatus | null>>;
+  imGatewayByProvider: Partial<Record<ImProviderId, ImGatewayStatus | null>>;
   setUserSettings: (settings: UserSettings) => void;
   setImSettings: (settings: ImIntegrationSettings) => void;
   setAgentSkills: (skills: AgentSkill[]) => void;
   setModelApiKeyStatuses: (updater: (current: ModelApiKeyStatus[]) => ModelApiKeyStatus[]) => void;
-  setFeishuCredentialStatus: (status: FeishuCredentialStatus | null) => void;
-  setFeishuGatewayStatus: (status: FeishuGatewayStatus | null) => void;
+  setImCredentialByProvider: (
+    updater: (current: Partial<Record<ImProviderId, ImProviderCredentialStatus | null>>) => Partial<Record<ImProviderId, ImProviderCredentialStatus | null>>,
+  ) => void;
+  setImGatewayByProvider: (
+    updater: (current: Partial<Record<ImProviderId, ImGatewayStatus | null>>) => Partial<Record<ImProviderId, ImGatewayStatus | null>>,
+  ) => void;
+  setWeixinLoginStatus: (status: ImLoginStatus | null) => void;
   setKnowledgeBaseMemories: (updater: (current: KnowledgeBaseMemory[]) => KnowledgeBaseMemory[]) => void;
   setAuditLogs: (logs: RequestAuditLog[]) => void;
   setAppEventLogs: (logs: AppEventLog[]) => void;
@@ -79,14 +89,15 @@ export function useWorkspaceSettingsActions({
   endBusy,
   setNotice,
   imSettings,
-  feishuCredentialStatus,
-  feishuGatewayStatus,
+  imCredentialByProvider,
+  imGatewayByProvider,
   setUserSettings,
   setImSettings,
   setAgentSkills,
   setModelApiKeyStatuses,
-  setFeishuCredentialStatus,
-  setFeishuGatewayStatus,
+  setImCredentialByProvider,
+  setImGatewayByProvider,
+  setWeixinLoginStatus,
   setKnowledgeBaseMemories,
   setAuditLogs,
   setAppEventLogs,
@@ -148,7 +159,7 @@ export function useWorkspaceSettingsActions({
 
     try {
       setImSettings(await saveImSettings(nextSettings));
-      setFeishuGatewayStatus(await loadImGatewayStatus("feishu").catch(() => feishuGatewayStatus));
+      await refreshAllImStatuses();
       setNotice("已保存即时通讯设置。");
     } catch (error) {
       setNotice(formatSettingsErrorMessage(error));
@@ -158,16 +169,44 @@ export function useWorkspaceSettingsActions({
     }
   }
 
-  /** 保存飞书 appSecret；明文只在本次调用中传给后端 keyring 命令。 */
-  async function handleSaveFeishuSecret(appSecret: string) {
-    beginBusy("正在保存飞书 appSecret...");
+  async function refreshAllImStatuses() {
+    const providerIds: ImProviderId[] = ["feishu", "qq", "weixin"];
+    const results = await Promise.all(
+      providerIds.map(async (providerId) => {
+        const [credential, gateway] = await Promise.all([
+          loadImProviderCredentialStatus(providerId).catch(() => imCredentialByProvider[providerId] ?? null),
+          loadImGatewayStatus(providerId).catch(() => imGatewayByProvider[providerId] ?? null),
+        ]);
+        return { providerId, credential, gateway };
+      }),
+    );
+    setImCredentialByProvider((current) => {
+      const next = { ...current };
+      for (const result of results) {
+        next[result.providerId] = result.credential;
+      }
+      return next;
+    });
+    setImGatewayByProvider((current) => {
+      const next = { ...current };
+      for (const result of results) {
+        next[result.providerId] = result.gateway;
+      }
+      return next;
+    });
+    setWeixinLoginStatus(await loadImLoginStatus("weixin").catch(() => null));
+  }
+
+  /** 保存 IM provider 密钥；明文只在本次调用中传给后端 keyring 命令。 */
+  async function handleSaveImSecret(providerId: ImProviderId, secret: string) {
+    beginBusy("正在保存 IM 密钥...");
 
     try {
-      const status = await saveImProviderSecret("feishu", appSecret);
-
-      setFeishuCredentialStatus(status);
-      setFeishuGatewayStatus(await loadImGatewayStatus("feishu").catch(() => feishuGatewayStatus));
-      setNotice("已保存飞书 appSecret。");
+      const status = await saveImProviderSecret(providerId, secret);
+      const gateway = await loadImGatewayStatus(providerId).catch(() => imGatewayByProvider[providerId] ?? null);
+      setImCredentialByProvider((current) => ({ ...current, [providerId]: status }));
+      setImGatewayByProvider((current) => ({ ...current, [providerId]: gateway }));
+      setNotice("已保存 IM 密钥。");
     } catch (error) {
       setNotice(formatSettingsErrorMessage(error));
       throw error;
@@ -176,15 +215,17 @@ export function useWorkspaceSettingsActions({
     }
   }
 
-  /** 手动启动飞书长连接网关；启动失败时保留现有配置供用户修正。 */
-  async function handleStartFeishuGateway() {
-    beginBusy("正在启动飞书长连接...");
+  /** 手动启动 IM 网关；启动失败时保留现有配置供用户修正。 */
+  async function handleStartImGateway(providerId: ImProviderId) {
+    beginBusy("正在启动 IM 长连接...");
 
     try {
-      setFeishuGatewayStatus(await startImGateway("feishu"));
-      setNotice("已启动飞书长连接网关。");
+      const status = await startImGateway(providerId);
+      setImGatewayByProvider((current) => ({ ...current, [providerId]: status }));
+      setNotice("已启动 IM 长连接网关。");
     } catch (error) {
-      setFeishuGatewayStatus(await loadImGatewayStatus("feishu").catch(() => feishuGatewayStatus));
+      const fallback = await loadImGatewayStatus(providerId).catch(() => imGatewayByProvider[providerId] ?? null);
+      setImGatewayByProvider((current) => ({ ...current, [providerId]: fallback }));
       setNotice(formatSettingsErrorMessage(error));
       throw error;
     } finally {
@@ -192,13 +233,14 @@ export function useWorkspaceSettingsActions({
     }
   }
 
-  /** 手动停止飞书长连接网关；不会清空凭证或白名单。 */
-  async function handleStopFeishuGateway() {
-    beginBusy("正在停止飞书长连接...");
+  /** 手动停止 IM 网关；不会清空凭证或白名单。 */
+  async function handleStopImGateway(providerId: ImProviderId) {
+    beginBusy("正在停止 IM 长连接...");
 
     try {
-      setFeishuGatewayStatus(await stopImGateway("feishu"));
-      setNotice("已停止飞书长连接网关。");
+      const status = await stopImGateway(providerId);
+      setImGatewayByProvider((current) => ({ ...current, [providerId]: status }));
+      setNotice("已停止 IM 长连接网关。");
     } catch (error) {
       setNotice(formatSettingsErrorMessage(error));
     } finally {
@@ -206,24 +248,81 @@ export function useWorkspaceSettingsActions({
     }
   }
 
-  /** 刷新飞书网关、凭证和 IM 设置；未授权消息发现的候选对象也通过这里进入设置页。 */
-  async function handleRefreshFeishuStatus() {
-    beginBusy("正在刷新飞书状态...");
+  /** 刷新指定 IM provider 的网关、凭证和发现列表。 */
+  async function handleRefreshImStatus(providerId: ImProviderId) {
+    beginBusy("正在刷新 IM 状态...");
 
     try {
-      const [credentialStatus, gatewayStatus, nextImSettings] = await Promise.all([
-        loadImProviderCredentialStatus("feishu").catch(() => feishuCredentialStatus),
-        loadImGatewayStatus("feishu").catch(() => feishuGatewayStatus),
+      const [credentialStatus, gatewayStatus, nextImSettings, loginStatus] = await Promise.all([
+        loadImProviderCredentialStatus(providerId).catch(() => imCredentialByProvider[providerId] ?? null),
+        loadImGatewayStatus(providerId).catch(() => imGatewayByProvider[providerId] ?? null),
         loadImSettings().catch(() => imSettings),
+        providerId === "weixin" ? loadImLoginStatus("weixin").catch(() => null) : Promise.resolve(null),
       ]);
 
-      setFeishuCredentialStatus(credentialStatus);
-      setFeishuGatewayStatus(gatewayStatus);
+      setImCredentialByProvider((current) => ({ ...current, [providerId]: credentialStatus }));
+      setImGatewayByProvider((current) => ({ ...current, [providerId]: gatewayStatus }));
       if (nextImSettings) {
         setImSettings(nextImSettings);
       }
+      if (loginStatus) {
+        setWeixinLoginStatus(loginStatus);
+      }
     } catch (error) {
       setNotice(formatSettingsErrorMessage(error));
+    } finally {
+      endBusy();
+    }
+  }
+
+  async function handleStartWeixinLogin() {
+    beginBusy("正在获取微信登录二维码...");
+    try {
+      const status = await startImLogin("weixin");
+      setWeixinLoginStatus(status);
+      setNotice(status.message);
+      void pollWeixinLoginUntilSettled();
+      return status;
+    } catch (error) {
+      setNotice(formatSettingsErrorMessage(error));
+      throw error;
+    } finally {
+      endBusy();
+    }
+  }
+
+  async function pollWeixinLoginUntilSettled() {
+    for (let attempt = 0; attempt < 180; attempt += 1) {
+      await new Promise((resolve) => window.setTimeout(resolve, 1500));
+      const next = await loadImLoginStatus("weixin").catch(() => null);
+      if (!next) {
+        continue;
+      }
+      setWeixinLoginStatus(next);
+      if (next.status === "wait") {
+        continue;
+      }
+      if (next.status === "confirmed") {
+        const nextImSettings = await loadImSettings().catch(() => imSettings);
+        if (nextImSettings) {
+          setImSettings(nextImSettings);
+        }
+        await refreshAllImStatuses();
+        setNotice(next.message || "微信登录成功。");
+      }
+      return;
+    }
+  }
+
+  async function handleCancelWeixinLogin() {
+    beginBusy("正在取消微信登录...");
+    try {
+      const status = await cancelImLogin("weixin");
+      setWeixinLoginStatus(status);
+      return status;
+    } catch (error) {
+      setNotice(formatSettingsErrorMessage(error));
+      throw error;
     } finally {
       endBusy();
     }
@@ -451,10 +550,12 @@ export function useWorkspaceSettingsActions({
     handleSaveImSettings,
     handleSaveKnowledgeBaseMemory,
     handleDeleteKnowledgeBaseMemory,
-    handleSaveFeishuSecret,
-    handleStartFeishuGateway,
-    handleStopFeishuGateway,
-    handleRefreshFeishuStatus,
+    handleSaveImSecret,
+    handleStartImGateway,
+    handleStopImGateway,
+    handleRefreshImStatus,
+    handleStartWeixinLogin,
+    handleCancelWeixinLogin,
     handleSaveSkill,
     handleInstallSkill,
     handleToggleSkill,

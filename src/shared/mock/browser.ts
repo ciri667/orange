@@ -15,6 +15,7 @@ import type {
   FolderEntry,
   ImGatewayStatus,
   ImIntegrationSettings,
+  ImProviderId,
   ImProviderSettings,
   InstallAgentSkillPayload,
   InstallAgentSkillResult,
@@ -99,9 +100,46 @@ export const defaultBrowserFeishuProvider: ImProviderSettings = {
   },
 };
 
+/** 浏览器开发态默认 QQ provider。 */
+export const defaultBrowserQqProvider: ImProviderSettings = {
+  providerId: "qq",
+  enabled: false,
+  defaultKnowledgeBaseIds: [],
+  allowedUserOpenIds: [],
+  allowedChatIds: [],
+  discoveredUserOpenIds: [],
+  discoveredChatIds: [],
+  requireMention: true,
+  updatedAt: "刚刚",
+  config: {
+    type: "qq",
+    appId: "",
+    secretKeyReference: "orange-qq-app-secret",
+  },
+};
+
+/** 浏览器开发态默认个人微信 provider。 */
+export const defaultBrowserWeixinProvider: ImProviderSettings = {
+  providerId: "weixin",
+  enabled: false,
+  defaultKnowledgeBaseIds: [],
+  allowedUserOpenIds: [],
+  allowedChatIds: [],
+  discoveredUserOpenIds: [],
+  discoveredChatIds: [],
+  requireMention: true,
+  updatedAt: "刚刚",
+  config: {
+    type: "weixin",
+    accountId: "",
+    baseUrl: "https://ilinkai.weixin.qq.com",
+    secretKeyReference: "orange-weixin-bot-token",
+  },
+};
+
 /** 浏览器开发态默认 IM 设置；桌面端真实设置由 SQLite 和系统 keyring 保存。 */
 export const defaultBrowserImSettings: ImIntegrationSettings = {
-  providers: [defaultBrowserFeishuProvider],
+  providers: [defaultBrowserFeishuProvider, defaultBrowserQqProvider, defaultBrowserWeixinProvider],
 };
 
 /** 浏览器开发态镜像后端内置模板，只用于模拟设置页“新增 Provider”入口。 */
@@ -156,6 +194,14 @@ export const browserProviderTemplates: ProviderTemplate[] = [
 /** 从 IM 设置中读取飞书 provider；浏览器态缺失时回退默认值，避免旧 mock 状态崩溃。 */
 export function getFeishuProvider(settings: ImIntegrationSettings): ImProviderSettings {
   return settings.providers.find((provider) => provider.providerId === "feishu") ?? defaultBrowserFeishuProvider;
+}
+
+/** 从 IM 设置中读取指定 provider，缺失时回退浏览器默认值。 */
+export function getImProvider(settings: ImIntegrationSettings, providerId: ImProviderId): ImProviderSettings {
+  return (
+    settings.providers.find((provider) => provider.providerId === providerId) ??
+    (providerId === "qq" ? defaultBrowserQqProvider : providerId === "weixin" ? defaultBrowserWeixinProvider : defaultBrowserFeishuProvider)
+  );
 }
 
 /** 浏览器历史捕获上下文；正文只进入内存快照 Map，不进入前端日志。 */
@@ -1166,10 +1212,23 @@ export function createBrowserAuditLog(snapshot: WorkspaceSnapshot, prompt: strin
 }
 
 /** 浏览器开发态可变状态；桌面端走 Tauri 命令，不读写这里。 */
+function createMockGatewayStatus(providerId: ImProviderId, domain: string): ImGatewayStatus {
+  return {
+    providerId,
+    running: false,
+    connected: false,
+    domain,
+    appIdConfigured: false,
+    secretConfigured: false,
+    lastError: "浏览器开发态未连接桌面长连接网关。",
+  };
+}
+
 export const browserMock: {
   userSettings: UserSettings;
   imSettings: ImIntegrationSettings;
   feishuGatewayStatus: ImGatewayStatus;
+  imGatewayByProvider: Record<ImProviderId, ImGatewayStatus>;
   auditLogs: RequestAuditLog[];
   appEventLogs: AppEventLog[];
   documentHistoryEntries: DocumentHistoryEntry[];
@@ -1181,14 +1240,11 @@ export const browserMock: {
 } = {
   userSettings: defaultBrowserUserSettings,
   imSettings: defaultBrowserImSettings,
-  feishuGatewayStatus: {
-    providerId: "feishu",
-    running: false,
-    connected: false,
-    domain: "feishu",
-    appIdConfigured: false,
-    secretConfigured: false,
-    lastError: "浏览器开发态未连接桌面长连接网关。",
+  feishuGatewayStatus: createMockGatewayStatus("feishu", "feishu"),
+  imGatewayByProvider: {
+    feishu: createMockGatewayStatus("feishu", "feishu"),
+    qq: createMockGatewayStatus("qq", "qq"),
+    weixin: createMockGatewayStatus("weixin", "weixin"),
   },
   auditLogs: [],
   appEventLogs: [],

@@ -676,7 +676,7 @@ export interface UserSettings {
 }
 
 /** 当前内置 IM provider；新增 provider 时继续使用稳定小写 ID。 */
-export type ImProviderId = "feishu";
+export type ImProviderId = "feishu" | "qq" | "weixin";
 
 /** 飞书/Lark 自建应用专属配置；appSecret 单独保存在系统安全存储。 */
 export interface FeishuProviderConfig {
@@ -686,8 +686,23 @@ export interface FeishuProviderConfig {
   secretKeyReference: string;
 }
 
+/** QQ 官方机器人专属配置；AppSecret 单独保存在系统安全存储。 */
+export interface QqProviderConfig {
+  type: "qq";
+  appId: string;
+  secretKeyReference: string;
+}
+
+/** 个人微信 iLink 专属配置；token 单独保存在系统安全存储。 */
+export interface WeixinProviderConfig {
+  type: "weixin";
+  accountId: string;
+  baseUrl: string;
+  secretKeyReference: string;
+}
+
 /** IM provider 平台专属配置；新增 IM 时在这里扩展联合类型。 */
-export type ImProviderConfig = FeishuProviderConfig;
+export type ImProviderConfig = FeishuProviderConfig | QqProviderConfig | WeixinProviderConfig;
 
 /** 单个 IM provider 的通用配置；平台专属字段放在 config 中。 */
 export interface ImProviderSettings {
@@ -714,6 +729,16 @@ export type FeishuIntegrationSettings = ImProviderSettings & {
   config: FeishuProviderConfig;
 };
 
+export type QqIntegrationSettings = ImProviderSettings & {
+  providerId: "qq";
+  config: QqProviderConfig;
+};
+
+export type WeixinIntegrationSettings = ImProviderSettings & {
+  providerId: "weixin";
+  config: WeixinProviderConfig;
+};
+
 /** IM provider secret 保存状态；不包含明文 secret。 */
 export interface ImProviderCredentialStatus {
   providerId: ImProviderId;
@@ -730,12 +755,21 @@ export interface ImGatewayStatus {
   providerId: ImProviderId;
   running: boolean;
   connected: boolean;
-  domain: "feishu" | "lark";
+  domain: string;
   appIdConfigured: boolean;
   secretConfigured: boolean;
   lastStartedAt?: string;
   lastStoppedAt?: string;
   lastError?: string;
+}
+
+/** 个人微信扫码登录状态；二维码只短暂存在于设置页会话。 */
+export interface ImLoginStatus {
+  providerId: ImProviderId | string;
+  status: string;
+  qrImageBase64?: string;
+  accountId?: string;
+  message: string;
 }
 
 /** 兼容旧飞书网关状态命名；实际接口已经 provider 化。 */
