@@ -106,6 +106,7 @@ npm run sidecar:im:build
 npm run sidecar:feishu:build
 npm run sidecar:qq:build
 npm run sidecar:weixin:build
+npm run sidecar:wecom:build
 ```
 
 产物会生成到 `src-tauri/sidecars/bin/`，该目录不提交到仓库。首次使用 IM 网关或打包前，请先完成构建。
@@ -115,8 +116,9 @@ npm run sidecar:weixin:build
 - **飞书/Lark**：长连接订阅 `im.message.receive_v1` 和 `card.action.trigger`。
 - **QQ 官方机器人**：WebSocket 模式。在 [q.qq.com](https://q.qq.com) 创建机器人，填写 AppID/Secret；发送 API 可能要求配置出站 IP 白名单。
 - **个人微信**：腾讯官方 iLink / OpenClaw 接口，设置页扫码登录。需要较新的手机微信，且客户端包含 ClawBot 插件。
+- **企业微信**：智能机器人 WebSocket 长连接。在企业微信后台「管理工具 → 智能机器人」以 API 模式创建，填写 BotId / Secret；无需公网回调。
 
-审批卡片仅飞书可用；QQ 和微信使用“详情 / 确认 / 取消 &lt;编号&gt;”文字指令。群聊中仅发起变更的用户可以确认或取消。
+审批卡片仅飞书可用；QQ、微信和企业微信使用“详情 / 确认 / 取消 &lt;编号&gt;”文字指令。群聊中仅发起变更的用户可以确认或取消。
 
 ## 项目结构
 
