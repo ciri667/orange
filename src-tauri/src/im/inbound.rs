@@ -1,6 +1,6 @@
 use crate::domain::{
-    ImProviderSettings, ProposedChange, WorkspaceSnapshot, IM_PROVIDER_FEISHU,
-    IM_PROVIDER_QQ, IM_PROVIDER_WEIXIN,
+    ImProviderSettings, ProposedChange, WorkspaceSnapshot, IM_PROVIDER_FEISHU, IM_PROVIDER_QQ,
+    IM_PROVIDER_WECOM, IM_PROVIDER_WEIXIN,
 };
 use crate::logging::{self, AppEventBuilder, AppLogCategory, AppLogLevel};
 use crate::storage;
@@ -19,6 +19,9 @@ pub(crate) const QQ_REPLY_MAX_CHARS: usize = 2000;
 
 /** 个人微信文本上限，超出后按段发送。 */
 pub(crate) const WEIXIN_REPLY_MAX_CHARS: usize = 2000;
+
+/** 企业微信智能机器人单气泡上限；超出后截断，不拆成多条。 */
+pub(crate) const WECOM_REPLY_MAX_CHARS: usize = 4000;
 
 /**
  * sidecar 输出的标准化入站事件。飞书/QQ/微信共用同一 JSONL 契约；
@@ -121,7 +124,8 @@ pub(crate) fn decide_event_handling(
             return Err(block_reason(&format!("{label}群聊不在允许名单中。")));
         }
         // 卡片 action 是用户主动点击已发送的机器人卡片，不携带消息 mention。
-        if settings.require_mention && event.kind != "card_action" && !is_direct_bot_mention(event) {
+        if settings.require_mention && event.kind != "card_action" && !is_direct_bot_mention(event)
+        {
             return Err(block_reason(&format!("{label}群聊消息未直接 @ 机器人。")));
         }
     }
@@ -151,7 +155,10 @@ pub(crate) fn build_channel_key(provider_id: &str, event: &ImInboundEvent) -> St
             hash_identifier(&event.sender_open_id)
         )
     } else {
-        format!("{provider_id}:dm:{}", hash_identifier(&event.sender_open_id))
+        format!(
+            "{provider_id}:dm:{}",
+            hash_identifier(&event.sender_open_id)
+        )
     }
 }
 
@@ -195,12 +202,8 @@ pub(crate) async fn dispatch_authorized_text_event(
         } else {
             "direct"
         };
-        let im_identity = super::build_im_session_identity(
-            provider_id,
-            channel_key,
-            conversation_kind,
-            "新会话",
-        );
+        let im_identity =
+            super::build_im_session_identity(provider_id, channel_key, conversation_kind, "新会话");
         return crate::commands::handle_im_builtin_command(
             app.clone(),
             provider_id,
@@ -240,12 +243,8 @@ pub(crate) async fn run_agent_for_event(
     } else {
         "direct"
     };
-    let im_identity = super::build_im_session_identity(
-        provider_id,
-        channel_key,
-        conversation_kind,
-        &event.text,
-    );
+    let im_identity =
+        super::build_im_session_identity(provider_id, channel_key, conversation_kind, &event.text);
     let result = crate::commands::run_agent_turn_from_im(
         app.clone(),
         provider_id.to_owned(),
@@ -260,7 +259,10 @@ pub(crate) async fn run_agent_for_event(
     match result {
         Ok(snapshot) => build_agent_reply_text(&snapshot, card_sent),
         Err(error) if error.starts_with("当前有待确认变更") => error,
-        Err(error) => format!("{label}消息处理失败：{}", logging::sanitize_log_text(&error)),
+        Err(error) => format!(
+            "{label}消息处理失败：{}",
+            logging::sanitize_log_text(&error)
+        ),
     }
 }
 
@@ -493,9 +495,15 @@ pub(crate) async fn handle_authorized_event(
 
     let channel_key = build_channel_key(provider_id, &event);
     let _operation_guard = acquire_channel_operation_lock(&channel_key).await;
-    let reply =
-        dispatch_authorized_text_event(&app, provider_id, &event, &settings, &channel_key, card_sent)
-            .await;
+    let reply = dispatch_authorized_text_event(
+        &app,
+        provider_id,
+        &event,
+        &settings,
+        &channel_key,
+        card_sent,
+    )
+    .await;
 
     logging::write_app_event_best_effort(
         &app,
@@ -572,6 +580,7 @@ pub(crate) fn known_provider_label(provider_id: &str) -> &str {
         IM_PROVIDER_FEISHU => "飞书",
         IM_PROVIDER_QQ => "QQ",
         IM_PROVIDER_WEIXIN => "微信",
+        IM_PROVIDER_WECOM => "企业微信",
         _ => provider_id,
     }
 }
@@ -660,6 +669,15 @@ mod tests {
     #[test]
     fn chunks_unicode_text_by_char_limit() {
         let chunks = chunk_chars("一二三四五六", 2);
-        assert_eq!(chunks, vec!["一二".to_owned(), "三四".to_owned(), "五六".to_owned()]);
+        assert_eq!(
+            chunks,
+            vec!["一二".to_owned(), "三四".to_owned(), "五六".to_owned()]
+        );
+    }
+
+    /** 企业微信必须有稳定中文标签，会话标题和拦截日志会复用它。 */
+    #[test]
+    fn known_provider_label_includes_wecom() {
+        assert_eq!(known_provider_label(IM_PROVIDER_WECOM), "企业微信");
     }
 }

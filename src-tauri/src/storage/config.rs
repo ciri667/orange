@@ -1,7 +1,7 @@
 use super::*;
 use crate::domain::{
-    QqProviderConfig, WeixinProviderConfig, IM_PROVIDER_QQ, IM_PROVIDER_WEIXIN,
-    WEIXIN_DEFAULT_BASE_URL,
+    QqProviderConfig, WecomProviderConfig, WeixinProviderConfig, IM_PROVIDER_QQ, IM_PROVIDER_WECOM,
+    IM_PROVIDER_WEIXIN, WECOM_DEFAULT_WS_URL, WEIXIN_DEFAULT_BASE_URL,
 };
 
 pub fn default_user_settings() -> UserSettings {
@@ -40,6 +40,7 @@ pub fn default_im_settings() -> ImIntegrationSettings {
             default_feishu_provider_settings(),
             default_qq_provider_settings(),
             default_weixin_provider_settings(),
+            default_wecom_provider_settings(),
         ],
     }
 }
@@ -96,6 +97,27 @@ pub(crate) fn default_weixin_provider_settings() -> ImProviderSettings {
             account_id: String::new(),
             base_url: WEIXIN_DEFAULT_BASE_URL.to_owned(),
             secret_key_reference: WEIXIN_SECRET_KEY_REFERENCE.to_owned(),
+        }),
+    }
+}
+
+/** 构造企业微信智能机器人默认配置。 */
+pub(crate) fn default_wecom_provider_settings() -> ImProviderSettings {
+    ImProviderSettings {
+        provider_id: IM_PROVIDER_WECOM.to_owned(),
+        enabled: false,
+        default_knowledge_base_ids: Vec::new(),
+        allowed_user_open_ids: Vec::new(),
+        allowed_chat_ids: Vec::new(),
+        discovered_user_open_ids: Vec::new(),
+        discovered_chat_ids: Vec::new(),
+        require_mention: true,
+        updated_at: format_local_datetime(),
+        config: ImProviderConfig::Wecom(WecomProviderConfig {
+            bot_id: String::new(),
+            robot_name: String::new(),
+            ws_url: WECOM_DEFAULT_WS_URL.to_owned(),
+            secret_key_reference: WECOM_SECRET_KEY_REFERENCE.to_owned(),
         }),
     }
 }
@@ -315,7 +337,13 @@ pub fn remember_feishu_discovered_peer(
     chat_id: &str,
     is_group_chat: bool,
 ) -> Result<bool, String> {
-    remember_im_discovered_peer(app, IM_PROVIDER_FEISHU, sender_open_id, chat_id, is_group_chat)
+    remember_im_discovered_peer(
+        app,
+        IM_PROVIDER_FEISHU,
+        sender_open_id,
+        chat_id,
+        is_group_chat,
+    )
 }
 
 /** 记录任意 IM provider 发现的用户和群，供设置页一键加入白名单。 */
@@ -442,6 +470,13 @@ pub(crate) fn normalize_im_settings(settings: &mut ImIntegrationSettings) {
     {
         settings.providers.push(default_weixin_provider_settings());
     }
+    if !settings
+        .providers
+        .iter()
+        .any(|provider| provider.provider_id == IM_PROVIDER_WECOM)
+    {
+        settings.providers.push(default_wecom_provider_settings());
+    }
 
     for provider in &mut settings.providers {
         provider.provider_id = provider.provider_id.trim().to_ascii_lowercase();
@@ -487,6 +522,17 @@ pub(crate) fn normalize_im_settings(settings: &mut ImIntegrationSettings) {
                     config.base_url.trim().trim_end_matches('/').to_owned()
                 };
                 config.secret_key_reference = WEIXIN_SECRET_KEY_REFERENCE.to_owned();
+            }
+            ImProviderConfig::Wecom(config) => {
+                provider.provider_id = IM_PROVIDER_WECOM.to_owned();
+                config.bot_id = config.bot_id.trim().to_owned();
+                config.robot_name = config.robot_name.trim().to_owned();
+                config.ws_url = if config.ws_url.trim().is_empty() {
+                    WECOM_DEFAULT_WS_URL.to_owned()
+                } else {
+                    config.ws_url.trim().to_owned()
+                };
+                config.secret_key_reference = WECOM_SECRET_KEY_REFERENCE.to_owned();
             }
         }
     }
@@ -572,6 +618,18 @@ pub(crate) fn merge_im_provider_settings(
                 target_config.base_url = source_config.base_url;
             }
             target_config.secret_key_reference = WEIXIN_SECRET_KEY_REFERENCE.to_owned();
+        }
+        (ImProviderConfig::Wecom(target_config), ImProviderConfig::Wecom(source_config)) => {
+            if !source_config.bot_id.trim().is_empty() {
+                target_config.bot_id = source_config.bot_id;
+            }
+            if !source_config.robot_name.trim().is_empty() {
+                target_config.robot_name = source_config.robot_name;
+            }
+            if !source_config.ws_url.trim().is_empty() {
+                target_config.ws_url = source_config.ws_url;
+            }
+            target_config.secret_key_reference = WECOM_SECRET_KEY_REFERENCE.to_owned();
         }
         _ => {}
     }
@@ -822,6 +880,7 @@ pub fn load_im_provider_credential_status(
         IM_PROVIDER_FEISHU => "飞书 appSecret",
         IM_PROVIDER_QQ => "QQ AppSecret",
         IM_PROVIDER_WEIXIN => "微信登录 token",
+        IM_PROVIDER_WECOM => "企业微信 Secret",
         _ => "IM 密钥",
     };
     let message = if configured {
@@ -850,6 +909,7 @@ fn im_secret_key_reference(provider_id: &str) -> Result<&'static str, String> {
         IM_PROVIDER_FEISHU => Ok(FEISHU_SECRET_KEY_REFERENCE),
         IM_PROVIDER_QQ => Ok(QQ_SECRET_KEY_REFERENCE),
         IM_PROVIDER_WEIXIN => Ok(WEIXIN_SECRET_KEY_REFERENCE),
+        IM_PROVIDER_WECOM => Ok(WECOM_SECRET_KEY_REFERENCE),
         _ => Err(format!("暂不支持 IM provider {provider_id} 的密钥。")),
     }
 }

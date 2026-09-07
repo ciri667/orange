@@ -2,14 +2,15 @@ use crate::logging::{self, AppEventBuilder, AppLogCategory, AppLogLevel};
 use serde::Serialize;
 use serde_json::json;
 use std::io::{BufRead, BufReader, Write};
-use std::process::{Child, ChildStderr, ChildStdout, Command, Stdio};
+use std::process::{Child, ChildStderr, ChildStdin, ChildStdout, Command, Stdio};
 use tauri::AppHandle;
 
-/** 已启动的 sidecar 进程句柄；stdin 在写入配置后关闭。 */
+/** 已启动的 sidecar 进程句柄；配置写入后 stdin 交给调用方，不需要回复通道的 provider 丢弃即可关闭。 */
 pub(crate) struct SpawnedSidecar {
     pub child: Child,
     pub stdout: ChildStdout,
     pub stderr: ChildStderr,
+    pub stdin: Option<ChildStdin>,
 }
 
 /** 启动 IM sidecar：配置经 stdin JSON 注入，secret 不出现在命令行。 */
@@ -35,12 +36,14 @@ pub(crate) fn spawn_im_sidecar(
             )
         })?;
 
-    if let Some(mut stdin) = child.stdin.take() {
-        let config_line = serde_json::to_string(config)
-            .map_err(|error| format!("无法序列化 IM sidecar 配置：{error}"))?;
-        writeln!(stdin, "{config_line}")
-            .map_err(|error| format!("无法写入 IM sidecar 配置：{error}"))?;
-    }
+    let mut stdin = child
+        .stdin
+        .take()
+        .ok_or_else(|| "IM sidecar 未提供 stdin。".to_owned())?;
+    let config_line = serde_json::to_string(config)
+        .map_err(|error| format!("无法序列化 IM sidecar 配置：{error}"))?;
+    writeln!(stdin, "{config_line}")
+        .map_err(|error| format!("无法写入 IM sidecar 配置：{error}"))?;
 
     let stdout = child
         .stdout
@@ -55,6 +58,7 @@ pub(crate) fn spawn_im_sidecar(
         child,
         stdout,
         stderr,
+        stdin: Some(stdin),
     })
 }
 

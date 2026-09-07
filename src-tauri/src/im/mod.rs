@@ -1,6 +1,6 @@
 use crate::domain::{
     AgentMessage, AgentSession, AgentTurnRequest, ImGatewayStatus, ImLoginStatus,
-    ImSessionIdentity, IM_PROVIDER_FEISHU, IM_PROVIDER_QQ, IM_PROVIDER_WEIXIN,
+    ImSessionIdentity, IM_PROVIDER_FEISHU, IM_PROVIDER_QQ, IM_PROVIDER_WECOM, IM_PROVIDER_WEIXIN,
 };
 use crate::storage::{create_id, format_local_datetime};
 use std::path::{Path, PathBuf};
@@ -13,6 +13,7 @@ pub mod feishu;
 pub mod inbound;
 pub mod process;
 pub mod qq;
+pub mod wecom;
 pub mod weixin;
 
 /** 会话摘要最大字符数，兼顾历史列表扫描效率和本地消息内容最小暴露。 */
@@ -171,6 +172,7 @@ pub async fn start_gateway(app: AppHandle, provider_id: &str) -> Result<ImGatewa
         IM_PROVIDER_FEISHU => feishu::start_gateway(app).await,
         IM_PROVIDER_QQ => qq::start_gateway(app).await,
         IM_PROVIDER_WEIXIN => weixin::start_gateway(app).await,
+        IM_PROVIDER_WECOM => wecom::start_gateway(app).await,
         _ => Err(format!("暂不支持启动 IM provider {provider_id} 的网关。")),
     }
 }
@@ -181,6 +183,7 @@ pub fn stop_gateway(app: &AppHandle, provider_id: &str) -> Result<ImGatewayStatu
         IM_PROVIDER_FEISHU => feishu::stop_gateway(app),
         IM_PROVIDER_QQ => qq::stop_gateway(app),
         IM_PROVIDER_WEIXIN => weixin::stop_gateway(app),
+        IM_PROVIDER_WECOM => wecom::stop_gateway(app),
         _ => Err(format!("暂不支持停止 IM provider {provider_id} 的网关。")),
     }
 }
@@ -191,6 +194,7 @@ pub fn load_gateway_status(app: &AppHandle, provider_id: &str) -> Result<ImGatew
         IM_PROVIDER_FEISHU => feishu::load_gateway_status(app),
         IM_PROVIDER_QQ => qq::load_gateway_status(app),
         IM_PROVIDER_WEIXIN => weixin::load_gateway_status(app),
+        IM_PROVIDER_WECOM => wecom::load_gateway_status(app),
         _ => Err(format!(
             "暂不支持读取 IM provider {provider_id} 的网关状态。"
         )),
@@ -419,14 +423,16 @@ mod tests {
         assert_eq!(new_identity.channel_hash, identity.channel_hash);
     }
 
-    /** QQ/微信会话标题必须使用中文平台名，且通道原文不得进入标题。 */
+    /** QQ/微信/企业微信会话标题必须使用中文平台名，且通道原文不得进入标题。 */
     #[test]
     fn qq_and_weixin_titles_use_localized_labels() {
         let qq = build_im_session_identity("qq", "qq:dm:secret-user", "direct", "整理会议纪要");
         let weixin = build_im_session_identity("weixin", "weixin:group:secret", "group", "查资料");
+        let wecom = build_im_session_identity("wecom", "wecom:group:secret", "group", "查资料");
 
         assert_eq!(format_im_session_title(&qq), "QQ · 私聊 · 整理会议纪要");
         assert_eq!(format_im_session_title(&weixin), "微信 · 群聊 · 查资料");
+        assert_eq!(format_im_session_title(&wecom), "企业微信 · 群聊 · 查资料");
         assert_ne!(qq.channel_hash, "qq:dm:secret-user");
         assert_eq!(qq.channel_hash.len(), 16);
     }

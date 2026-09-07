@@ -20,8 +20,14 @@ pub const IM_PROVIDER_QQ: &str = "qq";
 /** 个人微信 iLink / OpenClaw provider ID。 */
 pub const IM_PROVIDER_WEIXIN: &str = "weixin";
 
+/** 企业微信智能机器人 provider ID。 */
+pub const IM_PROVIDER_WECOM: &str = "wecom";
+
 /** 个人微信默认 API 根地址；用户一般无需修改。 */
 pub const WEIXIN_DEFAULT_BASE_URL: &str = "https://ilinkai.weixin.qq.com";
+
+/** 企业微信智能机器人默认长连接地址；用户一般无需修改。 */
+pub const WECOM_DEFAULT_WS_URL: &str = "wss://openws.work.weixin.qq.com";
 
 /** 即时通讯集成总设置；providers 是持久化扩展点，避免新增 IM 时继续扩根字段。 */
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -62,6 +68,8 @@ pub enum ImProviderConfig {
     Qq(QqProviderConfig),
     #[serde(rename = "weixin")]
     Weixin(WeixinProviderConfig),
+    #[serde(rename = "wecom")]
+    Wecom(WecomProviderConfig),
 }
 
 /** 飞书/Lark 自建应用专属配置；appSecret 单独存 keyring，这里只保存引用。 */
@@ -89,6 +97,19 @@ pub struct WeixinProviderConfig {
     pub account_id: String,
     #[serde(default)]
     pub base_url: String,
+    pub secret_key_reference: String,
+}
+
+/** 企业微信智能机器人专属配置；Secret 单独存 keyring。 */
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WecomProviderConfig {
+    #[serde(default)]
+    pub bot_id: String,
+    #[serde(default)]
+    pub robot_name: String,
+    #[serde(default)]
+    pub ws_url: String,
     pub secret_key_reference: String,
 }
 
@@ -168,7 +189,19 @@ impl ImProviderSettings {
     /** 读取个人微信配置；非微信 provider 返回 None。 */
     pub fn to_weixin_config(&self) -> Option<&WeixinProviderConfig> {
         match &self.config {
-            ImProviderConfig::Weixin(config) if self.provider_id == IM_PROVIDER_WEIXIN => Some(config),
+            ImProviderConfig::Weixin(config) if self.provider_id == IM_PROVIDER_WEIXIN => {
+                Some(config)
+            }
+            _ => None,
+        }
+    }
+
+    /** 读取企业微信智能机器人配置；非企业微信 provider 返回 None。 */
+    pub fn to_wecom_config(&self) -> Option<&WecomProviderConfig> {
+        match &self.config {
+            ImProviderConfig::Wecom(config) if self.provider_id == IM_PROVIDER_WECOM => {
+                Some(config)
+            }
             _ => None,
         }
     }
