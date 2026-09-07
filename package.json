@@ -17,6 +17,8 @@
     "desktop:build:release": "node scripts/desktop-build.mjs --release",
     "sidecar:im:build": "node scripts/build-im-sidecars.mjs",
     "sidecar:feishu:build": "npm run sidecar:im:build -- --provider feishu",
+    "sidecar:qq:build": "npm run sidecar:im:build -- --provider qq",
+    "sidecar:weixin:build": "npm run sidecar:im:build -- --provider weixin",
     "rust:test": "cargo test --manifest-path src-tauri/Cargo.toml"
   },
   "dependencies": {

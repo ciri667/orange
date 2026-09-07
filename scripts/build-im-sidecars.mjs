@@ -25,6 +25,34 @@ const sidecarProviders = [
       ];
     },
   },
+  {
+    providerId: "qq",
+    displayName: "QQ Official Bot",
+    sourceDir: join(projectRoot, "src-tauri", "sidecars", "qq-gateway"),
+    binaryName: "qq-gateway",
+    buildTool: "go",
+    buildArgs(outputPath) {
+      return [
+        ["go", ["version"]],
+        ["go", ["mod", "tidy"]],
+        ["go", ["build", "-trimpath", "-o", outputPath, "."]],
+      ];
+    },
+  },
+  {
+    providerId: "weixin",
+    displayName: "WeChat iLink",
+    sourceDir: join(projectRoot, "src-tauri", "sidecars", "weixin-gateway"),
+    binaryName: "weixin-gateway",
+    buildTool: "go",
+    buildArgs(outputPath) {
+      return [
+        ["go", ["version"]],
+        ["go", ["mod", "tidy"]],
+        ["go", ["build", "-trimpath", "-o", outputPath, "."]],
+      ];
+    },
+  },
 ];
 
 /** 解析命令行参数；只支持 provider 过滤，避免把未知参数静默吞掉。 */
