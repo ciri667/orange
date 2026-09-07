@@ -156,6 +156,30 @@ pub async fn load_im_gateway_status(
     .await
 }
 
+/** 启动 IM 扫码登录；目前仅个人微信使用。 */
+#[tauri::command]
+pub async fn start_im_login(
+    app: AppHandle,
+    payload: ImLoginPayload,
+) -> Result<ImLoginStatus, String> {
+    let provider_id = payload.provider_id.trim().to_ascii_lowercase();
+    crate::im::start_login(app, &provider_id).await
+}
+
+/** 读取 IM 扫码登录状态。 */
+#[tauri::command]
+pub async fn load_im_login_status(payload: ImLoginPayload) -> Result<ImLoginStatus, String> {
+    let provider_id = payload.provider_id.trim().to_ascii_lowercase();
+    crate::im::load_login_status(&provider_id)
+}
+
+/** 取消进行中的 IM 扫码登录。 */
+#[tauri::command]
+pub async fn cancel_im_login(payload: ImLoginPayload) -> Result<ImLoginStatus, String> {
+    let provider_id = payload.provider_id.trim().to_ascii_lowercase();
+    crate::im::cancel_login(&provider_id)
+}
+
 /** 保存飞书 appSecret 到系统安全存储；兼容旧命令，内部转发到通用 provider 命令。 */
 #[tauri::command]
 pub async fn save_feishu_app_secret(
@@ -164,7 +188,7 @@ pub async fn save_feishu_app_secret(
 ) -> Result<FeishuCredentialStatus, String> {
     let started_at = Instant::now();
     let result = run_blocking("保存飞书 appSecret", move || {
-        storage::save_im_provider_secret(IM_PROVIDER_FEISHU, &payload.app_secret)
+        storage::save_feishu_app_secret(&payload.app_secret)
     })
     .await;
 
@@ -200,7 +224,7 @@ pub async fn save_feishu_app_secret(
 #[tauri::command]
 pub async fn load_feishu_credential_status() -> Result<FeishuCredentialStatus, String> {
     run_blocking("读取飞书凭证状态", || {
-        storage::load_im_provider_credential_status(IM_PROVIDER_FEISHU)
+        storage::load_feishu_credential_status()
     })
     .await
 }

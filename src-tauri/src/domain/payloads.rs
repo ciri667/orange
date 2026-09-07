@@ -370,6 +370,13 @@ pub struct ImProviderPayload {
     pub provider_id: String,
 }
 
+/** 启动或查询 IM 扫码登录的命令入参。 */
+#[derive(Clone, Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ImLoginPayload {
+    pub provider_id: String,
+}
+
 /** 保存飞书 appSecret 的兼容命令入参；明文只进入系统安全存储。 */
 #[derive(Clone, Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]

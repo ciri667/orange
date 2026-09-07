@@ -1,4 +1,8 @@
 use super::*;
+use crate::domain::{
+    QqProviderConfig, WeixinProviderConfig, IM_PROVIDER_QQ, IM_PROVIDER_WEIXIN,
+    WEIXIN_DEFAULT_BASE_URL,
+};
 
 pub fn default_user_settings() -> UserSettings {
     let now = format_local_datetime();
@@ -32,7 +36,11 @@ pub fn default_user_settings() -> UserSettings {
 /** 返回即时通讯默认配置；默认不启用，必须由用户显式填写凭证和白名单。 */
 pub fn default_im_settings() -> ImIntegrationSettings {
     ImIntegrationSettings {
-        providers: vec![default_feishu_provider_settings()],
+        providers: vec![
+            default_feishu_provider_settings(),
+            default_qq_provider_settings(),
+            default_weixin_provider_settings(),
+        ],
     }
 }
 
@@ -51,6 +59,45 @@ pub(crate) fn default_feishu_provider_settings() -> ImProviderSettings {
         require_mention: true,
         updated_at: format_local_datetime(),
     })
+}
+
+/** 构造 QQ 官方机器人默认配置。 */
+pub(crate) fn default_qq_provider_settings() -> ImProviderSettings {
+    ImProviderSettings {
+        provider_id: IM_PROVIDER_QQ.to_owned(),
+        enabled: false,
+        default_knowledge_base_ids: Vec::new(),
+        allowed_user_open_ids: Vec::new(),
+        allowed_chat_ids: Vec::new(),
+        discovered_user_open_ids: Vec::new(),
+        discovered_chat_ids: Vec::new(),
+        require_mention: true,
+        updated_at: format_local_datetime(),
+        config: ImProviderConfig::Qq(QqProviderConfig {
+            app_id: String::new(),
+            secret_key_reference: QQ_SECRET_KEY_REFERENCE.to_owned(),
+        }),
+    }
+}
+
+/** 构造个人微信默认配置。 */
+pub(crate) fn default_weixin_provider_settings() -> ImProviderSettings {
+    ImProviderSettings {
+        provider_id: IM_PROVIDER_WEIXIN.to_owned(),
+        enabled: false,
+        default_knowledge_base_ids: Vec::new(),
+        allowed_user_open_ids: Vec::new(),
+        allowed_chat_ids: Vec::new(),
+        discovered_user_open_ids: Vec::new(),
+        discovered_chat_ids: Vec::new(),
+        require_mention: true,
+        updated_at: format_local_datetime(),
+        config: ImProviderConfig::Weixin(WeixinProviderConfig {
+            account_id: String::new(),
+            base_url: WEIXIN_DEFAULT_BASE_URL.to_owned(),
+            secret_key_reference: WEIXIN_SECRET_KEY_REFERENCE.to_owned(),
+        }),
+    }
 }
 
 pub fn load_user_settings(app: &AppHandle) -> Result<UserSettings, String> {
@@ -268,11 +315,22 @@ pub fn remember_feishu_discovered_peer(
     chat_id: &str,
     is_group_chat: bool,
 ) -> Result<bool, String> {
+    remember_im_discovered_peer(app, IM_PROVIDER_FEISHU, sender_open_id, chat_id, is_group_chat)
+}
+
+/** 记录任意 IM provider 发现的用户和群，供设置页一键加入白名单。 */
+pub fn remember_im_discovered_peer(
+    app: &AppHandle,
+    provider_id: &str,
+    sender_open_id: &str,
+    chat_id: &str,
+    is_group_chat: bool,
+) -> Result<bool, String> {
     let mut settings = load_im_settings(app)?;
     let sender_open_id = sender_open_id.trim();
     let chat_id = chat_id.trim();
     let mut changed = false;
-    let provider = feishu_provider_mut(&mut settings)?;
+    let provider = im_provider_mut(&mut settings, provider_id)?;
 
     if !sender_open_id.is_empty()
         && !provider
@@ -307,14 +365,58 @@ pub fn remember_feishu_discovered_peer(
 }
 
 /** 获取可变飞书 provider；调用方只在飞书平台事件中使用。 */
+#[allow(dead_code)]
 pub(crate) fn feishu_provider_mut(
     settings: &mut ImIntegrationSettings,
 ) -> Result<&mut ImProviderSettings, String> {
+    im_provider_mut(settings, IM_PROVIDER_FEISHU)
+}
+
+/** 获取指定 IM provider 的可变配置。 */
+pub(crate) fn im_provider_mut<'a>(
+    settings: &'a mut ImIntegrationSettings,
+    provider_id: &str,
+) -> Result<&'a mut ImProviderSettings, String> {
     settings
         .providers
         .iter_mut()
-        .find(|provider| provider.provider_id == IM_PROVIDER_FEISHU)
-        .ok_or_else(|| "未找到飞书 IM provider 配置。".to_owned())
+        .find(|provider| provider.provider_id == provider_id)
+        .ok_or_else(|| format!("未找到 IM provider {provider_id} 配置。"))
+}
+
+/** 读取指定 IM provider 设置。 */
+pub fn load_im_provider_settings(
+    app: &AppHandle,
+    provider_id: &str,
+) -> Result<ImProviderSettings, String> {
+    let settings = load_im_settings(app)?;
+    settings
+        .providers
+        .into_iter()
+        .find(|provider| provider.provider_id == provider_id)
+        .ok_or_else(|| format!("未找到 IM provider {provider_id} 配置。"))
+}
+
+/** 扫码登录成功后写入微信账号标识和 API 地址，不覆盖白名单。 */
+pub fn update_weixin_account(
+    app: &AppHandle,
+    account_id: &str,
+    base_url: &str,
+) -> Result<(), String> {
+    let mut settings = load_im_settings(app)?;
+    let provider = im_provider_mut(&mut settings, IM_PROVIDER_WEIXIN)?;
+    if let ImProviderConfig::Weixin(config) = &mut provider.config {
+        if !account_id.trim().is_empty() {
+            config.account_id = account_id.trim().to_owned();
+        }
+        if !base_url.trim().is_empty() {
+            config.base_url = base_url.trim().trim_end_matches('/').to_owned();
+        }
+        config.secret_key_reference = WEIXIN_SECRET_KEY_REFERENCE.to_owned();
+    }
+    provider.updated_at = format_local_datetime();
+    save_im_settings(app, &settings)?;
+    Ok(())
 }
 
 /** 归一化 IM provider 设置，避免空白 ID、重复 provider、重复白名单或错误 key 引用进入持久化配置。 */
@@ -325,6 +427,20 @@ pub(crate) fn normalize_im_settings(settings: &mut ImIntegrationSettings) {
         .any(|provider| provider.provider_id == IM_PROVIDER_FEISHU)
     {
         settings.providers.push(default_feishu_provider_settings());
+    }
+    if !settings
+        .providers
+        .iter()
+        .any(|provider| provider.provider_id == IM_PROVIDER_QQ)
+    {
+        settings.providers.push(default_qq_provider_settings());
+    }
+    if !settings
+        .providers
+        .iter()
+        .any(|provider| provider.provider_id == IM_PROVIDER_WEIXIN)
+    {
+        settings.providers.push(default_weixin_provider_settings());
     }
 
     for provider in &mut settings.providers {
@@ -356,6 +472,21 @@ pub(crate) fn normalize_im_settings(settings: &mut ImIntegrationSettings) {
                 };
                 config.app_id = config.app_id.trim().to_owned();
                 config.secret_key_reference = FEISHU_SECRET_KEY_REFERENCE.to_owned();
+            }
+            ImProviderConfig::Qq(config) => {
+                provider.provider_id = IM_PROVIDER_QQ.to_owned();
+                config.app_id = config.app_id.trim().to_owned();
+                config.secret_key_reference = QQ_SECRET_KEY_REFERENCE.to_owned();
+            }
+            ImProviderConfig::Weixin(config) => {
+                provider.provider_id = IM_PROVIDER_WEIXIN.to_owned();
+                config.account_id = config.account_id.trim().to_owned();
+                config.base_url = if config.base_url.trim().is_empty() {
+                    WEIXIN_DEFAULT_BASE_URL.to_owned()
+                } else {
+                    config.base_url.trim().trim_end_matches('/').to_owned()
+                };
+                config.secret_key_reference = WEIXIN_SECRET_KEY_REFERENCE.to_owned();
             }
         }
     }
@@ -427,6 +558,22 @@ pub(crate) fn merge_im_provider_settings(
             }
             target_config.secret_key_reference = FEISHU_SECRET_KEY_REFERENCE.to_owned();
         }
+        (ImProviderConfig::Qq(target_config), ImProviderConfig::Qq(source_config)) => {
+            if !source_config.app_id.trim().is_empty() {
+                target_config.app_id = source_config.app_id;
+            }
+            target_config.secret_key_reference = QQ_SECRET_KEY_REFERENCE.to_owned();
+        }
+        (ImProviderConfig::Weixin(target_config), ImProviderConfig::Weixin(source_config)) => {
+            if !source_config.account_id.trim().is_empty() {
+                target_config.account_id = source_config.account_id;
+            }
+            if !source_config.base_url.trim().is_empty() {
+                target_config.base_url = source_config.base_url;
+            }
+            target_config.secret_key_reference = WEIXIN_SECRET_KEY_REFERENCE.to_owned();
+        }
+        _ => {}
     }
 }
 
@@ -661,85 +808,102 @@ pub fn save_im_provider_secret(
     provider_id: &str,
     secret: &str,
 ) -> Result<ImProviderCredentialStatus, String> {
-    match provider_id {
-        IM_PROVIDER_FEISHU => save_feishu_app_secret(secret),
-        _ => Err(format!("暂不支持保存 IM provider {provider_id} 的密钥。")),
-    }
+    let key_reference = im_secret_key_reference(provider_id)?;
+    save_im_secret_for_reference(provider_id, key_reference, secret)
 }
 
 /** 查询 IM provider 密钥状态；设置页只展示状态，不拿到明文。 */
 pub fn load_im_provider_credential_status(
     provider_id: &str,
 ) -> Result<ImProviderCredentialStatus, String> {
-    match provider_id {
-        IM_PROVIDER_FEISHU => load_feishu_credential_status(),
-        _ => Err(format!(
-            "暂不支持读取 IM provider {provider_id} 的凭证状态。"
-        )),
-    }
+    let key_reference = im_secret_key_reference(provider_id)?;
+    let configured = load_model_api_key(key_reference)?.is_some();
+    let label = match provider_id {
+        IM_PROVIDER_FEISHU => "飞书 appSecret",
+        IM_PROVIDER_QQ => "QQ AppSecret",
+        IM_PROVIDER_WEIXIN => "微信登录 token",
+        _ => "IM 密钥",
+    };
+    let message = if configured {
+        format!("系统安全存储中已找到{label}。")
+    } else {
+        format!("系统安全存储中尚未找到{label}。")
+    };
+
+    Ok(ImProviderCredentialStatus {
+        provider_id: provider_id.to_owned(),
+        key_reference: key_reference.to_owned(),
+        configured,
+        message,
+    })
 }
 
 /** 读取 IM provider 明文密钥；仅供网关和发送 API 在后台流程中使用。 */
 pub fn load_im_provider_secret(provider_id: &str) -> Result<Option<String>, String> {
+    let key_reference = im_secret_key_reference(provider_id)?;
+    load_model_api_key(key_reference)
+}
+
+/** 按 provider 选择 keyring 引用；未知 provider 拒绝写入以免串密钥。 */
+fn im_secret_key_reference(provider_id: &str) -> Result<&'static str, String> {
     match provider_id {
-        IM_PROVIDER_FEISHU => load_feishu_app_secret(),
-        _ => Err(format!("暂不支持读取 IM provider {provider_id} 的密钥。")),
+        IM_PROVIDER_FEISHU => Ok(FEISHU_SECRET_KEY_REFERENCE),
+        IM_PROVIDER_QQ => Ok(QQ_SECRET_KEY_REFERENCE),
+        IM_PROVIDER_WEIXIN => Ok(WEIXIN_SECRET_KEY_REFERENCE),
+        _ => Err(format!("暂不支持 IM provider {provider_id} 的密钥。")),
     }
 }
 
-/** 把飞书 appSecret 保存到系统安全存储；错误信息不回显 secret 内容。 */
-pub fn save_feishu_app_secret(app_secret: &str) -> Result<FeishuCredentialStatus, String> {
+/** 把指定 key 引用的 IM 密钥写入系统安全存储并读回校验。 */
+fn save_im_secret_for_reference(
+    provider_id: &str,
+    key_reference: &str,
+    secret: &str,
+) -> Result<ImProviderCredentialStatus, String> {
     ensure_persistent_model_keyring()?;
 
-    if app_secret.trim().is_empty() {
-        return Err("飞书 appSecret 不能为空。".to_owned());
+    if secret.trim().is_empty() {
+        return Err("IM 密钥不能为空。".to_owned());
     }
 
-    let entry = keyring::Entry::new(keyring_service(), FEISHU_SECRET_KEY_REFERENCE)
+    let entry = keyring::Entry::new(keyring_service(), key_reference)
         .map_err(|error| format!("无法打开系统安全存储：{error}"))?;
 
     entry
-        .set_password(app_secret)
-        .map_err(|error| format!("无法保存飞书 appSecret：{error}"))?;
+        .set_password(secret)
+        .map_err(|error| format!("无法保存 IM 密钥：{error}"))?;
 
     let saved_secret = entry
         .get_password()
-        .map_err(|error| format!("飞书 appSecret 已提交但读回校验失败：{error}"))?;
+        .map_err(|error| format!("IM 密钥已提交但读回校验失败：{error}"))?;
 
     if saved_secret.trim().is_empty() {
-        return Err("飞书 appSecret 已提交但系统安全存储返回空值。".to_owned());
+        return Err("IM 密钥已提交但系统安全存储返回空值。".to_owned());
     }
 
-    store_model_api_key_in_cache(FEISHU_SECRET_KEY_REFERENCE, &saved_secret)?;
+    store_model_api_key_in_cache(key_reference, &saved_secret)?;
 
-    Ok(FeishuCredentialStatus {
-        provider_id: IM_PROVIDER_FEISHU.to_owned(),
-        key_reference: FEISHU_SECRET_KEY_REFERENCE.to_owned(),
+    Ok(ImProviderCredentialStatus {
+        provider_id: provider_id.to_owned(),
+        key_reference: key_reference.to_owned(),
         configured: true,
-        message: "飞书 appSecret 已保存到系统安全存储。".to_owned(),
+        message: "密钥已保存到系统安全存储。".to_owned(),
     })
+}
+
+/** 把飞书 appSecret 保存到系统安全存储；兼容旧命令，内部走通用 IM 密钥路径。 */
+pub fn save_feishu_app_secret(app_secret: &str) -> Result<FeishuCredentialStatus, String> {
+    save_im_provider_secret(IM_PROVIDER_FEISHU, app_secret)
 }
 
 /** 读取飞书 appSecret，供长连接和发送消息 API 使用；缺失时返回 None。 */
 pub fn load_feishu_app_secret() -> Result<Option<String>, String> {
-    load_model_api_key(FEISHU_SECRET_KEY_REFERENCE)
+    load_im_provider_secret(IM_PROVIDER_FEISHU)
 }
 
 /** 查询飞书 appSecret 是否可读取；设置页只展示状态，不拿到明文。 */
 pub fn load_feishu_credential_status() -> Result<FeishuCredentialStatus, String> {
-    let configured = load_feishu_app_secret()?.is_some();
-    let message = if configured {
-        "系统安全存储中已找到飞书 appSecret。"
-    } else {
-        "系统安全存储中尚未找到飞书 appSecret。"
-    };
-
-    Ok(FeishuCredentialStatus {
-        provider_id: IM_PROVIDER_FEISHU.to_owned(),
-        key_reference: FEISHU_SECRET_KEY_REFERENCE.to_owned(),
-        configured,
-        message: message.to_owned(),
-    })
+    load_im_provider_credential_status(IM_PROVIDER_FEISHU)
 }
 
 /** 查询单个 provider 的模型密钥是否已经可读取；不会返回明文密钥。 */

@@ -79,6 +79,12 @@ pub const MODEL_KEY_REFERENCE: &str = "orange-openai-compatible-api-key";
 /** 系统安全存储中的飞书 appSecret 引用，SQLite 永远不保存明文 secret。 */
 pub const FEISHU_SECRET_KEY_REFERENCE: &str = "orange-feishu-app-secret";
 
+/** 系统安全存储中的 QQ AppSecret 引用。 */
+pub const QQ_SECRET_KEY_REFERENCE: &str = "orange-qq-app-secret";
+
+/** 系统安全存储中的个人微信 bot token 引用。 */
+pub const WEIXIN_SECRET_KEY_REFERENCE: &str = "orange-weixin-bot-token";
+
 /** 正式构建使用的 Keychain service；生产用户保存的凭据只能由正式应用访问。 */
 const PRODUCTION_KEYRING_SERVICE: &str = "Orange";
 
@@ -309,6 +315,20 @@ mod tests {
         session
     }
 
+    /** 默认 IM 设置必须同时带上飞书、QQ 和微信三个禁用 provider。 */
+    #[test]
+    fn default_im_settings_includes_qq_and_weixin_providers() {
+        let settings = super::default_im_settings();
+        let ids = settings
+            .providers
+            .iter()
+            .map(|provider| provider.provider_id.as_str())
+            .collect::<Vec<_>>();
+
+        assert_eq!(ids, vec!["feishu", "qq", "weixin"]);
+        assert!(settings.providers.iter().all(|provider| !provider.enabled));
+    }
+
     /** 旧版 `{ feishu: ... }` IM 设置必须迁移为 providers，避免升级后丢失飞书配置。 */
     #[test]
     fn legacy_im_settings_payload_migrates_to_provider_shape() {
@@ -331,10 +351,17 @@ mod tests {
 
         normalize_im_settings(&mut settings);
 
-        assert_eq!(settings.providers.len(), 1);
-        let feishu = settings.providers[0].to_feishu_settings().unwrap();
+        assert_eq!(settings.providers.len(), 3);
+        let feishu = settings
+            .providers
+            .iter()
+            .find_map(ImProviderSettings::to_feishu_settings)
+            .unwrap();
 
-        assert_eq!(settings.providers[0].provider_id, IM_PROVIDER_FEISHU);
+        assert_eq!(
+            settings.providers[0].provider_id,
+            IM_PROVIDER_FEISHU
+        );
         assert!(feishu.enabled);
         assert_eq!(feishu.domain, "lark");
         assert_eq!(feishu.app_id, "cli_x");
@@ -413,8 +440,12 @@ mod tests {
 
         normalize_im_settings(&mut settings);
 
-        assert_eq!(settings.providers.len(), 1);
-        let feishu = settings.providers[0].to_feishu_settings().unwrap();
+        assert_eq!(settings.providers.len(), 3);
+        let feishu = settings
+            .providers
+            .iter()
+            .find_map(ImProviderSettings::to_feishu_settings)
+            .unwrap();
         assert!(feishu.enabled);
         assert_eq!(feishu.domain, "lark");
         assert_eq!(feishu.app_id, "cli_x");

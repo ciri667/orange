@@ -14,6 +14,15 @@ pub struct ImSessionIdentity {
 /** 首个内置 IM provider ID；后续 provider 继续使用稳定小写 ID。 */
 pub const IM_PROVIDER_FEISHU: &str = "feishu";
 
+/** QQ 官方机器人 provider ID。 */
+pub const IM_PROVIDER_QQ: &str = "qq";
+
+/** 个人微信 iLink / OpenClaw provider ID。 */
+pub const IM_PROVIDER_WEIXIN: &str = "weixin";
+
+/** 个人微信默认 API 根地址；用户一般无需修改。 */
+pub const WEIXIN_DEFAULT_BASE_URL: &str = "https://ilinkai.weixin.qq.com";
+
 /** 即时通讯集成总设置；providers 是持久化扩展点，避免新增 IM 时继续扩根字段。 */
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -49,6 +58,10 @@ pub struct ImProviderSettings {
 pub enum ImProviderConfig {
     #[serde(rename = "feishu")]
     Feishu(FeishuProviderConfig),
+    #[serde(rename = "qq")]
+    Qq(QqProviderConfig),
+    #[serde(rename = "weixin")]
+    Weixin(WeixinProviderConfig),
 }
 
 /** 飞书/Lark 自建应用专属配置；appSecret 单独存 keyring，这里只保存引用。 */
@@ -57,6 +70,25 @@ pub enum ImProviderConfig {
 pub struct FeishuProviderConfig {
     pub domain: String,
     pub app_id: String,
+    pub secret_key_reference: String,
+}
+
+/** QQ 官方机器人专属配置；AppSecret 单独存 keyring。 */
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct QqProviderConfig {
+    pub app_id: String,
+    pub secret_key_reference: String,
+}
+
+/** 个人微信 iLink 专属配置；bot token 单独存 keyring。 */
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WeixinProviderConfig {
+    #[serde(default)]
+    pub account_id: String,
+    #[serde(default)]
+    pub base_url: String,
     pub secret_key_reference: String,
 }
 
@@ -124,6 +156,22 @@ impl ImProviderSettings {
             _ => None,
         }
     }
+
+    /** 读取 QQ 官方机器人配置；非 QQ provider 返回 None。 */
+    pub fn to_qq_config(&self) -> Option<&QqProviderConfig> {
+        match &self.config {
+            ImProviderConfig::Qq(config) if self.provider_id == IM_PROVIDER_QQ => Some(config),
+            _ => None,
+        }
+    }
+
+    /** 读取个人微信配置；非微信 provider 返回 None。 */
+    pub fn to_weixin_config(&self) -> Option<&WeixinProviderConfig> {
+        match &self.config {
+            ImProviderConfig::Weixin(config) if self.provider_id == IM_PROVIDER_WEIXIN => Some(config),
+            _ => None,
+        }
+    }
 }
 
 /** IM provider 凭证保存状态；只暴露是否存在，不返回明文。 */
@@ -156,3 +204,16 @@ pub struct ImGatewayStatus {
 
 /** 兼容旧命令签名的飞书网关状态别名。 */
 pub type FeishuGatewayStatus = ImGatewayStatus;
+
+/** 个人微信扫码登录状态；qr 图片只短暂存在于设置页会话。 */
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ImLoginStatus {
+    pub provider_id: String,
+    pub status: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub qr_image_base64: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub account_id: Option<String>,
+    pub message: String,
+}

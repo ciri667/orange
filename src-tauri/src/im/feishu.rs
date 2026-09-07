@@ -133,7 +133,7 @@ static FEISHU_CHANNEL_OPERATION_LOCKS: OnceLock<
 /** 启动飞书长连接网关；只负责拉起 sidecar，消息处理在后台任务中完成。 */
 pub async fn start_gateway(app: AppHandle) -> Result<FeishuGatewayStatus, String> {
     let settings = storage::load_feishu_integration_settings(&app)?;
-    let app_secret = storage::load_im_provider_secret(IM_PROVIDER_FEISHU)?
+    let app_secret = storage::load_feishu_app_secret()?
         .ok_or_else(|| "请先保存飞书 appSecret。".to_owned())?;
 
     validate_gateway_settings(&settings)?;

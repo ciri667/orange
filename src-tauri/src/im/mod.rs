@@ -1,6 +1,6 @@
 use crate::domain::{
-    AgentMessage, AgentSession, AgentTurnRequest, ImGatewayStatus, ImSessionIdentity,
-    IM_PROVIDER_FEISHU,
+    AgentMessage, AgentSession, AgentTurnRequest, ImGatewayStatus, ImLoginStatus,
+    ImSessionIdentity, IM_PROVIDER_FEISHU, IM_PROVIDER_QQ, IM_PROVIDER_WEIXIN,
 };
 use crate::storage::{create_id, format_local_datetime};
 use std::path::{Path, PathBuf};
@@ -10,6 +10,10 @@ use tauri::{AppHandle, Manager};
 use std::os::unix::fs::PermissionsExt;
 
 pub mod feishu;
+pub mod inbound;
+pub mod process;
+pub mod qq;
+pub mod weixin;
 
 /** 会话摘要最大字符数，兼顾历史列表扫描效率和本地消息内容最小暴露。 */
 const IM_MESSAGE_PREVIEW_MAX_CHARS: usize = 28;
@@ -125,10 +129,7 @@ pub(crate) fn build_im_message_preview(message: &str) -> String {
 
 /** 将外部 provider ID 转换为界面文案，未知 provider 保留其 ID 以支持后续扩展。 */
 pub(crate) fn get_im_provider_label(provider_id: &str) -> &str {
-    match provider_id {
-        IM_PROVIDER_FEISHU => "飞书",
-        _ => provider_id,
-    }
+    inbound::known_provider_label(provider_id)
 }
 
 /** 将通用会话类型转成用户可读标签。 */
@@ -168,6 +169,8 @@ fn parse_channel_key_identity(channel_key: &str) -> (&str, &str) {
 pub async fn start_gateway(app: AppHandle, provider_id: &str) -> Result<ImGatewayStatus, String> {
     match provider_id {
         IM_PROVIDER_FEISHU => feishu::start_gateway(app).await,
+        IM_PROVIDER_QQ => qq::start_gateway(app).await,
+        IM_PROVIDER_WEIXIN => weixin::start_gateway(app).await,
         _ => Err(format!("暂不支持启动 IM provider {provider_id} 的网关。")),
     }
 }
@@ -176,6 +179,8 @@ pub async fn start_gateway(app: AppHandle, provider_id: &str) -> Result<ImGatewa
 pub fn stop_gateway(app: &AppHandle, provider_id: &str) -> Result<ImGatewayStatus, String> {
     match provider_id {
         IM_PROVIDER_FEISHU => feishu::stop_gateway(app),
+        IM_PROVIDER_QQ => qq::stop_gateway(app),
+        IM_PROVIDER_WEIXIN => weixin::stop_gateway(app),
         _ => Err(format!("暂不支持停止 IM provider {provider_id} 的网关。")),
     }
 }
@@ -184,9 +189,35 @@ pub fn stop_gateway(app: &AppHandle, provider_id: &str) -> Result<ImGatewayStatu
 pub fn load_gateway_status(app: &AppHandle, provider_id: &str) -> Result<ImGatewayStatus, String> {
     match provider_id {
         IM_PROVIDER_FEISHU => feishu::load_gateway_status(app),
+        IM_PROVIDER_QQ => qq::load_gateway_status(app),
+        IM_PROVIDER_WEIXIN => weixin::load_gateway_status(app),
         _ => Err(format!(
             "暂不支持读取 IM provider {provider_id} 的网关状态。"
         )),
+    }
+}
+
+/** 启动 IM 扫码登录；目前仅个人微信需要。 */
+pub async fn start_login(app: AppHandle, provider_id: &str) -> Result<ImLoginStatus, String> {
+    match provider_id {
+        IM_PROVIDER_WEIXIN => weixin::start_login(app).await,
+        _ => Err(format!("IM provider {provider_id} 不支持扫码登录。")),
+    }
+}
+
+/** 读取扫码登录状态。 */
+pub fn load_login_status(provider_id: &str) -> Result<ImLoginStatus, String> {
+    match provider_id {
+        IM_PROVIDER_WEIXIN => weixin::load_login_status(),
+        _ => Err(format!("IM provider {provider_id} 不支持扫码登录。")),
+    }
+}
+
+/** 取消进行中的扫码登录。 */
+pub fn cancel_login(provider_id: &str) -> Result<ImLoginStatus, String> {
+    match provider_id {
+        IM_PROVIDER_WEIXIN => weixin::cancel_login(),
+        _ => Err(format!("IM provider {provider_id} 不支持扫码登录。")),
     }
 }
 
@@ -386,5 +417,17 @@ mod tests {
             "飞书 · 私聊 · 新会话"
         );
         assert_eq!(new_identity.channel_hash, identity.channel_hash);
+    }
+
+    /** QQ/微信会话标题必须使用中文平台名，且通道原文不得进入标题。 */
+    #[test]
+    fn qq_and_weixin_titles_use_localized_labels() {
+        let qq = build_im_session_identity("qq", "qq:dm:secret-user", "direct", "整理会议纪要");
+        let weixin = build_im_session_identity("weixin", "weixin:group:secret", "group", "查资料");
+
+        assert_eq!(format_im_session_title(&qq), "QQ · 私聊 · 整理会议纪要");
+        assert_eq!(format_im_session_title(&weixin), "微信 · 群聊 · 查资料");
+        assert_ne!(qq.channel_hash, "qq:dm:secret-user");
+        assert_eq!(qq.channel_hash.len(), 16);
     }
 }
