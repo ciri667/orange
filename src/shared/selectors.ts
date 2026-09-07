@@ -107,6 +107,7 @@ export function getImSessionSourceLabel(session: AgentSession) {
     feishu: "飞书",
     qq: "QQ",
     weixin: "微信",
+    wecom: "企业微信",
   };
   const kindLabels: Record<"direct" | "group" | "unknown", string> = {
     direct: "私聊",

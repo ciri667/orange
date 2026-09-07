@@ -128,6 +128,8 @@ export function useWorkspaceBootData({ onSnapshotInitialized, onEditorStateIniti
         nextQqGatewayStatus,
         nextWeixinCredentialStatus,
         nextWeixinGatewayStatus,
+        nextWecomCredentialStatus,
+        nextWecomGatewayStatus,
         nextWeixinLoginStatus,
         nextKnowledgeBaseMemories,
       ] = await Promise.all([
@@ -171,6 +173,8 @@ export function useWorkspaceBootData({ onSnapshotInitialized, onEditorStateIniti
         loadImGatewayStatus("qq").catch(() => null),
         loadImProviderCredentialStatus("weixin").catch(() => null),
         loadImGatewayStatus("weixin").catch(() => null),
+        loadImProviderCredentialStatus("wecom").catch(() => null),
+        loadImGatewayStatus("wecom").catch(() => null),
         loadImLoginStatus("weixin").catch(() => null),
         loadKnowledgeBaseMemories().catch((error) => {
           logWarn("读取跨会话记忆失败。", { category: "settings", event: "kb_memory_load", status: "failed", error });
@@ -195,11 +199,13 @@ export function useWorkspaceBootData({ onSnapshotInitialized, onEditorStateIniti
         feishu: nextFeishuCredentialStatus,
         qq: nextQqCredentialStatus,
         weixin: nextWeixinCredentialStatus,
+        wecom: nextWecomCredentialStatus,
       });
       setImGatewayByProvider({
         feishu: nextFeishuGatewayStatus,
         qq: nextQqGatewayStatus,
         weixin: nextWeixinGatewayStatus,
+        wecom: nextWecomGatewayStatus,
       });
       setWeixinLoginStatus(nextWeixinLoginStatus);
       setKnowledgeBaseMemories(nextKnowledgeBaseMemories);

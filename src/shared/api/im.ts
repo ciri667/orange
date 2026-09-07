@@ -27,10 +27,10 @@ export async function saveImSettings(settings: ImIntegrationSettings): Promise<I
     for (const provider of settings.providers) {
       const current = browserMock.imGatewayByProvider[provider.providerId] ?? browserMock.imGatewayByProvider.feishu;
       const identityConfigured =
-        provider.config.type === "feishu"
+        provider.config.type === "feishu" || provider.config.type === "qq"
           ? Boolean(provider.config.appId.trim())
-          : provider.config.type === "qq"
-            ? Boolean(provider.config.appId.trim())
+          : provider.config.type === "wecom"
+            ? Boolean(provider.config.botId.trim())
             : Boolean(provider.config.accountId.trim());
       browserMock.imGatewayByProvider[provider.providerId] = {
         ...current,

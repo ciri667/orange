@@ -264,7 +264,7 @@ export function SettingsDrawer({
         id: "im",
         group: "配置",
         label: "即时通讯",
-        description: "飞书、QQ 和微信长连接与白名单",
+        description: "飞书、QQ、微信和企业微信长连接与白名单",
         meta: settingsSummary.feishuStatus,
         icon: MessageCircle,
         tone: runningImCount > 0 ? "success" : enabledImCount > 0 ? "warning" : "neutral",
@@ -410,7 +410,9 @@ export function SettingsDrawer({
             ? { ...provider.config, appId: provider.config.appId.trim() }
             : provider.config.type === "qq"
               ? { ...provider.config, appId: provider.config.appId.trim() }
-              : { ...provider.config, accountId: provider.config.accountId.trim(), baseUrl: provider.config.baseUrl.trim() };
+              : provider.config.type === "wecom"
+                ? { ...provider.config, botId: provider.config.botId.trim(), robotName: provider.config.robotName.trim() }
+                : { ...provider.config, accountId: provider.config.accountId.trim(), baseUrl: provider.config.baseUrl.trim() };
 
         return {
           ...provider,

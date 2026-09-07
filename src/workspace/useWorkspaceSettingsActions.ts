@@ -170,7 +170,7 @@ export function useWorkspaceSettingsActions({
   }
 
   async function refreshAllImStatuses() {
-    const providerIds: ImProviderId[] = ["feishu", "qq", "weixin"];
+    const providerIds: ImProviderId[] = ["feishu", "qq", "weixin", "wecom"];
     const results = await Promise.all(
       providerIds.map(async (providerId) => {
         const [credential, gateway] = await Promise.all([

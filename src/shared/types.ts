@@ -676,7 +676,7 @@ export interface UserSettings {
 }
 
 /** 当前内置 IM provider；新增 provider 时继续使用稳定小写 ID。 */
-export type ImProviderId = "feishu" | "qq" | "weixin";
+export type ImProviderId = "feishu" | "qq" | "weixin" | "wecom";
 
 /** 飞书/Lark 自建应用专属配置；appSecret 单独保存在系统安全存储。 */
 export interface FeishuProviderConfig {
@@ -701,8 +701,17 @@ export interface WeixinProviderConfig {
   secretKeyReference: string;
 }
 
+/** 企业微信智能机器人专属配置；Secret 单独保存在系统安全存储。 */
+export interface WecomProviderConfig {
+  type: "wecom";
+  botId: string;
+  robotName: string;
+  wsUrl: string;
+  secretKeyReference: string;
+}
+
 /** IM provider 平台专属配置；新增 IM 时在这里扩展联合类型。 */
-export type ImProviderConfig = FeishuProviderConfig | QqProviderConfig | WeixinProviderConfig;
+export type ImProviderConfig = FeishuProviderConfig | QqProviderConfig | WeixinProviderConfig | WecomProviderConfig;
 
 /** 单个 IM provider 的通用配置；平台专属字段放在 config 中。 */
 export interface ImProviderSettings {
@@ -737,6 +746,11 @@ export type QqIntegrationSettings = ImProviderSettings & {
 export type WeixinIntegrationSettings = ImProviderSettings & {
   providerId: "weixin";
   config: WeixinProviderConfig;
+};
+
+export type WecomIntegrationSettings = ImProviderSettings & {
+  providerId: "wecom";
+  config: WecomProviderConfig;
 };
 
 /** IM provider secret 保存状态；不包含明文 secret。 */

@@ -137,9 +137,34 @@ export const defaultBrowserWeixinProvider: ImProviderSettings = {
   },
 };
 
+/** 浏览器开发态默认企业微信 provider。 */
+export const defaultBrowserWecomProvider: ImProviderSettings = {
+  providerId: "wecom",
+  enabled: false,
+  defaultKnowledgeBaseIds: [],
+  allowedUserOpenIds: [],
+  allowedChatIds: [],
+  discoveredUserOpenIds: [],
+  discoveredChatIds: [],
+  requireMention: true,
+  updatedAt: "刚刚",
+  config: {
+    type: "wecom",
+    botId: "",
+    robotName: "",
+    wsUrl: "wss://openws.work.weixin.qq.com",
+    secretKeyReference: "orange-wecom-bot-secret",
+  },
+};
+
 /** 浏览器开发态默认 IM 设置；桌面端真实设置由 SQLite 和系统 keyring 保存。 */
 export const defaultBrowserImSettings: ImIntegrationSettings = {
-  providers: [defaultBrowserFeishuProvider, defaultBrowserQqProvider, defaultBrowserWeixinProvider],
+  providers: [
+    defaultBrowserFeishuProvider,
+    defaultBrowserQqProvider,
+    defaultBrowserWeixinProvider,
+    defaultBrowserWecomProvider,
+  ],
 };
 
 /** 浏览器开发态镜像后端内置模板，只用于模拟设置页“新增 Provider”入口。 */
@@ -200,7 +225,13 @@ export function getFeishuProvider(settings: ImIntegrationSettings): ImProviderSe
 export function getImProvider(settings: ImIntegrationSettings, providerId: ImProviderId): ImProviderSettings {
   return (
     settings.providers.find((provider) => provider.providerId === providerId) ??
-    (providerId === "qq" ? defaultBrowserQqProvider : providerId === "weixin" ? defaultBrowserWeixinProvider : defaultBrowserFeishuProvider)
+    (providerId === "qq"
+      ? defaultBrowserQqProvider
+      : providerId === "weixin"
+        ? defaultBrowserWeixinProvider
+        : providerId === "wecom"
+          ? defaultBrowserWecomProvider
+          : defaultBrowserFeishuProvider)
   );
 }
 
@@ -1245,6 +1276,7 @@ export const browserMock: {
     feishu: createMockGatewayStatus("feishu", "feishu"),
     qq: createMockGatewayStatus("qq", "qq"),
     weixin: createMockGatewayStatus("weixin", "weixin"),
+    wecom: createMockGatewayStatus("wecom", "wecom"),
   },
   auditLogs: [],
   appEventLogs: [],

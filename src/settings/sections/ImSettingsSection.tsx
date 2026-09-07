@@ -23,6 +23,7 @@ import type {
   ImProviderSettings,
   KnowledgeBase,
   QqProviderConfig,
+  WecomProviderConfig,
   WeixinProviderConfig,
 } from "../../shared/types";
 
@@ -30,9 +31,10 @@ const PROVIDER_TABS: Array<{ id: ImProviderId; label: string }> = [
   { id: "feishu", label: "飞书" },
   { id: "qq", label: "QQ" },
   { id: "weixin", label: "微信" },
+  { id: "wecom", label: "企业微信" },
 ];
 
-/** 即时通讯设置分区，按 provider 切换飞书、QQ 官方机器人和个人微信。 */
+/** 即时通讯设置分区，按 provider 切换飞书、QQ、个人微信和企业微信。 */
 export function ImSettingsSection({
   knowledgeBases,
   providers,
@@ -157,9 +159,15 @@ export function ImSettingsSection({
         {provider.config.type === "weixin" ? (
           <WeixinConfigFields config={provider.config} loginStatus={weixinLoginStatus} isBusy={isBusy} onStartLogin={onStartWeixinLogin} onCancelLogin={onCancelWeixinLogin} />
         ) : null}
+        {provider.config.type === "wecom" ? (
+          <WecomConfigFields
+            config={provider.config}
+            onChange={(config) => onProviderDraftChange(provider.providerId, { ...provider, config })}
+          />
+        ) : null}
         {provider.config.type !== "weixin" ? (
           <label className={cn(fieldLabelClassName, "col-span-full")}>
-            <span>{provider.config.type === "qq" ? "App Secret" : "App Secret"}</span>
+            <span>{secretFieldLabel(provider.config.type)}</span>
             <div className="grid grid-cols-[minmax(0,1fr)_auto] gap-2">
               <input
                 className={cn(fieldControlClassName, "tracking-[0.02em]")}
@@ -334,6 +342,27 @@ function QqConfigFields({
   );
 }
 
+function WecomConfigFields({
+  config,
+  onChange,
+}: {
+  config: WecomProviderConfig;
+  onChange: (config: WecomProviderConfig) => void;
+}) {
+  return (
+    <>
+      <label className={fieldLabelClassName}>
+        <span>Bot ID</span>
+        <input className={fieldControlClassName} value={config.botId} onChange={(event) => onChange({ ...config, botId: event.target.value })} placeholder="智能机器人 BotId" />
+      </label>
+      <label className={fieldLabelClassName}>
+        <span>机器人名称</span>
+        <input className={fieldControlClassName} value={config.robotName} onChange={(event) => onChange({ ...config, robotName: event.target.value })} placeholder="与企业微信后台显示名一致" />
+      </label>
+    </>
+  );
+}
+
 function WeixinConfigFields({
   config,
   loginStatus,
@@ -378,7 +407,20 @@ function providerLabel(providerId: ImProviderId) {
   if (providerId === "weixin") {
     return "微信";
   }
+  if (providerId === "wecom") {
+    return "企业微信";
+  }
   return "飞书/Lark";
+}
+
+function secretFieldLabel(type: ImProviderSettings["config"]["type"]) {
+  if (type === "qq") {
+    return "App Secret";
+  }
+  if (type === "wecom") {
+    return "Secret";
+  }
+  return "App Secret";
 }
 
 function providerHelpText(providerId: ImProviderId) {
@@ -387,6 +429,9 @@ function providerHelpText(providerId: ImProviderId) {
   }
   if (providerId === "weixin") {
     return "使用腾讯官方个人微信助手接口（iLink）。需要较新的手机微信，且客户端包含 ClawBot 插件。扫码登录后无需公网回调。待确认改动使用文字指令审批。";
+  }
+  if (providerId === "wecom") {
+    return "使用企业微信智能机器人长连接，无需公网回调。请在管理工具 → 智能机器人中以 API 模式创建，填写 BotId 和 Secret，并把机器人拉进内部群。群聊 @ 检测依赖上方填写的机器人名称。待确认改动使用“详情 / 确认 / 取消 <编号>”文字指令。";
   }
   return "待确认改动使用飞书审批卡片。请在飞书开发者后台启用长连接，并订阅 im.message.receive_v1 和 card.action.trigger。";
 }
