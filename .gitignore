@@ -8,6 +8,8 @@ src-tauri/sidecars/bin/qq-gateway
 src-tauri/sidecars/bin/qq-gateway.exe
 src-tauri/sidecars/bin/weixin-gateway
 src-tauri/sidecars/bin/weixin-gateway.exe
+src-tauri/sidecars/bin/wecom-gateway
+src-tauri/sidecars/bin/wecom-gateway.exe
 docs/
 .idea/
 .zcode/

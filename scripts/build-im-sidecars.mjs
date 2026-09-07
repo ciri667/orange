@@ -53,6 +53,21 @@ const sidecarProviders = [
       ];
     },
   },
+  {
+    providerId: "wecom",
+    displayName: "WeCom AI Bot",
+    sourceDir: join(projectRoot, "src-tauri", "sidecars", "wecom-gateway"),
+    binaryName: "wecom-gateway",
+    buildTool: "go",
+    buildArgs(outputPath) {
+      return [
+        ["go", ["version"]],
+        ["go", ["mod", "tidy"]],
+        ["go", ["test", "./..."]],
+        ["go", ["build", "-trimpath", "-o", outputPath, "."]],
+      ];
+    },
+  },
 ];
 
 /** 解析命令行参数；只支持 provider 过滤，避免把未知参数静默吞掉。 */
