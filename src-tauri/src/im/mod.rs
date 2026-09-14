@@ -382,10 +382,7 @@ mod tests {
     /** 纯图 IM 会话标题使用「图片」，和 App 空正文配图对齐。 */
     #[test]
     fn im_preview_uses_image_fallback_for_empty_prompt() {
-        assert_eq!(
-            super::inbound::conversation_preview_source("  ", 2),
-            "图片"
-        );
+        assert_eq!(super::inbound::conversation_preview_source("  ", 2), "图片");
         assert_eq!(
             format_im_session_title(&build_im_session_identity(
                 "feishu",

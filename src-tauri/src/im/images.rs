@@ -14,17 +14,9 @@ const WEIXIN_CDN_BASE_URL: &str = "https://novac2c.cdn.weixin.qq.com/c2c";
 /** IM 入站图片下载鉴权；平台专属 header 只在这里组装，不进入 JSONL 契约。 */
 pub(crate) enum ImageFetchAuth {
     Public,
-    Qq {
-        token: String,
-    },
-    Feishu {
-        token: String,
-        domain: String,
-    },
-    Weixin {
-        token: String,
-        base_url: String,
-    },
+    Qq { token: String },
+    Feishu { token: String, domain: String },
+    Weixin { token: String, base_url: String },
 }
 
 /** 下载并准入 sidecar 给出的图片引用；单张失败就跳过，不中断文字回合。 */
@@ -121,12 +113,7 @@ async fn fetch_inbound_image(
             download_feishu_resource(domain, token, message_id, image.resource_id.trim()).await
         }
         _ if is_http_url(&image.url) => {
-            download_http_url(
-                &image.url,
-                authorization_header(auth),
-                extra_headers(auth),
-            )
-            .await
+            download_http_url(&image.url, authorization_header(auth), extra_headers(auth)).await
         }
         _ => Err("缺少可下载的图片地址。".to_owned()),
     }
@@ -185,10 +172,7 @@ fn authorization_header(auth: &ImageFetchAuth) -> Option<String> {
 fn extra_headers(auth: &ImageFetchAuth) -> Vec<(String, String)> {
     match auth {
         ImageFetchAuth::Weixin { .. } => vec![
-            (
-                "AuthorizationType".to_owned(),
-                "ilink_bot_token".to_owned(),
-            ),
+            ("AuthorizationType".to_owned(), "ilink_bot_token".to_owned()),
             ("X-WECHAT-UIN".to_owned(), random_wechat_uin()),
         ],
         _ => Vec::new(),
@@ -301,8 +285,7 @@ fn feishu_resource_url(
     resource_id: &str,
     resource_type: &str,
 ) -> Result<String, String> {
-    let mut url =
-        reqwest::Url::parse(base).map_err(|_| "飞书域名无效。".to_owned())?;
+    let mut url = reqwest::Url::parse(base).map_err(|_| "飞书域名无效。".to_owned())?;
     {
         let mut segments = url
             .path_segments_mut()
@@ -433,8 +416,13 @@ fn response_content_type(response: &reqwest::Response) -> String {
 }
 
 fn first_json_url(value: &Value) -> Option<&str> {
-    for key in ["url", "full_url", "file_url", "cdn_url", "pic_url", "picurl"] {
-        if let Some(url) = value.get(key).and_then(Value::as_str).filter(|item| is_http_url(item))
+    for key in [
+        "url", "full_url", "file_url", "cdn_url", "pic_url", "picurl",
+    ] {
+        if let Some(url) = value
+            .get(key)
+            .and_then(Value::as_str)
+            .filter(|item| is_http_url(item))
         {
             return Some(url);
         }
@@ -444,7 +432,10 @@ fn first_json_url(value: &Value) -> Option<&str> {
 
 fn first_json_base64(value: &Value) -> Option<&str> {
     for key in ["data", "file_data", "buffer", "content"] {
-        if let Some(encoded) = value.get(key).and_then(Value::as_str).filter(|item| !item.is_empty())
+        if let Some(encoded) = value
+            .get(key)
+            .and_then(Value::as_str)
+            .filter(|item| !item.is_empty())
         {
             return Some(encoded);
         }
@@ -642,19 +633,25 @@ fn decrypt_aes_cbc(key: &[u8], iv: &[u8], data: &[u8]) -> Result<Vec<u8>, String
     let iv: [u8; 16] = iv.try_into().map_err(|_| "微信图片 IV 无效。".to_owned())?;
     match key.len() {
         16 => {
-            let key: [u8; 16] = key.try_into().map_err(|_| "微信 aeskey 无效。".to_owned())?;
+            let key: [u8; 16] = key
+                .try_into()
+                .map_err(|_| "微信 aeskey 无效。".to_owned())?;
             Decryptor::<Aes128>::new(&key.into(), &iv.into())
                 .decrypt_padded_vec_mut::<Pkcs7>(data)
                 .map_err(|_| "微信图片 AES-128 解密失败。".to_owned())
         }
         24 => {
-            let key: [u8; 24] = key.try_into().map_err(|_| "微信 aeskey 无效。".to_owned())?;
+            let key: [u8; 24] = key
+                .try_into()
+                .map_err(|_| "微信 aeskey 无效。".to_owned())?;
             Decryptor::<Aes192>::new(&key.into(), &iv.into())
                 .decrypt_padded_vec_mut::<Pkcs7>(data)
                 .map_err(|_| "微信图片 AES-192 解密失败。".to_owned())
         }
         32 => {
-            let key: [u8; 32] = key.try_into().map_err(|_| "微信 aeskey 无效。".to_owned())?;
+            let key: [u8; 32] = key
+                .try_into()
+                .map_err(|_| "微信 aeskey 无效。".to_owned())?;
             Decryptor::<Aes256>::new(&key.into(), &iv.into())
                 .decrypt_padded_vec_mut::<Pkcs7>(data)
                 .map_err(|_| "微信图片 AES-256 解密失败。".to_owned())
@@ -701,21 +698,15 @@ mod tests {
     #[test]
     fn builds_weixin_cdn_url_from_encrypt_query() {
         let url = weixin_cdn_download_url("abc+def/g=");
-        assert!(url.starts_with(
-            "https://novac2c.cdn.weixin.qq.com/c2c/download?encrypted_query_param="
-        ));
+        assert!(url
+            .starts_with("https://novac2c.cdn.weixin.qq.com/c2c/download?encrypted_query_param="));
         assert!(url.contains("abc%2Bdef%2Fg%3D"));
     }
 
     #[test]
     fn builds_feishu_resource_url_with_encoded_path() {
-        let url = feishu_resource_url(
-            "https://open.feishu.cn",
-            "om_1",
-            "img_v2_a+b",
-            "image",
-        )
-        .expect("url");
+        let url = feishu_resource_url("https://open.feishu.cn", "om_1", "img_v2_a+b", "image")
+            .expect("url");
         assert!(url.contains("/open-apis/im/v1/messages/om_1/resources/"));
         assert!(url.contains("type=image"));
         assert!(url.contains("img_v2_a"));
@@ -732,8 +723,12 @@ mod tests {
         let b64_hex = STANDARD.encode(hex.as_bytes());
 
         assert_eq!(weixin_aes_key_candidates(&hex)[0], key);
-        assert!(weixin_aes_key_candidates(&b64_raw).iter().any(|item| item == &key));
-        assert!(weixin_aes_key_candidates(&b64_hex).iter().any(|item| item == &key));
+        assert!(weixin_aes_key_candidates(&b64_raw)
+            .iter()
+            .any(|item| item == &key));
+        assert!(weixin_aes_key_candidates(&b64_hex)
+            .iter()
+            .any(|item| item == &key));
     }
 
     #[test]
@@ -759,7 +754,8 @@ mod tests {
         assert_eq!(&from_hex[..png.len()], &png);
 
         let from_b64_hex =
-            decrypt_weixin_aes(&encrypted, &STANDARD.encode(to_hex(&key).as_bytes())).expect("b64 hex");
+            decrypt_weixin_aes(&encrypted, &STANDARD.encode(to_hex(&key).as_bytes()))
+                .expect("b64 hex");
         assert_eq!(&from_b64_hex[..png.len()], &png);
 
         let from_b64_raw = decrypt_weixin_aes(&encrypted, &STANDARD.encode(key)).expect("b64 raw");

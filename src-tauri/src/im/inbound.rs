@@ -611,9 +611,7 @@ pub(crate) fn is_conversation_payload(
     if kind == "card_action" || kind == "discovery" {
         return false;
     }
-    !text.trim().is_empty()
-        || image_count > 0
-        || matches!(message_type, "image" | "post" | "mixed")
+    !text.trim().is_empty() || image_count > 0 || matches!(message_type, "image" | "post" | "mixed")
 }
 
 /** 构造拦截原因。 */

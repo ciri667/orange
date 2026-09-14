@@ -98,9 +98,7 @@ pub fn save_conversation_image_from_bytes(
             .map(str::to_owned),
     };
     let mut saved = save_conversation_images(root, &[input])?;
-    saved
-        .pop()
-        .ok_or_else(|| "保存对话图片失败。".to_owned())
+    saved.pop().ok_or_else(|| "保存对话图片失败。".to_owned())
 }
 
 /** 逐张准入已下载图片；单张失败或超限时跳过，不让坏图阻断整批文字。 */
