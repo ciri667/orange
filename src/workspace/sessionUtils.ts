@@ -4,6 +4,7 @@ import type {
   AgentActionType,
   AgentMessage,
   AgentSession,
+  ConversationImageAttachment,
   FolderEntry,
   KnowledgeBase,
   Note,
@@ -122,9 +123,19 @@ export function isPersistedSession(snapshot: WorkspaceSnapshot, session: AgentSe
   return snapshot.sessions.some((item) => item.id === session.id);
 }
 
-/** 首条用户消息会成为会话标题；空输入不会触发提交，保留默认“新会话”。 */
-export function buildTitleFromFirstPrompt(prompt: string) {
-  return prompt.trim() || DEFAULT_SESSION_TITLE;
+/** 首条用户消息会成为会话标题；纯图片消息用「图片」兜底。 */
+export function buildTitleFromFirstPrompt(prompt: string, imageCount = 0) {
+  const trimmed = prompt.trim();
+  if (trimmed) {
+    return trimmed;
+  }
+  if (imageCount === 1) {
+    return "图片";
+  }
+  if (imageCount > 1) {
+    return `${imageCount} 张图片`;
+  }
+  return DEFAULT_SESSION_TITLE;
 }
 
 /** 仅在空白新会话第一次发送消息前允许用用户输入替换标题。 */
@@ -133,10 +144,15 @@ export function shouldUseFirstPromptAsTitle(session: AgentSession) {
 }
 
 /** 返回替换标题后的快照和会话对象，避免在运行 Agent 前丢失用户首条输入标题。 */
-export function applyFirstPromptTitle(snapshot: WorkspaceSnapshot, session: AgentSession, prompt: string) {
+export function applyFirstPromptTitle(
+  snapshot: WorkspaceSnapshot,
+  session: AgentSession,
+  prompt: string,
+  imageCount = 0,
+) {
   const nextSession = {
     ...session,
-    title: buildTitleFromFirstPrompt(prompt),
+    title: buildTitleFromFirstPrompt(prompt, imageCount),
     updatedAt: formatLocalDateTime(),
   };
 
@@ -151,13 +167,19 @@ export function applyFirstPromptTitle(snapshot: WorkspaceSnapshot, session: Agen
 }
 
 /** 构造发送后立即展示的用户消息，后端会通过同一 ID 复用并持久化本轮记录。 */
-export function buildOptimisticUserMessage(prompt: string, action: AgentActionType, mentionedFileIds: string[]): AgentMessage {
+export function buildOptimisticUserMessage(
+  prompt: string,
+  action: AgentActionType,
+  mentionedFileIds: string[],
+  images: ConversationImageAttachment[] = [],
+): AgentMessage {
   return {
     id: createLocalId("user"),
     role: "user",
     content: prompt,
     action,
     mentionedFileIds: mentionedFileIds.length ? mentionedFileIds : undefined,
+    images: images.length ? images : undefined,
   };
 }
 
@@ -331,16 +353,15 @@ export function rewindSessionToUserMessage(session: AgentSession, messageId: str
   }
 
   const nextPrompt = prompt.trim();
-  if (!nextPrompt) {
-    throw new Error("消息不能为空。");
-  }
-
   const messageIndex = session.messages.findIndex((message) => message.id === messageId);
   if (messageIndex < 0) {
     throw new Error("找不到要编辑的用户消息。");
   }
   if (session.messages[messageIndex].role !== "user") {
     throw new Error("只能编辑用户消息。");
+  }
+  if (!nextPrompt && !session.messages[messageIndex].images?.length) {
+    throw new Error("消息不能为空。");
   }
 
   const oldContent = session.messages[messageIndex].content;
@@ -365,7 +386,10 @@ export function rewindSessionToUserMessage(session: AgentSession, messageId: str
 
   return {
     ...session,
-    title: isFirstUser && session.title.trim() === oldContent.trim() ? nextPrompt : session.title,
+    title:
+      isFirstUser && session.title.trim() === oldContent.trim()
+        ? buildTitleFromFirstPrompt(nextPrompt, session.messages[messageIndex].images?.length ?? 0)
+        : session.title,
     messages,
     pendingChange: undefined,
     pendingChangeSet: undefined,

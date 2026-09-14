@@ -1,10 +1,12 @@
-import { ArrowRight, BrainCircuit, FileText, Image, Sparkles, Square } from "lucide-react";
+import { ArrowRight, BrainCircuit, FileText, Image, ImagePlus, Sparkles, Square } from "lucide-react";
 import {
   useMemo,
   useRef,
   useState,
   type ChangeEventHandler,
+  type ClipboardEventHandler,
   type CompositionEventHandler,
+  type DragEventHandler,
   type KeyboardEventHandler,
 } from "react";
 import { Button } from "../shared/Button";
@@ -15,6 +17,14 @@ import { getProviderModelSelectionLabel } from "../shared/modelSelection";
 import { ModelCascadeSelector } from "../shared/ModelCascadeSelector";
 import { OverflowTooltipText } from "../shared/OverflowTooltipText";
 import type { AgentSecuritySettings, AgentSession, AgentSkill, ModelConfig } from "../shared/types";
+import {
+  fileToConversationImageDraft,
+  collectImageFilesFromDataTransfer,
+  MAX_CONVERSATION_IMAGES,
+  revokeConversationImagePreview,
+  validateConversationImageFiles,
+  type ConversationImageDraft,
+} from "./conversationImages";
 import { AgentSecurityLevelControl } from "./AgentPanelSections";
 
 /** 输入法结束组词后的短保护窗口；部分中文输入法会先触发 compositionend，再派发 Enter keydown。 */
@@ -118,6 +128,7 @@ export function AgentInput({
   selectedSkillIds,
   mentionedFiles = [],
   selectedMentionedFileIds = [],
+  draftImages = [],
   modelConfig,
   agentSecurity,
   turnModelSelection,
@@ -126,6 +137,8 @@ export function AgentInput({
   onPromptChange,
   onSelectedSkillIdsChange,
   onSelectedMentionedFileIdsChange,
+  onDraftImagesChange,
+  onNotice,
   onSubmitPrompt,
   onAbortTurn,
   onClearQueuedFollowUp,
@@ -140,6 +153,8 @@ export function AgentInput({
   mentionedFiles?: AgentMentionFile[];
   /** 本轮临时选择的 @ 文件 ID；发送成功后由父组件清空。 */
   selectedMentionedFileIds?: string[];
+  /** 尚未发送的对话图片草稿；发送成功后由父组件清空。 */
+  draftImages?: ConversationImageDraft[];
   modelConfig: ModelConfig;
   agentSecurity?: AgentSecuritySettings;
   /** 本轮显式选择的 provider/model，空字符串表示跟随会话/全局默认。 */
@@ -150,6 +165,8 @@ export function AgentInput({
   onPromptChange: (value: string) => void;
   onSelectedSkillIdsChange: (skillIds: string[]) => void;
   onSelectedMentionedFileIdsChange?: (fileIds: string[]) => void;
+  onDraftImagesChange?: (images: ConversationImageDraft[]) => void;
+  onNotice?: (message: string) => void;
   onSubmitPrompt: () => void;
   /** 中断当前正在跑的 Agent 回合。 */
   onAbortTurn?: () => void;
@@ -178,6 +195,7 @@ export function AgentInput({
   const isPromptComposingRef = useRef(false);
   /** Agent textarea 引用，用于读取光标位置并在选择 skill 后恢复焦点。 */
   const promptTextareaRef = useRef<HTMLTextAreaElement | null>(null);
+  const imageFileInputRef = useRef<HTMLInputElement | null>(null);
   /** 最近一次输入法组词结束时间，用于过滤 compositionend 后紧邻的候选确认 Enter。 */
   const lastPromptCompositionEndAtRef = useRef(0);
   /** 记录已在组词阶段捕获到 Enter，避免常规事件顺序下过度拦截用户后续发送。 */
@@ -568,14 +586,66 @@ export function AgentInput({
     });
 
     // 空输入只吞掉回车，避免产生无意义空行；真正发送仍复用按钮的同一业务入口。
-    if (!promptLength) {
+    if (!promptLength && !draftImages.length) {
       return;
     }
 
     onSubmitPrompt();
   };
 
-  const hasComposerChips = selectedExplicitSkillChips.length > 0 || selectedMentionFileChips.length > 0;
+  async function appendDraftImages(files: File[]) {
+    const { accepted, error } = validateConversationImageFiles(files, draftImages.length);
+    if (error) {
+      onNotice?.(error);
+      return;
+    }
+    if (!accepted.length || !onDraftImagesChange) {
+      return;
+    }
+
+    try {
+      const nextDrafts = await Promise.all(accepted.map((file) => fileToConversationImageDraft(file)));
+      onDraftImagesChange([...draftImages, ...nextDrafts]);
+    } catch (error) {
+      onNotice?.(error instanceof Error ? error.message : "无法读取图片。");
+    }
+  }
+
+  function handleRemoveDraftImage(localId: string) {
+    const removed = draftImages.find((image) => image.localId === localId);
+    if (removed) {
+      revokeConversationImagePreview(removed);
+    }
+    onDraftImagesChange?.(draftImages.filter((image) => image.localId !== localId));
+  }
+
+  const handlePromptPaste: ClipboardEventHandler<HTMLTextAreaElement> = (event) => {
+    const files = collectImageFilesFromDataTransfer(event.clipboardData);
+    if (!files.length) {
+      return;
+    }
+    event.preventDefault();
+    void appendDraftImages(files);
+  };
+
+  const handleComposerDragOver: DragEventHandler<HTMLElement> = (event) => {
+    if (!collectImageFilesFromDataTransfer(event.dataTransfer).length) {
+      return;
+    }
+    event.preventDefault();
+    event.dataTransfer.dropEffect = "copy";
+  };
+
+  const handleComposerDrop: DragEventHandler<HTMLElement> = (event) => {
+    const files = collectImageFilesFromDataTransfer(event.dataTransfer);
+    if (!files.length) {
+      return;
+    }
+    event.preventDefault();
+    void appendDraftImages(files);
+  };
+
+  const hasComposerChips = selectedExplicitSkillChips.length > 0 || selectedMentionFileChips.length > 0 || draftImages.length > 0;
   /** 权限设置缺失时仍展示基础档，避免输入条因旧设置结构崩溃。 */
   const resolvedAgentSecurity = agentSecurity ?? {
     defaultLevel: "basic" as const,
@@ -595,7 +665,11 @@ export function AgentInput({
   const showStopButton = isBusy;
 
   return (
-    <footer className="flex min-w-0 shrink-0 flex-col gap-1 rounded-2xl border border-border-translucent bg-surface-translucent px-2.5 py-2 pr-2 shadow-[0_8px_20px_rgba(47,39,29,0.05)]">
+    <footer
+      className="flex min-w-0 shrink-0 flex-col gap-1 rounded-2xl border border-border-translucent bg-surface-translucent px-2.5 py-2 pr-2 shadow-[0_8px_20px_rgba(47,39,29,0.05)]"
+      onDragOver={handleComposerDragOver}
+      onDrop={handleComposerDrop}
+    >
       {queuedFollowUp ? (
         <div className="flex min-w-0 items-center gap-2 px-0.5 pt-0.5" role="status" aria-label="输入区的排队指令">
           <Chip className="max-w-full flex-1" onRemove={onClearQueuedFollowUp} removeLabel="取消排队指令">
@@ -635,6 +709,23 @@ export function AgentInput({
                     {file.kind === "image" ? <Image size={12} /> : <FileText size={12} />}
                     <OverflowTooltipText text={file.displayName} logArea="agent_mentioned_file_chip" />
                   </Chip>
+                ))}
+              </div>
+            )}
+            {draftImages.length > 0 && (
+              <div className="inline-flex min-w-0 max-w-full items-center gap-1.5 overflow-x-auto" aria-label="待发送图片">
+                {draftImages.map((image) => (
+                  <span key={image.localId} className="relative inline-flex h-12 w-12 shrink-0 overflow-hidden rounded-md border border-primary-border">
+                    <img src={image.previewUrl} alt={image.name || "图片"} className="h-full w-full object-cover" />
+                    <button
+                      type="button"
+                      className="absolute top-0.5 right-0.5 inline-grid size-4 place-items-center rounded-full border-0 bg-ink/70 text-[10px] leading-none text-white"
+                      aria-label={`移除 ${image.name || "图片"}`}
+                      onClick={() => handleRemoveDraftImage(image.localId)}
+                    >
+                      {"×"}
+                    </button>
+                  </span>
                 ))}
               </div>
             )}
@@ -718,11 +809,37 @@ export function AgentInput({
           onCompositionStart={handlePromptCompositionStart}
           onCompositionEnd={handlePromptCompositionEnd}
           onKeyDown={handlePromptKeyDown}
+          onPaste={handlePromptPaste}
           placeholder={promptPlaceholder}
           aria-label="Agent 输入"
         />
       </div>
       <div className="flex min-w-0 items-center gap-2 pt-0.5">
+        <input
+          ref={imageFileInputRef}
+          type="file"
+          accept="image/png,image/jpeg,image/webp,image/gif"
+          multiple
+          className="hidden"
+          aria-hidden="true"
+          tabIndex={-1}
+          onChange={(event) => {
+            const files = Array.from(event.currentTarget.files ?? []);
+            event.currentTarget.value = "";
+            void appendDraftImages(files);
+          }}
+        />
+        <Button
+          variant="icon"
+          size="compact"
+          className="size-[34px] min-h-[34px] min-w-[34px] border-transparent bg-transparent text-ink-muted hover:enabled:bg-surface-hover hover:enabled:text-ink"
+          title="添加图片"
+          aria-label="添加图片"
+          disabled={Boolean(queuedFollowUp) || draftImages.length >= MAX_CONVERSATION_IMAGES}
+          onClick={() => imageFileInputRef.current?.click()}
+        >
+          <ImagePlus size={16} />
+        </Button>
         {!activeSession.imIdentity && (
           <AgentSecurityLevelControl
             activeSession={activeSession}
@@ -765,7 +882,7 @@ export function AgentInput({
             title={sendTitle}
             aria-label={sendTitle}
             onClick={onSubmitPrompt}
-            disabled={!prompt.trim() || Boolean(queuedFollowUp)}
+            disabled={(!prompt.trim() && !draftImages.length) || Boolean(queuedFollowUp)}
           >
             <ArrowRight size={16} />
           </Button>

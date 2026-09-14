@@ -25,6 +25,7 @@
         "enable": true,
         "scope": [
           "$HOME/**",
+          "$APPDATA/**",
           "$DESKTOP/**",
           "$DOCUMENT/**",
           "$DOWNLOAD/**",

@@ -18,6 +18,7 @@ import type {
   WorkspaceDocument,
 } from "../shared/types";
 import { AgentInput, type AgentMentionFile } from "./AgentInput";
+import type { ConversationImageDraft } from "./conversationImages";
 import {
   AgentMessageList,
   AgentScopeSelector,
@@ -40,6 +41,7 @@ export function AgentPanel({
   selectedSkillIds,
   mentionedFiles,
   selectedMentionedFileIds,
+  draftImages,
   modelConfig,
   agentSecurity,
   turnModelSelection,
@@ -63,6 +65,8 @@ export function AgentPanel({
   onPromptChange,
   onSelectedSkillIdsChange,
   onSelectedMentionedFileIdsChange,
+  onDraftImagesChange,
+  onNotice,
   onSubmitPrompt,
   onEditUserMessage,
   onAbortTurn,
@@ -95,6 +99,7 @@ export function AgentPanel({
   mentionedFiles: AgentMentionFile[];
   /** 本轮临时选择的 @ 文件 ID。 */
   selectedMentionedFileIds: string[];
+  draftImages?: ConversationImageDraft[];
   modelConfig: ModelConfig;
   agentSecurity: AgentSecuritySettings;
   /** 本轮显式选择的 provider/model，空字符串表示跟随会话/全局默认。 */
@@ -125,6 +130,8 @@ export function AgentPanel({
   onPromptChange: (value: string) => void;
   onSelectedSkillIdsChange: (skillIds: string[]) => void;
   onSelectedMentionedFileIdsChange: (fileIds: string[]) => void;
+  onDraftImagesChange?: (images: ConversationImageDraft[]) => void;
+  onNotice?: (message: string) => void;
   onSubmitPrompt: () => void;
   /** 编辑已发送的用户消息并截断其后历史重跑。 */
   onEditUserMessage?: (messageId: string, prompt: string) => void;
@@ -320,6 +327,7 @@ export function AgentPanel({
         selectedSkillIds={selectedSkillIds}
         mentionedFiles={mentionedFiles}
         selectedMentionedFileIds={selectedMentionedFileIds}
+        draftImages={draftImages}
         modelConfig={modelConfig}
         agentSecurity={agentSecurity}
         turnModelSelection={turnModelSelection}
@@ -328,6 +336,8 @@ export function AgentPanel({
         onPromptChange={onPromptChange}
         onSelectedSkillIdsChange={onSelectedSkillIdsChange}
         onSelectedMentionedFileIdsChange={onSelectedMentionedFileIdsChange}
+        onDraftImagesChange={onDraftImagesChange}
+        onNotice={onNotice}
         onSubmitPrompt={onSubmitPrompt}
         onAbortTurn={onAbortTurn}
         onClearQueuedFollowUp={onClearQueuedFollowUp}

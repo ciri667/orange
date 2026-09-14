@@ -359,6 +359,25 @@ export interface AgentTurnProgressEvent {
   content?: string;
 }
 
+/** 对话图片的持久引用；二进制留在附件目录，会话 JSON 只保存元数据。 */
+export interface ConversationImageAttachment {
+  id: string;
+  mimeType: string;
+  byteSize: number;
+  width?: number;
+  height?: number;
+  name?: string;
+  /** 本机绝对路径或浏览器 mock 的 data URL，仅供预览。 */
+  absolutePath: string;
+}
+
+/** 前端提交给准入命令的图片字节；不得写入日志。 */
+export interface ConversationImageInput {
+  mimeType: string;
+  bytesBase64: string;
+  originalFileName?: string;
+}
+
 /** Agent 与用户的会话消息，可携带引用和工具调用轨迹。 */
 export interface AgentMessage {
   id: string;
@@ -367,6 +386,8 @@ export interface AgentMessage {
   action?: AgentActionType;
   /** 本条用户消息显式 @ 的文件 ID；仅记录本轮材料，不作为后续会话自动上下文。 */
   mentionedFileIds?: string[];
+  /** 本条用户消息上传的对话图片；旧消息缺省为空。 */
+  images?: ConversationImageAttachment[];
   citations?: Citation[];
   toolCalls?: AgentToolCall[];
   /** 本轮过程时间线；旧消息没有该字段时回退到扁平 toolCalls。 */
@@ -930,6 +951,8 @@ export interface AgentTurnRequest {
   modelId?: string;
   /** 本轮通过 slash picker 显式激活的 Skill ID；只作用于当前 turn，不写入会话。 */
   explicitSkillIds?: string[];
+  /** 本轮已准入的对话图片 ID；后端按附件目录重新解析。 */
+  imageIds?: string[];
 }
 
 /** Agent 单轮返回结果，包含更新后的完整工作台状态。 */

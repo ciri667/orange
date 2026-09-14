@@ -1,4 +1,5 @@
 import { useState } from "react";
+import type { ConversationImageDraft } from "../agent/conversationImages";
 
 /** 按会话写入草稿字段，避免切走再切回时把模型或未发送输入带到别的对话。 */
 function setSessionValue<T>(
@@ -15,6 +16,7 @@ export function useAgentTurnDraft(sessionId: string) {
   const [explicitSkillIdsBySession, setExplicitSkillIdsBySession] = useState<Record<string, string[]>>({});
   const [mentionedFileIdsBySession, setMentionedFileIdsBySession] = useState<Record<string, string[]>>({});
   const [agentPromptBySession, setAgentPromptBySession] = useState<Record<string, string>>({});
+  const [draftImagesBySession, setDraftImagesBySession] = useState<Record<string, ConversationImageDraft[]>>({});
 
   return {
     agentPrompt: agentPromptBySession[sessionId] ?? "",
@@ -25,5 +27,7 @@ export function useAgentTurnDraft(sessionId: string) {
     setExplicitSkillIds: (value: string[]) => setSessionValue(setExplicitSkillIdsBySession, sessionId, value),
     mentionedFileIds: mentionedFileIdsBySession[sessionId] ?? [],
     setMentionedFileIds: (value: string[]) => setSessionValue(setMentionedFileIdsBySession, sessionId, value),
+    draftImages: draftImagesBySession[sessionId] ?? [],
+    setDraftImages: (value: ConversationImageDraft[]) => setSessionValue(setDraftImagesBySession, sessionId, value),
   };
 }

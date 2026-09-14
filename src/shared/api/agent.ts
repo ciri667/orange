@@ -15,11 +15,48 @@ import {
   AgentTurnProgressEvent,
   AgentTurnRequest,
   AgentTurnResult,
+  ConversationImageAttachment,
+  ConversationImageInput,
   KnowledgeBase,
   Note,
   ProposedChange,
   WorkspaceSnapshot,
 } from "../types";
+import { createContentHash } from "../id";
+
+/** 把上传字节写成持久对话附件；浏览器 mock 用 data URL 代替本地文件。 */
+export async function saveConversationImageAttachments(
+  images: ConversationImageInput[],
+): Promise<ConversationImageAttachment[]> {
+  if (!images.length) {
+    return [];
+  }
+
+  if (!isTauriRuntime()) {
+    return images.map((image) => {
+      const id = mockConversationImageId(image.bytesBase64);
+      return {
+        id,
+        mimeType: image.mimeType,
+        byteSize: Math.ceil((image.bytesBase64.length * 3) / 4),
+        name: image.originalFileName,
+        absolutePath: `data:${image.mimeType};base64,${image.bytesBase64}`,
+      };
+    });
+  }
+
+  return invokeLogged<ConversationImageAttachment[]>("save_conversation_image_attachments", {
+    payload: { images },
+  });
+}
+
+function mockConversationImageId(bytesBase64: string) {
+  let hex = "";
+  for (let index = 0; hex.length < 64; index += 1) {
+    hex += createContentHash(`${bytesBase64}:${index}`).replace(/[^0-9a-f]/gi, "a");
+  }
+  return hex.slice(0, 64).toLowerCase();
+}
 
 /** 运行 Agent 单轮 loop，模型可在内部自行选择是否调用检索工具。 */
 export async function runAgentTurn(
@@ -31,6 +68,7 @@ export async function runAgentTurn(
   modelId?: string,
   explicitSkillIds: string[] = [],
   mentionedFileIds: string[] = [],
+  imageIds: string[] = [],
 ): Promise<AgentTurnResult> {
   const request: AgentTurnRequest = {
     prompt,
@@ -43,11 +81,20 @@ export async function runAgentTurn(
     modelId,
     explicitSkillIds,
     mentionedFileIds,
+    imageIds,
   };
 
   if (!isTauriRuntime()) {
     logBrowserSkillContext(browserMock.agentSkills, request);
-    const nextSnapshot = runMockAgentTurn(snapshot, prompt, action, clientMessageId, explicitSkillIds, mentionedFileIds);
+    const nextSnapshot = runMockAgentTurn(
+      snapshot,
+      prompt,
+      action,
+      clientMessageId,
+      explicitSkillIds,
+      mentionedFileIds,
+      imageIds,
+    );
     const session = nextSnapshot.sessions.find((item) => item.id === nextSnapshot.activeSessionId);
 
     if (session) {

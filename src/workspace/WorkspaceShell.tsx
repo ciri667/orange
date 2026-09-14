@@ -168,6 +168,8 @@ export function WorkspaceShell() {
     setExplicitSkillIds,
     mentionedFileIds,
     setMentionedFileIds,
+    draftImages,
+    setDraftImages,
   } = useAgentTurnDraft(snapshot?.activeSessionId || DRAFT_SESSION_ID);
   /** 只读文档预览 hook 负责异步加载和错误状态，TXT 仍由可编辑正文面板处理。 */
   const { documentPreview, documentPreviewError, isDocumentPreviewLoading } = useDocumentPreview(snapshot);
@@ -369,6 +371,8 @@ export function WorkspaceShell() {
     setExplicitSkillIds,
     mentionedFileIds,
     setMentionedFileIds,
+    draftImages,
+    setDraftImages,
     setAuditLogs,
     setAppEventLogs,
     dirtyNoteIds,
@@ -720,6 +724,7 @@ export function WorkspaceShell() {
             selectedSkillIds={explicitSkillIds}
             mentionedFiles={mentionableFiles}
             selectedMentionedFileIds={mentionedFileIds}
+            draftImages={draftImages}
             modelConfig={userSettings.modelConfig}
             agentSecurity={userSettings.agentSecurity}
             turnModelSelection={turnModelSelection}
@@ -743,6 +748,8 @@ export function WorkspaceShell() {
             onPromptChange={setAgentPrompt}
             onSelectedSkillIdsChange={setExplicitSkillIds}
             onSelectedMentionedFileIdsChange={setMentionedFileIds}
+            onDraftImagesChange={setDraftImages}
+            onNotice={setNotice}
             onSubmitPrompt={() => handleSubmitPrompt("ask")}
             onEditUserMessage={(messageId, prompt) => void handleEditUserMessageAndRerun(messageId, prompt)}
             onAbortTurn={() => void handleAbortTurn()}

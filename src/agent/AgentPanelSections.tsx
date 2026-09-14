@@ -25,6 +25,7 @@ import {
   getSessionRecoveryNoteLabel,
   getSessionTypeLabel,
 } from "../shared/selectors";
+import { conversationImageSrc } from "./conversationImages";
 import {
   encodeModelSelection,
   FOLLOW_DEFAULT_MODEL_SELECTION,
@@ -805,6 +806,28 @@ function AgentMessageItem({
           ))}
         </div>
       ) : null}
+      {message.images?.length ? (
+        <div className="my-2 flex flex-wrap gap-1.5" aria-label="本条消息的图片">
+          {message.images.map((image) => {
+            const src = conversationImageSrc(image);
+            return src ? (
+              <img
+                key={image.id}
+                src={src}
+                alt={image.name || "图片"}
+                className="h-20 max-w-[160px] rounded-md border border-border object-cover"
+              />
+            ) : (
+              <span
+                key={image.id}
+                className="inline-flex h-20 min-w-[72px] items-center justify-center rounded-md border border-border bg-surface px-2 text-[11px] text-ink-muted"
+              >
+                {image.name || "图片"}
+              </span>
+            );
+          })}
+        </div>
+      ) : null}
       {showTurnTrace ? (
         <AgentTurnTrace
           durationMs={message.turnDurationMs}
@@ -816,6 +839,7 @@ function AgentMessageItem({
       {isEditing ? (
         <UserMessageEditor
           initialContent={message.content}
+          allowEmpty={Boolean(message.images?.length)}
           onCancel={() => setIsEditing(false)}
           onSubmit={(prompt) => {
             setIsEditing(false);
@@ -827,7 +851,7 @@ function AgentMessageItem({
           {message.content ? (
             <MessageMarkdown content={message.content} streaming={liveStatus === "running"} />
           ) : null}
-          {message.content.trim() || (canEdit && !queued) ? (
+          {message.content.trim() || message.images?.length || (canEdit && !queued) ? (
             <div className="mt-1.5 flex items-center gap-0.5">
               <MessageCopyButton content={message.content} messageRole={message.role} />
               {canEdit && !queued ? (
@@ -863,16 +887,19 @@ const MESSAGE_COPY_RESET_MS = 1600;
 /** 用户消息气泡内编辑；发送后由会话动作截断后续历史并重跑。 */
 function UserMessageEditor({
   initialContent,
+  allowEmpty = false,
   onCancel,
   onSubmit,
 }: {
   initialContent: string;
+  allowEmpty?: boolean;
   onCancel: () => void;
   onSubmit: (prompt: string) => void;
 }) {
   const [draft, setDraft] = useState(initialContent);
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
   const trimmed = draft.trim();
+  const canSubmit = Boolean(trimmed) || allowEmpty;
 
   useEffect(() => {
     const textarea = textareaRef.current;
@@ -889,7 +916,7 @@ function UserMessageEditor({
       className="mt-2 grid gap-2"
       onSubmit={(event) => {
         event.preventDefault();
-        if (!trimmed) {
+        if (!canSubmit) {
           return;
         }
         onSubmit(trimmed);
@@ -905,7 +932,7 @@ function UserMessageEditor({
             event.preventDefault();
             onCancel();
           }
-          if (event.key === "Enter" && (event.ctrlKey || event.metaKey) && trimmed) {
+          if (event.key === "Enter" && (event.ctrlKey || event.metaKey) && canSubmit) {
             event.preventDefault();
             onSubmit(trimmed);
           }
@@ -917,7 +944,7 @@ function UserMessageEditor({
         <Button type="button" variant="ghost" size="compact" onClick={onCancel}>
           取消
         </Button>
-        <Button type="submit" variant="primary" size="compact" disabled={!trimmed}>
+        <Button type="submit" variant="primary" size="compact" disabled={!canSubmit}>
           发送
         </Button>
       </div>

@@ -18,9 +18,21 @@ import {
   loadSessions,
   rewindAgentSession,
   runAgentTurn,
+  saveConversationImageAttachments,
   saveSession,
 } from "../shared/tauriApi";
-import type { AgentActionType, AgentMessage, AgentSession, AgentTurnProgressEvent, AppEventLog, RequestAuditLog, WorkspaceSnapshot } from "../shared/types";
+import type { ConversationImageDraft } from "../agent/conversationImages";
+import { draftToConversationImageInput, revokeConversationImagePreview } from "../agent/conversationImages";
+import type {
+  AgentActionType,
+  AgentMessage,
+  AgentSession,
+  AgentTurnProgressEvent,
+  AppEventLog,
+  ConversationImageAttachment,
+  RequestAuditLog,
+  WorkspaceSnapshot,
+} from "../shared/types";
 import { formatLocalDateTime } from "../shared/id";
 import {
   applyFirstPromptTitle,
@@ -48,6 +60,8 @@ interface AgentTurnOptions extends WorkspaceChrome {
   setExplicitSkillIds: (value: string[]) => void;
   mentionedFileIds: string[];
   setMentionedFileIds: (value: string[]) => void;
+  draftImages: ConversationImageDraft[];
+  setDraftImages: (value: ConversationImageDraft[]) => void;
   setAuditLogs: (logs: RequestAuditLog[]) => void;
   setAppEventLogs: (logs: AppEventLog[]) => void;
   dirtyNoteIds: Set<string>;
@@ -62,6 +76,7 @@ interface QueuedFollowUp {
   modelSelection: string;
   explicitSkillIds: string[];
   mentionedFileIds: string[];
+  images?: ConversationImageAttachment[];
   clientMessageId?: string;
 }
 
@@ -81,6 +96,8 @@ export function useAgentTurn(options: AgentTurnOptions) {
     setExplicitSkillIds,
     mentionedFileIds,
     setMentionedFileIds,
+    draftImages,
+    setDraftImages,
     setAuditLogs,
     setAppEventLogs,
     dirtyNoteIds,
@@ -267,6 +284,8 @@ export function useAgentTurn(options: AgentTurnOptions) {
     syncQueuedFollowUps();
     if (!queued.clientMessageId) {
       setAgentPrompt("");
+      draftImages.forEach(revokeConversationImagePreview);
+      setDraftImages([]);
     }
     setNotice(
       reason === "capacity"
@@ -420,6 +439,7 @@ export function useAgentTurn(options: AgentTurnOptions) {
     const turnMentionedFileIds = replay?.mentionedFileIds ?? (presetPrompt ? [] : mentionedFileIds);
     const turnModelSelectionForRun = replay?.modelSelection ?? turnModelSelection;
     const turnAction = replay?.action ?? action;
+    const turnDraftImages = replay || presetPrompt ? [] : draftImages;
     const sourceActiveKnowledgeBase =
       sourceSnapshot.knowledgeBases.find((knowledgeBase) => knowledgeBase.id === sourceSnapshot.activeKnowledgeBaseId) ??
       activeKnowledgeBase;
@@ -432,7 +452,21 @@ export function useAgentTurn(options: AgentTurnOptions) {
       sourceSnapshot.sessions.find((session) => session.id === sourceSnapshot.activeSessionId) ??
       activeSession;
 
-    if (!prompt) {
+    if (!prompt && !turnDraftImages.length && !replay?.images?.length) {
+      return;
+    }
+
+    let turnImages = replay?.images ?? [];
+    if (!replay && turnDraftImages.length) {
+      try {
+        turnImages = await saveConversationImageAttachments(turnDraftImages.map(draftToConversationImageInput));
+      } catch (error) {
+        setNotice(error instanceof Error ? error.message : String(error));
+        return;
+      }
+    }
+
+    if (!prompt && !turnImages.length) {
       return;
     }
 
@@ -449,6 +483,7 @@ export function useAgentTurn(options: AgentTurnOptions) {
           modelSelection: turnModelSelectionForRun,
           explicitSkillIds: turnExplicitSkillIds,
           mentionedFileIds: turnMentionedFileIds,
+          images: turnImages,
         });
         return;
       }
@@ -456,9 +491,10 @@ export function useAgentTurn(options: AgentTurnOptions) {
 
     const optimisticMessage = replay?.clientMessageId
       ? sourceActiveSession.messages.find((message) => message.id === replay.clientMessageId) ??
-        buildOptimisticUserMessage(prompt, turnAction, turnMentionedFileIds)
-      : buildOptimisticUserMessage(prompt, turnAction, turnMentionedFileIds);
+        buildOptimisticUserMessage(prompt, turnAction, turnMentionedFileIds, turnImages)
+      : buildOptimisticUserMessage(prompt, turnAction, turnMentionedFileIds, turnImages);
     const promptBeforeSubmit = agentPrompt;
+    const draftImagesBeforeSubmit = draftImages;
     let didPersistOptimisticMessage = Boolean(replay?.clientMessageId);
     let latestSnapshot = sourceSnapshot;
     let sessionForTurn = sourceActiveSession;
@@ -496,7 +532,7 @@ export function useAgentTurn(options: AgentTurnOptions) {
         if (!isPersistedSession(sourceSnapshot, sourceActiveSession)) {
           sessionForTurn = buildAgentSession({
             knowledgeBase: sourceActiveKnowledgeBase,
-            title: buildTitleFromFirstPrompt(prompt),
+            title: buildTitleFromFirstPrompt(prompt, turnImages.length),
           });
           snapshotForTurn = {
             ...sourceSnapshot,
@@ -514,7 +550,7 @@ export function useAgentTurn(options: AgentTurnOptions) {
             },
           });
         } else if (shouldUseFirstPromptAsTitle(sourceActiveSession)) {
-          const titled = applyFirstPromptTitle(sourceSnapshot, sourceActiveSession, prompt);
+          const titled = applyFirstPromptTitle(sourceSnapshot, sourceActiveSession, prompt, turnImages.length);
           sessionForTurn = titled.session;
           snapshotForTurn = titled.snapshot;
           logInfo("会话标题已由首条输入确定。", {
@@ -544,6 +580,7 @@ export function useAgentTurn(options: AgentTurnOptions) {
         latestSnapshot = snapshotForTurn;
         setAgentPrompt("");
         setMentionedFileIds([]);
+        setDraftImages([]);
         snapshotForTurn = await saveSession(snapshotForTurn, sessionForTurn);
         latestSnapshot = mergeSessionTurn(snapshotRef.current ?? snapshotForTurn, snapshotForTurn, sessionForTurn.id, {
           dirtyNoteIds: dirtyNoteIdsRef.current,
@@ -552,6 +589,7 @@ export function useAgentTurn(options: AgentTurnOptions) {
         commitTurnSnapshot(latestSnapshot);
         snapshotForTurn = latestSnapshot;
         didPersistOptimisticMessage = true;
+        draftImagesBeforeSubmit.forEach(revokeConversationImagePreview);
         logInfo("用户消息已乐观落库。", {
           category: "frontend",
           event: "persist_user_message",
@@ -561,6 +599,7 @@ export function useAgentTurn(options: AgentTurnOptions) {
             sessionId: sessionForTurn.id,
             promptLength: prompt.length,
             explicitSkillCount: turnExplicitSkillIds.length,
+            imageCount: turnImages.length,
           },
         });
       }
@@ -581,6 +620,7 @@ export function useAgentTurn(options: AgentTurnOptions) {
             modelSelection: turnModelSelectionForRun,
             explicitSkillIds: turnExplicitSkillIds,
             mentionedFileIds: turnMentionedFileIds,
+            images: turnImages,
             clientMessageId: optimisticMessage.id,
           },
           "capacity",
@@ -618,6 +658,7 @@ export function useAgentTurn(options: AgentTurnOptions) {
         decodedTurnModelSelection.modelId || undefined,
         turnExplicitSkillIds,
         turnMentionedFileIds,
+        turnImages.map((image) => image.id),
       );
       const viewerSnapshot = snapshotRef.current ?? result.snapshot;
       const touched = collectTouchedFileIds(snapshotForTurn, result.snapshot);
@@ -645,6 +686,7 @@ export function useAgentTurn(options: AgentTurnOptions) {
     } catch (error) {
       if (!presetPrompt && !replay) {
         setMentionedFileIds(turnMentionedFileIds);
+        setDraftImages(draftImagesBeforeSubmit);
       }
       if (!didPersistOptimisticMessage) {
         commitTurnSnapshot(sourceSnapshot);
@@ -718,7 +760,7 @@ export function useAgentTurn(options: AgentTurnOptions) {
   /** 编辑一条已发送的用户消息，截断其后历史并立刻重跑。 */
   async function handleEditUserMessageAndRerun(messageId: string, prompt: string) {
     const nextPrompt = prompt.trim();
-    if (!nextPrompt) {
+    if (!nextPrompt && !snapshotRef.current?.sessions.find((item) => item.id === activeSession.id)?.messages.find((message) => message.id === messageId)?.images?.length) {
       return;
     }
 
@@ -789,6 +831,7 @@ export function useAgentTurn(options: AgentTurnOptions) {
         modelSelection: turnModelSelection,
         explicitSkillIds: [],
         mentionedFileIds: target.mentionedFileIds ?? [],
+        images: target.images,
         clientMessageId: target.id,
       });
     } catch (error) {
@@ -900,6 +943,7 @@ export function useAgentTurn(options: AgentTurnOptions) {
         modelSelection: turnModelSelection,
         explicitSkillIds,
         mentionedFileIds,
+        images: [],
       });
     },
     takeQueuedFollowUp: () => takeNextQueuedFollowUp(activeSession.id)?.prompt ?? null,

@@ -674,6 +674,7 @@ export function runMockAgentTurn(
   clientMessageId?: string,
   explicitSkillIds: string[] = [],
   mentionedFileIds: string[] = [],
+  imageIds: string[] = [],
 ): WorkspaceSnapshot {
   const nextSnapshot = cloneWorkspaceSnapshot(snapshot);
   const session = nextSnapshot.sessions.find((item) => item.id === nextSnapshot.activeSessionId) ?? nextSnapshot.sessions[0];
@@ -692,12 +693,16 @@ export function runMockAgentTurn(
     throw new Error("当前没有可用 Agent 会话。");
   }
 
+  const existingUserMessage = clientMessageId
+    ? session.messages.find((message) => message.id === clientMessageId)
+    : undefined;
   const userMessage: AgentMessage = {
     id: clientMessageId ?? createLocalId("user"),
     role: "user",
     content: prompt,
     action,
     mentionedFileIds: mentionedFileIds.length ? mentionedFileIds : undefined,
+    images: existingUserMessage?.images,
   };
   /** 去重后的显式 Skill ID；mock 环境只有 ID，不读取或保存 Skill 正文。 */
   const explicitSkillIdList = Array.from(new Set(explicitSkillIds.map((skillId) => skillId.trim()).filter(Boolean))).slice(0, 3);
@@ -728,7 +733,8 @@ export function runMockAgentTurn(
     session.title.trim() === "新会话" &&
     !session.messages.some((message) => message.role === "user" && message.id !== clientMessageId)
   ) {
-    session.title = prompt.trim() || "新会话";
+    session.title =
+      prompt.trim() || (existingUserMessage?.images?.length || imageIds.length ? "图片" : "新会话");
   }
 
   // 前端会在发送瞬间先落库并渲染用户消息，mock loop 只在没有该消息时补齐。
