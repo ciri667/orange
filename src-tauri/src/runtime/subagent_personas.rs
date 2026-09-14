@@ -114,7 +114,7 @@ fn builtin_agent(name: &str) -> Option<ResolvedAgent> {
 策略：search 找入口，read 跟进关键笔记，必要时再 search 验证。不要满足于标题命中。\
 终稿给没读过原文件的父 Agent，按下面结构输出：\n\
 ## 问题\n一句话。\n\
-## 证据\n每条证据带来源路径或笔记 id，以及短摘录。\n\
+## 引用\n每条引用带来源路径或笔记 id，以及短摘录。\n\
 ## 结论\n综合判断。\n\
 ## 开放问题\n仍不确定或知识库里没有的部分。".to_owned(),
             source: AgentSource::Builtin,

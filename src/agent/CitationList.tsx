@@ -7,13 +7,13 @@ export function CitationList({ citations }: { citations?: Citation[] }) {
     return null;
   }
 
-  /** 引用来源按知识库去重，用于证据块标题的低噪音摘要。 */
+  /** 引用来源按知识库去重，用于引用块标题的低噪音摘要。 */
   const sourceCount = new Set(citations.map((citation) => citation.knowledgeBaseName)).size;
 
   return (
     <section className="mt-2.5 grid gap-[7px]" aria-label="回答引用来源">
       <div className="flex items-center justify-between gap-2 text-[11px] text-ink-muted">
-        <strong className="text-xs text-agent-strong">证据</strong>
+        <strong className="text-xs text-agent-strong">引用</strong>
         <span>
           {citations.length} 条引用 · {sourceCount} 个资料库
         </span>
