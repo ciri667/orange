@@ -358,12 +358,17 @@ async fn handle_inbound_event(app: AppHandle, event: ImInboundEvent) {
         return;
     }
 
+    let image_auth = match fetch_access_token(&app, &settings).await {
+        Ok(token) => super::images::ImageFetchAuth::Qq { token },
+        Err(_) => super::images::ImageFetchAuth::Public,
+    };
     let reply = inbound::handle_authorized_event(
         app.clone(),
         IM_PROVIDER_QQ,
         event.clone(),
         settings.clone(),
         false,
+        image_auth,
     )
     .await;
 

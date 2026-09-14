@@ -29,6 +29,16 @@ type outboundMention struct {
 	Name   string `json:"name,omitempty"`
 }
 
+type outboundImage struct {
+	MimeType     string `json:"mimeType,omitempty"`
+	Name         string `json:"name,omitempty"`
+	URL          string `json:"url,omitempty"`
+	ResourceID   string `json:"resourceId,omitempty"`
+	AesKey       string `json:"aesKey,omitempty"`
+	EncryptQuery string `json:"encryptQuery,omitempty"`
+	BytesBase64  string `json:"bytesBase64,omitempty"`
+}
+
 type outboundEvent struct {
 	Kind         string            `json:"kind"`
 	EventID      string            `json:"eventId,omitempty"`
@@ -39,6 +49,7 @@ type outboundEvent struct {
 	MessageType  string            `json:"messageType,omitempty"`
 	Text         string            `json:"text,omitempty"`
 	Mentions     []outboundMention `json:"mentions,omitempty"`
+	Images       []outboundImage   `json:"images,omitempty"`
 	ContextToken string            `json:"contextToken,omitempty"`
 	Status       string            `json:"status,omitempty"`
 	QRImage      string            `json:"qrImageBase64,omitempty"`
@@ -178,12 +189,23 @@ func runGateway(config sidecarConfig) error {
 }
 
 func buildMessageEvent(msg map[string]any) (outboundEvent, bool) {
-	if intValue(msg["message_type"]) != 1 {
+	sender := stringify(msg["from_user_id"])
+	if sender == "" || strings.EqualFold(sender, "bot") {
 		return outboundEvent{}, false
 	}
-	sender := stringify(msg["from_user_id"])
-	if sender == "" {
-		return outboundEvent{}, false
+	text, messageType, images := extractContent(msg)
+	msgType := intValue(msg["message_type"])
+	// iLink 用户消息通常是 1；纯图/表情有时顶层就是 2。机器人自己发出的文本回声也是 2，但带文字，这里只放行无文字的图片。
+	if msgType != 1 {
+		if text != "" || (len(images) == 0 && messageType != "image" && msgType != 2) {
+			return outboundEvent{}, false
+		}
+		if messageType == "unknown" || messageType == "" {
+			messageType = "image"
+		}
+		if len(images) == 0 {
+			images = []outboundImage{collectWeixinImage(msg)}
+		}
 	}
 	groupID := stringify(msg["group_id"])
 	chatType := "direct"
@@ -192,7 +214,6 @@ func buildMessageEvent(msg map[string]any) (outboundEvent, bool) {
 		chatType = "group"
 		chatID = groupID
 	}
-	text, messageType := extractText(msg)
 	eventID := firstNonEmpty(stringify(msg["message_id"]), stringify(msg["client_id"]), sender+strconv.FormatInt(intValue(msg["create_time_ms"]), 10))
 	return outboundEvent{
 		Kind:         "message",
@@ -203,33 +224,245 @@ func buildMessageEvent(msg map[string]any) (outboundEvent, bool) {
 		SenderOpenID: sender,
 		MessageType:  messageType,
 		Text:         text,
+		Images:       images,
 		ContextToken: stringify(msg["context_token"]),
 	}, true
 }
 
-func extractText(msg map[string]any) (string, string) {
-	items, _ := msg["item_list"].([]any)
+func extractContent(msg map[string]any) (string, string, []outboundImage) {
 	var parts []string
-	for _, raw := range items {
-		item, _ := raw.(map[string]any)
-		switch intValue(item["type"]) {
-		case 1:
-			textItem, _ := item["text_item"].(map[string]any)
-			if text := stringify(textItem["text"]); text != "" {
+	var images []outboundImage
+	for _, item := range collectItems(msg) {
+		switch {
+		case isTextItem(item):
+			textItem := firstObject(item, "text_item", "textItem")
+			if text := lookupString(textItem, "text"); text != "" {
 				parts = append(parts, text)
 			}
-		case 3:
-			voiceItem, _ := item["voice_item"].(map[string]any)
-			if text := stringify(voiceItem["text"]); text != "" {
+		case isImageItem(item):
+			image := collectWeixinImage(item)
+			images = append(images, image)
+			if image.URL == "" && image.ResourceID == "" && image.EncryptQuery == "" && image.BytesBase64 == "" {
+				payload := firstObject(item, "image_item", "imageItem", "image", "emoji_item", "emojiItem")
+				fmt.Fprintf(os.Stderr, "weixin image item has no fetchable ref keys=%s mediaKeys=%s mediaKind=%T\n", strings.Join(objectKeys(payload), ","), strings.Join(objectKeys(firstObject(payload, "media", "hd_media", "mid_media", "thumb_media")), ","), payload["media"])
+			}
+		case isVoiceItem(item):
+			voiceItem := firstObject(item, "voice_item", "voiceItem")
+			if text := lookupString(voiceItem, "text"); text != "" {
 				parts = append(parts, text)
 			}
 		}
 	}
-	text := strings.TrimSpace(strings.Join(parts, "\n"))
-	if text == "" {
-		return "", "unknown"
+	if image := collectWeixinImage(msg); image.URL != "" || image.ResourceID != "" || image.EncryptQuery != "" || image.BytesBase64 != "" {
+		if !containsImage(images, image) {
+			images = append(images, image)
+		}
 	}
-	return text, "text"
+	text := strings.TrimSpace(strings.Join(parts, "\n"))
+	if text != "" {
+		return text, "text", images
+	}
+	if len(images) > 0 {
+		return "", "image", images
+	}
+	if kinds := itemKinds(msg); len(kinds) > 0 {
+		fmt.Fprintf(os.Stderr, "weixin message not extracted message_type=%d keys=%s itemKinds=%s\n", intValue(msg["message_type"]), strings.Join(objectKeys(msg), ","), strings.Join(kinds, ","))
+	}
+	return "", "unknown", nil
+}
+
+func collectItems(msg map[string]any) []map[string]any {
+	for _, key := range []string{"item_list", "itemList", "items"} {
+		switch typed := msg[key].(type) {
+		case []any:
+			items := make([]map[string]any, 0, len(typed))
+			for _, raw := range typed {
+				items = append(items, asObject(raw))
+			}
+			return items
+		case map[string]any:
+			return []map[string]any{typed}
+		}
+	}
+	return nil
+}
+
+func isTextItem(item map[string]any) bool {
+	kind := itemKind(item)
+	return kind == "text" || kind == "1" || hasObject(item, "text_item", "textItem")
+}
+
+func isImageItem(item map[string]any) bool {
+	kind := itemKind(item)
+	switch kind {
+	case "image", "img", "2", "8", "23", "47", "emoji", "emotion", "emoticon", "sticker":
+		return true
+	}
+	return hasObject(item, "image_item", "imageItem", "image", "emoji_item", "emojiItem", "emotion_item", "emotionItem", "emoticon_item", "sticker_item")
+}
+
+func isVoiceItem(item map[string]any) bool {
+	kind := itemKind(item)
+	return kind == "voice" || kind == "3" || hasObject(item, "voice_item", "voiceItem")
+}
+
+func itemKind(item map[string]any) string {
+	if value := strings.ToLower(strings.TrimSpace(stringify(item["type"]))); value != "" {
+		return value
+	}
+	return strconv.FormatInt(intValue(item["type"]), 10)
+}
+
+func collectWeixinImage(source map[string]any) outboundImage {
+	image := firstObject(source, "image_item", "imageItem", "image", "emoji_item", "emojiItem", "emotion_item", "emotionItem", "emoticon_item", "sticker_item")
+	if len(image) == 0 {
+		image = source
+	}
+	candidates := []map[string]any{image}
+	for _, key := range []string{"hd_media", "hdMedia", "media", "mid_media", "midMedia", "thumb_media", "thumbMedia"} {
+		if nested := firstObject(image, key); len(nested) > 0 {
+			candidates = append([]map[string]any{nested}, candidates...)
+		} else if url := asHTTPURL(stringify(image[key])); url != "" {
+			candidates = append([]map[string]any{{"url": url}}, candidates...)
+		}
+	}
+
+	url := ""
+	resourceID := ""
+	// image_item.aeskey 是 16 字节 hex；media.aes_key 多为该 hex 的 base64。优先外层 hex。
+	aesKey := lookupString(image, "aeskey", "aes_key", "aesKey")
+	encryptQuery := ""
+	bytesBase64 := ""
+	for _, candidate := range candidates {
+		if url == "" {
+			url = firstHTTPURL(candidate, "full_url", "fullUrl", "url", "cdnurl", "cdn_url", "cdnUrl", "cdn_mid_url", "pic_url", "picUrl", "picurl", "thumburl", "thumb_url")
+			if url == "" {
+				url = firstHTTPURLInValues(candidate)
+			}
+		}
+		if resourceID == "" {
+			resourceID = lookupString(candidate, "fileid", "file_id", "fileId", "media_id", "mediaId", "mid")
+		}
+		if aesKey == "" {
+			aesKey = lookupString(candidate, "aeskey", "aes_key", "aesKey")
+		}
+		if encryptQuery == "" {
+			encryptQuery = lookupString(candidate, "encrypt_query_param", "encryptQueryParam", "encrypt_query", "encryptQuery")
+		}
+		if bytesBase64 == "" {
+			bytesBase64 = lookupString(candidate, "bytes_base64", "bytesBase64", "buffer", "data", "content")
+		}
+	}
+	if httpURL := asHTTPURL(encryptQuery); httpURL != "" {
+		if url == "" {
+			url = httpURL
+		}
+		encryptQuery = ""
+	}
+	if asHTTPURL(bytesBase64) != "" {
+		if url == "" {
+			url = asHTTPURL(bytesBase64)
+		}
+		bytesBase64 = ""
+	}
+	return outboundImage{
+		URL:          url,
+		ResourceID:   resourceID,
+		AesKey:       aesKey,
+		EncryptQuery: encryptQuery,
+		BytesBase64:  bytesBase64,
+	}
+}
+
+func itemKinds(msg map[string]any) []string {
+	items := collectItems(msg)
+	kinds := make([]string, 0, len(items))
+	for _, item := range items {
+		kinds = append(kinds, itemKind(item))
+	}
+	return kinds
+}
+
+func firstHTTPURL(source map[string]any, keys ...string) string {
+	for _, key := range keys {
+		if url := asHTTPURL(stringify(source[key])); url != "" {
+			return url
+		}
+	}
+	return ""
+}
+
+func firstHTTPURLInValues(source map[string]any) string {
+	for _, value := range source {
+		if url := asHTTPURL(stringify(value)); url != "" {
+			return url
+		}
+	}
+	return ""
+}
+
+func asHTTPURL(value string) string {
+	trimmed := strings.TrimSpace(value)
+	if strings.HasPrefix(trimmed, "http://") || strings.HasPrefix(trimmed, "https://") {
+		return trimmed
+	}
+	return ""
+}
+
+func firstObject(source map[string]any, keys ...string) map[string]any {
+	for _, key := range keys {
+		if object := asObject(source[key]); len(object) > 0 {
+			return object
+		}
+		if raw, ok := source[key].(string); ok {
+			trimmed := strings.TrimSpace(raw)
+			if strings.HasPrefix(trimmed, "{") {
+				var object map[string]any
+				if json.Unmarshal([]byte(trimmed), &object) == nil && len(object) > 0 {
+					return object
+				}
+			}
+		}
+	}
+	return map[string]any{}
+}
+
+func hasObject(source map[string]any, keys ...string) bool {
+	return len(firstObject(source, keys...)) > 0
+}
+
+func lookupString(source map[string]any, keys ...string) string {
+	for _, key := range keys {
+		if value := strings.TrimSpace(stringify(source[key])); value != "" {
+			return value
+		}
+	}
+	return ""
+}
+
+func objectKeys(source map[string]any) []string {
+	keys := make([]string, 0, len(source))
+	for key := range source {
+		keys = append(keys, key)
+	}
+	return keys
+}
+
+func containsImage(images []outboundImage, candidate outboundImage) bool {
+	for _, image := range images {
+		if image == candidate {
+			return true
+		}
+	}
+	return false
+}
+
+func asObject(value any) map[string]any {
+	object, _ := value.(map[string]any)
+	if object == nil {
+		return map[string]any{}
+	}
+	return object
 }
 
 type qrResponse struct {

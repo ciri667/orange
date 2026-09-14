@@ -102,3 +102,25 @@ func TestIsSupportedChatType(t *testing.T) {
 		t.Fatal("missing or unknown chat types must be rejected")
 	}
 }
+
+func TestParseMessagePayloadExtractsImageAndPost(t *testing.T) {
+	text, images := parseMessagePayload("image", `{"image_key":"img_v2_abc"}`)
+	if text != "" || len(images) != 1 || images[0].ResourceID != "img_v2_abc" {
+		t.Fatalf("unexpected image payload: text=%q images=%+v", text, images)
+	}
+
+	text, images = parseMessagePayload("post", `{
+		"zh_cn": {
+			"title": "纪要",
+			"content": [[{"tag":"text","text":"看看 "},{"tag":"img","image_key":"img_post"}]]
+		}
+	}`)
+	if text != "纪要 看看" || len(images) != 1 || images[0].ResourceID != "img_post" {
+		t.Fatalf("unexpected post payload: text=%q images=%+v", text, images)
+	}
+
+	text, images = parseMessagePayload("text", `{"text":"@_user_1 整理会议"}`)
+	if text != "整理会议" || len(images) != 0 {
+		t.Fatalf("unexpected text payload: text=%q images=%+v", text, images)
+	}
+}

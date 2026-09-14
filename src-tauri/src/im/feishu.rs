@@ -1,5 +1,8 @@
+use super::images::{fetch_and_admit_inbound_images, ImageFetchAuth};
+use super::inbound::{self, ImInboundImage};
 use crate::domain::{
-    FeishuGatewayStatus, FeishuIntegrationSettings, WorkspaceSnapshot, IM_PROVIDER_FEISHU,
+    ConversationImageAttachment, FeishuGatewayStatus, FeishuIntegrationSettings, WorkspaceSnapshot,
+    IM_PROVIDER_FEISHU,
 };
 use crate::logging::{self, AppEventBuilder, AppLogCategory, AppLogLevel};
 use crate::storage::{self, format_local_datetime};
@@ -52,6 +55,8 @@ pub struct FeishuInboundEvent {
     pub text: String,
     #[serde(default)]
     pub mentions: Vec<FeishuMention>,
+    #[serde(default)]
+    pub images: Vec<ImInboundImage>,
     /** 仅 card_action 事件携带的卡片操作名称。 */
     #[serde(default)]
     pub action: String,
@@ -133,8 +138,8 @@ static FEISHU_CHANNEL_OPERATION_LOCKS: OnceLock<
 /** 启动飞书长连接网关；只负责拉起 sidecar，消息处理在后台任务中完成。 */
 pub async fn start_gateway(app: AppHandle) -> Result<FeishuGatewayStatus, String> {
     let settings = storage::load_feishu_integration_settings(&app)?;
-    let app_secret = storage::load_feishu_app_secret()?
-        .ok_or_else(|| "请先保存飞书 appSecret。".to_owned())?;
+    let app_secret =
+        storage::load_feishu_app_secret()?.ok_or_else(|| "请先保存飞书 appSecret。".to_owned())?;
 
     validate_gateway_settings(&settings)?;
 
@@ -455,6 +460,7 @@ async fn handle_inbound_event(app: AppHandle, event: FeishuInboundEvent) {
             "senderHash": hash_identifier(&event.sender_open_id),
             "messageType": event.message_type,
             "chatType": event.chat_type,
+            "imageRefCount": event.images.len(),
         })),
     );
 
@@ -497,10 +503,15 @@ async fn handle_inbound_event(app: AppHandle, event: FeishuInboundEvent) {
         let channel_key = build_channel_key(&event);
         let _operation_guard = acquire_channel_operation_lock(&channel_key).await;
         handle_card_action_for_event(&app, &event).await
-    } else if event.message_type != "text" {
-        "暂不支持该飞书消息类型；首版只处理文本消息。".to_owned()
+    } else if !inbound::is_conversation_payload(
+        &event.kind,
+        &event.message_type,
+        &event.text,
+        event.images.len(),
+    ) {
+        "暂不支持该飞书消息类型；请发送文字或图片。".to_owned()
     } else {
-        // 同一 channel 的所有文本事件都按顺序执行；命令与普通消息不会并发读取后覆盖彼此的会话快照。
+        // 同一 channel 的对话事件都按顺序执行；命令与普通消息不会并发读取后覆盖彼此的会话快照。
         let channel_key = build_channel_key(&event);
         let _operation_guard = acquire_channel_operation_lock(&channel_key).await;
         dispatch_authorized_text_event(&app, &event, &settings, &channel_key).await
@@ -595,7 +606,59 @@ async fn dispatch_authorized_text_event(
         return handle_pending_change_command_for_event(app, event, action, change_token).await;
     }
 
-    run_agent_for_event(app, event, settings).await
+    let images = fetch_feishu_inbound_images(app, settings, event).await;
+    if event.text.trim().is_empty() && images.is_empty() {
+        return inbound::UNREADABLE_IMAGES_REPLY.to_owned();
+    }
+
+    run_agent_for_event(app, event, settings, images).await
+}
+
+/** 用飞书 tenant token 下载 sidecar 给出的 image_key；坏图跳过。 */
+async fn fetch_feishu_inbound_images(
+    app: &AppHandle,
+    settings: &FeishuIntegrationSettings,
+    event: &FeishuInboundEvent,
+) -> Vec<ConversationImageAttachment> {
+    if event.images.is_empty() {
+        return Vec::new();
+    }
+    let app_secret = storage::load_im_provider_secret(IM_PROVIDER_FEISHU)
+        .ok()
+        .flatten()
+        .unwrap_or_default();
+    let auth = if app_secret.trim().is_empty() {
+        ImageFetchAuth::Public
+    } else {
+        match fetch_tenant_access_token(&settings.domain, &settings.app_id, &app_secret).await {
+            Ok(token) => ImageFetchAuth::Feishu {
+                token,
+                domain: settings.domain.clone(),
+            },
+            Err(error) => {
+                logging::write_app_event_best_effort(
+                    app,
+                    AppEventBuilder::new(
+                        AppLogLevel::Warn,
+                        AppLogCategory::Im,
+                        "im_inbound_image_skipped",
+                        "skipped",
+                        error,
+                    )
+                    .metadata(json!({ "providerId": IM_PROVIDER_FEISHU })),
+                );
+                ImageFetchAuth::Public
+            }
+        }
+    };
+    fetch_and_admit_inbound_images(
+        app,
+        IM_PROVIDER_FEISHU,
+        &auth,
+        &event.message_id,
+        &event.images,
+    )
+    .await
 }
 
 /** 从消息或会话进入事件中保存可授权候选，返回是否完成保存尝试。 */
@@ -854,6 +917,7 @@ async fn run_agent_for_event(
     app: &AppHandle,
     event: &FeishuInboundEvent,
     settings: &FeishuIntegrationSettings,
+    images: Vec<ConversationImageAttachment>,
 ) -> String {
     let channel_key = build_channel_key(event);
     let conversation_kind = if is_group_chat_event(event) {
@@ -866,12 +930,13 @@ async fn run_agent_for_event(
         IM_PROVIDER_FEISHU,
         &channel_key,
         conversation_kind,
-        &event.text,
+        inbound::conversation_preview_source(&event.text, images.len()),
     );
     let result = crate::commands::run_agent_turn_from_im(
         app.clone(),
         IM_PROVIDER_FEISHU.to_owned(),
         event.text.trim().to_owned(),
+        images,
         channel_key,
         settings.default_knowledge_base_ids.clone(),
         im_identity,
@@ -1545,6 +1610,7 @@ mod tests {
             mentions: Vec::new(),
             action: String::new(),
             change_id: String::new(),
+            images: Vec::new(),
         };
 
         assert_eq!(build_channel_key(&event), build_channel_key(&event));
@@ -1579,6 +1645,7 @@ mod tests {
             mentions: Vec::new(),
             action: String::new(),
             change_id: String::new(),
+            images: Vec::new(),
         };
 
         assert!(decide_event_handling(&settings, &event).is_ok());
@@ -1603,6 +1670,7 @@ mod tests {
             }],
             action: String::new(),
             change_id: String::new(),
+            images: Vec::new(),
         };
 
         assert!(!is_direct_bot_mention(&event));
@@ -1644,6 +1712,7 @@ mod tests {
             }],
             action: String::new(),
             change_id: String::new(),
+            images: Vec::new(),
         };
 
         assert!(decide_event_handling(&settings, &event).is_ok());
@@ -1723,6 +1792,7 @@ mod tests {
             mentions: Vec::new(),
             action: String::new(),
             change_id: String::new(),
+            images: Vec::new(),
         };
 
         let block = decide_event_handling(&settings, &event).unwrap_err();

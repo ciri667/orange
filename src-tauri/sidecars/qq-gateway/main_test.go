@@ -31,3 +31,32 @@ func TestBuildGroupEventMarksBotMention(t *testing.T) {
 		t.Fatalf("expected cleaned text, got %q", event.Text)
 	}
 }
+
+func TestBuildEventCollectsImageAttachments(t *testing.T) {
+	event, ok := buildEvent("C2C_MESSAGE_CREATE", "evt-2", map[string]any{
+		"id":      "msg-2",
+		"content": "看看这张图",
+		"author":  map[string]any{"user_openid": "user-2"},
+		"attachments": []any{
+			map[string]any{
+				"content_type": "image/png",
+				"filename":     "shot.png",
+				"url":          "https://example.com/shot.png",
+			},
+			map[string]any{
+				"content_type": "application/pdf",
+				"filename":     "note.pdf",
+				"url":          "https://example.com/note.pdf",
+			},
+		},
+	})
+	if !ok {
+		t.Fatal("expected c2c event")
+	}
+	if event.MessageType != "text" || event.Text != "看看这张图" || len(event.Images) != 1 {
+		t.Fatalf("unexpected event: %+v", event)
+	}
+	if event.Images[0].URL != "https://example.com/shot.png" || event.Images[0].Name != "shot.png" {
+		t.Fatalf("unexpected image: %+v", event.Images[0])
+	}
+}

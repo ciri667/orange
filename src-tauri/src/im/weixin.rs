@@ -562,6 +562,7 @@ async fn handle_inbound_event(app: AppHandle, event: ImInboundEvent) {
         event.clone(),
         settings.clone(),
         false,
+        weixin_image_auth(&settings),
     )
     .await;
 
@@ -645,7 +646,10 @@ async fn send_text_reply(
             }
         });
         let response = client
-            .post(format!("{}/ilink/bot/sendmessage", base_url.trim_end_matches('/')))
+            .post(format!(
+                "{}/ilink/bot/sendmessage",
+                base_url.trim_end_matches('/')
+            ))
             .header("Content-Type", "application/json")
             .header("AuthorizationType", "ilink_bot_token")
             .header("Authorization", format!("Bearer {token}"))
@@ -715,6 +719,23 @@ async fn rate_limit_send() -> Result<(), String> {
         tokio::time::sleep(wait_duration).await;
     }
     Ok(())
+}
+
+fn weixin_image_auth(settings: &ImProviderSettings) -> super::images::ImageFetchAuth {
+    let token = storage::load_im_provider_secret(IM_PROVIDER_WEIXIN)
+        .ok()
+        .flatten()
+        .unwrap_or_default();
+    let base_url = settings
+        .to_weixin_config()
+        .map(|config| config.base_url.trim().to_owned())
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| WEIXIN_DEFAULT_BASE_URL.to_owned());
+    if token.trim().is_empty() {
+        super::images::ImageFetchAuth::Public
+    } else {
+        super::images::ImageFetchAuth::Weixin { token, base_url }
+    }
 }
 
 fn random_wechat_uin() -> String {

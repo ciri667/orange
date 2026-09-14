@@ -25,6 +25,14 @@ type outboundMention struct {
 	Name   string `json:"name,omitempty"`
 }
 
+type outboundImage struct {
+	MimeType   string `json:"mimeType,omitempty"`
+	Name       string `json:"name,omitempty"`
+	URL        string `json:"url,omitempty"`
+	ResourceID string `json:"resourceId,omitempty"`
+	AesKey     string `json:"aesKey,omitempty"`
+}
+
 type outboundEvent struct {
 	Kind         string            `json:"kind"`
 	EventID      string            `json:"eventId"`
@@ -35,6 +43,7 @@ type outboundEvent struct {
 	MessageType  string            `json:"messageType"`
 	Text         string            `json:"text,omitempty"`
 	Mentions     []outboundMention `json:"mentions,omitempty"`
+	Images       []outboundImage   `json:"images,omitempty"`
 }
 
 type gatewayPayload struct {
@@ -183,30 +192,28 @@ func buildEvent(eventType, eventID string, data map[string]any) (outboundEvent, 
 	switch eventType {
 	case "C2C_MESSAGE_CREATE":
 		sender := firstNonEmpty(stringify(author["user_openid"]), stringify(author["id"]))
-		return outboundEvent{
+		event := outboundEvent{
 			Kind:         "message",
 			EventID:      firstNonEmpty(eventID, messageID),
 			MessageID:    messageID,
 			ChatID:       sender,
 			ChatType:     "direct",
 			SenderOpenID: sender,
-			MessageType:  messageTypeOf(content),
-			Text:         cleanText(content),
-		}, sender != ""
+		}
+		return finishEvent(event, data, content), sender != ""
 	case "GROUP_AT_MESSAGE_CREATE":
 		sender := firstNonEmpty(stringify(author["member_openid"]), stringify(author["id"]))
 		chatID := stringify(data["group_openid"])
-		return outboundEvent{
+		event := outboundEvent{
 			Kind:         "message",
 			EventID:      firstNonEmpty(eventID, messageID),
 			MessageID:    messageID,
 			ChatID:       chatID,
 			ChatType:     "group",
 			SenderOpenID: sender,
-			MessageType:  messageTypeOf(content),
-			Text:         cleanText(content),
 			Mentions:     []outboundMention{{OpenID: "bot", Name: "bot"}},
-		}, sender != "" && chatID != ""
+		}
+		return finishEvent(event, data, content), sender != "" && chatID != ""
 	case "AT_MESSAGE_CREATE", "DIRECT_MESSAGE_CREATE":
 		sender := firstNonEmpty(stringify(author["id"]), stringify(author["user_openid"]))
 		chatID := firstNonEmpty(stringify(data["channel_id"]), stringify(data["guild_id"]))
@@ -222,23 +229,66 @@ func buildEvent(eventType, eventID string, data map[string]any) (outboundEvent, 
 			ChatID:       chatID,
 			ChatType:     chatType,
 			SenderOpenID: sender,
-			MessageType:  messageTypeOf(content),
-			Text:         cleanText(content),
 		}
 		if chatType == "group" {
 			event.Mentions = []outboundMention{{OpenID: "bot", Name: "bot"}}
 		}
-		return event, sender != ""
+		return finishEvent(event, data, content), sender != ""
 	default:
 		return outboundEvent{}, false
 	}
 }
 
-func messageTypeOf(content string) string {
-	if strings.TrimSpace(cleanText(content)) == "" {
-		return "unknown"
+func finishEvent(event outboundEvent, data map[string]any, content string) outboundEvent {
+	event.Text = cleanText(content)
+	event.Images = collectImages(data)
+	event.MessageType = messageTypeOf(event.Text, event.Images)
+	return event
+}
+
+func collectImages(data map[string]any) []outboundImage {
+	attachments, _ := data["attachments"].([]any)
+	var images []outboundImage
+	for _, raw := range attachments {
+		object := asObject(raw)
+		if !isImageAttachment(object) {
+			continue
+		}
+		url := stringify(object["url"])
+		if strings.TrimSpace(url) == "" {
+			continue
+		}
+		images = append(images, outboundImage{
+			URL:      url,
+			MimeType: stringify(object["content_type"]),
+			Name:     stringify(object["filename"]),
+		})
 	}
-	return "text"
+	return images
+}
+
+func isImageAttachment(object map[string]any) bool {
+	contentType := strings.ToLower(stringify(object["content_type"]))
+	if strings.HasPrefix(contentType, "image/") && contentType != "image/svg+xml" {
+		return true
+	}
+	name := strings.ToLower(stringify(object["filename"]))
+	for _, extension := range []string{".png", ".jpg", ".jpeg", ".webp", ".gif"} {
+		if strings.HasSuffix(name, extension) {
+			return true
+		}
+	}
+	return false
+}
+
+func messageTypeOf(text string, images []outboundImage) string {
+	if strings.TrimSpace(text) != "" {
+		return "text"
+	}
+	if len(images) > 0 {
+		return "image"
+	}
+	return "unknown"
 }
 
 func cleanText(content string) string {

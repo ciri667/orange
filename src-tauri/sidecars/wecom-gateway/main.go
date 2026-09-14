@@ -42,6 +42,14 @@ type outboundMention struct {
 	Name   string `json:"name,omitempty"`
 }
 
+type outboundImage struct {
+	MimeType   string `json:"mimeType,omitempty"`
+	Name       string `json:"name,omitempty"`
+	URL        string `json:"url,omitempty"`
+	ResourceID string `json:"resourceId,omitempty"`
+	AesKey     string `json:"aesKey,omitempty"`
+}
+
 type outboundEvent struct {
 	Kind          string            `json:"kind"`
 	EventID       string            `json:"eventId"`
@@ -52,6 +60,7 @@ type outboundEvent struct {
 	MessageType   string            `json:"messageType"`
 	Text          string            `json:"text,omitempty"`
 	Mentions      []outboundMention `json:"mentions,omitempty"`
+	Images        []outboundImage   `json:"images,omitempty"`
 	ContextToken  string            `json:"contextToken,omitempty"`
 }
 
@@ -328,8 +337,8 @@ func buildEvent(body map[string]any, reqID, robotName string) (outboundEvent, bo
 		}
 	}
 
-	text, outboundType, mentions := extractText(body, robotName)
-	if outboundType == "text" && strings.TrimSpace(text) == "" {
+	text, outboundType, mentions, images := extractContent(body, robotName)
+	if outboundType == "text" && strings.TrimSpace(text) == "" && len(images) == 0 {
 		return outboundEvent{}, false
 	}
 
@@ -345,13 +354,15 @@ func buildEvent(body map[string]any, reqID, robotName string) (outboundEvent, bo
 		MessageType:  outboundType,
 		Text:         text,
 		Mentions:     mentions,
+		Images:       images,
 		ContextToken: reqID + "|" + streamID,
 	}, true
 }
 
-func extractText(body map[string]any, robotName string) (string, string, []outboundMention) {
+func extractContent(body map[string]any, robotName string) (string, string, []outboundMention, []outboundImage) {
 	msgType := stringify(body["msgtype"])
 	var content string
+	var images []outboundImage
 	switch msgType {
 	case "text":
 		content = nestedString(body, "text", "content")
@@ -360,10 +371,13 @@ func extractText(body map[string]any, robotName string) (string, string, []outbo
 			nestedString(body, "markdown", "content"),
 			nestedString(body, "text", "content"),
 		)
+	case "image":
+		images = collectImageObject(asObject(body["image"]))
+		return "", "image", nil, images
 	case "mixed":
-		content = mixedText(body)
+		content, images = mixedContent(body)
 	default:
-		return "", unsupportedMsgType, nil
+		return "", unsupportedMsgType, nil, nil
 	}
 
 	var mentions []outboundMention
@@ -371,24 +385,46 @@ func extractText(body map[string]any, robotName string) (string, string, []outbo
 		content = strings.ReplaceAll(content, "@"+robotName, "")
 		mentions = []outboundMention{{OpenID: "bot", Name: "bot"}}
 	}
-	return strings.TrimSpace(content), "text", mentions
+	content = strings.TrimSpace(content)
+	if content == "" && len(images) > 0 {
+		return "", "image", mentions, images
+	}
+	return content, "text", mentions, images
 }
 
-func mixedText(body map[string]any) string {
+func mixedContent(body map[string]any) (string, []outboundImage) {
 	mixed := asObject(body["mixed"])
 	items, _ := mixed["msg_item"].([]any)
 	var parts []string
+	var images []outboundImage
 	for _, item := range items {
 		object := asObject(item)
-		if stringify(object["msgtype"]) != "text" {
-			continue
-		}
-		text := nestedString(object, "text", "content")
-		if strings.TrimSpace(text) != "" {
-			parts = append(parts, text)
+		switch stringify(object["msgtype"]) {
+		case "text":
+			text := nestedString(object, "text", "content")
+			if strings.TrimSpace(text) != "" {
+				parts = append(parts, text)
+			}
+		case "image":
+			images = append(images, collectImageObject(asObject(object["image"]))...)
 		}
 	}
-	return strings.Join(parts, " ")
+	return strings.Join(parts, " "), images
+}
+
+func collectImageObject(image map[string]any) []outboundImage {
+	url := firstNonEmpty(
+		stringify(image["url"]),
+		stringify(image["picurl"]),
+		stringify(image["pic_url"]),
+	)
+	if strings.TrimSpace(url) == "" {
+		return nil
+	}
+	return []outboundImage{{
+		URL:      url,
+		MimeType: stringify(image["type"]),
+	}}
 }
 
 func emitStatus(connected bool) {

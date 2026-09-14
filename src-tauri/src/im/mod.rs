@@ -1,6 +1,7 @@
 use crate::domain::{
-    AgentMessage, AgentSession, AgentTurnRequest, ImGatewayStatus, ImLoginStatus,
-    ImSessionIdentity, IM_PROVIDER_FEISHU, IM_PROVIDER_QQ, IM_PROVIDER_WECOM, IM_PROVIDER_WEIXIN,
+    AgentMessage, AgentSession, AgentTurnRequest, ConversationImageAttachment, ImGatewayStatus,
+    ImLoginStatus, ImSessionIdentity, IM_PROVIDER_FEISHU, IM_PROVIDER_QQ, IM_PROVIDER_WECOM,
+    IM_PROVIDER_WEIXIN,
 };
 use crate::storage::{create_id, format_local_datetime};
 use std::path::{Path, PathBuf};
@@ -10,6 +11,7 @@ use tauri::{AppHandle, Manager};
 use std::os::unix::fs::PermissionsExt;
 
 pub mod feishu;
+pub mod images;
 pub mod inbound;
 pub mod process;
 pub mod qq;
@@ -313,7 +315,10 @@ pub(crate) fn build_im_agent_session(
 }
 
 /** 构造 IM 入口的乐观用户消息，和前端提交保持同一消息复用语义。 */
-pub(crate) fn build_im_user_message(prompt: &str) -> AgentMessage {
+pub(crate) fn build_im_user_message(
+    prompt: &str,
+    images: &[ConversationImageAttachment],
+) -> AgentMessage {
     AgentMessage {
         id: create_id("user-im"),
         role: "user".to_owned(),
@@ -322,7 +327,7 @@ pub(crate) fn build_im_user_message(prompt: &str) -> AgentMessage {
         citations: None,
         tool_calls: None,
         mentioned_file_ids: Vec::new(),
-        images: Vec::new(),
+        images: images.to_vec(),
         trace: Vec::new(),
         turn_duration_ms: None,
         interrupted: false,
@@ -335,6 +340,7 @@ pub(crate) fn build_im_turn_request(
     session_id: String,
     active_knowledge_base_id: String,
     client_message_id: String,
+    image_ids: Vec<String>,
 ) -> AgentTurnRequest {
     AgentTurnRequest {
         prompt,
@@ -347,7 +353,7 @@ pub(crate) fn build_im_turn_request(
         model_id: None,
         explicit_skill_ids: Vec::new(),
         mentioned_file_ids: Vec::new(),
-        image_ids: Vec::new(),
+        image_ids,
     }
 }
 
@@ -371,6 +377,24 @@ mod tests {
     #[test]
     fn im_preview_falls_back_for_empty_content() {
         assert_eq!(build_im_message_preview("  @_user_bot  "), "未命名对话");
+    }
+
+    /** 纯图 IM 会话标题使用「图片」，和 App 空正文配图对齐。 */
+    #[test]
+    fn im_preview_uses_image_fallback_for_empty_prompt() {
+        assert_eq!(
+            super::inbound::conversation_preview_source("  ", 2),
+            "图片"
+        );
+        assert_eq!(
+            format_im_session_title(&build_im_session_identity(
+                "feishu",
+                "feishu:dm:secret",
+                "direct",
+                super::inbound::conversation_preview_source("", 1),
+            )),
+            "飞书 · 私聊 · 图片"
+        );
     }
 
     /** 新会话标题必须携带来源、聊天类型和首条主题，通道原文不得进入标题。 */

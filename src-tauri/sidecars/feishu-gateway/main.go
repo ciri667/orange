@@ -3,8 +3,10 @@ package main
 import (
 	"bufio"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"strings"
 
@@ -29,6 +31,22 @@ type outboundMention struct {
 	Name   string `json:"name,omitempty"`
 }
 
+// outboundImage is a provider-neutral image ref; Rust downloads and admits the bytes.
+type outboundImage struct {
+	MimeType     string `json:"mimeType,omitempty"`
+	Name         string `json:"name,omitempty"`
+	URL          string `json:"url,omitempty"`
+	ResourceID   string `json:"resourceId,omitempty"`
+	AesKey       string `json:"aesKey,omitempty"`
+	BytesBase64  string `json:"bytesBase64,omitempty"`
+}
+
+const maxFeishuImageBytes = 20 * 1024 * 1024
+
+// feishuAPIClient downloads inbound image bytes with the official SDK so Rust does not
+// have to reconstruct Get Message Resource URLs.
+var feishuAPIClient *lark.Client
+
 // outboundEvent is the JSONL contract between the Go SDK process and Rust.
 type outboundEvent struct {
 	Kind         string            `json:"kind"`
@@ -40,6 +58,7 @@ type outboundEvent struct {
 	MessageType  string            `json:"messageType"`
 	Text         string            `json:"text,omitempty"`
 	Mentions     []outboundMention `json:"mentions,omitempty"`
+	Images       []outboundImage   `json:"images,omitempty"`
 }
 
 // cardActionValue is the JSONL payload Rust receives when a user presses an Orange review card.
@@ -91,6 +110,13 @@ func main() {
 		OnP2CardActionTrigger(func(ctx context.Context, event *larkcallback.CardActionTriggerEvent) (*larkcallback.CardActionTriggerResponse, error) {
 			return emitCardActionEvent(event)
 		})
+	feishuAPIClient = lark.NewClient(
+		config.AppID,
+		config.AppSecret,
+		lark.WithOpenBaseUrl(resolveDomain(config.Domain)),
+		lark.WithLogLevel(larkcore.LogLevelError),
+		lark.WithLogger(silentLogger{}),
+	)
 	client := larkws.NewClient(
 		config.AppID,
 		config.AppSecret,
@@ -287,12 +313,8 @@ func emitMessageEvent(event *larkim.P2MessageReceiveV1) error {
 		Mentions:     buildMentions(message.Mentions),
 	}
 
-	if out.MessageType == "text" {
-		var content textContent
-		if err := json.Unmarshal([]byte(stringValue(message.Content)), &content); err == nil {
-			out.Text = stripBotMention(content.Text)
-		}
-	}
+	out.Text, out.Images = parseMessagePayload(out.MessageType, stringValue(message.Content))
+	hydrateFeishuImages(out.MessageID, out.Images)
 
 	encoded, err := json.Marshal(out)
 	if err != nil {
@@ -300,6 +322,69 @@ func emitMessageEvent(event *larkim.P2MessageReceiveV1) error {
 	}
 	fmt.Println(string(encoded))
 	return nil
+}
+
+func hydrateFeishuImages(messageID string, images []outboundImage) {
+	if feishuAPIClient == nil || strings.TrimSpace(messageID) == "" {
+		return
+	}
+	for i := range images {
+		if strings.TrimSpace(images[i].ResourceID) == "" || images[i].BytesBase64 != "" {
+			continue
+		}
+		encoded, err := downloadFeishuImage(messageID, images[i].ResourceID)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "feishu image download failed: %v\n", err)
+			continue
+		}
+		images[i].BytesBase64 = encoded
+	}
+}
+
+func downloadFeishuImage(messageID, fileKey string) (string, error) {
+	var lastErr error
+	for _, resourceType := range []string{"image", "file"} {
+		req := larkim.NewGetMessageResourceReqBuilder().
+			MessageId(messageID).
+			FileKey(fileKey).
+			Type(resourceType).
+			Build()
+		resp, err := feishuAPIClient.Im.MessageResource.Get(context.Background(), req)
+		if err != nil {
+			lastErr = err
+			continue
+		}
+		if resp == nil {
+			lastErr = fmt.Errorf("empty response")
+			continue
+		}
+		if resp.Code != 0 {
+			lastErr = fmt.Errorf("code=%d msg=%s", resp.Code, resp.Msg)
+			continue
+		}
+		if resp.File == nil {
+			lastErr = fmt.Errorf("missing file")
+			continue
+		}
+		raw, err := io.ReadAll(io.LimitReader(resp.File, maxFeishuImageBytes+1))
+		if err != nil {
+			lastErr = err
+			continue
+		}
+		if len(raw) == 0 || len(raw) > maxFeishuImageBytes {
+			lastErr = fmt.Errorf("invalid image size")
+			continue
+		}
+		if raw[0] == '{' {
+			lastErr = fmt.Errorf("json body")
+			continue
+		}
+		return base64.StdEncoding.EncodeToString(raw), nil
+	}
+	if lastErr == nil {
+		lastErr = fmt.Errorf("download failed")
+	}
+	return "", lastErr
 }
 
 // emitP2pEnteredEvent records a discoverable user when someone opens the bot DM without sending text yet.
@@ -385,6 +470,103 @@ func stripBotMention(text string) string {
 		filtered = append(filtered, field)
 	}
 	return strings.Join(filtered, " ")
+}
+
+func parseMessagePayload(messageType, content string) (string, []outboundImage) {
+	switch messageType {
+	case "text":
+		var payload textContent
+		if err := json.Unmarshal([]byte(content), &payload); err != nil {
+			return "", nil
+		}
+		return stripBotMention(payload.Text), nil
+	case "image":
+		return "", parseImageKeys(content)
+	case "post":
+		return parsePostContent(content)
+	default:
+		return "", nil
+	}
+}
+
+func parseImageKeys(content string) []outboundImage {
+	var payload map[string]any
+	if err := json.Unmarshal([]byte(content), &payload); err != nil {
+		return nil
+	}
+	key := firstNonEmpty(
+		stringify(payload["image_key"]),
+		stringify(payload["img_key"]),
+		stringify(payload["file_key"]),
+	)
+	if key == "" {
+		return nil
+	}
+	return []outboundImage{{ResourceID: key}}
+}
+
+func parsePostContent(content string) (string, []outboundImage) {
+	var raw map[string]any
+	if err := json.Unmarshal([]byte(content), &raw); err != nil {
+		return "", nil
+	}
+	body := raw
+	for _, lang := range []string{"zh_cn", "zh_tw", "en_us", "ja_jp"} {
+		if inner, ok := raw[lang].(map[string]any); ok {
+			body = inner
+			break
+		}
+	}
+	var texts []string
+	if title := stringify(body["title"]); strings.TrimSpace(title) != "" {
+		texts = append(texts, title)
+	}
+	var images []outboundImage
+	collectPostNodes(body["content"], &texts, &images)
+	return stripBotMention(strings.Join(texts, " ")), images
+}
+
+func collectPostNodes(node any, texts *[]string, images *[]outboundImage) {
+	switch typed := node.(type) {
+	case []any:
+		for _, child := range typed {
+			collectPostNodes(child, texts, images)
+		}
+	case map[string]any:
+		tag := stringify(typed["tag"])
+		switch tag {
+		case "text", "a":
+			if text := stringify(typed["text"]); strings.TrimSpace(text) != "" {
+				*texts = append(*texts, text)
+			}
+		case "img", "media":
+			key := firstNonEmpty(
+				stringify(typed["image_key"]),
+				stringify(typed["img_key"]),
+				stringify(typed["file_key"]),
+			)
+			if key != "" {
+				*images = append(*images, outboundImage{ResourceID: key})
+			}
+		}
+		if content, ok := typed["content"]; ok {
+			collectPostNodes(content, texts, images)
+		}
+	}
+}
+
+func stringify(value any) string {
+	text, _ := value.(string)
+	return text
+}
+
+func firstNonEmpty(values ...string) string {
+	for _, value := range values {
+		if strings.TrimSpace(value) != "" {
+			return value
+		}
+	}
+	return ""
 }
 
 func stringValue(value *string) string {

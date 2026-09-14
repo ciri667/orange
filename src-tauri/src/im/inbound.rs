@@ -1,6 +1,7 @@
+use super::images::{fetch_and_admit_inbound_images, ImageFetchAuth};
 use crate::domain::{
-    ImProviderSettings, ProposedChange, WorkspaceSnapshot, IM_PROVIDER_FEISHU, IM_PROVIDER_QQ,
-    IM_PROVIDER_WECOM, IM_PROVIDER_WEIXIN,
+    ConversationImageAttachment, ImProviderSettings, ProposedChange, WorkspaceSnapshot,
+    IM_PROVIDER_FEISHU, IM_PROVIDER_QQ, IM_PROVIDER_WECOM, IM_PROVIDER_WEIXIN,
 };
 use crate::logging::{self, AppEventBuilder, AppLogCategory, AppLogLevel};
 use crate::storage;
@@ -13,6 +14,10 @@ use tauri::AppHandle;
 
 /** IM 文本回复默认截断长度，避免超平台可读边界。 */
 pub(crate) const DEFAULT_IM_REPLY_MAX_CHARS: usize = 3500;
+
+/** 入站图片全部无法准入且没有文字时的固定回复。 */
+pub(crate) const UNREADABLE_IMAGES_REPLY: &str =
+    "没有可读取的图片；请发送 png、jpeg、webp 或 gif，也可以直接发文字。";
 
 /** QQ 官方文本上限，超出后按段发送。 */
 pub(crate) const QQ_REPLY_MAX_CHARS: usize = 2000;
@@ -49,11 +54,33 @@ pub struct ImInboundEvent {
     #[serde(default)]
     pub mentions: Vec<ImMention>,
     #[serde(default)]
+    pub images: Vec<ImInboundImage>,
+    #[serde(default)]
     pub action: String,
     #[serde(default)]
     pub change_id: String,
     #[serde(default)]
     pub context_token: String,
+}
+
+/** sidecar 归一化后的图片引用；字节由 Rust 下载准入，不进 JSONL 日志。 */
+#[derive(Clone, Debug, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ImInboundImage {
+    #[serde(default)]
+    pub mime_type: String,
+    #[serde(default)]
+    pub name: String,
+    #[serde(default)]
+    pub url: String,
+    #[serde(default)]
+    pub resource_id: String,
+    #[serde(default)]
+    pub aes_key: String,
+    #[serde(default)]
+    pub encrypt_query: String,
+    #[serde(default)]
+    pub bytes_base64: String,
 }
 
 /** 消息中的 @ 元数据；open_id=bot 表示直接 @ 了机器人。 */
@@ -183,7 +210,7 @@ pub(crate) fn normalize_pending_change_action(action: &str) -> Option<&str> {
     }
 }
 
-/** 分派已经完成鉴权与群聊门禁的文本事件。 */
+/** 分派已经完成鉴权与群聊门禁的对话事件。 */
 pub(crate) async fn dispatch_authorized_text_event(
     app: &AppHandle,
     provider_id: &str,
@@ -191,6 +218,7 @@ pub(crate) async fn dispatch_authorized_text_event(
     settings: &ImProviderSettings,
     channel_key: &str,
     card_sent: bool,
+    image_auth: ImageFetchAuth,
 ) -> String {
     if event.text.trim() == "/status" {
         return build_status_reply(app, provider_id, settings);
@@ -226,7 +254,28 @@ pub(crate) async fn dispatch_authorized_text_event(
         .await;
     }
 
-    run_agent_for_event(app, provider_id, event, settings, channel_key, card_sent).await
+    let images = fetch_and_admit_inbound_images(
+        app,
+        provider_id,
+        &image_auth,
+        &event.message_id,
+        &event.images,
+    )
+    .await;
+    if event.text.trim().is_empty() && images.is_empty() {
+        return UNREADABLE_IMAGES_REPLY.to_owned();
+    }
+
+    run_agent_for_event(
+        app,
+        provider_id,
+        event,
+        settings,
+        channel_key,
+        card_sent,
+        images,
+    )
+    .await
 }
 
 /** 为 IM 消息运行橘记 Agent，并返回可发送回平台的短文本。 */
@@ -237,18 +286,24 @@ pub(crate) async fn run_agent_for_event(
     settings: &ImProviderSettings,
     channel_key: &str,
     card_sent: bool,
+    images: Vec<ConversationImageAttachment>,
 ) -> String {
     let conversation_kind = if is_group_chat_event(event) {
         "group"
     } else {
         "direct"
     };
-    let im_identity =
-        super::build_im_session_identity(provider_id, channel_key, conversation_kind, &event.text);
+    let im_identity = super::build_im_session_identity(
+        provider_id,
+        channel_key,
+        conversation_kind,
+        conversation_preview_source(&event.text, images.len()),
+    );
     let result = crate::commands::run_agent_turn_from_im(
         app.clone(),
         provider_id.to_owned(),
         event.text.trim().to_owned(),
+        images,
         channel_key.to_owned(),
         settings.default_knowledge_base_ids.clone(),
         im_identity,
@@ -438,13 +493,14 @@ pub(crate) fn block_metadata(
     })
 }
 
-/** 处理已鉴权的入站文本或卡片事件，返回应回发的正文。 */
+/** 处理已鉴权的入站文本、图片或卡片事件，返回应回发的正文。 */
 pub(crate) async fn handle_authorized_event(
     app: AppHandle,
     provider_id: &str,
     event: ImInboundEvent,
     settings: ImProviderSettings,
     card_sent: bool,
+    image_auth: ImageFetchAuth,
 ) -> String {
     let started_at = std::time::Instant::now();
     let event_hash = hash_identifier(&event.event_id);
@@ -468,6 +524,7 @@ pub(crate) async fn handle_authorized_event(
             "messageType": event.message_type,
             "chatType": event.chat_type,
             "isGroupChat": is_group_chat,
+            "imageRefCount": event.images.len(),
         })),
     );
 
@@ -488,9 +545,9 @@ pub(crate) async fn handle_authorized_event(
         .await;
     }
 
-    if event.message_type != "text" {
+    if !is_conversation_turn(&event) {
         let label = super::get_im_provider_label(provider_id);
-        return format!("暂不支持该{label}消息类型；首版只处理文本消息。");
+        return format!("暂不支持该{label}消息类型；请发送文字或图片。");
     }
 
     let channel_key = build_channel_key(provider_id, &event);
@@ -502,6 +559,7 @@ pub(crate) async fn handle_authorized_event(
         &settings,
         &channel_key,
         card_sent,
+        image_auth,
     )
     .await;
 
@@ -523,6 +581,39 @@ pub(crate) async fn handle_authorized_event(
     );
 
     reply
+}
+
+/** 文字、图片或图文混合都走同一套 Agent 对话接口。 */
+pub(crate) fn is_conversation_turn(event: &ImInboundEvent) -> bool {
+    is_conversation_payload(
+        &event.kind,
+        &event.message_type,
+        &event.text,
+        event.images.len(),
+    )
+}
+
+/** 纯图消息用稳定摘要，避免会话标题变成「未命名对话」。 */
+pub(crate) fn conversation_preview_source(text: &str, image_count: usize) -> &str {
+    if text.trim().is_empty() && image_count > 0 {
+        "图片"
+    } else {
+        text
+    }
+}
+
+pub(crate) fn is_conversation_payload(
+    kind: &str,
+    message_type: &str,
+    text: &str,
+    image_count: usize,
+) -> bool {
+    if kind == "card_action" || kind == "discovery" {
+        return false;
+    }
+    !text.trim().is_empty()
+        || image_count > 0
+        || matches!(message_type, "image" | "post" | "mixed")
 }
 
 /** 构造拦截原因。 */
@@ -620,6 +711,7 @@ mod tests {
             action: String::new(),
             change_id: String::new(),
             context_token: String::new(),
+            images: Vec::new(),
         };
 
         let key = build_channel_key(IM_PROVIDER_QQ, &event);
@@ -660,6 +752,7 @@ mod tests {
             action: String::new(),
             change_id: String::new(),
             context_token: String::new(),
+            images: Vec::new(),
         };
 
         assert!(decide_event_handling(IM_PROVIDER_QQ, &settings, &event).is_err());
@@ -679,5 +772,42 @@ mod tests {
     #[test]
     fn known_provider_label_includes_wecom() {
         assert_eq!(known_provider_label(IM_PROVIDER_WECOM), "企业微信");
+    }
+
+    /** 纯图、图文和富文本都视为对话；文件等未知类型仍拒绝。 */
+    #[test]
+    fn conversation_turn_accepts_text_and_images() {
+        let mut event = ImInboundEvent {
+            kind: "message".to_owned(),
+            event_id: "evt".to_owned(),
+            message_id: "msg".to_owned(),
+            chat_id: "dm".to_owned(),
+            chat_type: "direct".to_owned(),
+            sender_open_id: "user".to_owned(),
+            message_type: "text".to_owned(),
+            text: "看看这张图".to_owned(),
+            mentions: Vec::new(),
+            action: String::new(),
+            change_id: String::new(),
+            context_token: String::new(),
+            images: Vec::new(),
+        };
+        assert!(is_conversation_turn(&event));
+
+        event.text.clear();
+        event.message_type = "file".to_owned();
+        assert!(!is_conversation_turn(&event));
+
+        event.message_type = "image".to_owned();
+        assert!(is_conversation_turn(&event));
+
+        event.message_type = "unknown".to_owned();
+        event.images.push(ImInboundImage {
+            url: "https://example.com/a.png".to_owned(),
+            ..ImInboundImage::default()
+        });
+        assert!(is_conversation_turn(&event));
+        assert_eq!(conversation_preview_source("", 1), "图片");
+        assert_eq!(conversation_preview_source("纪要", 1), "纪要");
     }
 }

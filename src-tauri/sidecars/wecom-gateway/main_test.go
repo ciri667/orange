@@ -65,7 +65,7 @@ func TestBuildEventIgnoresNonText(t *testing.T) {
 	body := map[string]any{
 		"msgid":    "msg-3",
 		"chattype": "single",
-		"msgtype":  "image",
+		"msgtype":  "file",
 		"from":     map[string]any{"userid": "user-3"},
 	}
 	event, ok := buildEvent(body, "req-3", "橘记")
@@ -74,6 +74,23 @@ func TestBuildEventIgnoresNonText(t *testing.T) {
 	}
 	if event.MessageType != unsupportedMsgType {
 		t.Fatalf("expected unsupported type, got %q", event.MessageType)
+	}
+}
+
+func TestBuildEventEmitsImage(t *testing.T) {
+	body := map[string]any{
+		"msgid":    "msg-img",
+		"chattype": "single",
+		"msgtype":  "image",
+		"from":     map[string]any{"userid": "user-3"},
+		"image":    map[string]any{"url": "https://example.com/a.png"},
+	}
+	event, ok := buildEvent(body, "req-img", "橘记")
+	if !ok {
+		t.Fatal("expected image event")
+	}
+	if event.MessageType != "image" || len(event.Images) != 1 || event.Images[0].URL != "https://example.com/a.png" {
+		t.Fatalf("unexpected image event: %+v", event)
 	}
 }
 
@@ -86,7 +103,7 @@ func TestBuildEventExtractsMixedText(t *testing.T) {
 		"mixed": map[string]any{
 			"msg_item": []any{
 				map[string]any{"msgtype": "text", "text": map[string]any{"content": "第一段"}},
-				map[string]any{"msgtype": "image"},
+				map[string]any{"msgtype": "image", "image": map[string]any{"url": "https://example.com/b.jpg"}},
 				map[string]any{"msgtype": "text", "text": map[string]any{"content": "第二段"}},
 			},
 		},
@@ -97,6 +114,9 @@ func TestBuildEventExtractsMixedText(t *testing.T) {
 	}
 	if event.Text != "第一段 第二段" {
 		t.Fatalf("unexpected mixed text: %q", event.Text)
+	}
+	if event.MessageType != "text" || len(event.Images) != 1 || event.Images[0].URL != "https://example.com/b.jpg" {
+		t.Fatalf("expected mixed image, got %+v", event)
 	}
 }
 

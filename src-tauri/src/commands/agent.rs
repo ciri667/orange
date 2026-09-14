@@ -314,6 +314,7 @@ pub(crate) async fn run_agent_turn_from_im(
     app: AppHandle,
     provider_id: String,
     prompt: String,
+    images: Vec<ConversationImageAttachment>,
     channel_key: String,
     knowledge_base_ids: Vec<String>,
     im_identity: crate::domain::ImSessionIdentity,
@@ -363,8 +364,12 @@ pub(crate) async fn run_agent_turn_from_im(
     let cancel = runtime::register_agent_cancel(&session_id)?;
     let _cancel_guard = runtime::AgentCancelGuard::new(session_id.clone(), cancel.clone());
     let active_knowledge_base_id = valid_scope_ids.first().cloned().unwrap_or_default();
-    let user_message = crate::im::build_im_user_message(&prompt);
+    let user_message = crate::im::build_im_user_message(&prompt, &images);
     let user_message_id = user_message.id.clone();
+    let image_ids = images
+        .iter()
+        .map(|image| image.id.clone())
+        .collect::<Vec<_>>();
 
     if let Some(session) = snapshot
         .sessions
@@ -407,6 +412,7 @@ pub(crate) async fn run_agent_turn_from_im(
             "providerId": provider_id.clone(),
             "scopeCount": valid_scope_ids.len(),
             "promptChars": prompt.chars().count(),
+            "imageCount": image_ids.len(),
             "channelHash": storage::hash_content(&channel_key).chars().take(16).collect::<String>(),
         })),
     );
@@ -428,6 +434,7 @@ pub(crate) async fn run_agent_turn_from_im(
         session_id.clone(),
         active_knowledge_base_id.clone(),
         user_message_id,
+        image_ids,
     );
     let runtime_result =
         runtime::run_agent_turn(&app, snapshot, request, settings, available_skills, cancel).await;

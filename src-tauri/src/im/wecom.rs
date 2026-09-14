@@ -20,8 +20,8 @@ const RECENT_EVENT_LIMIT: usize = 512;
 /** 鉴权通过后立刻占住流式气泡，避免企业微信因 Agent 耗时超时重试。 */
 const PROCESSING_PLACEHOLDER: &str = "橘记正在处理…";
 
-/** 首版只处理文本；其它消息类型回固定说明。 */
-const UNSUPPORTED_MESSAGE_REPLY: &str = "暂不支持该消息类型，请发送文本。";
+/** 非文字/图片对话的固定说明。 */
+const UNSUPPORTED_MESSAGE_REPLY: &str = "暂不支持该消息类型，请发送文字或图片。";
 
 /** 企业微信 sidecar 配置，通过 stdin JSON 注入。 */
 #[derive(Clone, Debug, Serialize)]
@@ -393,7 +393,7 @@ async fn handle_inbound_event(app: AppHandle, event: ImInboundEvent) {
         return;
     }
 
-    if event.message_type != "text" {
+    if !inbound::is_conversation_turn(&event) {
         if let Err(error) = send_stream_reply(&event, UNSUPPORTED_MESSAGE_REPLY, true).await {
             record_reply_result(&app, started_at, &event_hash, Err(error));
         } else {
@@ -418,6 +418,7 @@ async fn handle_inbound_event(app: AppHandle, event: ImInboundEvent) {
         event.clone(),
         settings,
         false,
+        super::images::ImageFetchAuth::Public,
     )
     .await;
     let truncated = inbound::truncate_chars(&reply, inbound::WECOM_REPLY_MAX_CHARS);
