@@ -97,6 +97,24 @@ pub struct AgentTraceStep {
     pub task_id: Option<String>,
 }
 
+/** 对话图片的持久引用；二进制只落在附件目录，不进入会话 JSON 或模型 transcript。 */
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ConversationImageAttachment {
+    /** 原始字节的 sha256 hex，也是附件文件名。 */
+    pub id: String,
+    pub mime_type: String,
+    pub byte_size: usize,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub width: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub height: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    /** 本机绝对路径，仅供前端 convertFileSrc 预览，不得写入模型请求。 */
+    pub absolute_path: String,
+}
+
 /** Agent 与用户的会话消息。 */
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -110,6 +128,9 @@ pub struct AgentMessage {
     /** 本条用户消息在发送时显式 @ 的文件 ID；仅用于历史回显，不会成为长期上下文。 */
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub mentioned_file_ids: Vec<String>,
+    /** 本条用户消息上传的对话图片；旧会话缺省为空。 */
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub images: Vec<ConversationImageAttachment>,
     /** 本轮过程时间线；旧会话没有该字段时按空轨迹兼容。 */
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub trace: Vec<AgentTraceStep>,
@@ -555,4 +576,7 @@ pub struct AgentTurnRequest {
     /** 本轮用户显式 @ 的文件 ID；Runtime 会在会话 scope 内重新校验。 */
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub mentioned_file_ids: Vec<String>,
+    /** 本轮已准入的对话图片 ID；后端按附件目录重新解析，不信任前端路径。 */
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub image_ids: Vec<String>,
 }

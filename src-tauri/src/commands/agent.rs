@@ -1,5 +1,64 @@
 use super::common::*;
 
+/** 准入对话图片：校验格式后写入 app_data 附件目录，返回可持久化的引用。 */
+#[tauri::command]
+pub async fn save_conversation_image_attachments(
+    app: AppHandle,
+    payload: SaveConversationImageAttachmentsPayload,
+) -> Result<Vec<ConversationImageAttachment>, String> {
+    let started_at = Instant::now();
+    let image_count = payload.images.len();
+    let images = payload.images;
+    let root = storage::conversation_attachments_root(&app)?;
+    allow_asset_protocol_directory(&app, &root)?;
+
+    let save_result = run_blocking("保存对话图片附件", move || {
+        storage::save_conversation_images(&root, &images)
+    })
+    .await;
+
+    match save_result {
+        Ok(saved_attachments) => {
+            let total_byte_size: usize = saved_attachments
+                .iter()
+                .map(|attachment| attachment.byte_size)
+                .sum();
+            logging::write_app_event_best_effort(
+                &app,
+                AppEventBuilder::new(
+                    AppLogLevel::Info,
+                    AppLogCategory::Agent,
+                    "save_conversation_image_attachment",
+                    "completed",
+                    "已保存对话图片附件。",
+                )
+                .duration(started_at.elapsed())
+                .metadata(json!({
+                    "imageCount": image_count,
+                    "savedCount": saved_attachments.len(),
+                    "totalBytes": total_byte_size,
+                })),
+            );
+            Ok(saved_attachments)
+        }
+        Err(error) => {
+            logging::write_app_event_best_effort(
+                &app,
+                AppEventBuilder::new(
+                    AppLogLevel::Warn,
+                    AppLogCategory::Agent,
+                    "save_conversation_image_attachment",
+                    "failed",
+                    error.clone(),
+                )
+                .duration(started_at.elapsed())
+                .metadata(json!({ "imageCount": image_count })),
+            );
+            Err(error)
+        }
+    }
+}
+
 /** 运行 Agent 单轮 loop，检索作为工具由 Agent 自行选择。 */
 #[tauri::command]
 pub async fn run_agent_turn(

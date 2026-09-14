@@ -124,6 +124,7 @@ mod tests {
             model_id: None,
             explicit_skill_ids: Vec::new(),
             mentioned_file_ids: Vec::new(),
+            image_ids: Vec::new(),
         }
     }
 

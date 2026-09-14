@@ -1,15 +1,15 @@
 use super::*;
 
 pub(crate) struct ImageAttachmentFormat {
-    mime_type: &'static str,
-    extension: &'static str,
+    pub(crate) mime_type: &'static str,
+    pub(crate) extension: &'static str,
 }
 
 /** 已完成校验的待写入图片，避免写文件过程中才发现 MIME 或大小不合法。 */
 pub(crate) struct PreparedImageAttachment {
-    bytes: Vec<u8>,
-    format: ImageAttachmentFormat,
-    hash_prefix: String,
+    pub(crate) bytes: Vec<u8>,
+    pub(crate) format: ImageAttachmentFormat,
+    pub(crate) hash_prefix: String,
 }
 
 /** 单次写入完成后的文件位置，分别服务清理和 Markdown 插入。 */

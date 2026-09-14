@@ -12,10 +12,6 @@ pub fn rewind_session_to_user_message(
     }
 
     let prompt = prompt.trim();
-    if prompt.is_empty() {
-        return Err("消息不能为空。".to_owned());
-    }
-
     let message_index = session
         .messages
         .iter()
@@ -23,6 +19,9 @@ pub fn rewind_session_to_user_message(
         .ok_or_else(|| "找不到要编辑的用户消息。".to_owned())?;
     if session.messages[message_index].role != "user" {
         return Err("只能编辑用户消息。".to_owned());
+    }
+    if prompt.is_empty() && session.messages[message_index].images.is_empty() {
+        return Err("消息不能为空。".to_owned());
     }
 
     let old_content = session.messages[message_index].content.clone();
@@ -40,7 +39,15 @@ pub fn rewind_session_to_user_message(
     reconcile_context_summary_after_rewind(session);
 
     if is_first_user_message && session.title.trim() == old_content.trim() {
-        session.title = prompt.to_owned();
+        session.title = if prompt.is_empty() {
+            match session.messages[message_index].images.len() {
+                0 => session.title.clone(),
+                1 => "图片".to_owned(),
+                count => format!("{count} 张图片"),
+            }
+        } else {
+            prompt.to_owned()
+        };
     }
 
     session.updated_at = format_local_datetime();
@@ -107,6 +114,7 @@ mod tests {
             citations: None,
             tool_calls: None,
             mentioned_file_ids: Vec::new(),
+            images: Vec::new(),
             trace: Vec::new(),
             turn_duration_ms: None,
             interrupted: false,

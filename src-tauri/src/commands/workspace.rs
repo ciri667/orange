@@ -15,6 +15,9 @@ pub async fn load_workspace_state(app: AppHandle) -> Result<WorkspaceBootstrapSt
     let index_snapshot = bootstrap.snapshot.clone();
 
     allow_asset_protocol_for_knowledge_bases(&app, &bootstrap.snapshot)?;
+    if let Ok(attachments_root) = storage::conversation_attachments_root(&app) {
+        let _ = allow_asset_protocol_directory(&app, &attachments_root);
+    }
 
     // 启动索引只影响后续检索，不阻塞首屏进入；失败时写 stderr 供桌面日志排查。
     tauri::async_runtime::spawn(async move {

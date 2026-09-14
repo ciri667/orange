@@ -147,6 +147,12 @@ pub(super) fn build_model_prompt(
     let mentioned_files_prompt =
         render_mentioned_files_prompt(&resolve_mentioned_files(snapshot, session, request));
     let pending_prompt = render_pending_live_prompt(session);
+    let current_images = session
+        .messages
+        .iter()
+        .find(|message| message.id == current_user_message_id)
+        .map(|message| message.images.clone())
+        .unwrap_or_default();
     // 工作记忆每轮都会更新给 UI 看；检查点只在历史已经装不下时才进模型上下文。
     let checkpoint = if should_inject_checkpoint(session, model_context_length) {
         render_checkpoint_user_message(session.context_summary.as_ref())
@@ -186,6 +192,7 @@ pub(super) fn build_model_prompt(
             explicit_skills,
             mentioned_files_prompt.as_deref(),
             pending_prompt.as_deref(),
+            &current_images,
         ));
         let used_chars = estimate_model_messages_chars(&messages[prefix_len..]);
         PackedHistoryStats {
@@ -212,6 +219,7 @@ pub(super) fn build_model_prompt(
             explicit_skills,
             mentioned_files_prompt.as_deref(),
             pending_prompt.as_deref(),
+            &current_images,
         );
         packed_history.stats
     };
@@ -360,12 +368,13 @@ pub(super) fn build_scope_summary(snapshot: &WorkspaceSnapshot, session: &AgentS
     }
 }
 
-/** 构造本轮发给模型的 user 消息：action、slash Skill、用户原话、@、pending。 */
+/** 构造本轮发给模型的 user 消息：action、slash Skill、用户原话、@、pending、图片引用。 */
 pub(super) fn build_current_user_model_message(
     request: &AgentTurnRequest,
     explicit_skills: &[AgentSkill],
     mentioned_files_prompt: Option<&str>,
     pending_prompt: Option<&str>,
+    images: &[crate::domain::ConversationImageAttachment],
 ) -> Value {
     let mut content = format!("界面 action 提示：{}", request.action);
     let skill_prompt = skills::explicit_skill_prompt(explicit_skills);
@@ -373,7 +382,11 @@ pub(super) fn build_current_user_model_message(
         content.push_str("\n\n");
         content.push_str(&skill_prompt);
     }
-    content.push_str(&format!("\n用户输入：{}", request.prompt));
+    if request.prompt.trim().is_empty() && !images.is_empty() {
+        content.push_str("\n用户输入：[图片]");
+    } else {
+        content.push_str(&format!("\n用户输入：{}", request.prompt));
+    }
     if let Some(mentioned) = mentioned_files_prompt.filter(|value| !value.is_empty()) {
         content.push_str("\n\n");
         content.push_str(mentioned);
@@ -384,7 +397,7 @@ pub(super) fn build_current_user_model_message(
     }
     json!({
         "role": "user",
-        "content": content
+        "content": user_model_content(&content, images, true)
     })
 }
 
@@ -396,12 +409,14 @@ fn attach_turn_materials_to_current_user(
     explicit_skills: &[AgentSkill],
     mentioned_files_prompt: Option<&str>,
     pending_prompt: Option<&str>,
+    images: &[crate::domain::ConversationImageAttachment],
 ) {
     let current = build_current_user_model_message(
         request,
         explicit_skills,
         mentioned_files_prompt,
         pending_prompt,
+        images,
     );
     if let Some(user_message) = messages
         .iter_mut()
@@ -445,7 +460,19 @@ fn session_history_exceeds_budget(
     let used = session
         .messages
         .iter()
-        .map(|message| message.content.chars().count().saturating_add(64))
+        .map(|message| {
+            message
+                .content
+                .chars()
+                .count()
+                .saturating_add(64)
+                .saturating_add(
+                    message
+                        .images
+                        .len()
+                        .saturating_mul(crate::storage::ESTIMATED_IMAGE_CHARS),
+                )
+        })
         .sum::<usize>();
     used > budget
 }
@@ -724,6 +751,43 @@ fn message_text_content(message: &Value) -> &str {
     message.get("content").and_then(Value::as_str).unwrap_or("")
 }
 
+fn message_text_content_owned(message: &Value) -> String {
+    match message.get("content") {
+        Some(Value::String(text)) => text.clone(),
+        Some(Value::Array(parts)) => parts
+            .iter()
+            .filter_map(|part| match part.get("type").and_then(Value::as_str) {
+                Some("text") => part.get("text").and_then(Value::as_str).map(str::to_owned),
+                Some(crate::storage::MODEL_IMAGE_REF_TYPE) => Some("[图片]".to_owned()),
+                Some("image_url") => Some("[图片]".to_owned()),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+            .join("\n"),
+        _ => String::new(),
+    }
+}
+
+/** 转储里去掉 data URL，避免把图片字节写进日志文件。 */
+fn redact_prompt_dump_content(content: &str) -> String {
+    if !content.contains("data:image") && !content.contains("base64,") {
+        return content.to_owned();
+    }
+    content
+        .split("data:image")
+        .enumerate()
+        .map(|(index, part)| {
+            if index == 0 {
+                return part.to_owned();
+            }
+            match part.find('"') {
+                Some(end) => format!("data:image[redacted]{}", &part[end..]),
+                None => "data:image[redacted]".to_owned(),
+            }
+        })
+        .collect()
+}
+
 fn message_role(message: &Value) -> &str {
     message.get("role").and_then(Value::as_str).unwrap_or("")
 }
@@ -928,12 +992,18 @@ fn history_messages_from_session_message(
                 "界面 action 提示：{}\n用户输入：{}",
                 request.action, message.content
             )
+        } else if message.content.trim().is_empty() && !message.images.is_empty() {
+            "[图片]".to_owned()
         } else {
             message.content.clone()
         };
         return vec![json!({
             "role": "user",
-            "content": truncate_chars(&content, max_content_chars)
+            "content": user_model_content(
+                &truncate_chars(&content, max_content_chars),
+                &message.images,
+                is_hot || message.id == current_user_message_id,
+            )
         })];
     }
 
@@ -1346,12 +1416,55 @@ pub(super) fn render_mentioned_files_prompt(materials: &[MentionedFileMaterial])
     ))
 }
 
-/** 估算模型消息字符数。 */
+/** 把用户正文和图片引用收成模型 content：无图时保持字符串，兼容旧 transcript。 */
+fn user_model_content(
+    text: &str,
+    images: &[crate::domain::ConversationImageAttachment],
+    include_images: bool,
+) -> Value {
+    if images.is_empty() {
+        return json!(text);
+    }
+    if !include_images {
+        let placeholder = format!("{text}\n\n[图片 {} 张]", images.len());
+        return json!(placeholder);
+    }
+    let mut parts = vec![json!({ "type": "text", "text": text })];
+    for image in images {
+        parts.push(json!({
+            "type": crate::storage::MODEL_IMAGE_REF_TYPE,
+            "id": image.id,
+            "mimeType": image.mime_type,
+        }));
+    }
+    json!(parts)
+}
+
+/** 估算模型消息字符数；图片引用按固定预算计，避免把 data URL 算进窗口。 */
 pub(super) fn estimate_model_messages_chars(messages: &[Value]) -> usize {
-    messages
-        .iter()
-        .map(|message| message.to_string().chars().count())
-        .sum()
+    messages.iter().map(estimate_model_message_chars).sum()
+}
+
+fn estimate_model_message_chars(message: &Value) -> usize {
+    match message.get("content") {
+        Some(Value::String(text)) => text.chars().count().saturating_add(64),
+        Some(Value::Array(parts)) => parts
+            .iter()
+            .map(|part| match part.get("type").and_then(Value::as_str) {
+                Some("text") => part
+                    .get("text")
+                    .and_then(Value::as_str)
+                    .map(|text| text.chars().count())
+                    .unwrap_or(0),
+                Some(crate::storage::MODEL_IMAGE_REF_TYPE) | Some("image_url") => {
+                    crate::storage::ESTIMATED_IMAGE_CHARS
+                }
+                _ => part.to_string().chars().count(),
+            })
+            .sum::<usize>()
+            .saturating_add(64),
+        _ => message.to_string().chars().count(),
+    }
 }
 
 /** 开发者预览截断长度；完整正文写入日志目录 JSON。 */
@@ -1395,14 +1508,16 @@ pub(super) fn build_prompt_dump(
 
 fn prompt_dump_message(index: usize, message: &Value) -> AgentPromptDumpMessage {
     let role = message_role(message).to_owned();
-    let chars = message.to_string().chars().count();
-    let content = serde_json::to_string_pretty(message).unwrap_or_else(|_| message.to_string());
+    let chars = estimate_model_message_chars(message);
+    let content = redact_prompt_dump_content(
+        &serde_json::to_string_pretty(message).unwrap_or_else(|_| message.to_string()),
+    );
     let preview_source = {
-        let text = message_text_content(message);
+        let text = message_text_content_owned(message);
         if text.is_empty() {
             content.clone()
         } else {
-            text.to_owned()
+            text
         }
     };
     let (preview, truncated) = preview_chars(&preview_source, PROMPT_DUMP_PREVIEW_CHARS);
@@ -1621,5 +1736,88 @@ mod tests {
             .content
             .as_ref()
             .is_some_and(|content| content.chars().count() > PROMPT_DUMP_PREVIEW_CHARS));
+    }
+
+    /** 当前用户消息带图时，transcript 只存引用，不把路径或 base64 写进 content。 */
+    #[test]
+    fn current_user_model_message_uses_image_refs_instead_of_bytes() {
+        let request = crate::domain::AgentTurnRequest {
+            prompt: "这是什么".to_owned(),
+            action: "ask".to_owned(),
+            session_id: "session-a".to_owned(),
+            active_knowledge_base_id: "kb-a".to_owned(),
+            active_note_id: "note-a".to_owned(),
+            client_message_id: None,
+            model_provider_id: None,
+            model_id: None,
+            explicit_skill_ids: Vec::new(),
+            mentioned_file_ids: Vec::new(),
+            image_ids: vec!["a".repeat(64)],
+        };
+        let images = vec![crate::domain::ConversationImageAttachment {
+            id: "a".repeat(64),
+            mime_type: "image/png".to_owned(),
+            byte_size: 12,
+            width: Some(1),
+            height: Some(1),
+            name: Some("shot.png".to_owned()),
+            absolute_path: "C:\\secret\\shot.png".to_owned(),
+        }];
+        let message = build_current_user_model_message(&request, &[], None, None, &images);
+        let parts = message["content"].as_array().expect("multipart content");
+        assert_eq!(parts[0]["type"], "text");
+        assert_eq!(parts[1]["type"], crate::storage::MODEL_IMAGE_REF_TYPE);
+        assert_eq!(parts[1]["id"], "a".repeat(64));
+        let serialized = message.to_string();
+        assert!(!serialized.contains("secret"));
+        assert!(!serialized.contains("base64"));
+        assert_eq!(
+            estimate_model_message_chars(&message),
+            parts[0]["text"].as_str().unwrap().chars().count()
+                + crate::storage::ESTIMATED_IMAGE_CHARS
+                + 64
+        );
+    }
+
+    /** 温历史丢掉像素，只保留张数占位，避免旧图挤占窗口。 */
+    #[test]
+    fn warm_history_replaces_images_with_placeholder() {
+        let content = user_model_content(
+            "看看图",
+            &[crate::domain::ConversationImageAttachment {
+                id: "b".repeat(64),
+                mime_type: "image/jpeg".to_owned(),
+                byte_size: 8,
+                width: Some(2),
+                height: Some(2),
+                name: None,
+                absolute_path: "/tmp/hidden.jpg".to_owned(),
+            }],
+            false,
+        );
+        assert_eq!(content.as_str().unwrap(), "看看图\n\n[图片 1 张]");
+    }
+
+    /** prompt dump 不得把 data URL 原样落盘。 */
+    #[test]
+    fn prompt_dump_redacts_image_data_urls() {
+        let dump = build_prompt_dump(
+            "session-a",
+            "gpt-4o-mini",
+            None,
+            1,
+            "turn",
+            &[json!({
+                "role": "user",
+                "content": [{
+                    "type": "image_url",
+                    "image_url": { "url": "data:image/png;base64,QUJDRA==" }
+                }]
+            })],
+            "2026-09-09 10:00:00",
+        );
+        let content = dump.messages[0].content.as_deref().unwrap_or("");
+        assert!(content.contains("[redacted]"));
+        assert!(!content.contains("QUJDRA=="));
     }
 }

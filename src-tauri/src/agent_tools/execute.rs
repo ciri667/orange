@@ -1447,6 +1447,9 @@ pub(crate) fn execute_read_session_context(
 #[allow(dead_code)]
 pub(crate) fn session_message_search_text(message: &crate::domain::AgentMessage) -> String {
     let mut parts = vec![message.content.clone()];
+    if !message.images.is_empty() {
+        parts.push(format!("[图片 {} 张]", message.images.len()));
+    }
 
     if let Some(tool_calls) = &message.tool_calls {
         parts.extend(tool_calls.iter().map(|tool_call| tool_call.summary.clone()));

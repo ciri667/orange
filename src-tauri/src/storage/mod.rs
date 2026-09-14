@@ -95,10 +95,10 @@ const PRODUCTION_KEYRING_SERVICE: &str = "Orange";
 const DEVELOPMENT_KEYRING_SERVICE: &str = "Orange Dev";
 
 /** 单张粘贴图片最大字节数，避免超大剪贴板内容阻塞 UI 或撑爆本地目录。 */
-const MAX_SINGLE_PASTE_IMAGE_BYTES: usize = 20 * 1024 * 1024;
+pub(crate) const MAX_SINGLE_PASTE_IMAGE_BYTES: usize = 20 * 1024 * 1024;
 
 /** 单次粘贴图片总字节数上限，用于限制批量截图或多图复制的最坏写入成本。 */
-const MAX_PASTE_IMAGE_BATCH_BYTES: usize = 50 * 1024 * 1024;
+pub(crate) const MAX_PASTE_IMAGE_BATCH_BYTES: usize = 50 * 1024 * 1024;
 
 /** 图片附件文件名 hash 前缀长度，兼顾可读性和同秒重复粘贴冲突概率。 */
 const PASTED_IMAGE_HASH_PREFIX_LENGTH: usize = 12;
@@ -121,6 +121,7 @@ static INITIALIZED_DATABASE_PATHS: OnceLock<Mutex<HashSet<PathBuf>>> = OnceLock:
 /** 最近一次已完成的 FTS 快照签名，用于跳过 StrictMode/reload 的重复索引任务。 */
 static COMPLETED_INDEX_SIGNATURE: OnceLock<Mutex<Option<String>>> = OnceLock::new();
 
+mod attachments;
 mod config;
 mod db;
 mod files;
@@ -134,6 +135,7 @@ mod rewind;
 mod sessions;
 mod workspace;
 
+pub use attachments::*;
 pub use config::*;
 pub use db::*;
 pub use files::*;

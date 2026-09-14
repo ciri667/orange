@@ -41,6 +41,13 @@ pub struct SaveNoteImageAttachmentsPayload {
     pub images: Vec<NoteImageAttachmentInput>,
 }
 
+/** 对话图片准入命令入参；bytesBase64 只在命令边界传输。 */
+#[derive(Clone, Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SaveConversationImageAttachmentsPayload {
+    pub images: Vec<NoteImageAttachmentInput>,
+}
+
 /** 保存 txt 文档正文的命令入参，expectedHash 用于发现外部编辑器冲突。 */
 #[derive(Clone, Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]

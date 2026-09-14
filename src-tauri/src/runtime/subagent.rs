@@ -333,6 +333,7 @@ async fn run_nested_loop(
             &mut model_messages,
             Some(&tool_schemas),
             None,
+            None,
             params.cancel,
             &mut |streamed| {
                 let progress = stream_ui_progress(streamed);

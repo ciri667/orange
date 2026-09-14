@@ -31,7 +31,10 @@ use crate::logging::{self, AppEventBuilder, AppLogCategory, AppLogLevel};
 use crate::model_provider;
 use crate::provider_error;
 use crate::skills;
-use crate::storage::{create_id, format_local_datetime};
+use crate::storage::{
+    conversation_attachments_root, create_id, format_local_datetime, hydrate_model_images,
+    messages_contain_image_refs, resolve_conversation_images,
+};
 use reqwest::Client;
 use serde_json::{json, Value};
 use std::collections::HashSet;
@@ -681,9 +684,17 @@ async fn run_model_loop(
     let mut citations = Vec::new();
     let mut audit_trail = RuntimeAuditTrail::default();
     let client = build_http_client()?;
-    apply_first_prompt_title(&mut snapshot.sessions[session_index], &request.prompt);
-    let current_user_message_id =
-        ensure_user_message_for_turn(&mut snapshot.sessions[session_index], &request);
+    let turn_images = resolve_turn_images(app, &request)?;
+    apply_first_prompt_title(
+        &mut snapshot.sessions[session_index],
+        &request.prompt,
+        turn_images.len(),
+    );
+    let current_user_message_id = ensure_user_message_for_turn(
+        &mut snapshot.sessions[session_index],
+        &request,
+        &turn_images,
+    );
     audit_trail.record_context_summary_injection(&snapshot.sessions[session_index]);
     // 加载当前会话 scope 内已启用的跨会话记忆，失败只写脱敏 warn，不阻塞 Agent 回合。
     let session_knowledge_base_ids = snapshot.sessions[session_index].knowledge_base_ids.clone();
@@ -793,6 +804,7 @@ async fn run_model_loop(
             model_round,
             &model_messages,
         );
+        let image_root = conversation_attachments_root(app).ok();
         let response = match send_chat_completion_with_policy(
             &client,
             &provider,
@@ -802,6 +814,7 @@ async fn run_model_loop(
             &mut model_messages,
             Some(&tool_schemas),
             None,
+            image_root.as_deref(),
             cancel,
             &mut |streamed| {
                 apply_streamed_assistant_progress(tracer, Some(app), streamed);
@@ -1666,9 +1679,17 @@ pub(super) async fn send_chat_completion_with_policy(
     messages: &mut Vec<Value>,
     tool_schemas: Option<&Value>,
     response_format: Option<&Value>,
+    image_root: Option<&std::path::Path>,
     cancel: &AgentCancel,
     on_progress: &mut impl FnMut(&StreamedAssistant),
 ) -> Result<Value, String> {
+    let hydrated_messages = image_root
+        .filter(|_| messages_contain_image_refs(messages))
+        .map(|root| hydrate_model_images(root, messages));
+    let request_messages: &[Value] = match &hydrated_messages {
+        Some(hydrated) => hydrated,
+        None => messages,
+    };
     let mut delay = Duration::from_millis(400);
     let mut retryable_attempts = 0usize;
     loop {
@@ -1681,7 +1702,7 @@ pub(super) async fn send_chat_completion_with_policy(
             model_id,
             endpoint,
             api_key,
-            messages,
+            request_messages,
             tool_schemas,
             response_format,
             cancel,
@@ -2672,8 +2693,24 @@ fn fallback_agent_turn(
     }
 }
 
+/** 按 ID 从附件目录解析本轮对话图片；缺文件时直接失败，避免模型收到空引用。 */
+fn resolve_turn_images(
+    app: &AppHandle,
+    request: &AgentTurnRequest,
+) -> Result<Vec<crate::domain::ConversationImageAttachment>, String> {
+    if request.image_ids.is_empty() {
+        return Ok(Vec::new());
+    }
+    let root = conversation_attachments_root(app)?;
+    resolve_conversation_images(&root, &request.image_ids)
+}
+
 /** 确保本轮用户消息存在；前端已乐观落库时复用同一条消息，避免最终快照重复。 */
-fn ensure_user_message_for_turn(session: &mut AgentSession, request: &AgentTurnRequest) -> String {
+fn ensure_user_message_for_turn(
+    session: &mut AgentSession,
+    request: &AgentTurnRequest,
+    images: &[crate::domain::ConversationImageAttachment],
+) -> String {
     let user_message_id = request
         .client_message_id
         .clone()
@@ -2684,8 +2721,12 @@ fn ensure_user_message_for_turn(session: &mut AgentSession, request: &AgentTurnR
         .iter_mut()
         .find(|message| message.id == user_message_id && message.role == "user")
         .map(|message| {
-            // 前端乐观消息可能尚未带该字段；后端以本轮已提交请求为准补齐历史回显数据。
+            // 乐观插入或 rewind 后的用户消息以本轮请求为准，避免正文、@ 文件和图片与请求分叉。
+            message.content = request.prompt.clone();
             message.mentioned_file_ids = request.mentioned_file_ids.clone();
+            if !images.is_empty() {
+                message.images = images.to_vec();
+            }
         })
         .is_some()
     {
@@ -2694,12 +2735,16 @@ fn ensure_user_message_for_turn(session: &mut AgentSession, request: &AgentTurnR
 
     session
         .messages
-        .push(build_user_message(request, user_message_id.clone()));
+        .push(build_user_message(request, user_message_id.clone(), images));
     user_message_id
 }
 
 /** 构造用户消息，确保真实模型、错误分支和本地 fallback 的消息形态一致。 */
-fn build_user_message(request: &AgentTurnRequest, id: String) -> AgentMessage {
+fn build_user_message(
+    request: &AgentTurnRequest,
+    id: String,
+    images: &[crate::domain::ConversationImageAttachment],
+) -> AgentMessage {
     AgentMessage {
         id,
         role: "user".to_owned(),
@@ -2708,6 +2753,7 @@ fn build_user_message(request: &AgentTurnRequest, id: String) -> AgentMessage {
         citations: None,
         tool_calls: None,
         mentioned_file_ids: request.mentioned_file_ids.clone(),
+        images: images.to_vec(),
         trace: Vec::new(),
         turn_duration_ms: None,
         interrupted: false,
@@ -2882,8 +2928,12 @@ fn model_error_turn(
         },
     };
 
-    apply_first_prompt_title(&mut snapshot.sessions[session_index], &request.prompt);
-    ensure_user_message_for_turn(&mut snapshot.sessions[session_index], &request);
+    apply_first_prompt_title(
+        &mut snapshot.sessions[session_index],
+        &request.prompt,
+        request.image_ids.len(),
+    );
+    ensure_user_message_for_turn(&mut snapshot.sessions[session_index], &request, &[]);
     let mut tool_calls = vec![skill_context_tool_call(available_skills)];
 
     tool_calls.extend(activate_skill_tool_calls(
@@ -2912,6 +2962,7 @@ fn model_error_turn(
             citations: Some(Vec::new()),
             tool_calls: Some(tool_calls),
             mentioned_file_ids: Vec::new(),
+            images: Vec::new(),
             trace: tracer
                 .map(|tracer| tracer.steps())
                 .filter(|steps| !steps.is_empty())
@@ -2977,8 +3028,12 @@ fn skill_activation_error_turn(
         });
     }
 
-    apply_first_prompt_title(&mut snapshot.sessions[session_index], &request.prompt);
-    ensure_user_message_for_turn(&mut snapshot.sessions[session_index], &request);
+    apply_first_prompt_title(
+        &mut snapshot.sessions[session_index],
+        &request.prompt,
+        request.image_ids.len(),
+    );
+    ensure_user_message_for_turn(&mut snapshot.sessions[session_index], &request, &[]);
     snapshot.sessions[session_index]
         .messages
         .push(AgentMessage {
@@ -2989,6 +3044,7 @@ fn skill_activation_error_turn(
             citations: Some(Vec::new()),
             tool_calls: Some(tool_calls),
             mentioned_file_ids: Vec::new(),
+            images: Vec::new(),
             trace: Vec::new(),
             turn_duration_ms: None,
             interrupted: false,
@@ -3060,8 +3116,8 @@ fn resolve_session_index(
         .ok_or_else(|| "当前没有可用 Agent 会话。".to_owned())
 }
 
-/** 空白新会话的标题直接使用用户第一条输入，避免按知识库或文档名组装默认标题。 */
-fn apply_first_prompt_title(session: &mut AgentSession, prompt: &str) {
+/** 空白新会话的标题直接使用用户第一条输入；纯图片消息用张数兜底。 */
+fn apply_first_prompt_title(session: &mut AgentSession, prompt: &str, image_count: usize) {
     let has_user_message = session
         .messages
         .iter()
@@ -3072,6 +3128,10 @@ fn apply_first_prompt_title(session: &mut AgentSession, prompt: &str) {
 
         if !next_title.is_empty() {
             session.title = next_title.to_owned();
+        } else if image_count == 1 {
+            session.title = "图片".to_owned();
+        } else if image_count > 1 {
+            session.title = format!("{image_count} 张图片");
         }
     }
 }
@@ -3097,6 +3157,7 @@ fn push_assistant_message(
             citations: Some(deduplicate_citations(citations)),
             tool_calls: Some(tool_calls),
             mentioned_file_ids: Vec::new(),
+            images: Vec::new(),
             trace: tracer.steps(),
             turn_duration_ms: Some(tracer.duration_ms()),
             interrupted,
@@ -3429,6 +3490,7 @@ mod tests {
             citations: None,
             tool_calls,
             mentioned_file_ids: Vec::new(),
+            images: Vec::new(),
             trace,
             turn_duration_ms: None,
             interrupted: false,
@@ -3448,6 +3510,7 @@ mod tests {
             model_id: None,
             explicit_skill_ids: Vec::new(),
             mentioned_file_ids: Vec::new(),
+            image_ids: Vec::new(),
         }
     }
 
@@ -3651,6 +3714,7 @@ mod tests {
                 citations: None,
                 tool_calls: None,
                 mentioned_file_ids: Vec::new(),
+                images: Vec::new(),
                 trace: Vec::new(),
                 turn_duration_ms: None,
                 interrupted: false,
@@ -3728,6 +3792,7 @@ mod tests {
                     },
                 ]),
                 mentioned_file_ids: Vec::new(),
+                images: Vec::new(),
                 trace: vec![AgentTraceStep {
                     id: "trace-search".to_owned(),
                     step_type: "tool".to_owned(),
@@ -3824,6 +3889,7 @@ mod tests {
                     args: json!({ "count": 1 }),
                 }]),
                 mentioned_file_ids: Vec::new(),
+                images: Vec::new(),
                 trace: Vec::new(),
                 turn_duration_ms: None,
                 interrupted: false,
@@ -3876,6 +3942,7 @@ mod tests {
                 }),
             }]),
             mentioned_file_ids: Vec::new(),
+            images: Vec::new(),
             trace: Vec::new(),
             turn_duration_ms: None,
             interrupted: false,
@@ -3929,6 +3996,7 @@ mod tests {
                 args: json!({ "fileId": "note-missing" }),
             }]),
             mentioned_file_ids: Vec::new(),
+            images: Vec::new(),
             trace: Vec::new(),
             turn_duration_ms: None,
             interrupted: false,
@@ -4115,6 +4183,7 @@ mod tests {
                 args: json!({ "query": "旧笔记" }),
             }]),
             mentioned_file_ids: Vec::new(),
+            images: Vec::new(),
             trace: vec![AgentTraceStep {
                 id: "trace-old".to_owned(),
                 step_type: "tool".to_owned(),
@@ -4709,6 +4778,7 @@ mod tests {
                 citations: None,
                 tool_calls: None,
                 mentioned_file_ids: Vec::new(),
+                images: Vec::new(),
                 trace: Vec::new(),
                 turn_duration_ms: None,
                 interrupted: false,
@@ -4795,6 +4865,7 @@ mod tests {
                 citations: None,
                 tool_calls: None,
                 mentioned_file_ids: Vec::new(),
+                images: Vec::new(),
                 trace: Vec::new(),
                 turn_duration_ms: None,
                 interrupted: false,
@@ -5011,6 +5082,7 @@ mod tests {
             citations: None,
             tool_calls: None,
             mentioned_file_ids: Vec::new(),
+            images: Vec::new(),
             trace: Vec::new(),
             turn_duration_ms: None,
             interrupted: false,
@@ -5359,6 +5431,7 @@ mod tests {
                     args: json!({ "query": "隐私边界" }),
                 }]),
                 mentioned_file_ids: Vec::new(),
+                images: Vec::new(),
                 trace: vec![AgentTraceStep {
                     id: "trace-search".to_owned(),
                     step_type: "tool".to_owned(),

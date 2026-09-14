@@ -86,6 +86,7 @@ pub fn run_agent_turn(
             citations: Some(deduplicate_citations(citations)),
             tool_calls: Some(tool_calls),
             mentioned_file_ids: Vec::new(),
+            images: Vec::new(),
             trace,
             turn_duration_ms: None,
             interrupted: false,
@@ -181,6 +182,12 @@ fn apply_first_prompt_title(session: &mut crate::domain::AgentSession, prompt: &
 
         if !next_title.is_empty() {
             session.title = next_title.to_owned();
+        } else if session
+            .messages
+            .iter()
+            .any(|message| !message.images.is_empty())
+        {
+            session.title = "图片".to_owned();
         }
     }
 }
@@ -217,6 +224,7 @@ fn ensure_user_message_for_turn(
         citations: None,
         tool_calls: None,
         mentioned_file_ids: request.mentioned_file_ids.clone(),
+        images: Vec::new(),
         trace: Vec::new(),
         turn_duration_ms: None,
         interrupted: false,
@@ -271,6 +279,7 @@ mod tests {
             model_id: None,
             explicit_skill_ids: Vec::new(),
             mentioned_file_ids: Vec::new(),
+            image_ids: Vec::new(),
         };
         let response = build_local_response(&request, &[], &[]);
 
@@ -291,6 +300,7 @@ mod tests {
             model_id: None,
             explicit_skill_ids: Vec::new(),
             mentioned_file_ids: Vec::new(),
+            image_ids: Vec::new(),
         };
         let response = build_local_response(&request, &[], &[]);
 
@@ -317,6 +327,7 @@ mod tests {
                 citations: None,
                 tool_calls: None,
                 mentioned_file_ids: Vec::new(),
+                images: Vec::new(),
                 trace: Vec::new(),
                 turn_duration_ms: None,
                 interrupted: false,
@@ -344,6 +355,7 @@ mod tests {
             model_id: None,
             explicit_skill_ids: Vec::new(),
             mentioned_file_ids: Vec::new(),
+            image_ids: Vec::new(),
         };
 
         ensure_user_message_for_turn(&mut session, &request);
@@ -378,6 +390,7 @@ mod tests {
                 citations: None,
                 tool_calls: None,
                 mentioned_file_ids: Vec::new(),
+                images: Vec::new(),
                 trace: Vec::new(),
                 turn_duration_ms: None,
                 interrupted: false,
@@ -405,6 +418,7 @@ mod tests {
             model_id: None,
             explicit_skill_ids: Vec::new(),
             mentioned_file_ids: vec!["note-a".to_owned()],
+            image_ids: Vec::new(),
         };
 
         ensure_user_message_for_turn(&mut session, &request);
