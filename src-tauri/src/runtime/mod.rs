@@ -19,7 +19,7 @@ pub use cancel::{
 
 use crate::agent;
 use crate::agent_tools::{model_tool_call_name, parse_tool_args, AgentToolContext, ToolRegistry};
-use crate::agent_trace::AgentTurnTracer;
+use crate::agent_trace::{running_tool_summary, AgentTurnTracer};
 use crate::domain::{
     AgentContextSummary, AgentContextTouchedNote, AgentContextUsage, AgentMessage, AgentSession,
     AgentSkill, AgentToolCall, AgentTurnRequest, AgentTurnResult, Citation, KnowledgeBaseMemory,
@@ -920,9 +920,7 @@ async fn run_model_loop(
                 &model_tool_calls,
                 &extracted_tool_calls.visible_content,
             ));
-            if !tracer.last_step_is_thinking() {
-                tracer.push_thinking(&extracted_tool_calls.visible_content, Some(app));
-            }
+            tracer.update_narration(&extracted_tool_calls.visible_content, Some(app));
             let failure_text = "工具参数可能被截断，本批调用未执行。请用完整参数重新发送。";
             for model_tool_call in &model_tool_calls {
                 let failed_call = AgentToolCall {
@@ -1053,9 +1051,7 @@ async fn run_model_loop(
             &extracted_tool_calls.visible_content,
         ));
 
-        if !tracer.last_step_is_thinking() {
-            tracer.push_thinking(&extracted_tool_calls.visible_content, Some(app));
-        }
+        tracer.update_narration(&extracted_tool_calls.visible_content, Some(app));
 
         let mut remaining_tool_calls = model_tool_calls;
         while !remaining_tool_calls.is_empty() {
@@ -1090,8 +1086,8 @@ async fn run_model_loop(
                     let mut jobs = Vec::new();
                     for model_tool_call in &batch {
                         let tool_args = parse_tool_args(model_tool_call);
-                        let step_id =
-                            tracer.begin_tool("task", "正在调用 task", tool_args, Some(app));
+                        let summary = running_tool_summary("task", &tool_args);
+                        let step_id = tracer.begin_tool("task", &summary, tool_args, Some(app));
                         jobs.push((model_tool_call.clone(), step_id));
                     }
                     let live_id = tracer.live_message_id().to_owned();
@@ -1149,7 +1145,7 @@ async fn run_model_loop(
             let tool_args = parse_tool_args(&model_tool_call);
             let trace_step_id = tracer.begin_tool(
                 &tool_name,
-                &format!("正在调用 {tool_name}"),
+                &running_tool_summary(&tool_name, &tool_args),
                 tool_args.clone(),
                 Some(app),
             );
@@ -2093,7 +2089,7 @@ async fn send_chat_completion_stream(
     }
 }
 
-/** 把流式增量写进过程区：思考进 trace，回答进 live content。 */
+/** 把流式增量写进过程区：reasoning 进思考，工具前正文进旁白，回答进 live content。 */
 fn apply_streamed_assistant_progress(
     tracer: &mut AgentTurnTracer,
     app: Option<&AppHandle>,
@@ -2102,6 +2098,9 @@ fn apply_streamed_assistant_progress(
     let progress = stream_ui_progress(streamed);
     if !progress.thinking.is_empty() {
         tracer.update_thinking(&progress.thinking, app);
+    }
+    if !progress.narration.is_empty() {
+        tracer.update_narration(&progress.narration, app);
     }
     tracer.set_partial_content(&progress.content, app);
 }
@@ -3801,6 +3800,7 @@ mod tests {
                     name: Some("search_notes".to_owned()),
                     status: Some("completed".to_owned()),
                     summary: Some("已检索到 2 条笔记".to_owned()),
+                    title: Some("搜索「隐私边界」".to_owned()),
                     args: Some(json!({ "query": "隐私边界" })),
                     result_preview: Some(
                         r#"{"matches":[{"title":"隐私边界","score":0.9}]}"#.to_owned(),
@@ -4192,6 +4192,7 @@ mod tests {
                 name: Some("search_notes".to_owned()),
                 status: Some("completed".to_owned()),
                 summary: Some("已检索到旧笔记".to_owned()),
+                title: Some("搜索「旧笔记」".to_owned()),
                 args: Some(json!({ "query": "旧笔记" })),
                 result_preview: Some(
                     r#"{"matches":[{"title":"旧笔记预览不应进入温窗口"}]}"#.to_owned(),
@@ -5440,6 +5441,7 @@ mod tests {
                     name: Some("search_notes".to_owned()),
                     status: Some("completed".to_owned()),
                     summary: Some("已检索到 1 条笔记".to_owned()),
+                    title: Some("搜索「隐私边界」".to_owned()),
                     args: Some(json!({ "query": "隐私边界" })),
                     result_preview: Some("truncated-preview".to_owned()),
                     error: None,

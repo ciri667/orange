@@ -92,47 +92,25 @@ impl AgentTurnTracer {
     }
 
     /** 把模型在调用工具前的可见正文记为思考步骤；空白内容直接丢弃。 */
+    #[cfg(test)]
     pub fn push_thinking(&mut self, content: &str, app: Option<&AppHandle>) {
         self.update_thinking(content, app);
     }
 
-    /** 流式更新当前思考：最后一步已是 thinking 则改写，否则新开一步。 */
+    /** 流式更新当前思考：本轮已有 thinking 则改写，否则新开一步（插到旁白前）。 */
     pub fn update_thinking(&mut self, content: &str, app: Option<&AppHandle>) {
-        let trimmed = content.trim();
-        if trimmed.is_empty() {
-            return;
-        }
-        let truncated = truncate_trace_text(trimmed, MAX_TRACE_THINKING_CHARS);
-        if let Some(step) = self
-            .steps
-            .last_mut()
-            .filter(|step| step.step_type == "thinking")
-        {
-            if step.content.as_deref() == Some(truncated.as_str()) {
-                return;
-            }
-            step.content = Some(truncated);
-            self.emit_throttled(app, false);
-            return;
-        }
+        self.update_text_step("thinking", content, app);
+    }
 
-        self.steps.push(AgentTraceStep {
-            id: create_id("trace"),
-            step_type: "thinking".to_owned(),
-            timestamp: format_local_datetime(),
-            content: Some(truncated),
-            name: None,
-            status: None,
-            summary: None,
-            args: None,
-            result_preview: None,
-            error: None,
-            duration_ms: None,
-            children: Vec::new(),
-            agent: None,
-            task_id: None,
-        });
-        self.emit(app);
+    /** 把工具调用前的可见正文记为旁白；空白内容直接丢弃。 */
+    #[cfg(test)]
+    pub fn push_narration(&mut self, content: &str, app: Option<&AppHandle>) {
+        self.update_narration(content, app);
+    }
+
+    /** 流式更新当前旁白：本轮已有 narration 则改写，否则新开一步。 */
+    pub fn update_narration(&mut self, content: &str, app: Option<&AppHandle>) {
+        self.update_text_step("narration", content, app);
     }
 
     /** 流式更新用户可见回答；空字符串表示清掉尚未定稿的正文。 */
@@ -150,16 +128,17 @@ impl AgentTurnTracer {
         self.emit_throttled(app, clearing);
     }
 
-    /** 工具调用出现后，把已经流出的回答改记为思考，避免中间过程留在终稿位置。 */
+    /** 工具调用出现后，把已经流出的回答改记为旁白，避免中间过程留在终稿位置。 */
     #[cfg(test)]
-    pub fn promote_partial_content_to_thinking(&mut self, app: Option<&AppHandle>) {
+    pub fn promote_partial_content_to_narration(&mut self, app: Option<&AppHandle>) {
         let Some(content) = self.content.take() else {
             return;
         };
-        self.update_thinking(&content, None);
+        self.update_narration(&content, None);
         self.emit(app);
     }
 
+    #[cfg(test)]
     pub fn last_step_is_thinking(&self) -> bool {
         self.steps
             .last()
@@ -188,6 +167,7 @@ impl AgentTurnTracer {
             name: Some(name.to_owned()),
             status: Some("running".to_owned()),
             summary: Some(summary.to_owned()),
+            title: Some(summary.to_owned()),
             args: Some(sanitize_trace_args(args)),
             result_preview: None,
             error: None,
@@ -296,6 +276,7 @@ impl AgentTurnTracer {
         if let Some(agent) = agent.map(str::trim).filter(|value| !value.is_empty()) {
             step.agent = Some(agent.to_owned());
         }
+        step.title = Some(summary.to_owned());
         step.summary = Some(summary.to_owned());
         self.emit(app);
     }
@@ -328,43 +309,21 @@ impl AgentTurnTracer {
             self.update_thinking(content, app);
             return;
         };
-        let trimmed = content.trim();
-        if trimmed.is_empty() {
-            return;
-        }
-        let truncated = truncate_trace_text(trimmed, MAX_TRACE_THINKING_CHARS);
-        let Some(parent) = find_step_mut(&mut self.steps, parent_step_id) else {
+        self.update_nested_text_step(parent_step_id, "thinking", content, app);
+    }
+
+    /** 子 Agent 工具前旁白写入父级 task 步骤的 children。 */
+    pub fn update_nested_narration(
+        &mut self,
+        parent_step_id: Option<&str>,
+        content: &str,
+        app: Option<&AppHandle>,
+    ) {
+        let Some(parent_step_id) = parent_step_id else {
+            self.update_narration(content, app);
             return;
         };
-        if let Some(step) = parent
-            .children
-            .last_mut()
-            .filter(|step| step.step_type == "thinking")
-        {
-            if step.content.as_deref() == Some(truncated.as_str()) {
-                return;
-            }
-            step.content = Some(truncated);
-            self.emit_throttled(app, false);
-            return;
-        }
-        parent.children.push(AgentTraceStep {
-            id: create_id("trace"),
-            step_type: "thinking".to_owned(),
-            timestamp: format_local_datetime(),
-            content: Some(truncated),
-            name: None,
-            status: None,
-            summary: None,
-            args: None,
-            result_preview: None,
-            error: None,
-            duration_ms: None,
-            children: Vec::new(),
-            agent: None,
-            task_id: None,
-        });
-        self.emit(app);
+        self.update_nested_text_step(parent_step_id, "narration", content, app);
     }
 
     /** 子 Agent 工具调用写入父级 task 步骤的 children。 */
@@ -395,6 +354,7 @@ impl AgentTurnTracer {
             name: Some(name.to_owned()),
             status: Some("running".to_owned()),
             summary: Some(summary.to_owned()),
+            title: Some(summary.to_owned()),
             args: Some(sanitize_trace_args(args)),
             result_preview: None,
             error: None,
@@ -432,6 +392,7 @@ impl AgentTurnTracer {
         self.emit_throttled(app, false);
     }
 
+    #[cfg(test)]
     pub fn last_nested_step_is_thinking(&self, parent_step_id: Option<&str>) -> bool {
         let Some(parent_step_id) = parent_step_id else {
             return self.last_step_is_thinking();
@@ -441,6 +402,43 @@ impl AgentTurnTracer {
             .find(|step| step.id == parent_step_id)
             .and_then(|step| step.children.last())
             .is_some_and(|step| step.step_type == "thinking")
+    }
+
+    /** 流式更新指定类型的文本步骤：本轮同类步骤改写，否则新开一步。 */
+    fn update_text_step(&mut self, step_type: &str, content: &str, app: Option<&AppHandle>) {
+        let trimmed = content.trim();
+        if trimmed.is_empty() {
+            return;
+        }
+        let truncated = truncate_trace_text(trimmed, MAX_TRACE_THINKING_CHARS);
+        match rewrite_or_push_text_step(&mut self.steps, step_type, truncated) {
+            TextStepUpdate::Unchanged => {}
+            TextStepUpdate::Rewritten => self.emit_throttled(app, false),
+            TextStepUpdate::Pushed => self.emit(app),
+        }
+    }
+
+    /** 在指定父步骤的 children 上更新思考或旁白。 */
+    fn update_nested_text_step(
+        &mut self,
+        parent_step_id: &str,
+        step_type: &str,
+        content: &str,
+        app: Option<&AppHandle>,
+    ) {
+        let trimmed = content.trim();
+        if trimmed.is_empty() {
+            return;
+        }
+        let truncated = truncate_trace_text(trimmed, MAX_TRACE_THINKING_CHARS);
+        let Some(parent) = find_step_mut(&mut self.steps, parent_step_id) else {
+            return;
+        };
+        match rewrite_or_push_text_step(&mut parent.children, step_type, truncated) {
+            TextStepUpdate::Unchanged => {}
+            TextStepUpdate::Rewritten => self.emit_throttled(app, false),
+            TextStepUpdate::Pushed => self.emit(app),
+        }
     }
 
     fn emit(&mut self, app: Option<&AppHandle>) {
@@ -483,6 +481,57 @@ pub fn is_user_visible_tool(name: &str) -> bool {
     !HIDDEN_TOOL_NAMES.contains(&name)
 }
 
+/** 工具刚开始执行时的折叠标题：优先模型 description，否则从关键参数拼。 */
+pub fn running_tool_summary(name: &str, args: &Value) -> String {
+    let canonical = canonical_running_tool_name(name);
+    match canonical {
+        "search" => match first_arg_string(args, &["query"]) {
+            Some(query) => format!("搜索「{}」", truncate_label(&query, 32)),
+            None => "搜索笔记".to_owned(),
+        },
+        "read" => match first_display_path(args, &["path", "targetPath", "title"]) {
+            Some(label) => format!("读取 {label}"),
+            None => "读取文件".to_owned(),
+        },
+        "list" => match first_display_path(args, &["path", "prefix"]) {
+            Some(label) => format!("查看 {label}"),
+            None => "查看目录".to_owned(),
+        },
+        "edit" => match first_human_label(args, &["title", "targetPath", "path"]) {
+            Some(label) => format!("编辑 {label}"),
+            None => "编辑文件".to_owned(),
+        },
+        "write" => {
+            if is_folder_write(name, args) {
+                match first_display_path(args, &["targetPath", "path", "title"]) {
+                    Some(label) => format!("创建文件夹 {label}"),
+                    None => "创建文件夹".to_owned(),
+                }
+            } else {
+                match first_human_label(args, &["title", "targetPath", "path"]) {
+                    Some(label) => format!("创建 {label}"),
+                    None => "创建文件".to_owned(),
+                }
+            }
+        }
+        "run" => match first_arg_string(args, &["skillId", "skill_id"]) {
+            Some(skill) => format!("运行 {}", truncate_label(&skill, 32)),
+            None => "运行 Skill".to_owned(),
+        },
+        "task" => match first_arg_string(args, &["description"]) {
+            Some(description) => truncate_label(&description, 40),
+            None => match first_arg_string(args, &["agent"]) {
+                Some(agent) => format!("委派 {agent}"),
+                None => "委派子 Agent".to_owned(),
+            },
+        },
+        _ => match first_arg_string(args, &["description", "title", "query"]) {
+            Some(label) => truncate_label(&label, 40),
+            None => "工具调用".to_owned(),
+        },
+    }
+}
+
 /** 从已完成工具调用生成用户可见轨迹，保持原有顺序。 */
 pub fn trace_from_tool_calls(tool_calls: &[AgentToolCall]) -> Vec<AgentTraceStep> {
     tool_calls
@@ -504,6 +553,146 @@ pub fn truncate_trace_text(value: &str, max_chars: usize) -> String {
     truncated
 }
 
+enum TextStepUpdate {
+    Unchanged,
+    Rewritten,
+    Pushed,
+}
+
+/** 本轮（最后一个工具之后）已有同类步骤则改写；思考插到旁白前，避免流式帧交错追加。 */
+fn rewrite_or_push_text_step(
+    steps: &mut Vec<AgentTraceStep>,
+    step_type: &str,
+    truncated: String,
+) -> TextStepUpdate {
+    let after_tool = steps
+        .iter()
+        .rposition(|step| step.step_type == "tool")
+        .map(|index| index + 1)
+        .unwrap_or(0);
+    if let Some(index) = steps
+        .iter()
+        .enumerate()
+        .rev()
+        .find(|(index, step)| *index >= after_tool && step.step_type == step_type)
+        .map(|(index, _)| index)
+    {
+        if steps[index].content.as_deref() == Some(truncated.as_str()) {
+            return TextStepUpdate::Unchanged;
+        }
+        steps[index].content = Some(truncated);
+        return TextStepUpdate::Rewritten;
+    }
+
+    let new_step = new_text_trace_step(step_type, truncated);
+    if step_type == "thinking" {
+        if let Some(narration_at) = steps
+            .iter()
+            .enumerate()
+            .find(|(index, step)| *index >= after_tool && step.step_type == "narration")
+            .map(|(index, _)| index)
+        {
+            steps.insert(narration_at, new_step);
+            return TextStepUpdate::Pushed;
+        }
+    }
+    steps.push(new_step);
+    TextStepUpdate::Pushed
+}
+
+fn new_text_trace_step(step_type: &str, content: String) -> AgentTraceStep {
+    AgentTraceStep {
+        id: create_id("trace"),
+        step_type: step_type.to_owned(),
+        timestamp: format_local_datetime(),
+        content: Some(content),
+        name: None,
+        status: None,
+        summary: None,
+        title: None,
+        args: None,
+        result_preview: None,
+        error: None,
+        duration_ms: None,
+        children: Vec::new(),
+        agent: None,
+        task_id: None,
+    }
+}
+
+fn canonical_running_tool_name(name: &str) -> &str {
+    match name {
+        "search_notes" => "search",
+        "read_file" | "read_note" | "read_document" | "get_current_file" | "read_path" => "read",
+        "list_tree" | "list_path" => "list",
+        "propose_file_change" | "propose_note_change" => "edit",
+        "create_file_draft" | "create_note_draft" | "create_folder" => "write",
+        "run_skill" => "run",
+        other => other,
+    }
+}
+
+fn first_arg_string(args: &Value, keys: &[&str]) -> Option<String> {
+    let object = args.as_object()?;
+    for key in keys {
+        let value = object.get(*key)?.as_str()?.trim();
+        if !value.is_empty() {
+            return Some(value.to_owned());
+        }
+    }
+    None
+}
+
+fn first_human_label(args: &Value, keys: &[&str]) -> Option<String> {
+    first_arg_string(args, keys).and_then(|value| {
+        if looks_like_identifier(&value) {
+            None
+        } else {
+            Some(truncate_label(&display_path_tail(&value), 40))
+        }
+    })
+}
+
+fn first_display_path(args: &Value, keys: &[&str]) -> Option<String> {
+    first_arg_string(args, keys).map(|value| truncate_label(&display_path_tail(&value), 40))
+}
+
+fn display_path_tail(value: &str) -> String {
+    value
+        .trim_end_matches(['/', '\\'])
+        .rsplit(['/', '\\'])
+        .next()
+        .unwrap_or(value)
+        .to_owned()
+}
+
+fn is_folder_write(name: &str, args: &Value) -> bool {
+    name == "create_folder"
+        || first_arg_string(args, &["kind", "fileType"])
+            .is_some_and(|value| value.eq_ignore_ascii_case("folder"))
+}
+
+fn looks_like_identifier(value: &str) -> bool {
+    let trimmed = value.trim();
+    let Some((prefix, rest)) = trimmed.split_once('-') else {
+        return false;
+    };
+    if prefix.is_empty() || !prefix.chars().all(|ch| ch.is_ascii_alphabetic()) {
+        return false;
+    }
+    rest.len() >= 8 && rest.chars().all(|ch| ch.is_ascii_hexdigit() || ch == '-')
+}
+
+fn truncate_label(value: &str, max_chars: usize) -> String {
+    let trimmed = value.trim();
+    if trimmed.chars().count() <= max_chars {
+        return trimmed.to_owned();
+    }
+    let mut truncated: String = trimmed.chars().take(max_chars.saturating_sub(1)).collect();
+    truncated.push('…');
+    truncated
+}
+
 fn completed_tool_step(tool_call: &AgentToolCall) -> AgentTraceStep {
     AgentTraceStep {
         id: create_id("trace"),
@@ -513,6 +702,7 @@ fn completed_tool_step(tool_call: &AgentToolCall) -> AgentTraceStep {
         name: Some(tool_call.name.clone()),
         status: Some(tool_call.status.clone()),
         summary: Some(tool_call.summary.clone()),
+        title: Some(running_tool_summary(&tool_call.name, &tool_call.args)),
         args: Some(sanitize_trace_args(tool_call.args.clone())),
         result_preview: None,
         error: if tool_call.status == "failed" {
@@ -629,6 +819,7 @@ mod tests {
 
         tracer.push_thinking("   \n  ", None);
         tracer.push_thinking("", None);
+        tracer.push_narration("   ", None);
 
         assert!(tracer.steps().is_empty());
     }
@@ -816,18 +1007,163 @@ mod tests {
         assert_eq!(steps[2].content.as_deref(), Some("根据检索结果作答。"));
     }
 
-    /** 工具调用开始后，已经流式展示的回答要降级为思考，避免把中间过程当成终稿。 */
+    /** 工具调用开始后，已经流式展示的回答要降级为旁白，避免把中间过程当成终稿。 */
     #[test]
-    fn promote_partial_content_to_thinking_clears_live_answer() {
+    fn promote_partial_content_to_narration_clears_live_answer() {
         let mut tracer = AgentTurnTracer::new("session-a", "assistant-a");
         tracer.set_partial_content("我先去检索相关笔记。", None);
-        tracer.promote_partial_content_to_thinking(None);
+        tracer.promote_partial_content_to_narration(None);
 
         assert_eq!(tracer.live_content(), None);
         assert_eq!(tracer.steps().len(), 1);
+        assert_eq!(tracer.steps()[0].step_type, "narration");
         assert_eq!(
             tracer.steps()[0].content.as_deref(),
             Some("我先去检索相关笔记。")
+        );
+    }
+
+    /** 思考和旁白要分开：reasoning 是 thinking，工具前正文是 narration。 */
+    #[test]
+    fn records_narration_between_thinking_and_tool() {
+        let mut tracer = AgentTurnTracer::new("session-a", "assistant-a");
+        tracer.update_thinking("需要检索。", None);
+        assert!(tracer.last_step_is_thinking());
+        tracer.update_narration("我先去搜相关笔记。", None);
+        assert!(!tracer.last_step_is_thinking());
+        tracer.begin_tool(
+            "search",
+            &running_tool_summary("search", &json!({ "query": "本地优先" })),
+            json!({ "query": "本地优先" }),
+            None,
+        );
+
+        let steps = tracer.steps();
+        assert_eq!(steps.len(), 3);
+        assert_eq!(steps[0].step_type, "thinking");
+        assert_eq!(steps[0].content.as_deref(), Some("需要检索。"));
+        assert_eq!(steps[1].step_type, "narration");
+        assert_eq!(steps[1].content.as_deref(), Some("我先去搜相关笔记。"));
+        assert_eq!(steps[2].step_type, "tool");
+        assert_eq!(steps[2].title.as_deref(), Some("搜索「本地优先」"));
+        assert_eq!(steps[2].summary.as_deref(), Some("搜索「本地优先」"));
+    }
+
+    /** 同一轮旁白要更新最后一条 narration，不能每来一个 token 就新建一步。 */
+    #[test]
+    fn update_narration_rewrites_last_narration_step() {
+        let mut tracer = AgentTurnTracer::new("session-a", "assistant-a");
+        tracer.update_narration("我先", None);
+        tracer.update_narration("我先确认工具参数。", None);
+
+        let steps = tracer.steps();
+        assert_eq!(steps.len(), 1);
+        assert_eq!(steps[0].step_type, "narration");
+        assert_eq!(steps[0].content.as_deref(), Some("我先确认工具参数。"));
+    }
+
+    /** 流式回调每帧都会先后写 thinking 和 narration；本轮已有的步骤必须改写，不能交错追加。 */
+    #[test]
+    fn interleaved_thinking_and_narration_do_not_duplicate() {
+        let mut tracer = AgentTurnTracer::new("session-a", "assistant-a");
+        tracer.update_thinking("用户想知道目录结构。", None);
+        tracer.update_narration("我先看看库里的文件。", None);
+        tracer.update_thinking("用户想知道目录结构，然后检索。", None);
+        tracer.update_narration("我先看看库里的文件和目录结构，同时检索「小红书」。", None);
+        tracer.update_thinking("用户想知道目录结构，然后检索。", None);
+        tracer.update_narration("我先看看库里的文件和目录结构，同时检索「小红书」。", None);
+
+        let steps = tracer.steps();
+        assert_eq!(steps.len(), 2);
+        assert_eq!(steps[0].step_type, "thinking");
+        assert_eq!(
+            steps[0].content.as_deref(),
+            Some("用户想知道目录结构，然后检索。")
+        );
+        assert_eq!(steps[1].step_type, "narration");
+        assert_eq!(
+            steps[1].content.as_deref(),
+            Some("我先看看库里的文件和目录结构，同时检索「小红书」。")
+        );
+    }
+
+    /** 旁白先到时，后到的思考要插到旁白前面，并且后续帧仍只改写这两步。 */
+    #[test]
+    fn thinking_inserts_before_existing_narration_in_the_same_round() {
+        let mut tracer = AgentTurnTracer::new("session-a", "assistant-a");
+        tracer.update_narration("我先 list 目录。", None);
+        tracer.update_thinking("需要先看目录。", None);
+        tracer.update_narration("让我先 list 目录，并搜索「小红书」。", None);
+        tracer.update_thinking("需要先看目录，然后检索。", None);
+
+        let steps = tracer.steps();
+        assert_eq!(steps.len(), 2);
+        assert_eq!(steps[0].step_type, "thinking");
+        assert_eq!(
+            steps[0].content.as_deref(),
+            Some("需要先看目录，然后检索。")
+        );
+        assert_eq!(steps[1].step_type, "narration");
+        assert_eq!(
+            steps[1].content.as_deref(),
+            Some("让我先 list 目录，并搜索「小红书」。")
+        );
+    }
+
+    #[test]
+    fn running_tool_summary_prefers_query_path_and_description() {
+        assert_eq!(
+            running_tool_summary("search", &json!({ "query": "认证流程" })),
+            "搜索「认证流程」"
+        );
+        assert_eq!(
+            running_tool_summary("read", &json!({ "path": "notes/login.md" })),
+            "读取 login.md"
+        );
+        assert_eq!(
+            running_tool_summary("list", &json!({ "path": "docs/api" })),
+            "查看 api"
+        );
+        assert_eq!(
+            running_tool_summary(
+                "edit",
+                &json!({ "title": "产品规划", "fileId": "note-abcd1234" })
+            ),
+            "编辑 产品规划"
+        );
+        assert_eq!(
+            running_tool_summary(
+                "write",
+                &json!({ "kind": "folder", "targetPath": "inbox/meetings" })
+            ),
+            "创建文件夹 meetings"
+        );
+        assert_eq!(
+            running_tool_summary(
+                "write",
+                &json!({ "title": "周报", "targetPath": "week.md" })
+            ),
+            "创建 周报"
+        );
+        assert_eq!(
+            running_tool_summary("run", &json!({ "skillId": "export-notes" })),
+            "运行 export-notes"
+        );
+        assert_eq!(
+            running_tool_summary(
+                "task",
+                &json!({ "description": "创建云文档", "agent": "explore", "prompt": "长任务说明" })
+            ),
+            "创建云文档"
+        );
+        assert_eq!(
+            running_tool_summary("search_notes", &json!({ "query": "旧名" })),
+            "搜索「旧名」"
+        );
+        assert_eq!(running_tool_summary("read", &json!({})), "读取文件");
+        assert_eq!(
+            running_tool_summary("edit", &json!({ "fileId": "note-abcd1234ef" })),
+            "编辑文件"
         );
     }
 
@@ -866,6 +1202,7 @@ mod tests {
             None,
         );
         tracer.update_nested_thinking(parent_id.as_deref(), "先搜索标题。", None);
+        assert!(tracer.last_nested_step_is_thinking(parent_id.as_deref()));
         let child_id = tracer.begin_nested_tool(
             parent_id.as_deref(),
             "search",

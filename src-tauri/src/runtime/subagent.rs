@@ -3,7 +3,7 @@
 use crate::agent_tools::{
     model_tool_call_name, parse_tool_args, AgentToolContext, ToolOutcome, ToolRegistry,
 };
-use crate::agent_trace::AgentTurnTracer;
+use crate::agent_trace::{running_tool_summary, AgentTurnTracer};
 use crate::domain::{
     AgentToolCall, AgentTurnRequest, Citation, LlmProviderConfig, ProposedChange,
     ProposedChangeSet, ProposedFileOperation, WorkspaceSnapshot, AGENT_DIRECT_EXECUTION_ID,
@@ -134,7 +134,7 @@ pub(super) async fn run_one_shot(mut params: SubagentRunParams<'_>) -> ToolOutco
         return aborted_outcome(params.args, Some(&parsed.task_id));
     }
 
-    let running_summary = format!("正在委派 {}：{}", parsed.agent.label, parsed.description);
+    let running_summary = running_tool_summary("task", params.args);
     let parent_step = params.parent_trace_step_id.clone();
     params.tracer.with_mut(|tracer| {
         tracer.annotate_tool(
@@ -346,6 +346,13 @@ async fn run_nested_loop(
                             trace_app,
                         );
                     }
+                    if !progress.narration.is_empty() {
+                        tracer.update_nested_narration(
+                            parent_step.as_deref(),
+                            &progress.narration,
+                            trace_app,
+                        );
+                    }
                     if !progress.content.is_empty() {
                         tracer.set_nested_result_preview(
                             parent_step.as_deref(),
@@ -420,13 +427,9 @@ async fn run_nested_loop(
             &model_tool_calls,
             &extracted.visible_content,
         ));
-        let should_push_thinking = params.tracer.with_mut(|tracer| {
-            !tracer.last_nested_step_is_thinking(parent_step.as_deref())
-                && !extracted.visible_content.trim().is_empty()
-        });
-        if should_push_thinking {
+        if !extracted.visible_content.trim().is_empty() {
             params.tracer.with_mut(|tracer| {
-                tracer.update_nested_thinking(
+                tracer.update_nested_narration(
                     parent_step.as_deref(),
                     &extracted.visible_content,
                     trace_app,
@@ -445,7 +448,7 @@ async fn run_nested_loop(
                 tracer.begin_nested_tool(
                     parent_step.as_deref(),
                     &tool_name,
-                    &format!("正在调用 {tool_name}"),
+                    &running_tool_summary(&tool_name, &tool_args),
                     tool_args,
                     trace_app,
                 )

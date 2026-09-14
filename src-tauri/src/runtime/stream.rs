@@ -443,33 +443,31 @@ fn complete_stream_after_body_error(
     Ok(assistant.into_chat_completion())
 }
 
-/** 把累积中的流式助手消息映射成过程区思考和用户可见回答。 */
+/** 把累积中的流式助手消息映射成过程区思考、工具前旁白和用户可见回答。 */
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct StreamUiProgress {
     pub thinking: String,
+    pub narration: String,
     pub content: String,
 }
 
-/** 有 tool_calls 时正文属于过程思考；否则 reasoning 进思考、content 进回答。 */
+/** reasoning 进思考；有 tool_calls 时正文进旁白，否则进回答区。 */
 pub fn stream_ui_progress(streamed: &StreamedAssistant) -> StreamUiProgress {
     let visible = super::dsml::strip_dsml_tool_calls(&streamed.content);
     let visible = visible.trim();
     let reasoning = streamed.reasoning.trim();
 
     if streamed.has_tool_calls() {
-        let thinking = [reasoning, visible]
-            .into_iter()
-            .filter(|part| !part.is_empty())
-            .collect::<Vec<_>>()
-            .join("\n\n");
         return StreamUiProgress {
-            thinking,
+            thinking: reasoning.to_owned(),
+            narration: visible.to_owned(),
             content: String::new(),
         };
     }
 
     StreamUiProgress {
         thinking: reasoning.to_owned(),
+        narration: String::new(),
         content: visible.to_owned(),
     }
 }
@@ -839,14 +837,15 @@ mod tests {
             stream_ui_progress(&assistant),
             StreamUiProgress {
                 thinking: "先组织语言。".to_owned(),
+                narration: String::new(),
                 content: "这是回答。".to_owned(),
             }
         );
     }
 
-    /** 一旦出现 tool_calls，已经流出的正文要改记为思考，终稿位置必须清空。 */
+    /** 一旦出现 tool_calls，已经流出的正文改记为旁白，终稿位置必须清空。 */
     #[test]
-    fn stream_ui_progress_moves_content_to_thinking_when_tools_start() {
+    fn stream_ui_progress_moves_content_to_narration_when_tools_start() {
         let mut assistant = StreamedAssistant::default();
         assistant.reasoning = "需要检索。".to_owned();
         assistant.content = "我先去搜相关笔记。".to_owned();
@@ -855,7 +854,8 @@ mod tests {
         assert_eq!(
             stream_ui_progress(&assistant),
             StreamUiProgress {
-                thinking: "需要检索。\n\n我先去搜相关笔记。".to_owned(),
+                thinking: "需要检索。".to_owned(),
+                narration: "我先去搜相关笔记。".to_owned(),
                 content: String::new(),
             }
         );
