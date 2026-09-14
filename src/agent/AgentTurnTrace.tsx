@@ -25,6 +25,7 @@ import {
   formatTurnDuration,
   getToolKindLabel,
   getToolTraceLabel,
+  isTraceTextStep,
   nextTurnTraceExpanded,
   shouldExpandToolStep,
   shouldShowThinkingCaret,
@@ -141,16 +142,12 @@ export function AgentTurnTrace({
             </p>
           ) : (
             steps.map((step, index) =>
-              step.type === "thinking" ? (
-                <p
-                  className="m-0 text-[12.5px] leading-[1.65] text-ink-muted italic whitespace-pre-wrap [overflow-wrap:anywhere]"
+              isTraceTextStep(step) ? (
+                <TraceTextStep
                   key={step.id}
-                >
-                  {step.content}
-                  {shouldShowThinkingCaret(steps, index, resolvedStatus, hasLiveAnswer) ? (
-                    <TraceStreamingCaret />
-                  ) : null}
-                </p>
+                  showCaret={shouldShowThinkingCaret(steps, index, resolvedStatus, hasLiveAnswer)}
+                  step={step}
+                />
               ) : (
                 <TraceToolStep
                   autoExpand={shouldExpandToolStep(steps, index, resolvedStatus, hasLiveAnswer)}
@@ -163,6 +160,28 @@ export function AgentTurnTrace({
         </div>
       )}
     </div>
+  );
+}
+
+/** 思考用斜体弱化；工具前旁白用正文色，对应模型可见 content。 */
+function TraceTextStep({
+  step,
+  showCaret,
+}: {
+  step: AgentTraceStep;
+  showCaret: boolean;
+}) {
+  const isNarration = step.type === "narration";
+  return (
+    <p
+      className={cn(
+        "m-0 text-[12.5px] leading-[1.65] whitespace-pre-wrap [overflow-wrap:anywhere]",
+        isNarration ? "text-ink" : "text-ink-muted italic",
+      )}
+    >
+      {step.content}
+      {showCaret ? <TraceStreamingCaret /> : null}
+    </p>
   );
 }
 
@@ -243,16 +262,17 @@ function TraceToolStep({
           {(step.children?.length ?? 0) > 0 && (
             <div className="grid min-w-0 gap-2 border-l-[1.5px] border-border pl-2.5" aria-label="子 Agent 过程">
               {step.children?.map((child, index) =>
-                child.type === "thinking" ? (
-                  <p
-                    className="m-0 text-[12.5px] leading-[1.65] text-ink-muted italic whitespace-pre-wrap [overflow-wrap:anywhere]"
+                isTraceTextStep(child) ? (
+                  <TraceTextStep
                     key={child.id}
-                  >
-                    {child.content}
-                    {shouldShowThinkingCaret(step.children ?? [], index, isRunning ? "running" : "completed", false) ? (
-                      <TraceStreamingCaret />
-                    ) : null}
-                  </p>
+                    showCaret={shouldShowThinkingCaret(
+                      step.children ?? [],
+                      index,
+                      isRunning ? "running" : "completed",
+                      false,
+                    )}
+                    step={child}
+                  />
                 ) : (
                   <TraceToolStep
                     autoExpand={shouldExpandToolStep(

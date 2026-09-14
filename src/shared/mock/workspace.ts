@@ -902,6 +902,12 @@ export function runMockAgentTurn(
         },
         {
           id: createLocalId("trace"),
+          type: "narration",
+          timestamp: formatLocalDateTime(),
+          content: "我先在当前范围内检索相关笔记，再把阅读交给子 Agent。",
+        },
+        {
+          id: createLocalId("trace"),
           type: "tool",
           timestamp: formatLocalDateTime(),
           name: "task",
@@ -948,6 +954,16 @@ export function runMockAgentTurn(
         timestamp: formatLocalDateTime(),
         content: "浏览器开发态模拟思考：根据当前请求选择工具，并给出可回放的过程轨迹。",
       },
+      ...(toolCalls.length
+        ? [
+            {
+              id: createLocalId("trace"),
+              type: "narration" as const,
+              timestamp: formatLocalDateTime(),
+              content: "我先确认要用的工具，再开始执行。",
+            },
+          ]
+        : []),
       ...attachMockWriteTracePreview(traceFromToolCalls(toolCalls), session.pendingChange),
     ],
     turnDurationMs: 1200,

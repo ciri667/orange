@@ -149,7 +149,7 @@ export function shouldExpandToolStep(
   return index === steps.length - 1 && step.status === "completed";
 }
 
-/** 思考段是否带脉冲光标：仅 running、该段是时间线末尾、且回答区还没有终稿。 */
+/** 思考或旁白是否带脉冲光标：仅 running、该段是时间线末尾、且回答区还没有终稿。 */
 export function shouldShowThinkingCaret(
   steps: AgentTraceStep[],
   index: number,
@@ -159,24 +159,30 @@ export function shouldShowThinkingCaret(
   if (hasLiveAnswer || turnStatus !== "running") {
     return false;
   }
-  return steps[index]?.type === "thinking" && index === steps.length - 1;
+  return isTraceTextStep(steps[index]) && index === steps.length - 1;
 }
 
-/** 跟滚依赖指纹：思考变长或当前工具状态变化时必须变，不能只用 steps.length。 */
+/** 思考和工具前旁白都按文本步骤渲染。 */
+export function isTraceTextStep(step?: AgentTraceStep): boolean {
+  return step?.type === "thinking" || step?.type === "narration";
+}
+
+/** 跟滚依赖指纹：思考/旁白变长或当前工具状态变化时必须变，不能只用 steps.length。 */
 export function getTraceScrollFingerprint(steps: AgentTraceStep[]): string {
-  const lastThinking = [...steps].reverse().find((step) => step.type === "thinking");
+  const lastText = [...steps].reverse().find((step) => isTraceTextStep(step));
   const runningTool = steps.find((step) => step.type === "tool" && step.status === "running");
   const lastStep = steps[steps.length - 1];
   const nestedRunning = steps
     .flatMap((step) => step.children ?? [])
     .find((step) => step.type === "tool" && step.status === "running");
-  const nestedThinking = [...steps]
+  const nestedText = [...steps]
     .reverse()
     .flatMap((step) => [...(step.children ?? [])].reverse())
-    .find((step) => step.type === "thinking");
+    .find((step) => isTraceTextStep(step));
   return [
     String(steps.length),
-    lastThinking?.content ?? "",
+    lastText?.content ?? "",
+    lastText?.type ?? "",
     runningTool?.id ?? "",
     runningTool?.status ?? "",
     runningTool?.summary ?? "",
@@ -185,7 +191,8 @@ export function getTraceScrollFingerprint(steps: AgentTraceStep[]): string {
     lastStep?.resultPreview ?? "",
     String(lastStep?.children?.length ?? 0),
     nestedRunning?.id ?? "",
-    nestedThinking?.content ?? "",
+    nestedText?.content ?? "",
+    nestedText?.type ?? "",
   ].join("\0");
 }
 
