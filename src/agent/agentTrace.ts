@@ -292,6 +292,18 @@ const TRACE_FIELD_LABELS: Record<string, string> = {
   hits: "命中数",
   count: "数量",
   truncated: "已截断",
+  contentTruncated: "已截断",
+  contentChars: "字数",
+  limit: "上限",
+  offset: "偏移",
+  nextOffset: "续读位置",
+  updatedAt: "更新时间",
+  createdAt: "创建时间",
+  tags: "标签",
+  hint: "提示",
+  agent: "角色",
+  description: "说明",
+  prompt: "指令",
   name: "名称",
   summary: "摘要",
   diffStats: "变更",
@@ -371,6 +383,12 @@ const META_FIELD_ORDER = [
   "operation",
   "status",
   "diffStats",
+  "limit",
+  "offset",
+  "nextOffset",
+  "contentChars",
+  "contentTruncated",
+  "updatedAt",
 ];
 
 /** 过程区展开后的结构化字段，按稿纸卡片而不是原始 JSON 渲染。 */
@@ -737,7 +755,12 @@ function classifyTraceField(key: string, text: string, value: unknown): TraceDet
 }
 
 function fieldLabel(key: string): string {
-  return TRACE_FIELD_LABELS[key] ?? key;
+  return TRACE_FIELD_LABELS[key] ?? humanizeTraceFieldKey(key);
+}
+
+/** 未知字段把 camelCase 拆成可换行词，避免整段英文撑破标签列。 */
+function humanizeTraceFieldKey(key: string): string {
+  return key.replace(/([a-z0-9])([A-Z])/g, "$1 $2");
 }
 
 function formatTraceFieldValue(key: string, value: unknown): { text: string; truncated: boolean } {

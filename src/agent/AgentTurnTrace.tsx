@@ -16,7 +16,7 @@ import {
   Wrench,
   XCircle,
 } from "lucide-react";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { Fragment, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { cn } from "../shared/cn";
 import type { AgentTraceStep } from "../shared/types";
 import {
@@ -294,6 +294,28 @@ function TraceToolStep({
   );
 }
 
+/** 标签列随内容变宽并封顶，长英文键在列内换行，不挤占右侧取值。 */
+function TraceKeyValueFields({
+  fields,
+  renderValue,
+}: {
+  fields: TraceDetailField[];
+  renderValue: (field: TraceDetailField) => ReactNode;
+}) {
+  return (
+    <dl className="m-0 grid min-w-0 grid-cols-[fit-content(8rem)_minmax(0,1fr)] items-start gap-x-3 gap-y-1.5">
+      {fields.map((field) => (
+        <Fragment key={field.key}>
+          <dt className="min-w-0 pt-px text-[11px] font-bold leading-[1.45] text-ink-soft [overflow-wrap:anywhere]">
+            {field.label}
+          </dt>
+          <dd className="m-0 min-w-0">{renderValue(field)}</dd>
+        </Fragment>
+      ))}
+    </dl>
+  );
+}
+
 /** 把结构化字段分成元信息、列表、正文和技术细节，避免再次堆出两块 JSON。 */
 function TraceToolFields({ fields }: { fields: TraceDetailField[] }) {
   const meta = fields.filter((field) => field.kind === "meta");
@@ -309,17 +331,15 @@ function TraceToolFields({ fields }: { fields: TraceDetailField[] }) {
   return (
     <>
       {meta.length > 0 && (
-        <dl className="m-0 grid gap-1.5">
-          {meta.map((field) => (
-            <div className="grid min-w-0 grid-cols-[52px_minmax(0,1fr)] items-start gap-2" key={field.key}>
-              <dt className="text-[11px] font-bold text-ink-soft">{field.label}</dt>
-              <dd className="m-0 min-w-0 text-[12.5px] leading-[1.45] text-ink [overflow-wrap:anywhere]">
-                {field.text}
-                {field.truncated && <TraceTruncatedBadge />}
-              </dd>
-            </div>
-          ))}
-        </dl>
+        <TraceKeyValueFields
+          fields={meta}
+          renderValue={(field) => (
+            <span className="text-[12.5px] leading-[1.45] text-ink [overflow-wrap:anywhere]">
+              {field.text}
+              {field.truncated && <TraceTruncatedBadge />}
+            </span>
+          )}
+        />
       )}
       {lists.map((field) => (
         <section className="grid min-w-0 gap-1.5" key={field.key}>
@@ -346,16 +366,12 @@ function TraceToolFields({ fields }: { fields: TraceDetailField[] }) {
             技术细节
           </button>
           {techOpen && (
-            <dl className="m-0 grid gap-1.5">
-              {tech.map((field) => (
-                <div className="grid min-w-0 grid-cols-[64px_minmax(0,1fr)] items-start gap-2" key={field.key}>
-                  <dt className="pt-px text-[11px] font-bold text-ink-soft">{field.label}</dt>
-                  <dd className="m-0 min-w-0">
-                    <code className="block font-mono text-[11px] leading-[1.45] text-ink-muted [overflow-wrap:anywhere]">{field.text}</code>
-                  </dd>
-                </div>
-              ))}
-            </dl>
+            <TraceKeyValueFields
+              fields={tech}
+              renderValue={(field) => (
+                <code className="block font-mono text-[11px] leading-[1.45] text-ink-muted [overflow-wrap:anywhere]">{field.text}</code>
+              )}
+            />
           )}
         </div>
       )}

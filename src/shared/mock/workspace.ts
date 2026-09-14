@@ -653,6 +653,52 @@ function attachMockWriteTracePreview(steps: AgentTraceStep[], pendingChange?: Pr
   });
 }
 
+/** 给读取工具补上和桌面端同结构的结果预览，方便检查标签/取值两列布局。 */
+function attachMockReadTracePreview(steps: AgentTraceStep[], snapshot: WorkspaceSnapshot): AgentTraceStep[] {
+  return steps.map((step) => {
+    if ((step.name !== "read" && step.name !== "read_file") || step.resultPreview) {
+      return step;
+    }
+
+    const fileId = typeof step.args?.fileId === "string" ? step.args.fileId : "";
+    const note = snapshot.notes.find((item) => item.id === fileId);
+    if (!note) {
+      return step;
+    }
+
+    const contentChars = Array.from(note.content).length;
+    const limit = 6000;
+    const truncated = contentChars > limit;
+
+    return {
+      ...step,
+      args: { ...step.args, limit, offset: 0 },
+      resultPreview: JSON.stringify({
+        truncated,
+        offset: 0,
+        limit,
+        note: {
+          title: note.title,
+          path: note.path,
+          updatedAt: note.updatedAt,
+          content: note.content.slice(0, limit),
+          contentChars,
+          contentTruncated: truncated,
+        },
+      }),
+    };
+  });
+}
+
+/** 给 mock 轨迹补上读写结果预览，过程卡片才能展开出结构化字段。 */
+function attachMockToolTracePreviews(
+  steps: AgentTraceStep[],
+  snapshot: WorkspaceSnapshot,
+  pendingChange?: ProposedChange,
+): AgentTraceStep[] {
+  return attachMockReadTracePreview(attachMockWriteTracePreview(steps, pendingChange), snapshot);
+}
+
 /** 根据会话绑定范围生成可读标签，用于 Agent 回复文案。 */
 function getScopeLabel(snapshot: WorkspaceSnapshot, session: AgentSession) {
   const selectedNames = session.knowledgeBaseIds
@@ -879,7 +925,7 @@ export function runMockAgentTurn(
     content = citations.length
       ? `我调用了检索工具，并只在 ${getScopeLabel(nextSnapshot, session)} 范围内组织回答：本地优先的关键是把 Markdown 文件作为用户拥有的主数据源，索引和模型请求都只是辅助层；写入必须先形成 diff，确认后才落盘。`
       : `我调用了检索工具，但在 ${getScopeLabel(nextSnapshot, session)} 中没有找到足够相关的笔记。`;
-    const childSteps = attachMockWriteTracePreview(traceFromToolCalls(toolCalls), session.pendingChange);
+    const childSteps = attachMockToolTracePreviews(traceFromToolCalls(toolCalls), nextSnapshot, session.pendingChange);
     const childToolCount = childSteps.filter((step) => step.type === "tool").length;
     const taskCall = createToolCall("task", `探索 · 检索相关笔记 · ${childToolCount} 步 · 1s`, {
       agent: "explore",
@@ -964,7 +1010,7 @@ export function runMockAgentTurn(
             },
           ]
         : []),
-      ...attachMockWriteTracePreview(traceFromToolCalls(toolCalls), session.pendingChange),
+      ...attachMockToolTracePreviews(traceFromToolCalls(toolCalls), nextSnapshot, session.pendingChange),
     ],
     turnDurationMs: 1200,
   });
