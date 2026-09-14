@@ -62,7 +62,7 @@ pub struct AgentToolCall {
     pub args: serde_json::Value,
 }
 
-/** Agent 一轮中的一个过程步骤，按时间顺序记录模型思考或用户可见工具调用。 */
+/** Agent 一轮中的一个过程步骤：思考、工具前旁白或用户可见工具调用。 */
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AgentTraceStep {
@@ -78,6 +78,9 @@ pub struct AgentTraceStep {
     pub status: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub summary: Option<String>,
+    /** 折叠行上的步骤标题；完成后仍保留，不拿结果摘要覆盖。 */
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub args: Option<serde_json::Value>,
     #[serde(default, skip_serializing_if = "Option::is_none")]

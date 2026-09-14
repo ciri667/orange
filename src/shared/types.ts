@@ -325,10 +325,10 @@ export interface AgentToolCall {
   args: Record<string, unknown>;
 }
 
-/** 过程时间线步骤类型：思考段落或用户可见工具调用。 */
-export type AgentTraceStepType = "thinking" | "tool";
+/** 过程时间线步骤类型：思考、工具前旁白或用户可见工具调用。 */
+export type AgentTraceStepType = "thinking" | "narration" | "tool";
 
-/** 一轮 Agent 中的一个过程步骤，按时间顺序交错思考和工具结果。 */
+/** 一轮 Agent 中的一个过程步骤，按时间顺序交错思考、旁白和工具结果。 */
 export interface AgentTraceStep {
   id: string;
   type: AgentTraceStepType;
@@ -337,6 +337,8 @@ export interface AgentTraceStep {
   name?: AgentToolName;
   status?: AgentToolCallStatus;
   summary?: string;
+  /** 折叠行上的步骤标题；完成后仍保留，不拿结果摘要覆盖。 */
+  title?: string;
   args?: Record<string, unknown>;
   resultPreview?: string;
   error?: string;
