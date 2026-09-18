@@ -1,4 +1,4 @@
-import { AlertCircle, BookOpen, Database, Plus, RefreshCw, Search } from "lucide-react";
+import { AlertCircle, Database, MessageSquarePlus, Plus, RefreshCw, Search, Settings } from "lucide-react";
 import { FileTree } from "./FileTree";
 import { Button } from "../shared/Button";
 import { cn } from "../shared/cn";
@@ -8,19 +8,14 @@ import { OverflowTooltipText } from "../shared/OverflowTooltipText";
 import { sectionLabelClassName } from "../shared/ui";
 import type { FileTreeNode, KnowledgeBase } from "../shared/types";
 
-/** 汇总当前资料库文档数量，用于侧栏标题中的低噪音概览。 */
-function getKnowledgeBaseAssetCount(knowledgeBases: KnowledgeBase[]) {
-  return knowledgeBases.reduce((total, knowledgeBase) => total + knowledgeBase.noteCount + knowledgeBase.documentCount, 0);
-}
-
-/** 生成单个资料库文件数量摘要，总数优先，Markdown 数量作为类型补充。 */
+/** 生成单个资料库文件数量摘要，用于 tooltip，不占侧栏两行。 */
 function getKnowledgeBaseFileSummary(knowledgeBase: KnowledgeBase) {
   const fileCount = knowledgeBase.noteCount + knowledgeBase.documentCount;
 
   return `${fileCount} 个文件 · ${knowledgeBase.noteCount} 个 Markdown`;
 }
 
-/** 左侧知识库导航，包含知识库切换、搜索和本地目录树。 */
+/** 左侧知识库导航，包含品牌、新对话、知识库切换、搜索和本地目录树。 */
 export function KnowledgeBaseSidebar({
   knowledgeBases,
   activeKnowledgeBase,
@@ -49,6 +44,8 @@ export function KnowledgeBaseSidebar({
   onCreateFolder,
   onCreateProjectInstruction,
   onRefreshKnowledgeBase,
+  onCreateSession,
+  onOpenSettings,
 }: {
   knowledgeBases: KnowledgeBase[];
   activeKnowledgeBase: KnowledgeBase;
@@ -77,28 +74,25 @@ export function KnowledgeBaseSidebar({
   onCreateFolder: (parentPath: string) => void;
   onCreateProjectInstruction: () => void;
   onRefreshKnowledgeBase: (knowledgeBaseId: string) => void;
+  onCreateSession: () => void;
+  onOpenSettings: () => void;
 }) {
-  const assetCount = getKnowledgeBaseAssetCount(knowledgeBases);
-
   return (
     <aside className="sidebar" aria-label="知识库导航">
-      <div className="flex items-center gap-2.5 px-0.5 pb-1">
-        <div className="grid size-8 place-items-center rounded-control bg-accent-soft text-accent-strong">
-          <BookOpen size={18} />
+      <div className="flex items-center gap-2 px-2 py-1">
+        <div className="grid size-7 place-items-center overflow-hidden rounded-md">
+          <img className="block size-full object-contain" src="/orange-logo.svg" alt="" />
         </div>
-        <div className="min-w-0">
-          <strong className="block text-ink-strong">资料库</strong>
-          <span className="block truncate text-xs text-ink-muted">
-            {knowledgeBases.length} 个本地库 · {assetCount} 个文件
-          </span>
-        </div>
+        <strong className="text-[15px] font-semibold text-ink-strong">橘记</strong>
       </div>
 
-      <section className="grid gap-[7px]" aria-label="知识库切换">
-        <div className="flex items-center justify-between gap-3">
-          <p className={sectionLabelClassName}>Library</p>
-          <span className="text-xs text-ink-muted">本地优先</span>
-        </div>
+      <Button variant="ghost" className="w-full justify-start gap-2 px-2.5 text-[13px]" onClick={onCreateSession}>
+        <MessageSquarePlus size={16} />
+        新对话
+      </Button>
+
+      <section className="grid gap-0.5" aria-label="知识库切换">
+        <p className={sectionLabelClassName}>知识库</p>
         {knowledgeBases.map((knowledgeBase) => {
           const knowledgeBaseSummary = `${getKnowledgeBaseFileSummary(knowledgeBase)} · ${getKnowledgeBaseStatusLabel(knowledgeBase)}`;
 
@@ -107,18 +101,17 @@ export function KnowledgeBaseSidebar({
               key={knowledgeBase.id}
               active={knowledgeBase.id === activeKnowledgeBase.id}
               error={knowledgeBase.status === "error"}
+              className="py-1.5"
               aria-label={`${knowledgeBase.name}，${knowledgeBaseSummary}`}
+              title={knowledgeBaseSummary}
               onClick={() => onSelectKnowledgeBase(knowledgeBase.id)}
             >
               {knowledgeBase.status === "error" ? <AlertCircle size={15} /> : <Database size={15} />}
-              <span className="min-w-0">
-                <OverflowTooltipText as="strong" className="block truncate text-ink-strong" text={knowledgeBase.name} logArea="knowledge_base_row_name" />
-                <OverflowTooltipText className="mt-[3px] block truncate text-xs text-ink-muted" text={knowledgeBaseSummary} logArea="knowledge_base_row_summary" />
-              </span>
+              <OverflowTooltipText as="span" className="min-w-0 truncate text-[13px]" text={knowledgeBase.name} logArea="knowledge_base_row_name" />
             </ListRow>
           );
         })}
-        <Button variant="ghost" className="w-full" onClick={onAddKnowledgeBase}>
+        <Button variant="ghost" className="w-full justify-start px-2.5 text-[13px] text-ink-muted" onClick={onAddKnowledgeBase}>
           <Plus size={15} />
           连接资料库
         </Button>
@@ -126,35 +119,30 @@ export function KnowledgeBaseSidebar({
 
       <OperationNotice isBusy={isBusy} busyLabel={busyLabel} notice={notice} />
 
-      <label className="flex min-h-[38px] items-center gap-2 rounded-control border border-border-translucent bg-surface-translucent px-2.5 text-ink-muted">
-        <Search size={16} />
+      <label className="mx-1 flex min-h-8 items-center gap-2 rounded-control bg-white/70 px-2 text-ink-muted">
+        <Search size={14} />
         <input
-          className="min-w-0 w-full border-0 bg-transparent outline-0"
+          className="min-w-0 w-full border-0 bg-transparent text-[13px] outline-0"
           value={searchTerm}
           onChange={(event) => onSearchChange(event.target.value)}
-          placeholder="过滤文件和文件夹"
+          placeholder="过滤文件"
           type="search"
         />
       </label>
 
-      <div className="flex min-h-0 min-w-0 flex-1 flex-col overflow-auto border-t border-[rgba(230,224,214,0.72)] pt-3 pr-0.5" aria-label="本地目录树">
-        <div className="flex items-center justify-between gap-3">
-          <p className={sectionLabelClassName}>Files</p>
-          <div className="inline-flex items-center gap-2">
-            <span className="text-xs text-ink-muted">{activeKnowledgeBase.status === "error" ? "目录失效" : "支持文档"}</span>
-            <Button
-              variant="ghost"
-              size="compact"
-              title="手动刷新目录树"
-              onClick={() => onRefreshKnowledgeBase(activeKnowledgeBase.id)}
-              disabled={isBusy}
-            >
-              <RefreshCw size={13} />
-              刷新
-            </Button>
-          </div>
+      <div className="flex min-h-0 min-w-0 flex-1 flex-col overflow-auto pt-1 pr-0.5" aria-label="本地目录树">
+        <div className="flex items-center justify-between gap-2 px-1">
+          <p className={sectionLabelClassName}>文件</p>
+          <Button
+            variant="icon"
+            size="compact"
+            title="手动刷新目录树"
+            onClick={() => onRefreshKnowledgeBase(activeKnowledgeBase.id)}
+            disabled={isBusy}
+          >
+            <RefreshCw size={13} />
+          </Button>
         </div>
-        <OverflowTooltipText as="p" className="my-1.5 mb-2 truncate text-[11px] text-ink-muted" text={activeKnowledgeBase.path} logArea="knowledge_base_root_path" />
         <ScanReportSummary knowledgeBase={activeKnowledgeBase} />
         <FileTree
           nodes={fileTree}
@@ -177,6 +165,11 @@ export function KnowledgeBaseSidebar({
           onCreateProjectInstruction={onCreateProjectInstruction}
         />
       </div>
+
+      <Button variant="ghost" className="mt-auto w-full justify-start px-2.5 text-[13px] text-ink-muted" onClick={onOpenSettings}>
+        <Settings size={16} />
+        设置
+      </Button>
     </aside>
   );
 }
@@ -199,7 +192,7 @@ function ScanReportSummary({ knowledgeBase }: { knowledgeBase: KnowledgeBase }) 
   const report = knowledgeBase.scanReport;
 
   if (knowledgeBase.status === "error") {
-    return <p className="-mt-[3px] mb-2.5 text-xs leading-normal text-danger">{knowledgeBase.description}</p>;
+    return <p className="mb-1.5 px-2.5 text-xs leading-normal text-danger">{knowledgeBase.description}</p>;
   }
 
   if (!report) {
@@ -210,8 +203,8 @@ function ScanReportSummary({ knowledgeBase }: { knowledgeBase: KnowledgeBase }) 
   const errorText = report.failedFileCount ? `，${report.failedFileCount} 个读取失败` : "";
 
   return (
-    <p className={cn("-mt-[3px] mb-2.5 text-xs leading-normal text-ink-muted", report.failedFileCount && "text-warning")}>
-      已扫描 {report.scannedFileCount} 个支持文档{errorText}
+    <p className={cn("mb-1.5 px-2.5 text-[11px] leading-normal text-ink-soft", report.failedFileCount && "text-warning")}>
+      已扫描 {report.scannedFileCount} 个文档{errorText}
       {skippedText}
     </p>
   );

@@ -1,4 +1,4 @@
-import { ChevronLeft, ChevronRight, FileImage, FileText, FileType2, NotebookPen, X } from "lucide-react";
+import { ChevronLeft, ChevronRight, FileImage, FileText, FileType2, NotebookPen, PanelRight, X } from "lucide-react";
 import { useCallback, useEffect, useId, useLayoutEffect, useRef, useState } from "react";
 import { cn } from "../shared/cn";
 import { logDebug, logInfo } from "../shared/logger";
@@ -21,6 +21,8 @@ export interface EditorTabBarProps {
   onSelect: (tab: EditorFileTab) => void;
   onClose: (tab: EditorFileTab) => void;
   onScroll?: (direction: "left" | "right", source: EditorTabScrollSource) => void;
+  agentOpen?: boolean;
+  onToggleAgent?: () => void;
 }
 
 /** 将标签的种类和文件 ID 组合成稳定键，避免不同类型文件碰撞。 */
@@ -46,7 +48,7 @@ function TabFileIcon({ tab }: { tab: EditorTabBarItem }) {
 }
 
 /** IDE 风格的多文件标签栏，负责可访问键盘导航和溢出滚动，不持有文件业务状态。 */
-export function EditorTabBar({ tabs, activeTab, onSelect, onClose, onScroll }: EditorTabBarProps) {
+export function EditorTabBar({ tabs, activeTab, onSelect, onClose, onScroll, agentOpen, onToggleAgent }: EditorTabBarProps) {
   const tabListRef = useRef<HTMLDivElement>(null);
   const tabRefs = useRef(new Map<string, HTMLButtonElement>());
   const focusAfterSelectRef = useRef<string | null>(null);
@@ -194,17 +196,14 @@ export function EditorTabBar({ tabs, activeTab, onSelect, onClose, onScroll }: E
     }
   };
 
-  if (!tabs.length) {
-    return null;
-  }
-
   return (
     <div
-      className="grid min-w-0 grid-cols-[auto_minmax(0,1fr)_auto] items-center gap-1.5 rounded-control border border-border-soft bg-surface-muted p-1 max-[900px]:gap-[3px] max-[900px]:p-[3px]"
+      className="grid min-h-11 min-w-0 grid-cols-[auto_minmax(0,1fr)_auto] items-center gap-1 border-b border-border bg-surface px-2 max-[900px]:gap-[3px]"
       aria-label="已打开文件"
     >
+      {tabs.length > 0 ? (
       <button
-        className="inline-flex size-[26px] shrink-0 items-center justify-center rounded-small border-0 bg-transparent p-0 text-ink-soft hover:enabled:bg-surface-hover hover:enabled:text-agent-strong disabled:opacity-[0.38]"
+        className="inline-flex size-[26px] shrink-0 items-center justify-center rounded-small border-0 bg-transparent p-0 text-ink-soft hover:enabled:bg-surface-hover hover:enabled:text-ink disabled:opacity-[0.38]"
         type="button"
         aria-label="向左滚动文件标签"
         disabled={!canScrollLeft}
@@ -212,6 +211,9 @@ export function EditorTabBar({ tabs, activeTab, onSelect, onClose, onScroll }: E
       >
         <ChevronLeft size={16} aria-hidden="true" />
       </button>
+      ) : (
+        <span />
+      )}
       <div
         className="flex min-w-0 gap-[3px] overflow-x-auto overflow-y-hidden scroll-smooth [scrollbar-width:none] [&::-webkit-scrollbar]:hidden"
         id={tabListId}
@@ -228,9 +230,9 @@ export function EditorTabBar({ tabs, activeTab, onSelect, onClose, onScroll }: E
           return (
             <div
               className={cn(
-                "flex min-h-[30px] min-w-0 max-w-[210px] shrink-0 items-center rounded-small border border-transparent bg-transparent text-xs text-ink-muted max-[900px]:max-w-[156px]",
-                "hover:bg-surface-hover hover:text-ink",
-                isActive && "border-primary-border bg-surface text-agent-strong shadow-[0_1px_2px_rgba(var(--primary-rgb),0.08)]",
+                "flex min-h-[30px] min-w-0 max-w-[210px] shrink-0 items-center rounded-md border border-transparent bg-transparent text-xs text-ink-muted max-[900px]:max-w-[156px]",
+                "hover:bg-surface-muted hover:text-ink",
+                isActive && "bg-surface-muted text-ink-strong",
               )}
               key={tabKey}
             >
@@ -275,15 +277,33 @@ export function EditorTabBar({ tabs, activeTab, onSelect, onClose, onScroll }: E
           );
         })}
       </div>
-      <button
-        className="inline-flex size-[26px] shrink-0 items-center justify-center rounded-small border-0 bg-transparent p-0 text-ink-soft hover:enabled:bg-surface-hover hover:enabled:text-agent-strong disabled:opacity-[0.38]"
-        type="button"
-        aria-label="向右滚动文件标签"
-        disabled={!canScrollRight}
-        onClick={() => scrollTabs("right", "button")}
-      >
-        <ChevronRight size={16} aria-hidden="true" />
-      </button>
+      <div className="flex shrink-0 items-center gap-0.5">
+        {tabs.length > 0 && (
+        <button
+          className="inline-flex size-[26px] shrink-0 items-center justify-center rounded-small border-0 bg-transparent p-0 text-ink-soft hover:enabled:bg-surface-hover hover:enabled:text-ink disabled:opacity-[0.38]"
+          type="button"
+          aria-label="向右滚动文件标签"
+          disabled={!canScrollRight}
+          onClick={() => scrollTabs("right", "button")}
+        >
+          <ChevronRight size={16} aria-hidden="true" />
+        </button>
+        )}
+        {onToggleAgent && (
+          <button
+            className={cn(
+              "inline-flex size-8 shrink-0 items-center justify-center rounded-md border-0 bg-transparent p-0 text-ink-muted hover:bg-surface-muted hover:text-ink",
+              agentOpen && "bg-surface-muted text-ink",
+            )}
+            type="button"
+            title={agentOpen ? "收起 Agent" : "打开 Agent"}
+            aria-expanded={Boolean(agentOpen)}
+            onClick={onToggleAgent}
+          >
+            <PanelRight size={16} aria-hidden="true" />
+          </button>
+        )}
+      </div>
     </div>
   );
 }

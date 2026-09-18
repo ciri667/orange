@@ -603,11 +603,15 @@ export function WorkspaceShell() {
   return (
     <div className="app-shell">
       <TopBar
-        activeKnowledgeBase={activeKnowledgeBase}
-        knowledgeBaseCount={currentSnapshot.knowledgeBases.length}
         onOpenSettings={handleOpenSettings}
         agentOpen={agentOpen}
         onToggleAgent={handleToggleAgentPanel}
+        onCreateSession={() => {
+          if (!agentOpen) {
+            setAgentOpen(true);
+          }
+          void handleCreateSession();
+        }}
       />
       <main
         className={`workspace-grid${resizingPane ? " is-resizing" : ""}${agentOpen ? " agent-open" : ""}`}
@@ -642,6 +646,13 @@ export function WorkspaceShell() {
           onCreateFolder={(parentPath) => openCreateDialog("folder", parentPath)}
           onCreateProjectInstruction={() => handleCreateOrOpenProjectInstruction()}
           onRefreshKnowledgeBase={handleRescanKnowledgeBase}
+          onCreateSession={() => {
+            if (!agentOpen) {
+              setAgentOpen(true);
+            }
+            void handleCreateSession();
+          }}
+          onOpenSettings={handleOpenSettings}
         />
         <div
           className={`workspace-resizer workspace-resizer-sidebar ${resizingPane === "sidebar" ? "active" : ""}`}
@@ -653,6 +664,8 @@ export function WorkspaceShell() {
             activeTab={activeEditorTab}
             onSelect={(tab) => activateEditorTab(tab, "tab")}
             onClose={closeEditorTab}
+            agentOpen={agentOpen}
+            onToggleAgent={handleToggleAgentPanel}
           />
           <div className="editor-file-panel" id="editor-file-panel" role="tabpanel" aria-label="当前文件内容">
             {activeDocument ? (

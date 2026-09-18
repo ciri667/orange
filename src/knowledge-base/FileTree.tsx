@@ -25,10 +25,10 @@ import type { FileTreeNode } from "../shared/types";
 /** 文件树行的共用外观；active 只用于当前打开的文件。 */
 function fileTreeRowClassName({ isRoot = false, isActive = false }: { isRoot?: boolean; isActive?: boolean } = {}) {
   return cn(
-    "group relative flex min-h-8 min-w-0 w-full items-center gap-[7px] overflow-visible rounded-control border border-transparent bg-transparent pr-2 text-left text-ink",
-    !isActive && "hover:bg-surface-hover",
-    isRoot && "border-border-translucent bg-warm-panel",
-    isActive && "border-primary-border bg-primary-wash text-agent-strong",
+    "group relative flex min-h-8 min-w-0 w-full items-center gap-[7px] overflow-visible rounded-control border border-transparent bg-transparent pr-2 text-left text-[13px] text-ink",
+    !isActive && "hover:bg-[rgba(17,24,39,0.05)]",
+    isRoot && "bg-transparent",
+    isActive && "bg-[rgba(17,24,39,0.06)] text-ink-strong",
   );
 }
 
