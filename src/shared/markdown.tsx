@@ -11,7 +11,7 @@ export const markdownRemarkPlugins = [remarkGfm, remarkRestoreProtectedTablePipe
 
 /** Markdown 预览容器：编辑器阅读区。 */
 export const markdownPreviewClassName =
-  "min-h-0 min-w-0 overflow-auto rounded-panel border border-[rgba(230,224,214,0.92)] bg-surface p-[22px] text-sm leading-[1.76] text-ink [scrollbar-gutter:stable] [&>:first-child]:mt-0 [&>:last-child]:mb-0";
+  "min-h-0 min-w-0 overflow-auto bg-surface p-1 text-sm leading-[1.76] text-ink [scrollbar-gutter:stable] [&>:first-child]:mt-0 [&>:last-child]:mb-0";
 
 /** Agent 消息里的 Markdown 容器。 */
 export const markdownMessageClassName =
@@ -90,7 +90,7 @@ export function createMarkdownComponents(
     code: ({ node: _node, className, ...props }) => (
       <code
         className={cn(
-          "rounded-[5px] bg-[#f1eee8] font-mono text-[0.92em]",
+          "rounded-[5px] bg-surface-muted font-mono text-[0.92em]",
           isPreview ? "px-[5px] py-0.5" : "px-1 py-px",
           className,
         )}
@@ -112,7 +112,7 @@ export function createMarkdownComponents(
       <table
         className={cn(
           blockMarginClassName,
-          "block w-full max-w-full overflow-x-auto rounded-control border-collapse",
+          "w-full max-w-full overflow-hidden rounded-xl border border-border border-collapse",
           className,
         )}
         {...props}
@@ -121,8 +121,8 @@ export function createMarkdownComponents(
     th: ({ node: _node, className, ...props }) => (
       <th
         className={cn(
-          "border border-border bg-warm-panel text-left align-top font-bold text-ink-strong",
-          isPreview ? "px-[9px] py-[7px]" : "px-2 py-1.5",
+          "border-b border-border bg-surface-muted text-left align-top text-[11px] font-medium tracking-[0.04em] text-ink-muted",
+          isPreview ? "px-3 py-2" : "px-2.5 py-1.5",
           className,
         )}
         {...props}
@@ -131,8 +131,8 @@ export function createMarkdownComponents(
     td: ({ node: _node, className, ...props }) => (
       <td
         className={cn(
-          "border border-border text-left align-top",
-          isPreview ? "px-[9px] py-[7px]" : "px-2 py-1.5",
+          "border-b border-border text-left align-top last:border-b-0",
+          isPreview ? "px-3 py-2" : "px-2.5 py-1.5",
           className,
         )}
         {...props}

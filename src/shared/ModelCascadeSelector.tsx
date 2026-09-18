@@ -214,7 +214,7 @@ export function ModelCascadeSelector({
         className={cn(
           "inline-flex w-full min-w-0 items-center justify-between gap-1.5 border-0 bg-transparent text-left font-bold focus-visible:outline-[3px] focus-visible:outline-[var(--control-ring)] focus-visible:outline-offset-2",
           variant === "inline"
-            ? "min-h-7 rounded-full px-0 py-[3px] text-xs text-[#24323c]"
+            ? "min-h-7 rounded-full px-0 py-[3px] text-xs font-medium text-ink-muted"
             : "min-h-[var(--control-height)] rounded-control border border-border bg-white px-[11px] py-0 text-[13px] font-medium text-ink",
         )}
         type="button"
@@ -231,12 +231,12 @@ export function ModelCascadeSelector({
         createPortal(
           <div
             ref={menuRef}
-            className="fixed z-[calc(var(--z-agent-popover,180)+10)] grid min-h-[230px] w-[min(540px,calc(100vw-32px))] max-h-[min(390px,70vh)] grid-cols-[minmax(170px,0.92fr)_minmax(230px,1.18fr)] overflow-hidden rounded-[14px] border border-border bg-white/98 shadow-[0_22px_54px_rgba(31,36,48,0.18)]"
+            className="fixed z-[calc(var(--z-agent-popover,180)+10)] grid min-h-[230px] w-[min(540px,calc(100vw-32px))] max-h-[min(390px,70vh)] grid-cols-[minmax(170px,0.92fr)_minmax(230px,1.18fr)] overflow-hidden rounded-2xl border border-border bg-surface shadow-app"
             role="menu"
             aria-label={ariaLabel}
             style={menuStyle ?? { visibility: "hidden" }}
           >
-            <div className="grid min-w-0 content-start overflow-auto border-r border-border bg-[#fbfaf7] p-2.5" role="group" aria-label="Provider">
+            <div className="grid min-w-0 content-start overflow-auto border-r border-border bg-app p-2.5" role="group" aria-label="Provider">
               <button
                 className={cn(
                   "flex min-w-0 items-center justify-between gap-2.5 rounded-[10px] border-0 bg-transparent px-2.5 py-[9px] text-left text-ink hover:bg-surface-muted focus-visible:bg-surface-muted focus-visible:outline-none",

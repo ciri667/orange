@@ -22,7 +22,7 @@ export function OperationNotice({
   return (
     <div
       className={cn(
-        "flex items-center gap-2 rounded-control border border-primary-border bg-accent-soft px-2.5 py-[9px] text-left text-xs leading-[1.45] text-accent-strong",
+        "flex items-center gap-2 rounded-control border border-border bg-surface px-2.5 py-2 text-left text-xs leading-[1.45] text-ink-muted",
         isError && "border-[rgba(var(--danger-rgb),0.26)] bg-danger-soft text-danger",
         className,
       )}

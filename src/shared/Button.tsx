@@ -18,14 +18,13 @@ export interface ButtonProps extends ButtonHTMLAttributes<HTMLButtonElement> {
 }
 
 const baseClassName =
-  "inline-flex shrink-0 items-center justify-center gap-2 whitespace-nowrap rounded-control border border-solid transition-[background,border-color,color,box-shadow] duration-[160ms]";
+  "inline-flex shrink-0 items-center justify-center gap-2 whitespace-nowrap rounded-control border border-solid transition-[background,border-color,color] duration-[140ms]";
 
 const variantClassName: Record<ButtonVariant, string> = {
-  primary: "min-h-10 border-transparent bg-accent px-3.5 font-bold text-white hover:enabled:bg-accent-strong",
-  ghost:
-    "min-h-[34px] border-border-translucent bg-surface-translucent px-3.5 text-ink hover:enabled:border-border-strong hover:enabled:bg-surface-hover",
-  text: "min-h-[34px] border-border-translucent bg-surface-translucent px-3.5 text-ink hover:enabled:border-border-strong hover:enabled:bg-surface-hover",
-  icon: "size-[34px] min-h-[34px] border-border-translucent bg-surface-translucent p-0 text-ink hover:enabled:border-border-strong hover:enabled:bg-surface-hover",
+  primary: "min-h-9 border-transparent bg-accent px-3.5 font-semibold text-white hover:enabled:bg-accent-strong",
+  ghost: "min-h-8 border-transparent bg-transparent px-3 text-ink hover:enabled:bg-surface-hover",
+  text: "min-h-8 border-transparent bg-transparent px-3 text-ink hover:enabled:bg-surface-hover",
+  icon: "size-8 min-h-8 border-transparent bg-transparent p-0 text-ink-muted hover:enabled:bg-surface-hover hover:enabled:text-ink",
 };
 
 /** 统一按钮。应用内行动点用这个组件。 */
@@ -41,9 +40,9 @@ export const Button = forwardRef<HTMLButtonElement, ButtonProps>(function Button
       className={cn(
         baseClassName,
         variantClassName[variant],
-        size === "compact" && variant !== "icon" && "min-h-[34px]",
-        size === "compact" && variant === "ghost" && "px-[9px] py-1.5 text-xs",
-        size === "compact" && variant === "icon" && "size-[26px] min-h-[26px]",
+        size === "compact" && variant !== "icon" && "min-h-8 text-xs",
+        size === "compact" && variant === "ghost" && "px-2 py-1.5 text-xs",
+        size === "compact" && variant === "icon" && "size-7 min-h-7",
         tone === "danger" && variant === "primary" && "bg-danger text-white hover:enabled:bg-danger",
         tone === "danger" && variant !== "primary" && "text-danger",
         className,

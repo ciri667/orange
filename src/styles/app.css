@@ -3,73 +3,75 @@
  * 新 UI 用 src/styles/tailwind.css 中的工具类和 shared 原语。
  */
 :root {
-  color: #172026;
-  background: #f5f2ec;
+  color: #111827;
+  background: #f3f4f6;
   font-family:
-    Inter, "SF Pro Display", "SF Pro Text", -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    "SF Pro Text", "SF Pro Display", -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC",
+    "Microsoft YaHei", "Noto Sans SC", sans-serif;
   font-synthesis: none;
   text-rendering: optimizeLegibility;
   -webkit-font-smoothing: antialiased;
-  --app-bg: #f5f2ec;
-  --app-bg-strong: #ebe5da;
-  --border: #ded4c7;
-  --border-strong: #c9baa8;
-  --surface: #fffdf8;
-  --surface-warm: #fbf8f1;
-  --surface-muted: #eee8de;
-  --surface-hover: #f4efe6;
-  --text: #172026;
-  --text-strong: #101820;
-  --text-muted: #6f665b;
-  --text-soft: #9a9084;
-  --accent: #d47523;
-  --accent-strong: #f37021;
-  --accent-soft: #e9ebf4;
-  --agent: #6e665b;
-  --agent-strong: #4f3A2E;
-  --agent-soft: #e9ebf4;
+  --app-bg: #f3f4f6;
+  --app-bg-strong: #e5e7eb;
+  --border: #e5e7eb;
+  --border-strong: #d1d5db;
+  --surface: #ffffff;
+  --surface-warm: #f9fafb;
+  --surface-muted: #f3f4f6;
+  --surface-hover: #f3f4f6;
+  --text: #111827;
+  --text-strong: #0b1220;
+  --text-muted: #6b7280;
+  --text-soft: #9ca3af;
+  --accent: #e05a1a;
+  --accent-strong: #c44a12;
+  --accent-soft: rgba(224, 90, 26, 0.08);
+  --agent: #4b5563;
+  --agent-strong: #111827;
+  --agent-soft: #f3f4f6;
   --danger: #b42318;
-  --danger-soft: #fff0ec;
-  --success: #2f7258;
-  --success-soft: #e7f0eb;
-  --warning: #8b5e1f;
-  --warning-soft: #f7ecd8;
-  --radius-panel: 10px;
+  --danger-soft: #fef2f2;
+  --success: #067647;
+  --success-soft: #ecfdf3;
+  --warning: #b54708;
+  --warning-soft: #fffaeb;
+  --radius-panel: 16px;
   --radius-control: 8px;
   --radius-small: 6px;
-  --shadow: 0 18px 42px rgba(47, 39, 29, 0.12);
-  --shadow-soft: 0 10px 24px rgba(47, 39, 29, 0.08);
+  --shadow: 0 8px 24px rgba(17, 24, 39, 0.06);
+  --shadow-soft: 0 4px 12px rgba(17, 24, 39, 0.05);
   --mono-font: "SF Mono", "JetBrains Mono", "Roboto Mono", ui-monospace, monospace;
   --z-menu: 120;
   --z-agent-popover: 180;
   --z-settings: 320;
   --z-modal: 420;
   --z-confirm: 520;
-  --control-height: 38px;
-  --paper-rgb: 245, 242, 236;
-  --paper-strong-rgb: 235, 229, 218;
-  --surface-rgb: 255, 253, 248;
-  --surface-warm-rgb: 251, 248, 241;
-  --border-rgb: 222, 212, 199;
-  --border-strong-rgb: 201, 186, 168;
-  --ink-rgb: 23, 32, 38;
-  --primary-rgb: 75, 85, 127;
-  --primary-strong-rgb: 52, 63, 104;
-  --success-rgb: 47, 114, 88;
-  --warning-rgb: 139, 94, 31;
+  --control-height: 36px;
+  --paper-rgb: 243, 244, 246;
+  --paper-strong-rgb: 229, 231, 235;
+  --surface-rgb: 255, 255, 255;
+  --surface-warm-rgb: 249, 250, 251;
+  --border-rgb: 229, 231, 235;
+  --border-strong-rgb: 209, 213, 219;
+  --ink-rgb: 17, 24, 39;
+  --primary-rgb: 17, 24, 39;
+  --primary-strong-rgb: 11, 18, 32;
+  --accent-rgb: 224, 90, 26;
+  --success-rgb: 6, 118, 71;
+  --warning-rgb: 181, 71, 8;
   --danger-rgb: 180, 35, 24;
-  --color-primary-border: rgba(var(--primary-rgb), 0.22);
-  --color-primary-border-strong: rgba(var(--primary-rgb), 0.36);
-  --color-primary-wash: rgba(var(--primary-rgb), 0.09);
-  --color-primary-wash-strong: rgba(var(--primary-rgb), 0.14);
-  --color-surface-translucent: rgba(var(--surface-rgb), 0.78);
-  --color-surface-translucent-strong: rgba(var(--surface-rgb), 0.92);
-  --color-warm-panel: rgba(var(--surface-warm-rgb), 0.88);
-  --color-border-translucent: rgba(var(--border-rgb), 0.82);
-  --color-border-soft: rgba(var(--border-rgb), 0.68);
+  --color-primary-border: rgba(var(--ink-rgb), 0.08);
+  --color-primary-border-strong: rgba(var(--ink-rgb), 0.14);
+  --color-primary-wash: rgba(var(--ink-rgb), 0.04);
+  --color-primary-wash-strong: rgba(var(--ink-rgb), 0.08);
+  --color-surface-translucent: rgba(var(--surface-rgb), 0.86);
+  --color-surface-translucent-strong: rgba(var(--surface-rgb), 0.96);
+  --color-warm-panel: var(--surface-warm);
+  --color-border-translucent: var(--border);
+  --color-border-soft: rgba(var(--border-rgb), 0.88);
   --control-bg: var(--surface);
   --control-bg-hover: var(--surface-hover);
-  --control-ring: rgba(var(--primary-rgb), 0.24);
+  --control-ring: rgba(var(--accent-rgb), 0.28);
 }
 
 * {
@@ -125,12 +127,12 @@ textarea:disabled {
 input,
 textarea,
 select {
-  caret-color: var(--agent);
+  caret-color: var(--text);
 }
 
 input::placeholder,
 textarea::placeholder {
-  color: #aaa297;
+  color: var(--text-soft);
 }
 
 input[type="search"]::-webkit-search-decoration,
@@ -146,7 +148,7 @@ input:focus-visible,
 textarea:focus-visible,
 select:focus-visible,
 .workspace-resizer:focus-visible {
-  outline: 2px solid rgba(var(--primary-rgb), 0.26);
+  outline: 2px solid rgba(var(--accent-rgb), 0.35);
   outline-offset: 2px;
   box-shadow: none;
 }
@@ -169,12 +171,10 @@ select:focus-visible,
 }
 
 .app-shell {
-  display: grid;
+  display: flex;
+  flex-direction: column;
   height: 100%;
-  grid-template-rows: 52px 1fr;
-  background:
-    linear-gradient(180deg, rgba(var(--surface-rgb), 0.58), rgba(var(--paper-rgb), 0) 210px),
-    var(--app-bg);
+  background: var(--surface);
 }
 
 .brand-mark {
@@ -199,11 +199,12 @@ select:focus-visible,
   display: grid;
   min-width: 0;
   min-height: 0;
-  grid-template-columns: minmax(220px, 285px) 12px minmax(440px, 1fr) 12px minmax(320px, 380px);
+  flex: 1;
+  grid-template-columns: minmax(220px, 260px) 10px minmax(440px, 1fr) 10px minmax(320px, 400px);
   gap: 0;
   overflow: hidden;
-  padding: 12px 14px 14px;
-  background: var(--app-bg);
+  padding: 0;
+  background: var(--surface);
 }
 
 .sidebar,
@@ -212,24 +213,24 @@ select:focus-visible,
   min-width: 0;
   min-height: 0;
   isolation: isolate;
-  border: 1px solid var(--color-border-translucent);
-  border-radius: var(--radius-panel);
+  border: 0;
+  border-radius: 0;
   box-shadow: none;
 }
 
 .sidebar {
   display: flex;
   flex-direction: column;
-  gap: 14px;
-  padding: 14px;
-  background: var(--color-surface-translucent-strong);
+  gap: 8px;
+  padding: 12px 10px 8px;
+  background: var(--app-bg);
 }
 
 .editor-pane {
   display: grid;
   grid-template-rows: auto auto 1fr auto;
-  gap: 10px;
-  padding: 16px;
+  gap: 12px;
+  padding: 16px 22px 22px;
   background: var(--surface);
 }
 
@@ -237,10 +238,10 @@ select:focus-visible,
   position: relative;
   display: flex;
   flex-direction: column;
-  gap: 10px;
+  gap: 0;
   overflow: hidden;
-  padding: 14px;
-  background: var(--color-warm-panel);
+  padding: 0;
+  background: var(--surface);
 }
 
 .workspace-grid > .agent-panel {
@@ -266,7 +267,7 @@ select:focus-visible,
   bottom: 0;
   left: 50%;
   width: 1px;
-  background: rgba(213, 203, 189, 0.78);
+  background: var(--border);
   content: "";
   transform: translateX(-50%);
   transition:
@@ -279,7 +280,7 @@ select:focus-visible,
 .workspace-resizer.active::before,
 .workspace-grid.is-resizing .workspace-resizer.active::before {
   width: 2px;
-  background: var(--agent);
+  background: var(--border-strong);
 }
 
 .editor-workbench {
@@ -287,7 +288,8 @@ select:focus-visible,
   min-width: 0;
   min-height: 0;
   grid-template-rows: auto minmax(0, 1fr);
-  gap: 10px;
+  gap: 0;
+  background: var(--surface);
 }
 
 .editor-file-panel {
@@ -297,6 +299,12 @@ select:focus-visible,
 
 .editor-file-panel > .editor-pane {
   height: 100%;
+}
+
+.editor-source {
+  border: 0;
+  border-radius: 0;
+  background: var(--surface);
 }
 
 .settings-drawer {
@@ -318,7 +326,7 @@ select:focus-visible,
 
 * {
   scrollbar-width: thin;
-  scrollbar-color: rgba(111, 106, 97, 0.34) transparent;
+  scrollbar-color: rgba(17, 24, 39, 0.22) transparent;
 }
 
 *::-webkit-scrollbar {
@@ -329,12 +337,12 @@ select:focus-visible,
 *::-webkit-scrollbar-thumb {
   border: 3px solid transparent;
   border-radius: 999px;
-  background: rgba(111, 106, 97, 0.34);
+  background: rgba(17, 24, 39, 0.22);
   background-clip: padding-box;
 }
 
 *::-webkit-scrollbar-thumb:hover {
-  background: rgba(111, 106, 97, 0.52);
+  background: rgba(17, 24, 39, 0.36);
   background-clip: padding-box;
 }
 
@@ -350,7 +358,7 @@ select:focus-visible,
   }
 
   .workspace-grid {
-    padding: 10px;
+    padding: 0;
   }
 }
 

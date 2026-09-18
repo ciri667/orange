@@ -15,8 +15,8 @@ export function FilterChip({
     <button
       type={type}
       className={cn(
-        "inline-flex items-center gap-1.5 rounded-full border border-border-translucent bg-surface-translucent px-2 py-[5px] text-xs text-ink-muted",
-        active && "border-primary-border-strong bg-accent-soft text-accent-strong",
+        "inline-flex items-center gap-1.5 rounded-full border border-border bg-surface px-2 py-[5px] text-xs text-ink-muted",
+        active && "border-transparent bg-surface-muted text-ink-strong",
         className,
       )}
       {...props}

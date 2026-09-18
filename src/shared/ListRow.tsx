@@ -11,10 +11,10 @@ export interface ListRowVisualProps {
 /** 知识库行、会话行、Skill 行等选中态列表的共用 class。 */
 export function listRowClassName({ active = false, error = false, className }: ListRowVisualProps = {}) {
   return cn(
-    "flex w-full min-w-0 items-center gap-2.5 rounded-control border border-transparent bg-transparent p-2.5 text-left text-ink",
-    "hover:bg-surface-hover",
-    active && "border-primary-border-strong bg-accent-soft text-accent-strong",
-    error && "border-[rgba(180,35,24,0.28)] bg-danger-soft text-danger",
+    "flex w-full min-w-0 items-center gap-2.5 rounded-control border border-transparent bg-transparent px-2.5 py-2 text-left text-ink",
+    "hover:bg-[rgba(17,24,39,0.05)]",
+    active && "bg-[rgba(17,24,39,0.06)] text-ink-strong",
+    error && "bg-danger-soft text-danger",
     className,
   );
 }

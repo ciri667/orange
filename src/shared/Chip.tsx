@@ -22,7 +22,7 @@ export function Chip({
   return (
     <span
       className={cn(
-        "inline-flex min-w-0 max-w-[150px] items-center gap-1.5 overflow-hidden rounded-control border border-primary-border bg-primary-wash py-1 pr-1.5 pl-[7px] text-xs font-bold text-agent-strong",
+        "inline-flex min-w-0 max-w-[150px] items-center gap-1.5 overflow-hidden rounded-full border border-border bg-surface py-0.5 pr-1.5 pl-2 text-xs font-medium text-ink-muted",
         missing && "border-warning/35 bg-warning/10 text-warning",
         className,
       )}
@@ -31,7 +31,7 @@ export function Chip({
       {onRemove ? (
         <button
           type="button"
-          className="inline-grid size-[18px] shrink-0 place-items-center rounded-small border-0 bg-transparent text-inherit hover:bg-primary-wash-strong"
+          className="inline-grid size-[18px] shrink-0 place-items-center rounded-full border-0 bg-transparent text-inherit hover:bg-surface-hover"
           aria-label={removeLabel}
           onClick={onRemove}
         >

@@ -19,7 +19,7 @@ export function SegmentedControl({
   return (
     <div
       className={cn(
-        "inline-flex items-center rounded-control border border-border-translucent bg-surface-muted p-0.5",
+        "inline-flex items-center rounded-full border border-border bg-surface-muted p-0.5",
         className,
       )}
       role={role}
@@ -41,9 +41,9 @@ export function SegmentedControlItem({
     <button
       type={type}
       className={cn(
-        "inline-flex min-h-7 items-center justify-center gap-1.5 rounded-small border-0 bg-transparent px-2 text-xs text-ink-muted",
-        "hover:enabled:bg-surface-hover hover:enabled:text-ink",
-        active && "bg-surface text-agent-strong shadow-[0_1px_2px_rgba(66,53,34,0.08)]",
+        "inline-flex min-h-7 items-center justify-center gap-1.5 rounded-full border-0 bg-transparent px-2 text-xs text-ink-muted",
+        "hover:enabled:bg-white hover:enabled:text-ink",
+        active && "bg-white text-ink-strong shadow-app-soft",
         className,
       )}
       {...props}

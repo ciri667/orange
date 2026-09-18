@@ -18,8 +18,7 @@ export function BootScreen({
   return (
     <main
       className={cn(
-        "grid h-full w-full place-items-center gap-4 bg-app text-ink-muted",
-        "bg-[linear-gradient(180deg,rgba(var(--surface-rgb),0.58),rgba(var(--paper-rgb),0)_210px)]",
+        "grid h-full w-full place-items-center gap-4 bg-surface text-ink-muted",
         variant !== "loading" && "content-center p-12 text-center",
       )}
     >
@@ -30,7 +29,7 @@ export function BootScreen({
 
 /** 空状态主标题，对应原先 .empty-shell h1。 */
 export function BootTitle({ children }: { children: ReactNode }) {
-  return <h1 className="mt-2.5 mb-0 max-w-[680px] text-[34px] leading-[1.18] text-ink-strong">{children}</h1>;
+  return <h1 className="mt-2.5 mb-0 max-w-[680px] text-[28px] font-semibold leading-[1.2] text-ink-strong">{children}</h1>;
 }
 
 /** 空状态说明文字，对应原先 .empty-shell p。 */

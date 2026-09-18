@@ -18,7 +18,7 @@ export function ModalBackdrop({
     <div
       className={cn(
         "fixed inset-0 z-modal grid isolate place-items-center",
-        "bg-[radial-gradient(circle_at_top,rgba(255,255,255,0.12),transparent_360px),rgba(23,23,23,0.46)]",
+        "bg-[rgba(17,24,39,0.36)]",
         "backdrop-blur-[8px] max-[760px]:p-2.5",
         className,
       )}
@@ -45,7 +45,7 @@ export function ModalPanel({
   return (
     <section
       className={cn(
-        "grid isolate min-h-0 overflow-hidden rounded-panel border border-border-translucent bg-surface shadow-app",
+        "grid isolate min-h-0 overflow-hidden rounded-2xl border border-border bg-surface shadow-app",
         className,
       )}
       role="dialog"
@@ -83,7 +83,7 @@ export function ModalForm({
   return (
     <form
       className={cn(
-        "grid w-[min(420px,calc(100vw-40px))] isolate gap-3.5 rounded-panel border border-border-translucent bg-surface-translucent-strong p-4 shadow-app max-[760px]:w-[min(100%,calc(100vw-20px))]",
+        "grid w-[min(420px,calc(100vw-40px))] isolate gap-3.5 rounded-2xl border border-border bg-surface p-4 shadow-app max-[760px]:w-[min(100%,calc(100vw-20px))]",
         className,
       )}
       aria-label={ariaLabel}
