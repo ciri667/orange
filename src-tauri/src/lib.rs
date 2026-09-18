@@ -18,11 +18,69 @@ pub(crate) use skills::execution as skill_execution;
 mod storage;
 mod text_edit;
 
-use tauri::{Manager, WindowEvent};
+use std::sync::atomic::{AtomicBool, Ordering};
+use tauri::{Manager, RunEvent, WindowEvent};
 
 /** 托盘菜单 ID：显式退出才会停止本机 IM 网关，关闭窗口只隐藏到后台。 */
 const TRAY_MENU_SHOW: &str = "orange-show-window";
 const TRAY_MENU_QUIT: &str = "orange-quit-app";
+
+/** 进程退出标志。关闭按钮只隐藏窗口；真正退出时必须先拆掉 WebView HWND。 */
+struct AppQuitState {
+    quitting: AtomicBool,
+}
+
+impl AppQuitState {
+    fn new() -> Self {
+        Self {
+            quitting: AtomicBool::new(false),
+        }
+    }
+
+    fn is_quitting(&self) -> bool {
+        self.quitting.load(Ordering::SeqCst)
+    }
+
+    /// 返回是否由本次调用首次进入退出流程。
+    fn mark_quitting(&self) -> bool {
+        !self.quitting.swap(true, Ordering::SeqCst)
+    }
+}
+
+fn is_app_quitting(app: &tauri::AppHandle) -> bool {
+    app.try_state::<AppQuitState>()
+        .is_some_and(|state| state.is_quitting())
+}
+
+/**
+ * 标记退出并销毁全部 WebView 窗口。
+ *
+ * Windows 上 WebView2 在进程结束时会 UnregisterClass("Chrome_WidgetWin_0")。
+ * 若 CloseRequested 把窗口 hide 住、HWND 还在，就会打出 Error 1412 (ERROR_CLASS_HAS_WINDOWS)。
+ * 返回是否仍有窗口待 Destroyed，调用方应暂时 prevent_exit。
+ */
+fn begin_app_quit(app: &tauri::AppHandle) -> bool {
+    let first_quit = app
+        .try_state::<AppQuitState>()
+        .map(|state| state.mark_quitting())
+        .unwrap_or(true);
+    let windows = app.webview_windows();
+    if windows.is_empty() {
+        return false;
+    }
+    if first_quit {
+        for (_, window) in windows {
+            let _ = window.destroy();
+        }
+    }
+    !app.webview_windows().is_empty()
+}
+
+fn finish_app_quit_if_windows_gone(app: &tauri::AppHandle) {
+    if is_app_quitting(app) && app.webview_windows().is_empty() {
+        app.exit(0);
+    }
+}
 
 /** 桌面端应用入口，注册本地文件、索引、Agent loop 和写入确认命令。 */
 pub fn run() {
@@ -39,6 +97,8 @@ pub fn run() {
         .plugin(tauri_plugin_fs::init())
         .plugin(tauri_plugin_opener::init())
         .setup(|app| {
+            app.manage(AppQuitState::new());
+
             let show_item = tauri::menu::MenuItem::with_id(
                 app,
                 TRAY_MENU_SHOW,
@@ -65,7 +125,11 @@ pub fn run() {
                             let _ = window.set_focus();
                         }
                     }
-                    TRAY_MENU_QUIT => app.exit(0),
+                    TRAY_MENU_QUIT => {
+                        if !begin_app_quit(app) {
+                            app.exit(0);
+                        }
+                    }
                     _ => {}
                 });
 
@@ -159,8 +223,12 @@ pub fn run() {
 
             Ok(())
         })
-        .on_window_event(|window, event| {
-            if let WindowEvent::CloseRequested { api, .. } = event {
+        .on_window_event(|window, event| match event {
+            WindowEvent::CloseRequested { api, .. } => {
+                // 真正退出时放行销毁，否则 Windows WebView2 会留下 Chrome_WidgetWin_0 并在 UnregisterClass 时报 1412。
+                if is_app_quitting(&window.app_handle()) {
+                    return;
+                }
                 // 关闭主窗口不退出进程，使已启动的 IM sidecar 能持续接收远程确认操作。
                 api.prevent_close();
                 if let Err(error) = window.hide() {
@@ -176,6 +244,10 @@ pub fn run() {
                     );
                 }
             }
+            WindowEvent::Destroyed => {
+                finish_app_quit_if_windows_gone(&window.app_handle());
+            }
+            _ => {}
         })
         .invoke_handler(tauri::generate_handler![
             commands::workspace::load_workspace_state,
@@ -260,6 +332,33 @@ pub fn run() {
             commands::agent::apply_proposed_change,
             commands::agent::reject_proposed_change
         ])
-        .run(tauri::generate_context!())
-        .expect("failed to run Orange desktop app");
+        .build(tauri::generate_context!())
+        .expect("failed to build Orange desktop app")
+        .run(|app, event| match event {
+            RunEvent::ExitRequested { api, .. } => {
+                // cargo / 托盘 / 系统退出都会走这里。先拆 WebView，再结束事件循环。
+                if begin_app_quit(app) {
+                    api.prevent_exit();
+                }
+            }
+            RunEvent::Exit => {
+                im::stop_all_gateways(app);
+            }
+            _ => {}
+        });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::AppQuitState;
+
+    #[test]
+    fn quit_state_marks_first_caller_only() {
+        let state = AppQuitState::new();
+        assert!(!state.is_quitting());
+        assert!(state.mark_quitting());
+        assert!(state.is_quitting());
+        assert!(!state.mark_quitting());
+        assert!(state.is_quitting());
+    }
 }

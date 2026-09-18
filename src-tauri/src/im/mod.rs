@@ -190,6 +190,18 @@ pub fn stop_gateway(app: &AppHandle, provider_id: &str) -> Result<ImGatewayStatu
     }
 }
 
+/** 进程退出时停掉全部 IM sidecar，避免网关子进程残留。 */
+pub fn stop_all_gateways(app: &AppHandle) {
+    for provider_id in [
+        IM_PROVIDER_FEISHU,
+        IM_PROVIDER_QQ,
+        IM_PROVIDER_WEIXIN,
+        IM_PROVIDER_WECOM,
+    ] {
+        let _ = stop_gateway(app, provider_id);
+    }
+}
+
 /** 读取指定 IM provider 的网关状态；状态中只包含脱敏诊断信息。 */
 pub fn load_gateway_status(app: &AppHandle, provider_id: &str) -> Result<ImGatewayStatus, String> {
     match provider_id {
