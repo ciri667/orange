@@ -4,7 +4,6 @@ import { useRef } from "react";
 import { Button } from "../shared/Button";
 import { Checkbox } from "../shared/Checkbox";
 import { OverflowTooltipText } from "../shared/OverflowTooltipText";
-import { sectionLabelClassName } from "../shared/ui";
 import { getImSessionSourceLabel } from "../shared/selectors";
 import { useDismissable } from "../shared/useDismissable";
 import type {
@@ -161,24 +160,18 @@ export function AgentPanel({
 
   return (
     <aside ref={panelRef} className="agent-panel" aria-label="AI 协作区">
-      <header className="flex shrink-0 items-center justify-between gap-3">
-        <div className="min-w-0 flex-1">
-          <p className={sectionLabelClassName}>Agent</p>
-          <div className="flex min-w-0 items-center gap-2">
-            <OverflowTooltipText as="h2" className="mt-1 mb-0 block truncate text-xl leading-[1.18] text-ink-strong" text={activeSession.title} logArea="agent_session_title" />
-            {activeImSourceLabel && (
-              <span className="max-w-full shrink-0 truncate rounded-full border border-primary-border bg-accent-soft px-1.5 py-px text-[11px] font-semibold leading-[1.4] text-accent-strong">
-                {activeImSourceLabel}
-              </span>
-            )}
-          </div>
+      <header className="flex h-11 shrink-0 items-center justify-between gap-2 border-b border-border px-3">
+        <div className="flex min-w-0 flex-1 items-center gap-2">
+          <OverflowTooltipText as="h2" className="m-0 block truncate text-sm font-medium text-ink-strong" text={activeSession.title} logArea="agent_session_title" />
+          {activeImSourceLabel && (
+            <span className="max-w-full shrink-0 truncate rounded-full border border-border px-1.5 py-px text-[11px] font-medium text-ink-muted">
+              {activeImSourceLabel}
+            </span>
+          )}
         </div>
-        <div className="flex items-center gap-2">
-          <Button variant="icon" title="收起 Agent 协作区" onClick={onCollapsePanel}>
-            <PanelRightClose size={17} />
-          </Button>
+        <div className="flex items-center gap-0.5">
           <Button variant="icon" title="查看上下文" onClick={onToggleSessionContext}>
-            <Book size={17} />
+            <Book size={16} />
           </Button>
           <Button
             variant="icon"
@@ -186,7 +179,7 @@ export function AgentPanel({
             title={inFlightSessionIds.length ? `${inFlightSessionIds.length} 个任务运行中` : "会话历史"}
             onClick={onToggleSessionList}
           >
-            <History size={17} />
+            <History size={16} />
             {inFlightSessionIds.length > 0 && (
               <span
                 className={cn(
@@ -199,12 +192,15 @@ export function AgentPanel({
             )}
           </Button>
           <Button variant="icon" title="新建会话" onClick={onCreateSession}>
-            <Plus size={17} />
+            <Plus size={16} />
+          </Button>
+          <Button variant="icon" title="收起 Agent 协作区" onClick={onCollapsePanel}>
+            <PanelRightClose size={16} />
           </Button>
         </div>
       </header>
 
-      <div className="flex min-w-0 shrink-0 items-center gap-1.5" aria-label="当前会话上下文">
+      <div className="flex min-w-0 shrink-0 items-center gap-1.5 px-3 py-2" aria-label="当前会话上下文">
         <AgentScopeSelector
           activeSession={activeSession}
           activeKnowledgeBase={activeKnowledgeBase}
@@ -259,7 +255,7 @@ export function AgentPanel({
       />
 
       {activeSession.pendingExecution?.status === "pending" && (
-        <section className="mx-3 my-2 shrink-0 rounded-md border border-border-strong bg-surface-warm p-3" aria-label="待确认 Skill 执行">
+        <section className="mx-3 my-2 shrink-0 rounded-xl border border-border bg-surface p-3" aria-label="待确认 Skill 执行">
           <div className="flex items-center gap-2">
             <ShieldAlert size={16} />
             <div className="grid min-w-0 gap-[3px]">
@@ -273,7 +269,7 @@ export function AgentPanel({
             <div className="flex items-center justify-between gap-3 py-[3px]"><dt className="m-0">凭证</dt><dd className="m-0 text-xs text-ink-muted">{activeSession.pendingExecution.credentialAliases.length ? "已声明" : "不注入"}</dd></div>
           </dl>
           <div className="flex items-center justify-end gap-2">
-            <Button variant="ghost" size="compact" tone="danger" onClick={onRejectExecution} disabled={isComposerBusy}>
+            <Button variant="ghost" size="compact" onClick={onRejectExecution} disabled={isComposerBusy}>
               <X size={14} />
               拒绝
             </Button>
@@ -287,7 +283,7 @@ export function AgentPanel({
 
       {activeSession.pendingChangeSet?.status === "pending" && (
         <section
-          className="mx-3 my-2 shrink-0 rounded-md border border-border-strong bg-surface-warm p-3"
+          className="mx-3 my-2 shrink-0 rounded-xl border border-border bg-surface p-3"
           aria-label={activeSession.pendingChangeSet.executionId === "agent-direct" ? "Agent 文件变更集" : "Skill 文件变更集"}
         >
           <strong>{activeSession.pendingChangeSet.summary}</strong>
@@ -308,7 +304,7 @@ export function AgentPanel({
             <p className="text-xs text-ink-muted">另有 {activeSession.pendingChangeSet.operations.length - 8} 项。</p>
           )}
           <div className="flex items-center justify-end gap-2">
-            <Button variant="ghost" size="compact" tone="danger" onClick={onRejectChangeSet} disabled={isComposerBusy}>
+            <Button variant="ghost" size="compact" onClick={onRejectChangeSet} disabled={isComposerBusy}>
               <X size={14} />
               全部拒绝
             </Button>

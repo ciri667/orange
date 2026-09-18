@@ -113,7 +113,7 @@ export function AgentTurnTrace({
   return (
     <div className="my-1.5 mb-3 grid min-w-0 gap-2" aria-label="Agent 执行过程">
       <button
-        className="flex min-w-0 cursor-pointer items-center gap-1.5 border-0 bg-transparent px-0 py-0.5 text-left text-ink-muted"
+        className="flex min-w-0 cursor-pointer items-center gap-1.5 border-0 bg-transparent px-0 py-0.5 text-left text-ink-soft"
         type="button"
         aria-expanded={isExpanded}
         onClick={() => setIsExpanded((current) => !current)}
@@ -121,7 +121,7 @@ export function AgentTurnTrace({
         <ToggleIcon size={13} />
         <span
           className={cn(
-            "min-w-0 text-xs font-bold text-ink",
+            "min-w-0 text-xs font-medium text-ink-muted",
             resolvedStatus === "running" && "text-agent-strong",
             resolvedStatus === "failed" && "text-danger",
             resolvedStatus === "interrupted" && "text-warning",
@@ -134,7 +134,7 @@ export function AgentTurnTrace({
       </button>
 
       {isExpanded && (
-        <div className="ml-1.5 grid min-w-0 gap-2.5 border-l-[1.5px] border-border pl-3">
+        <div className="ml-1.5 grid min-w-0 gap-1.5 border-l border-border pl-3">
           {steps.length === 0 && resolvedStatus === "running" ? (
             <p className="m-0 text-[12.5px] leading-[1.65] text-ink-muted italic whitespace-pre-wrap [overflow-wrap:anywhere]">
               正在思考…
@@ -212,18 +212,11 @@ function TraceToolStep({
   const kindLabel = details.kindLabel || getToolKindLabel(step.name);
 
   return (
-    <div
-      className={cn(
-        "grid min-w-0 overflow-hidden rounded-xl border border-border bg-surface",
-        isFailed && "border-[rgba(var(--danger-rgb),0.26)] bg-danger-soft",
-        isAborted && "border-[rgba(var(--warning-rgb),0.26)] bg-warning-soft",
-        isRunning && "border-[rgba(var(--warning-rgb),0.28)] bg-warning-soft",
-      )}
-    >
+    <div className="grid min-w-0">
       <button
         className={cn(
-          "grid min-w-0 grid-cols-[auto_auto_minmax(0,1fr)] items-start gap-[7px] border-0 bg-transparent px-2.5 py-2 text-left text-ink",
-          hasDetails ? "cursor-pointer hover:bg-surface-hover" : "cursor-default",
+          "grid min-w-0 grid-cols-[auto_auto_minmax(0,1fr)] items-start gap-2 border-0 bg-transparent px-0 py-1 text-left text-ink-muted",
+          hasDetails ? "cursor-pointer hover:text-ink" : "cursor-default",
           isFailed && "text-danger",
           isAborted && "text-warning",
         )}
@@ -234,19 +227,19 @@ function TraceToolStep({
         {hasDetails ? <ToggleIcon size={13} /> : <span className="w-[13px]" />}
         <span
           className={cn(
-            "grid size-[22px] place-items-center rounded-full bg-surface-muted text-agent",
-            isRunning && "bg-white/70 text-warning",
-            isFailed && "bg-white/70 text-danger",
-            isAborted && "bg-white/70 text-warning",
+            "grid size-[18px] place-items-center text-ink-soft",
+            isRunning && "text-warning",
+            isFailed && "text-danger",
+            isAborted && "text-warning",
           )}
           aria-hidden="true"
         >
           <Icon className={isRunning ? "animate-spin" : undefined} size={13} />
         </span>
         <span className="grid min-w-0 gap-1 pt-px">
-          <span className="min-w-0 text-[12.5px] font-[650] leading-[1.45] [overflow-wrap:anywhere]">{getToolTraceLabel(step)}</span>
+          <span className="min-w-0 text-[12.5px] font-medium leading-[1.45] [overflow-wrap:anywhere]">{getToolTraceLabel(step)}</span>
           <span className="inline-flex flex-wrap items-center justify-start gap-1.5">
-            <em className="inline-flex items-center rounded-full bg-surface-muted px-[7px] py-0.5 text-[10px] font-bold not-italic tracking-[0.02em] text-ink-muted">
+            <em className="text-[10px] not-italic text-ink-soft">
               {kindLabel}
             </em>
             {typeof step.durationMs === "number" && step.durationMs > 0 && (
@@ -256,7 +249,7 @@ function TraceToolStep({
         </span>
       </button>
       {isExpanded && hasDetails && (
-        <div className="grid min-w-0 gap-2.5 border-t border-border bg-surface-warm px-3 py-2.5 pb-3">
+        <div className="grid min-w-0 gap-2 px-0 pb-2 pl-7">
           {step.error && <p className="m-0 rounded-lg bg-white/70 px-[9px] py-[7px] text-xs leading-normal text-danger">{step.error}</p>}
           <TraceToolFields fields={details.fields} />
           {(step.children?.length ?? 0) > 0 && (

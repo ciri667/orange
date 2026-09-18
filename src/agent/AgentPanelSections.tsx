@@ -1,4 +1,4 @@
-import { Check, Clock, Copy, Database, FileText, FolderOpen, Gauge, Layers3, Loader2, MessageSquareText, Pencil, ShieldAlert, Sparkles, Trash2, X } from "lucide-react";
+import { Check, Clock, Copy, Database, FileText, FolderOpen, Gauge, Layers3, Loader2, MessageSquareText, Pencil, Sparkles, Trash2, X } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import ReactMarkdown from "react-markdown";
 import rehypeSanitize from "rehype-sanitize";
@@ -15,7 +15,6 @@ import {
   protectGfmTablePipesInInlineCode,
 } from "../shared/markdown";
 import { OverflowTooltipText } from "../shared/OverflowTooltipText";
-import { SegmentedControl, SegmentedControlItem } from "../shared/SegmentedControl";
 import { agentPopoverClassName, fieldTextareaClassName, popoverHeaderClassName, sectionLabelClassName } from "../shared/ui";
 import {
   getScopeSummaryLabel,
@@ -84,7 +83,7 @@ export function AgentSessionSummary({
 
   return (
     <div className="flex min-h-0 min-w-0 flex-1 flex-nowrap items-center gap-1.5 overflow-hidden" aria-label="当前会话摘要">
-      <Chip className="max-w-full flex-1 rounded-full border-border bg-surface py-[5px] pr-[9px] pl-[9px] font-normal text-ink-muted">
+      <Chip className="max-w-full flex-1 font-normal">
         <FileText size={13} className="shrink-0" />
         <OverflowTooltipText className="min-w-0 truncate" text={currentFileLabel} logArea="agent_session_current_file_summary" />
       </Chip>
@@ -95,7 +94,7 @@ export function AgentSessionSummary({
           aria-label={contextMeterTitle}
         >
           {/* 占用标签很短，按内容单行展示。外层若是 shrink-to-fit，子级 max-w-[n%] 会把胶囊压成竖排。 */}
-          <Chip className="max-w-none rounded-full border-border bg-surface py-[5px] pr-[9px] pl-[9px] font-normal text-ink-muted">
+          <Chip className="max-w-none font-normal">
             <Gauge size={13} className="shrink-0" />
             <OverflowTooltipText
               className="whitespace-nowrap"
@@ -149,39 +148,34 @@ export function AgentSecurityLevelControl({
   }
 
   return (
-    <div className="inline-flex min-w-0 shrink items-center gap-1 bg-transparent p-0 text-xs text-agent-strong" aria-label="当前会话权限">
-      <span className="inline-flex shrink-0 items-center text-ink-muted">
-        <ShieldAlert size={13} />
-      </span>
-      <SegmentedControl
-        className="ml-0 w-auto grid grid-cols-3 gap-px rounded-full"
-        role="radiogroup"
-        aria-label="当前会话权限级别"
-      >
-        {([
-          ["basic", true],
-          ["advanced", agentSecurity.advancedExecutionEnabled],
-          ["autonomous", agentSecurity.autonomousModeEnabled],
-        ] as const).map(([level, isEnabled]) => {
-          const copy = AGENT_SECURITY_LEVEL_COPY[level];
+    <div className="inline-flex min-w-0 shrink items-center gap-1 bg-transparent p-0 text-xs" aria-label="当前会话权限" role="radiogroup">
+      {([
+        ["basic", true],
+        ["advanced", agentSecurity.advancedExecutionEnabled],
+        ["autonomous", agentSecurity.autonomousModeEnabled],
+      ] as const).map(([level, isEnabled]) => {
+        const copy = AGENT_SECURITY_LEVEL_COPY[level];
+        const active = activeSession.securityLevel === level;
 
-          return (
-            <SegmentedControlItem
-              className="min-h-[26px] rounded-full px-2 text-[11px] font-bold"
-              active={activeSession.securityLevel === level}
-              role="radio"
-              aria-checked={activeSession.securityLevel === level}
-              aria-label={`${copy.label}权限。${copy.description}`}
-              title={`${copy.description}${isEnabled ? "" : "选择后将启用此能力。"}`}
-              disabled={isBusy}
-              key={level}
-              onClick={() => onSecurityLevelChange?.(level)}
-            >
-              {copy.label}
-            </SegmentedControlItem>
-          );
-        })}
-      </SegmentedControl>
+        return (
+          <button
+            className={cn(
+              "rounded-full border-0 bg-transparent px-1.5 py-0.5 text-[12px] font-medium",
+              active ? "text-accent" : "text-ink-soft hover:text-ink",
+            )}
+            type="button"
+            role="radio"
+            aria-checked={active}
+            aria-label={`${copy.label}权限。${copy.description}`}
+            title={`${copy.description}${isEnabled ? "" : "选择后将启用此能力。"}`}
+            disabled={isBusy}
+            key={level}
+            onClick={() => onSecurityLevelChange?.(level)}
+          >
+            {copy.label}
+          </button>
+        );
+      })}
     </div>
   );
 }
@@ -239,7 +233,7 @@ export function AgentSessionHistoryPopover({
               </span>
               <span className="grid min-w-0 grid-cols-[minmax(0,max-content)_minmax(0,1fr)] items-center gap-x-1.5 gap-y-[3px] text-xs text-ink-muted">
                 {session.imIdentity ? (
-                  <span className="max-w-full shrink-0 truncate rounded-full border border-primary-border bg-accent-soft px-1.5 py-px text-[11px] font-semibold leading-[1.4] text-accent-strong">
+                  <span className="max-w-full shrink-0 truncate rounded-full border border-border px-1.5 py-px text-[11px] font-medium text-ink-muted">
                     {getImSessionSourceLabel(session)}
                   </span>
                 ) : (
@@ -269,7 +263,7 @@ export function AgentSessionHistoryPopover({
                 />
               </span>
               {runningIds.has(session.id) && (
-                <span className="rounded-control border border-primary-border bg-accent-soft px-1.5 py-0.5 text-xs text-accent-strong">
+                <span className="rounded-full border border-border px-1.5 py-0.5 text-xs text-ink-muted">
                   运行中
                 </span>
               )}
@@ -570,8 +564,8 @@ export function AgentScopeSelector({
     <>
       <button
         className={cn(
-          "inline-flex w-auto max-w-[46%] min-w-0 cursor-pointer items-center gap-1.5 rounded-full border border-border-translucent bg-surface-translucent px-[9px] py-[5px] text-left text-ink",
-          (selectedKnowledgeBaseIds.length > 1 || isScopeSelectorOpen) && "border-primary-border bg-primary-wash",
+          "inline-flex w-auto max-w-[46%] min-w-0 cursor-pointer items-center gap-1.5 rounded-full border border-border bg-surface px-2 py-1 text-left text-ink",
+          (selectedKnowledgeBaseIds.length > 1 || isScopeSelectorOpen) && "bg-surface-muted",
         )}
         type="button"
         title="编辑工具范围"
@@ -683,7 +677,7 @@ export function AgentMessageList({
 
   return (
     <div
-      className="min-h-0 flex-1 overflow-auto pr-0.5"
+      className="min-h-0 flex-1 overflow-auto px-4 py-4"
       aria-live="polite"
       ref={listRef}
       onScroll={(event) => {
@@ -692,10 +686,9 @@ export function AgentMessageList({
       }}
     >
       {activeSession.messages.length === 0 && !showLiveTurn && !queuedFollowUp && (
-        <div className="grid min-h-full place-content-center justify-items-center gap-1.5 px-3 py-6 text-center text-ink-muted">
-          <Sparkles size={16} className="text-agent opacity-70" />
-          <p className="m-0 text-[13px] font-[650] text-ink">从下面开始提问</p>
-          <span className="text-xs leading-[1.45]">@ 引用当前库里的文件，/ 选择本轮 Skill</span>
+        <div className="grid min-h-full place-content-center justify-items-center gap-1 px-6 py-10 text-center text-ink-muted">
+          <p className="m-0 text-sm text-ink-muted">从下面开始提问</p>
+          <span className="text-xs leading-[1.45] text-ink-soft">@ 引用文件，/ 选择 Skill</span>
         </div>
       )}
       {activeSession.messages.map((message) => (
@@ -769,65 +762,107 @@ function AgentMessageItem({
       message.content,
     );
 
-  return (
-    <article
-      aria-label={queued ? "排队中的下一条指令" : undefined}
-      className={cn(
-        "group min-w-0 select-text rounded-xl border border-transparent bg-surface-translucent px-3 py-2.5 [&+&]:mt-2.5",
-        message.role === "user" && "ml-[18px] bg-primary-wash text-agent-strong",
-        message.role === "assistant" && "mr-2.5",
-        queued && "border-dashed border-primary-border opacity-80",
-      )}
-    >
-      <div className="flex items-center gap-1.5 text-xs font-bold text-ink-muted select-none">
-        {message.role === "assistant" ? <Sparkles size={14} className="text-agent" /> : <MessageSquareText size={14} />}
-        <span>{message.role === "assistant" ? "橘记 Agent" : "你"}</span>
-        {queued ? (
-          <span className="inline-flex items-center gap-1 rounded-full border border-primary-border bg-surface px-1.5 py-px text-[11px] font-semibold text-ink-muted">
-            <Clock size={11} />
-            排队中
+  const statusChip = queued ? (
+    <span className="inline-flex items-center gap-1 text-[11px] font-medium text-ink-soft">
+      <Clock size={11} />
+      排队中
+    </span>
+  ) : message.interrupted || liveStatus === "interrupted" ? (
+    <span className="inline-flex items-center text-[11px] font-medium text-warning">已停止</span>
+  ) : null;
+
+  const mentionedFiles = message.mentionedFileIds?.length ? (
+    <div className="mb-2 flex flex-wrap gap-1" aria-label="本轮 @ 文件">
+      {message.mentionedFileIds.map((fileId) => (
+        <span
+          key={fileId}
+          className="max-w-[180px] truncate rounded-full border border-border px-2 py-[3px] text-[11px] font-medium text-ink-muted"
+        >
+          {getMentionedFileLabel(fileId, notes, documents)}
+        </span>
+      ))}
+    </div>
+  ) : null;
+
+  const imageBlock = message.images?.length ? (
+    <div className="mb-2 flex flex-wrap gap-1.5" aria-label="本条消息的图片">
+      {message.images.map((image) => {
+        const src = conversationImageSrc(image);
+        return src ? (
+          <img
+            key={image.id}
+            src={src}
+            alt={image.name || "图片"}
+            className="h-20 max-w-[160px] rounded-md border border-border object-cover"
+          />
+        ) : (
+          <span
+            key={image.id}
+            className="inline-flex h-20 min-w-[72px] items-center justify-center rounded-md border border-border bg-surface px-2 text-[11px] text-ink-muted"
+          >
+            {image.name || "图片"}
           </span>
-        ) : null}
-        {message.interrupted || liveStatus === "interrupted" ? (
-          <span className="inline-flex items-center rounded-full border border-border bg-warning-soft px-1.5 py-px text-[11px] font-semibold text-warning">
-            已停止
-          </span>
-        ) : null}
-      </div>
-      {message.mentionedFileIds?.length ? (
-        <div className="my-2 flex flex-wrap gap-[5px]" aria-label="本轮 @ 文件">
-          {message.mentionedFileIds.map((fileId) => (
-            <span
-              key={fileId}
-              className="max-w-[180px] truncate rounded-full border border-primary-border bg-primary-wash px-[7px] py-[3px] text-[11px] font-bold text-agent-strong"
+        );
+      })}
+    </div>
+  ) : null;
+
+  const body = isEditing ? (
+    <UserMessageEditor
+      initialContent={message.content}
+      allowEmpty={Boolean(message.images?.length)}
+      onCancel={() => setIsEditing(false)}
+      onSubmit={(prompt) => {
+        setIsEditing(false);
+        onEditUserMessage?.(message.id, prompt);
+      }}
+    />
+  ) : (
+    <>
+      {message.content ? (
+        <MessageMarkdown content={message.content} streaming={liveStatus === "running"} />
+      ) : null}
+      {message.content.trim() || message.images?.length || (canEdit && !queued) ? (
+        <div className="mt-1.5 flex items-center gap-0.5">
+          <MessageCopyButton content={message.content} messageRole={message.role} />
+          {canEdit && !queued ? (
+            <Button
+              variant="icon"
+              size="compact"
+              className="text-ink-soft opacity-0 group-hover:opacity-100 focus-visible:opacity-100"
+              title="编辑并重新执行"
+              aria-label="编辑并重新执行"
+              onClick={() => setIsEditing(true)}
             >
-              {getMentionedFileLabel(fileId, notes, documents)}
-            </span>
-          ))}
+              <Pencil size={13} />
+            </Button>
+          ) : null}
         </div>
       ) : null}
-      {message.images?.length ? (
-        <div className="my-2 flex flex-wrap gap-1.5" aria-label="本条消息的图片">
-          {message.images.map((image) => {
-            const src = conversationImageSrc(image);
-            return src ? (
-              <img
-                key={image.id}
-                src={src}
-                alt={image.name || "图片"}
-                className="h-20 max-w-[160px] rounded-md border border-border object-cover"
-              />
-            ) : (
-              <span
-                key={image.id}
-                className="inline-flex h-20 min-w-[72px] items-center justify-center rounded-md border border-border bg-surface px-2 text-[11px] text-ink-muted"
-              >
-                {image.name || "图片"}
-              </span>
-            );
-          })}
+    </>
+  );
+
+  if (message.role === "user") {
+    return (
+      <article
+        aria-label={queued ? "排队中的下一条指令" : undefined}
+        className={cn("group flex min-w-0 justify-end select-text [&+&]:mt-4", queued && "opacity-80")}
+      >
+        <div className="max-w-[86%] rounded-[18px] bg-surface-muted px-3.5 py-2.5 text-[13px] leading-[1.62] text-ink">
+          {statusChip ? <div className="mb-1">{statusChip}</div> : null}
+          {mentionedFiles}
+          {imageBlock}
+          {body}
         </div>
-      ) : null}
+      </article>
+    );
+  }
+
+  return (
+    <article className="group min-w-0 select-text [&+&]:mt-5">
+      {statusChip ? <div className="mb-1">{statusChip}</div> : null}
+      {mentionedFiles}
+      {imageBlock}
       {showTurnTrace ? (
         <AgentTurnTrace
           durationMs={message.turnDurationMs}
@@ -836,41 +871,8 @@ function AgentMessageItem({
           steps={message.trace ?? []}
         />
       ) : null}
-      {isEditing ? (
-        <UserMessageEditor
-          initialContent={message.content}
-          allowEmpty={Boolean(message.images?.length)}
-          onCancel={() => setIsEditing(false)}
-          onSubmit={(prompt) => {
-            setIsEditing(false);
-            onEditUserMessage?.(message.id, prompt);
-          }}
-        />
-      ) : (
-        <>
-          {message.content ? (
-            <MessageMarkdown content={message.content} streaming={liveStatus === "running"} />
-          ) : null}
-          {message.content.trim() || message.images?.length || (canEdit && !queued) ? (
-            <div className="mt-1.5 flex items-center gap-0.5">
-              <MessageCopyButton content={message.content} messageRole={message.role} />
-              {canEdit && !queued ? (
-                <Button
-                  variant="icon"
-                  size="compact"
-                  className="border-transparent bg-transparent text-ink-soft opacity-[0.58] group-hover:opacity-100 focus-visible:opacity-100 hover:enabled:border-border-strong hover:enabled:bg-surface-hover hover:enabled:text-ink"
-                  title="编辑并重新执行"
-                  aria-label="编辑并重新执行"
-                  onClick={() => setIsEditing(true)}
-                >
-                  <Pencil size={13} />
-                </Button>
-              ) : null}
-            </div>
-          ) : null}
-        </>
-      )}
-      {message.role === "assistant" && !usesTurnTrace ? <ToolCallList toolCalls={message.toolCalls} /> : null}
+      {body}
+      {!usesTurnTrace ? <ToolCallList toolCalls={message.toolCalls} /> : null}
       <CitationList citations={message.citations} />
     </article>
   );

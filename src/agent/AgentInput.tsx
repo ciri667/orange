@@ -666,7 +666,7 @@ export function AgentInput({
 
   return (
     <footer
-      className="flex min-w-0 shrink-0 flex-col gap-1 rounded-2xl border border-border-translucent bg-surface-translucent px-2.5 py-2 pr-2 shadow-[0_8px_20px_rgba(47,39,29,0.05)]"
+      className="m-3 mt-1 flex min-w-0 shrink-0 flex-col gap-1 rounded-[18px] border border-border bg-surface px-3 py-2.5 shadow-app-soft"
       onDragOver={handleComposerDragOver}
       onDrop={handleComposerDrop}
     >
@@ -735,7 +735,7 @@ export function AgentInput({
       <div className="relative min-w-0">
         {shouldShowMentionFilePicker && (
           <div
-            className="absolute right-0 bottom-[calc(100%+8px)] left-0 z-[6] grid max-h-[252px] gap-1 overflow-auto rounded-lg border border-primary-border-strong bg-surface p-1.5 shadow-[0_18px_40px_rgba(var(--ink-rgb),0.16)]"
+            className="absolute right-0 bottom-[calc(100%+8px)] left-0 z-[6] grid max-h-[252px] gap-1 overflow-auto rounded-xl border border-border bg-surface p-1.5 shadow-app"
             role="listbox"
             aria-label="选择本轮 @ 文件"
           >
@@ -744,7 +744,7 @@ export function AgentInput({
                 <button
                   className={cn(
                     "grid min-w-0 cursor-pointer grid-cols-[auto_minmax(0,1fr)_auto] items-center gap-[9px] rounded-md border border-transparent bg-transparent p-2 text-left text-ink",
-                    index === activeMentionFilePickerIndex && "border-primary-border bg-primary-wash",
+                    index === activeMentionFilePickerIndex && "bg-surface-muted",
                   )}
                   key={file.id}
                   type="button"
@@ -768,7 +768,7 @@ export function AgentInput({
         )}
         {shouldShowSkillPicker && (
           <div
-            className="absolute right-0 bottom-[calc(100%+8px)] left-0 z-[6] grid max-h-[252px] gap-1 overflow-auto rounded-lg border border-primary-border-strong bg-surface p-1.5 shadow-[0_18px_40px_rgba(var(--ink-rgb),0.16)]"
+            className="absolute right-0 bottom-[calc(100%+8px)] left-0 z-[6] grid max-h-[252px] gap-1 overflow-auto rounded-xl border border-border bg-surface p-1.5 shadow-app"
             role="listbox"
             aria-label="选择本轮显式 Skill"
           >
@@ -777,7 +777,7 @@ export function AgentInput({
                 <button
                   className={cn(
                     "flex min-w-0 cursor-pointer items-center justify-between gap-2.5 rounded-md border border-transparent bg-transparent p-2 text-left text-ink",
-                    index === activeSkillPickerIndex && "border-primary-border bg-primary-wash",
+                    index === activeSkillPickerIndex && "bg-surface-muted",
                   )}
                   key={skill.id}
                   type="button"
@@ -814,80 +814,82 @@ export function AgentInput({
           aria-label="Agent 输入"
         />
       </div>
-      <div className="flex min-w-0 items-center gap-2 pt-0.5">
-        <input
-          ref={imageFileInputRef}
-          type="file"
-          accept="image/png,image/jpeg,image/webp,image/gif"
-          multiple
-          className="hidden"
-          aria-hidden="true"
-          tabIndex={-1}
-          onChange={(event) => {
-            const files = Array.from(event.currentTarget.files ?? []);
-            event.currentTarget.value = "";
-            void appendDraftImages(files);
-          }}
-        />
-        <Button
-          variant="icon"
-          size="compact"
-          className="size-[34px] min-h-[34px] min-w-[34px] border-transparent bg-transparent text-ink-muted hover:enabled:bg-surface-hover hover:enabled:text-ink"
-          title="添加图片"
-          aria-label="添加图片"
-          disabled={Boolean(queuedFollowUp) || draftImages.length >= MAX_CONVERSATION_IMAGES}
-          onClick={() => imageFileInputRef.current?.click()}
-        >
-          <ImagePlus size={16} />
-        </Button>
-        {!activeSession.imIdentity && (
-          <AgentSecurityLevelControl
-            activeSession={activeSession}
-            agentSecurity={resolvedAgentSecurity}
-            isBusy={isBusy}
-            onSecurityLevelChange={onSecurityLevelChange}
+        <div className="flex min-w-0 items-center gap-2 pt-0.5">
+          <input
+            ref={imageFileInputRef}
+            type="file"
+            accept="image/png,image/jpeg,image/webp,image/gif"
+            multiple
+            className="hidden"
+            aria-hidden="true"
+            tabIndex={-1}
+            onChange={(event) => {
+              const files = Array.from(event.currentTarget.files ?? []);
+              event.currentTarget.value = "";
+              void appendDraftImages(files);
+            }}
           />
-        )}
-        {modelConfig.enabled && enabledProviders.length > 0 && (
-          <div className="ml-auto inline-flex min-w-0 max-w-[42%] items-center gap-1.5 rounded-full border-0 bg-transparent px-1.5 py-0.5 text-ink max-[760px]:max-w-full" aria-label="本轮使用的模型">
-            <BrainCircuit size={14} />
-            <ModelCascadeSelector
-              value={turnModelSelection}
-              providers={enabledProviders}
-              defaultLabel={`跟随默认${followDefaultLabel ? `（${followDefaultLabel}）` : ""}`}
-              triggerPrefix=""
-              ariaLabel="本轮使用的模型"
-              onChange={onTurnModelSelectionChange}
-              logArea="agent_turn_model_cascade"
+          <Button
+            variant="icon"
+            size="compact"
+            className="text-ink-muted hover:text-ink"
+            title="添加图片"
+            aria-label="添加图片"
+            disabled={Boolean(queuedFollowUp) || draftImages.length >= MAX_CONVERSATION_IMAGES}
+            onClick={() => imageFileInputRef.current?.click()}
+          >
+            <ImagePlus size={16} />
+          </Button>
+          {!activeSession.imIdentity && (
+            <AgentSecurityLevelControl
+              activeSession={activeSession}
+              agentSecurity={resolvedAgentSecurity}
+              isBusy={isBusy}
+              onSecurityLevelChange={onSecurityLevelChange}
             />
+          )}
+          <div className="ml-auto flex min-w-0 items-center justify-end gap-1.5">
+            {modelConfig.enabled && enabledProviders.length > 0 && (
+              <div className="inline-flex min-w-0 max-w-[220px] items-center gap-1.5 text-ink-muted" aria-label="本轮使用的模型">
+                <BrainCircuit size={14} />
+                <ModelCascadeSelector
+                  value={turnModelSelection}
+                  providers={enabledProviders}
+                  defaultLabel={`跟随默认${followDefaultLabel ? `（${followDefaultLabel}）` : ""}`}
+                  triggerPrefix=""
+                  ariaLabel="本轮使用的模型"
+                  onChange={onTurnModelSelectionChange}
+                  logArea="agent_turn_model_cascade"
+                />
+              </div>
+            )}
+            {showStopButton ? (
+              <Button
+                variant="primary"
+                size="compact"
+                tone="danger"
+                className="inline-grid size-8 min-h-8 min-w-8 shrink-0 place-items-center rounded-full border-transparent bg-danger p-0 hover:enabled:bg-danger disabled:opacity-[0.38]"
+                title="停止生成"
+                aria-label="停止生成"
+                onClick={onAbortTurn}
+              >
+                <Square size={12} fill="currentColor" />
+              </Button>
+            ) : (
+              <Button
+                variant="primary"
+                size="compact"
+                className="inline-grid size-8 min-h-8 min-w-8 shrink-0 place-items-center rounded-full border-transparent bg-accent p-0 hover:enabled:bg-accent-strong disabled:opacity-[0.38]"
+                title={sendTitle}
+                aria-label={sendTitle}
+                onClick={onSubmitPrompt}
+                disabled={(!prompt.trim() && !draftImages.length) || Boolean(queuedFollowUp)}
+              >
+                <ArrowRight size={16} />
+              </Button>
+            )}
           </div>
-        )}
-        {showStopButton ? (
-          <Button
-            variant="primary"
-            size="compact"
-            tone="danger"
-            className="inline-grid size-[34px] min-h-[34px] min-w-[34px] shrink-0 place-items-center rounded-full border-transparent bg-danger p-0 hover:enabled:bg-danger disabled:opacity-[0.38]"
-            title="停止生成"
-            aria-label="停止生成"
-            onClick={onAbortTurn}
-          >
-            <Square size={12} fill="currentColor" />
-          </Button>
-        ) : (
-          <Button
-            variant="primary"
-            size="compact"
-            className="inline-grid size-[34px] min-h-[34px] min-w-[34px] shrink-0 place-items-center rounded-full border-transparent bg-agent p-0 hover:enabled:bg-agent-strong disabled:opacity-[0.38]"
-            title={sendTitle}
-            aria-label={sendTitle}
-            onClick={onSubmitPrompt}
-            disabled={(!prompt.trim() && !draftImages.length) || Boolean(queuedFollowUp)}
-          >
-            <ArrowRight size={16} />
-          </Button>
-        )}
-      </div>
+        </div>
     </footer>
   );
 }

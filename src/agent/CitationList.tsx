@@ -11,22 +11,19 @@ export function CitationList({ citations }: { citations?: Citation[] }) {
   const sourceCount = new Set(citations.map((citation) => citation.knowledgeBaseName)).size;
 
   return (
-    <section className="mt-2.5 grid gap-[7px]" aria-label="回答引用来源">
-      <div className="flex items-center justify-between gap-2 text-[11px] text-ink-muted">
-        <strong className="text-xs text-agent-strong">引用</strong>
-        <span>
-          {citations.length} 条引用 · {sourceCount} 个资料库
+    <section className="mt-3 flex flex-wrap items-center gap-1.5" aria-label="回答引用来源">
+      <span className="text-[11px] text-ink-soft">
+        来源 · {citations.length} 条 · {sourceCount} 个资料库
+      </span>
+      {citations.map((citation) => (
+        <span
+          className="inline-flex max-w-[220px] items-center rounded-full border border-border bg-surface px-2 py-0.5 text-[11px] text-ink-muted"
+          key={`${citation.noteId}-${citation.path}`}
+          title={`${citation.knowledgeBaseName} · ${citation.path}${citation.location ? ` · ${citation.location}` : ""}\n${citation.snippet}`}
+        >
+          <OverflowTooltipText text={citation.title} logArea="agent_citation_title" />
         </span>
-      </div>
-      <div className="grid gap-1.5">
-        {citations.map((citation) => (
-          <article className="rounded-r-control border-l-[3px] border-agent bg-primary-wash px-[9px] py-[7px]" key={`${citation.noteId}-${citation.path}`}>
-            <OverflowTooltipText as="strong" className="block" text={citation.title} logArea="agent_citation_title" />
-            <OverflowTooltipText className="mt-[3px] block text-xs text-ink-muted" text={`${citation.knowledgeBaseName} · ${citation.path}${citation.location ? ` · ${citation.location}` : ""}`} logArea="agent_citation_path" />
-            <p className="mt-[3px] mb-0 text-xs">{citation.snippet}</p>
-          </article>
-        ))}
-      </div>
+      ))}
     </section>
   );
 }
