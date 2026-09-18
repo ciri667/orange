@@ -1038,23 +1038,20 @@ export function SettingsDrawer({
 
             return (
               <ListRow
-                className="grid grid-cols-[auto_minmax(0,1fr)_auto]"
+                className="grid grid-cols-[auto_minmax(0,1fr)_auto] py-1.5"
                 active={activeSection === item.id}
                 key={item.id}
                 aria-current={activeSection === item.id ? "page" : undefined}
                 onClick={() => handleActiveSectionChange(item.id)}
               >
-                <SectionIcon size={17} className={activeSection === item.id ? "text-accent-strong" : "text-ink-muted"} />
-                <span className="min-w-0">
-                  <OverflowTooltipText as="strong" className="block truncate text-ink-strong" text={item.label} logArea="settings_nav_label" />
-                  <OverflowTooltipText as="small" className="block truncate text-xs text-ink-muted" text={item.description} logArea="settings_nav_description" />
-                </span>
+                <SectionIcon size={16} className={activeSection === item.id ? "text-ink" : "text-ink-muted"} />
+                <OverflowTooltipText as="span" className="min-w-0 truncate text-[13px]" text={item.label} logArea="settings_nav_label" />
                 <OverflowTooltipText
                   as="em"
                   className={cn(
-                    "whitespace-nowrap rounded-full border border-[rgba(230,224,214,0.78)] bg-surface-muted px-[7px] py-[3px] text-[11px] not-italic text-ink-muted",
-                    item.tone === "success" && "bg-success-soft text-success",
-                    item.tone === "warning" && "border-[rgba(var(--warning-rgb),0.28)] bg-warning-soft text-warning",
+                    "whitespace-nowrap text-[11px] not-italic text-ink-soft",
+                    item.tone === "success" && "text-success",
+                    item.tone === "warning" && "text-warning",
                   )}
                   text={item.meta}
                   logArea="settings_nav_meta"
@@ -1211,14 +1208,13 @@ export function SettingsDrawer({
   return (
     <ModalBackdrop onClose={onClose} className="z-settings p-6 max-[760px]:p-2.5">
       <aside
-        className="settings-drawer relative grid h-[min(820px,calc(100vh-40px))] w-[min(1120px,calc(100vw-40px))] min-h-0 isolate grid-rows-[auto_minmax(0,1fr)] overflow-hidden rounded-panel border border-border-translucent bg-surface-translucent-strong shadow-app max-[760px]:h-[calc(100vh-20px)] max-[760px]:w-[min(100%,calc(100vw-20px))]"
+        className="settings-drawer relative grid h-[min(820px,calc(100vh-40px))] w-[min(1120px,calc(100vw-40px))] min-h-0 isolate grid-rows-[auto_minmax(0,1fr)] overflow-hidden rounded-2xl border border-border bg-surface shadow-app max-[760px]:h-[calc(100vh-20px)] max-[760px]:w-[min(100%,calc(100vw-20px))]"
         aria-label="设置"
         onMouseDown={(event) => event.stopPropagation()}
       >
         <ModalHeader className="px-5 py-[18px]">
           <div className="min-w-0">
-            <p className={sectionLabelClassName}>Settings</p>
-            <h2 className="mt-1 mb-0 text-xl leading-tight text-ink-strong">设置工作台</h2>
+            <h2 className="m-0 text-base font-semibold leading-tight text-ink-strong">设置</h2>
           </div>
           <Button variant="icon" title="关闭设置" onClick={onClose}>
             <X size={18} />
@@ -1226,14 +1222,7 @@ export function SettingsDrawer({
         </ModalHeader>
 
         <div className="grid min-h-0 min-w-0 grid-cols-[260px_minmax(0,1fr)]">
-          <nav className="grid min-h-0 min-w-0 content-start gap-[18px] overflow-auto border-r border-border bg-warm-panel p-4" aria-label="设置项">
-            <div className="grid gap-[7px] rounded-control border border-border-translucent bg-surface-translucent p-2.5 text-xs text-ink-muted" aria-label="设置摘要">
-              <strong className="text-[13px] text-ink-strong">本地 Agent 环境</strong>
-              <span>{settingsSummary.knowledgeBaseCount} 个资料库</span>
-              <span>{settingsSummary.providerCount} 个模型 Provider</span>
-              <span>{settingsSummary.enabledSkillCount} 个 Skill 启用</span>
-              {settingsSummary.errorLogCount > 0 && <em className="not-italic text-danger">{settingsSummary.errorLogCount} 条错误日志</em>}
-            </div>
+          <nav className="grid min-h-0 min-w-0 content-start gap-4 overflow-auto border-r border-border bg-app p-3" aria-label="设置项">
             {SETTINGS_SECTION_GROUPS.map((group) => renderNavigationGroup(group))}
           </nav>
           <main className="min-h-0 min-w-0 overflow-auto bg-surface p-5 max-[1100px]:p-4 max-[760px]:p-4" aria-label="设置主要内容">

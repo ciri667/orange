@@ -20,7 +20,7 @@ export function SettingsSectionHeader({
     <div className={settingsContentTitleClassName}>
       <div className="min-w-0">
         <p className={sectionLabelClassName}>{kicker}</p>
-        <h3 id={titleId} className="m-0 text-xl leading-tight text-ink-strong [overflow-wrap:anywhere]">
+        <h3 id={titleId} className="m-0 text-base font-semibold leading-tight text-ink-strong [overflow-wrap:anywhere]">
           {title}
         </h3>
         <p className="mt-[5px] mb-0 max-w-[680px] text-[13px] leading-[1.55] text-ink-muted">{description}</p>
@@ -49,7 +49,7 @@ export function SettingsPolicyRow({ icon, children, className }: { icon: ReactNo
   return (
     <div
       className={cn(
-        "flex items-start gap-2 rounded-control border border-border-translucent bg-warm-panel p-3 text-[13px] leading-[1.55] text-ink",
+        "flex items-start gap-2 rounded-xl border border-border bg-surface p-3 text-[13px] leading-[1.55] text-ink",
         className,
       )}
     >

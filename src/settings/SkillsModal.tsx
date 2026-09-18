@@ -910,7 +910,7 @@ function SkillDetail({
         <h4 className="m-0 text-[13px] text-ink-strong">运行兼容性</h4>
         <div
           className={cn(
-            "flex items-center justify-between gap-3 rounded-md border border-border bg-surface-warm px-3 py-2.5",
+            "flex items-center justify-between gap-3 rounded-xl border border-border bg-surface px-3 py-2.5",
             skill.compatibility?.status === "ready" && "[&_strong]:text-success",
             (skill.compatibility?.status === "missing-runtime" || skill.compatibility?.status === "partial" || skill.compatibility?.status === "unsupported") && "[&_strong]:text-warning",
           )}
@@ -933,7 +933,7 @@ function SkillDetail({
       </div>
       <div className="flex flex-wrap gap-1.5">
         {skill.tags.map((tag) => (
-          <OverflowTooltipText key={tag} className="rounded-full border border-[rgba(230,224,214,0.78)] bg-white/60 px-2 py-1 text-xs text-ink-muted" text={tag} logArea="skills_modal_detail_tag" />
+          <OverflowTooltipText key={tag} className="rounded-full border border-border bg-surface px-2 py-1 text-xs text-ink-muted" text={tag} logArea="skills_modal_detail_tag" />
         ))}
       </div>
       <section className="rounded-[7px] border border-border-translucent bg-warm-panel p-3">

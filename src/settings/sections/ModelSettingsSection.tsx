@@ -502,7 +502,7 @@ function ProviderModelsPanel({
                 <span
                   className={cn(
                     "inline-flex max-w-full items-center rounded-full px-[7px] py-[3px] text-[11px] font-bold",
-                    model.source === "discovered" ? "bg-accent-soft text-accent" : "bg-[#f7f1e7] text-[#8a5b12]",
+                    model.source === "discovered" ? "bg-accent-soft text-accent" : "bg-warning-soft text-warning",
                   )}
                 >
                   {isManual ? "手动" : "发现"}

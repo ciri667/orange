@@ -50,11 +50,11 @@ export function KnowledgeSettingsSection({
               <div>
                 <div className="flex flex-wrap items-center gap-1.5">
                   <OverflowTooltipText as="strong" text={knowledgeBase.name} logArea="settings_kb_name" />
-                  <span className="rounded-full border border-[rgba(230,224,214,0.78)] bg-white/60 px-2 py-1 text-xs text-ink-muted">
+                  <span className="rounded-full border border-border bg-surface px-2 py-1 text-xs text-ink-muted">
                     {knowledgeBase.status === "error" ? "目录失效" : knowledgeBase.semanticIndexEnabled ? "本地向量" : "FTS5"}
                   </span>
                   {knowledgeBase.id === activeKnowledgeBaseId && (
-                    <span className="rounded-full border border-[rgba(230,224,214,0.78)] bg-white/60 px-2 py-1 text-xs text-ink-muted">当前激活</span>
+                    <span className="rounded-full border border-border bg-surface px-2 py-1 text-xs text-ink-muted">当前激活</span>
                   )}
                 </div>
                 <p className="m-0 text-[13px] leading-[1.55] text-ink-muted">{knowledgeBase.description}</p>

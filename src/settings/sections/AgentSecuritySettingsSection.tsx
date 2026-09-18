@@ -52,15 +52,15 @@ export function AgentSecuritySettingsSection({
       />
 
       <div className="grid gap-2" aria-label="三级权限说明">
-        <article className="grid gap-1 rounded-lg border border-border bg-surface-warm px-3 py-2.5">
+        <article className="grid gap-1 rounded-xl border border-border bg-surface px-3 py-2.5">
           <strong className="text-[13px] text-ink-strong">基础</strong>
           <p className="m-0 text-xs leading-normal text-ink-muted">你盯紧每一步。Agent 只在知识库文档里工作，写入必须你确认。</p>
         </article>
-        <article className="grid gap-1 rounded-lg border border-border bg-surface-warm px-3 py-2.5">
+        <article className="grid gap-1 rounded-xl border border-border bg-surface px-3 py-2.5">
           <strong className="text-[13px] text-ink-strong">进阶</strong>
           <p className="m-0 text-xs leading-normal text-ink-muted">开始放手。Agent 可以做更多事（整理目录、运行 Skill 等），落盘前仍要你看一眼。</p>
         </article>
-        <article className="grid gap-1 rounded-lg border border-border bg-surface-warm px-3 py-2.5">
+        <article className="grid gap-1 rounded-xl border border-border bg-surface px-3 py-2.5">
           <strong className="text-[13px] text-ink-strong">完全</strong>
           <p className="m-0 text-xs leading-normal text-ink-muted">真正放手。校验通过后连续执行并自动落盘，让模型一次把任务做完。系统保护边界仍然有效。</p>
         </article>
