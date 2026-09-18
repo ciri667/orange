@@ -135,7 +135,7 @@ export function EditorPane({
     return (
       <section className="editor-pane" aria-label="Markdown 编辑器">
         <EditorEmptyHeader pathLabel={knowledgeBase.name} pathLogArea="editor_empty_knowledge_base" title="暂无 Markdown 笔记" />
-        <div className="grid min-h-0 place-content-center justify-items-center gap-2.5 rounded-panel border border-dashed border-border-strong bg-surface p-6 text-center text-ink-muted">
+        <div className="grid min-h-0 place-content-center justify-items-center gap-2.5 rounded-xl border border-dashed border-border bg-surface p-6 text-center text-ink-muted">
           {knowledgeBase.status === "error" ? (
             <>
               <strong className="text-base text-ink">当前知识库目录暂不可访问。</strong>

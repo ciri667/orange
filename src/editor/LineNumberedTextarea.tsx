@@ -118,9 +118,8 @@ export const LineNumberedTextarea = forwardRef<HTMLTextAreaElement, LineNumbered
   const logicalLines = useMemo(() => splitLogicalLines(value), [value]);
   const digitCount = String(logicalLines.length).length;
   const wrapperClassName = cn(
-    "relative min-h-0 min-w-0 overflow-hidden rounded-panel border border-[rgba(230,224,214,0.92)] bg-surface",
-    "focus-within:border-[rgba(var(--primary-rgb),0.46)] focus-within:outline-[3px] focus-within:outline-[var(--control-ring)] focus-within:outline-offset-0",
-    fileType === "txt" && "[&_.line-number-gutter]:bg-surface-muted",
+    "editor-source relative min-h-0 min-w-0 overflow-hidden bg-surface",
+    "focus-within:outline-none",
     className,
   );
   const textareaClassName = cn(
@@ -246,7 +245,7 @@ export const LineNumberedTextarea = forwardRef<HTMLTextAreaElement, LineNumbered
   return (
     <div className={wrapperClassName} style={wrapperStyle} data-file-type={fileType} data-gutter-width={gutterWidthToken}>
       <div
-        className="line-number-gutter pointer-events-none absolute top-0 bottom-0 left-0 z-[2] overflow-hidden border-r border-[rgba(230,224,214,0.82)] bg-warm-panel font-mono text-sm leading-[1.74] text-ink-soft select-none"
+        className="line-number-gutter pointer-events-none absolute top-0 bottom-0 left-0 z-[2] overflow-hidden border-r border-border bg-transparent font-mono text-sm leading-[1.74] text-ink-soft select-none"
         style={{ width: "var(--line-number-gutter-width)" }}
         aria-hidden="true"
       >

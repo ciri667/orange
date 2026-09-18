@@ -2,7 +2,7 @@ import { cn } from "../shared/cn";
 
 /** 统一 diff 文件头。 */
 export const unifiedDiffFileClassName =
-  "sticky top-0 z-[1] flex items-center justify-between gap-3 border-b border-border bg-warm-panel px-2.5 py-2 text-xs font-extrabold text-ink";
+  "sticky top-0 z-[1] flex items-center justify-between gap-3 border-b border-border bg-surface-muted px-2.5 py-2 text-xs font-semibold text-ink";
 
 /** hunk 头。 */
 export const diffHunkHeaderClassName =

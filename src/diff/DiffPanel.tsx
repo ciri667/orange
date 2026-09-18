@@ -95,33 +95,33 @@ export function DiffPanel({
   }
 
   return (
-    <aside className="flex max-h-[min(620px,55vh)] min-h-80 flex-col overflow-hidden rounded-panel border border-primary-border bg-[#f9f9f6]" aria-label="Agent 变更审阅工作台">
-      <div className="flex items-center justify-between gap-3">
+    <aside className="flex max-h-[min(620px,55vh)] min-h-80 flex-col overflow-hidden rounded-2xl border border-border bg-surface" aria-label="Agent 变更审阅工作台">
+      <div className="flex items-center justify-between gap-3 px-4 pt-4">
         <div className="min-w-0">
-          <p className={sectionLabelClassName}>{change.type === "create" ? "Agent 新建文件建议" : "Agent 文档变更审阅"}</p>
-          <OverflowTooltipText as="h3" className="mt-1 mb-0 text-xl leading-tight text-ink-strong" text={change.title} logArea="diff_change_title" />
-          <OverflowTooltipText text={change.targetPath} logArea="diff_target_path" />
+          <p className={sectionLabelClassName}>{change.type === "create" ? "新建文件建议" : "文档变更审阅"}</p>
+          <OverflowTooltipText as="h3" className="mt-1 mb-0 text-base font-semibold leading-tight text-ink-strong" text={change.title} logArea="diff_change_title" />
+          <OverflowTooltipText className="text-xs text-ink-muted" text={change.targetPath} logArea="diff_target_path" />
         </div>
         <div className="flex items-center gap-2">
-          <Button variant="ghost" tone="danger" onClick={onReject} disabled={isBusy}>
+          <Button variant="ghost" onClick={onReject} disabled={isBusy}>
             <X size={16} />
-            拒绝写入
+            放弃
           </Button>
           <Button variant="primary" size="compact" onClick={onAccept} disabled={isBusy}>
             <Check size={16} />
-            确认写入
+            写入
           </Button>
         </div>
       </div>
 
-      <div className="flex flex-wrap gap-[7px] rounded-control border border-primary-border bg-primary-wash px-2.5 py-2 text-xs text-ink-muted" aria-label="Agent 写入确认状态">
-        <strong className="text-agent-strong">写入前检查</strong>
-        <span className="border-l border-[rgba(59,92,204,0.16)] pl-2">{changedLineCount} 行变更</span>
-        <span className="border-l border-[rgba(59,92,204,0.16)] pl-2">{draftCommentCount ? `${draftCommentCount} 条反馈待发送` : "可直接确认或评论"}</span>
-        <span className="border-l border-[rgba(59,92,204,0.16)] pl-2">路径与 hash 会在确认时校验</span>
+      <div className="mx-4 mt-3 flex flex-wrap gap-2 rounded-xl border border-border px-3 py-2 text-xs text-ink-muted" aria-label="Agent 写入确认状态">
+        <strong className="text-ink">写入前检查</strong>
+        <span className="border-l border-border pl-2">{changedLineCount} 行变更</span>
+        <span className="border-l border-border pl-2">{draftCommentCount ? `${draftCommentCount} 条反馈待发送` : "可直接确认或评论"}</span>
+        <span className="border-l border-border pl-2">路径与 hash 会在确认时校验</span>
       </div>
 
-      <div className="flex shrink-0 flex-wrap gap-2 border-y border-[rgba(230,224,214,0.86)] px-3.5 py-2 text-xs text-ink-muted" aria-label="变更摘要">
+      <div className="mt-3 flex shrink-0 flex-wrap gap-2 border-y border-border px-4 py-2 text-xs text-ink-muted" aria-label="变更摘要">
         <span className="font-extrabold text-success">+{diff.stats.addedLines}</span>
         <span className="font-extrabold text-danger">-{diff.stats.removedLines}</span>
         <span>{diff.stats.hunkCount} 个变更区域</span>
@@ -131,7 +131,7 @@ export function DiffPanel({
       </div>
 
       <div className="grid min-h-0 grid-cols-[minmax(0,1fr)_minmax(250px,30%)] max-[1100px]:grid-cols-1">
-        <div className="min-w-0 overflow-auto border-r border-[rgba(230,224,214,0.86)] bg-surface max-[1100px]:border-r-0 max-[1100px]:border-b" aria-label="文本文件行级 diff">
+        <div className="min-w-0 overflow-auto border-r border-border bg-surface max-[1100px]:border-r-0 max-[1100px]:border-b" aria-label="文本文件行级 diff">
           <div className={unifiedDiffFileClassName}>
             <OverflowTooltipText className="min-w-0 truncate" text={change.targetPath} logArea="diff_file_path" />
             <span className="min-w-0 truncate">{change.fileType === "txt" ? "TXT" : "Markdown"} · {change.type === "create" ? "new file" : "pending"}</span>
@@ -149,7 +149,7 @@ export function DiffPanel({
           ))}
         </div>
 
-        <aside className="flex min-w-0 flex-col gap-2.5 overflow-auto bg-warm-panel p-3 max-[1100px]:max-h-[230px]" aria-label="审阅评论">
+        <aside className="flex min-w-0 flex-col gap-2.5 overflow-auto bg-surface-muted p-3 max-[1100px]:max-h-[230px]" aria-label="审阅评论">
           <div className="flex min-w-0 flex-col gap-2">
             <div>
               <p className={sectionLabelClassName}>行评论</p>
@@ -226,7 +226,7 @@ function DiffHunkView({
   ).length;
 
   return (
-    <section className="border-b border-[#eef2f4]">
+    <section className="border-b border-border">
       <button
         className={diffHunkHeaderClassName}
         type="button"

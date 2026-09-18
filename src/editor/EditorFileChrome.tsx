@@ -52,7 +52,7 @@ export function EditorFileHeader({
     <header className="flex items-start justify-between gap-3">
       <div className="min-w-0">
         <OverflowTooltipText as="p" className={pathLabelClassName} text={title.pathLabel} logArea={title.pathLogArea} />
-        <OverflowTooltipText as="h2" className="mt-1 mb-0 truncate text-xl leading-tight text-ink-strong" text={title.title} logArea={title.titleLogArea} />
+        <OverflowTooltipText as="h2" className="mt-0.5 mb-0 truncate text-base font-semibold leading-tight text-ink-strong" text={title.title} logArea={title.titleLogArea} />
       </div>
       <div className="flex min-w-0 flex-wrap items-center justify-end gap-[7px]">{actions}</div>
     </header>
@@ -73,7 +73,7 @@ export function EditorEmptyHeader({
     <header className="flex items-start justify-between gap-3">
       <div className="min-w-0">
         <OverflowTooltipText as="p" className={pathLabelClassName} text={pathLabel} logArea={pathLogArea} />
-        <h2 className="mt-1 mb-0 truncate text-xl leading-tight text-ink-strong">{title}</h2>
+        <h2 className="mt-0.5 mb-0 truncate text-base font-semibold leading-tight text-ink-strong">{title}</h2>
       </div>
       <div className="flex min-w-0 flex-wrap items-center justify-end gap-[7px]" />
     </header>
@@ -86,7 +86,7 @@ export function EditorMetaStrip({ items }: { items: EditorMetaItem[] }) {
     <div className="flex gap-2 overflow-x-auto text-xs text-ink-muted [scrollbar-width:none] [&::-webkit-scrollbar]:hidden">
       {items.map((item, index) => {
         const itemClassName = cn(
-          "inline-flex shrink-0 items-center gap-1.5 rounded-full border border-[rgba(230,224,214,0.7)] bg-[rgba(251,250,247,0.72)] px-2 py-1",
+          "inline-flex shrink-0 items-center gap-1.5 rounded-full border border-border bg-surface px-2 py-1",
           item.className === "dirty-indicator" && "border-[rgba(var(--warning-rgb),0.28)] bg-warning-soft font-bold text-warning",
           item.className !== "dirty-indicator" && item.className,
           item.onClick && "cursor-pointer hover:border-border-strong hover:bg-surface-hover",

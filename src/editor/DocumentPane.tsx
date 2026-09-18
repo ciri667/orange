@@ -210,7 +210,7 @@ function DocumentPreviewView({
     return (
       <div className="grid min-h-0 gap-3" aria-label="PDF 预览">
         {assetUrl ? (
-          <iframe className="h-full min-h-0 w-full min-w-0 overflow-hidden rounded-panel border border-[rgba(230,224,214,0.92)] bg-surface" title={document.title} src={assetUrl} />
+          <iframe className="h-full min-h-0 w-full min-w-0 overflow-hidden rounded-none border-0 bg-surface" title={document.title} src={assetUrl} />
         ) : (
           <div className="grid min-h-0 min-w-0 place-items-center rounded-panel border border-dashed border-border-strong bg-surface p-6 text-center text-[13px] leading-[1.55] text-ink-muted">当前环境无法内嵌 PDF 预览。</div>
         )}
@@ -233,7 +233,7 @@ function DocumentPreviewView({
     const assetUrl = createDocumentAssetUrl(preview?.assetPath);
 
     return assetUrl ? (
-      <div className="grid min-h-0 min-w-0 place-items-center overflow-auto rounded-panel border border-[rgba(230,224,214,0.92)] bg-surface p-[22px]" aria-label="图片预览">
+      <div className="grid min-h-0 min-w-0 place-items-center overflow-auto rounded-none border-0 bg-surface p-[22px]" aria-label="图片预览">
         <img
           className="block max-h-full max-w-full object-contain"
           src={assetUrl}
@@ -274,7 +274,7 @@ function DocumentPreviewView({
     const blocks = preview?.blocks ?? [];
 
     return (
-      <div className="min-h-0 min-w-0 overflow-auto rounded-panel border border-[rgba(230,224,214,0.92)] bg-surface p-[22px] text-sm leading-[1.76] text-ink [scrollbar-gutter:stable] [&>:last-child]:mb-0" aria-label="DOCX 预览">
+      <div className="min-h-0 min-w-0 overflow-auto rounded-none border-0 bg-surface p-[22px] text-sm leading-[1.76] text-ink [scrollbar-gutter:stable] [&>:last-child]:mb-0" aria-label="DOCX 预览">
         {blocks.map((block, index) =>
           block.type === "heading" ? (
             <h3 className="mb-3 mt-0 text-[19px] leading-[1.35] text-ink-strong" key={`${block.type}-${index}`}>{block.text}</h3>
