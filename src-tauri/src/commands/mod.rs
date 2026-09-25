@@ -6,6 +6,7 @@ pub mod im;
 pub mod knowledge;
 pub mod logs;
 pub mod notes;
+pub mod schedules;
 pub mod sessions;
 pub mod settings;
 pub mod skills;
@@ -15,6 +16,7 @@ pub(crate) use agent::{
     handle_im_builtin_command, handle_im_pending_change_command, run_agent_turn_from_im,
     short_change_code,
 };
+pub(crate) use schedules::run_scheduled_job_turn;
 
 #[cfg(test)]
 mod tests {

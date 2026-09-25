@@ -304,6 +304,13 @@ fn build_system_prompt(
         ),
     ];
 
+    if let Some(identity) = &session.schedule_identity {
+        parts.push(format!(
+            "当前会话由定时任务「{}」触发，处于无人值守模式。直接完成任务并给出可阅读的中文结果，不要向用户提问或等待确认。写入仍只生成待确认 diff，不能声称已经写入文件。不要创建或修改其它定时任务。",
+            identity.job_name
+        ));
+    }
+
     if let Some(project) = render_project_agent_instructions(snapshot, session) {
         parts.push(format!("<project_context>\n{project}\n</project_context>"));
     }

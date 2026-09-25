@@ -13,6 +13,7 @@ mod logging;
 mod model_provider;
 mod provider_error;
 mod runtime;
+mod scheduler;
 mod skills;
 pub(crate) use skills::execution as skill_execution;
 mod storage;
@@ -116,7 +117,7 @@ pub fn run() {
             let tray_menu = tauri::menu::Menu::with_items(app, &[&show_item, &quit_item])?;
             let mut tray_builder = tauri::tray::TrayIconBuilder::with_id("orange-im-gateway")
                 .menu(&tray_menu)
-                .tooltip("橘记正在后台运行，飞书远程服务可用")
+                .tooltip("橘记正在后台运行，IM 与定时任务可用")
                 .on_menu_event(|app, event| match event.id.as_ref() {
                     TRAY_MENU_SHOW => {
                         // 从托盘恢复窗口时同时请求焦点，避免窗口被其他应用遮挡后像是未响应。
@@ -179,6 +180,8 @@ pub fn run() {
                     ),
                 ),
             }
+
+            scheduler::start(handle.clone());
 
             let im_handle = handle.clone();
             tauri::async_runtime::spawn(async move {
@@ -318,6 +321,13 @@ pub fn run() {
             commands::history::clear_document_history,
             commands::documents::load_document_preview,
             export::export_current_file,
+            commands::schedules::list_scheduled_jobs,
+            commands::schedules::list_schedule_blueprints,
+            commands::schedules::create_scheduled_job,
+            commands::schedules::update_scheduled_job,
+            commands::schedules::delete_scheduled_job,
+            commands::schedules::list_scheduled_job_runs,
+            commands::schedules::trigger_scheduled_job,
             commands::agent::run_agent_turn,
             commands::agent::abort_agent_turn,
             commands::agent::list_active_agent_session_ids,
