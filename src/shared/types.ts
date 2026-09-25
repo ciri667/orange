@@ -608,6 +608,8 @@ export interface AgentSession {
   title: string;
   /** IM 会话身份；本地创建的 Agent 会话不携带该字段。 */
   imIdentity?: ImSessionIdentity;
+  /** 定时任务身份；普通本地会话和 IM 会话不携带该字段。 */
+  scheduleIdentity?: ScheduleSessionIdentity;
   type: AgentSessionType;
   knowledgeBaseIds: string[];
   activeNoteId?: string;
@@ -630,6 +632,12 @@ export interface AgentSession {
   modelId?: string;
   /** 最近一次有效 usage，供界面展示占用。 */
   contextUsage?: AgentContextUsage;
+}
+
+/** 定时任务绑定到 Agent 会话的身份。 */
+export interface ScheduleSessionIdentity {
+  jobId: string;
+  jobName: string;
 }
 
 /** IM 会话的展示身份；通道仅保留不可逆的脱敏指纹。 */
@@ -983,4 +991,105 @@ export interface KnowledgeBaseSelection {
   name: string;
   path: string;
   noteCount: number;
+}
+
+/** 与 Codex 对齐的星期枚举。 */
+export type JobWeekday = "MO" | "TU" | "WE" | "TH" | "FR" | "SA" | "SU";
+
+/** 结构化周期，不做 crontab。 */
+export type JobSchedule =
+  | { type: "hourly"; intervalHours: number; days?: JobWeekday[] }
+  | { type: "daily"; time: string }
+  | { type: "weekdays"; time: string }
+  | { type: "weekly"; days: JobWeekday[]; time: string }
+  | { type: "once"; at: string };
+
+export type ScheduleOutputMode = "session" | "inbox";
+export type ScheduleSessionPolicy = "newEachRun" | "continue";
+
+/** 一条持久化定时任务。 */
+export interface ScheduledJob {
+  id: string;
+  name: string;
+  prompt: string;
+  schedule: JobSchedule;
+  scheduleDisplay: string;
+  timezone: string;
+  knowledgeBaseIds: string[];
+  outputMode: ScheduleOutputMode | string;
+  inboxKnowledgeBaseId?: string;
+  inboxFolder?: string;
+  sessionPolicy: ScheduleSessionPolicy | string;
+  continuedSessionId?: string;
+  modelProviderId?: string;
+  modelId?: string;
+  explicitSkillIds?: string[];
+  enabled: boolean;
+  nextRunAt?: string;
+  lastRunAt?: string;
+  lastStatus?: string;
+  lastError?: string;
+  lastSessionId?: string;
+  failureStreak: number;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface ScheduledJobRun {
+  id: string;
+  jobId: string;
+  scheduledInstant: string;
+  startedAt: string;
+  finishedAt?: string;
+  status: string;
+  sessionId?: string;
+  error?: string;
+}
+
+export interface ScheduleBlueprint {
+  key: string;
+  name: string;
+  description: string;
+  prompt: string;
+  schedule: JobSchedule;
+  scheduleDisplay: string;
+  sessionPolicy: string;
+  outputMode: string;
+  needsTopic: boolean;
+}
+
+export interface CreateScheduledJobPayload {
+  name: string;
+  prompt: string;
+  schedule: JobSchedule;
+  knowledgeBaseIds: string[];
+  outputMode?: string;
+  inboxKnowledgeBaseId?: string;
+  inboxFolder?: string;
+  sessionPolicy?: string;
+  modelProviderId?: string;
+  modelId?: string;
+  explicitSkillIds?: string[];
+  enabled?: boolean;
+}
+
+export interface UpdateScheduledJobPayload {
+  jobId: string;
+  name?: string;
+  prompt?: string;
+  schedule?: JobSchedule;
+  knowledgeBaseIds?: string[];
+  outputMode?: string;
+  inboxKnowledgeBaseId?: string;
+  inboxFolder?: string;
+  sessionPolicy?: string;
+  modelProviderId?: string;
+  modelId?: string;
+  explicitSkillIds?: string[];
+  enabled?: boolean;
+}
+
+export interface ScheduledJobUpdatedEvent {
+  job: ScheduledJob;
+  sessionId?: string;
 }

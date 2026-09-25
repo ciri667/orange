@@ -1,4 +1,4 @@
-import { AlertCircle, Database, MessageSquarePlus, Plus, RefreshCw, Search, Settings } from "lucide-react";
+import { AlertCircle, Clock, Database, MessageSquarePlus, Plus, RefreshCw, Search, Settings } from "lucide-react";
 import { FileTree } from "./FileTree";
 import { Button } from "../shared/Button";
 import { cn } from "../shared/cn";
@@ -45,6 +45,8 @@ export function KnowledgeBaseSidebar({
   onCreateProjectInstruction,
   onRefreshKnowledgeBase,
   onCreateSession,
+  onOpenSchedules,
+  schedulesActive = false,
   onOpenSettings,
 }: {
   knowledgeBases: KnowledgeBase[];
@@ -75,6 +77,8 @@ export function KnowledgeBaseSidebar({
   onCreateProjectInstruction: () => void;
   onRefreshKnowledgeBase: (knowledgeBaseId: string) => void;
   onCreateSession: () => void;
+  onOpenSchedules?: () => void;
+  schedulesActive?: boolean;
   onOpenSettings: () => void;
 }) {
   return (
@@ -90,6 +94,16 @@ export function KnowledgeBaseSidebar({
         <MessageSquarePlus size={16} />
         新对话
       </Button>
+      {onOpenSchedules ? (
+        <Button
+          variant="ghost"
+          className={cn("w-full justify-start gap-2 px-2.5 text-[13px]", schedulesActive && "bg-surface-muted text-ink-strong")}
+          onClick={onOpenSchedules}
+        >
+          <Clock size={16} />
+          定时任务
+        </Button>
+      ) : null}
 
       <section className="grid gap-0.5" aria-label="知识库切换">
         <p className={sectionLabelClassName}>知识库</p>

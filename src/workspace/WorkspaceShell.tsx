@@ -18,7 +18,8 @@ import {
   getActiveDocument,
   getActiveNote,
 } from "../shared/selectors";
-import { saveWorkspaceEditorState } from "../shared/tauriApi";
+import { listenScheduledJobUpdated, loadSessions, restoreSessionContext, saveWorkspaceEditorState } from "../shared/tauriApi";
+import { SchedulesView } from "../schedules/SchedulesView";
 import type {
   DocumentHistoryTargetKind,
   EditorFileTab,
@@ -74,6 +75,8 @@ export function WorkspaceShell() {
   const [isScopeSelectorOpen, setIsScopeSelectorOpen] = useState(false);
   /** 设置抽屉打开状态，打开时会刷新非阻塞诊断日志。 */
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
+  /** 主区切到定时任务视图时隐藏编辑器。 */
+  const [isSchedulesOpen, setIsSchedulesOpen] = useState(false);
   /** 全局忙碌状态覆盖文件、会话、设置和日志刷新操作；用计数避免切会话清掉 Agent 回合。 */
   const [isBusy, setIsBusy] = useState(false);
   const busyCountRef = useRef(0);
@@ -157,6 +160,31 @@ export function WorkspaceShell() {
     },
     onNoticeChange: setNotice,
   });
+  useEffect(() => {
+    let unlisten: (() => void) | undefined;
+    void listenScheduledJobUpdated((payload) => {
+      const status = payload.job.lastStatus;
+      if (status === "ok") {
+        setNotice(`定时任务「${payload.job.name}」已完成。`);
+      } else if (status === "failed" || status === "blocked") {
+        setNotice(
+          `定时任务「${payload.job.name}」未成功${payload.job.lastError ? `：${payload.job.lastError}` : "。"}`,
+        );
+      }
+      setSnapshot((current) => {
+        if (!current || !payload.sessionId) {
+          return current;
+        }
+        void loadSessions(current).then((sessions) => {
+          setSnapshot((latest) => (latest ? { ...latest, sessions } : latest));
+        });
+        return current;
+      });
+    }).then((stop) => {
+      unlisten = stop;
+    });
+    return () => unlisten?.();
+  }, [setSnapshot]);
   useReviewChangeLogger(snapshot);
   /** Agent 输入草稿按会话隔离，切走再切回时保留该会话的模型和未发送文字。 */
   const {
@@ -607,6 +635,7 @@ export function WorkspaceShell() {
         agentOpen={agentOpen}
         onToggleAgent={handleToggleAgentPanel}
         onCreateSession={() => {
+          setIsSchedulesOpen(false);
           if (!agentOpen) {
             setAgentOpen(true);
           }
@@ -630,11 +659,20 @@ export function WorkspaceShell() {
           busyLabel={busyLabel}
           notice={notice}
           onSearchChange={setSearchTerm}
-          onSelectKnowledgeBase={handleSelectKnowledgeBase}
+          onSelectKnowledgeBase={(knowledgeBaseId) => {
+            setIsSchedulesOpen(false);
+            handleSelectKnowledgeBase(knowledgeBaseId);
+          }}
           onAddKnowledgeBase={handleAddKnowledgeBase}
           onToggleFolder={handleToggleFolder}
-          onSelectNote={handleSelectNote}
-          onSelectDocument={handleSelectDocument}
+          onSelectNote={(noteId) => {
+            setIsSchedulesOpen(false);
+            handleSelectNote(noteId);
+          }}
+          onSelectDocument={(documentId) => {
+            setIsSchedulesOpen(false);
+            handleSelectDocument(documentId);
+          }}
           onRenameNote={openRenameDialog}
           onDeleteNote={handleDeleteNote}
           onOpenNoteHistory={openNoteHistory}
@@ -647,18 +685,57 @@ export function WorkspaceShell() {
           onCreateProjectInstruction={() => handleCreateOrOpenProjectInstruction()}
           onRefreshKnowledgeBase={handleRescanKnowledgeBase}
           onCreateSession={() => {
+            setIsSchedulesOpen(false);
             if (!agentOpen) {
               setAgentOpen(true);
             }
             void handleCreateSession();
           }}
+          onOpenSchedules={() => setIsSchedulesOpen(true)}
+          schedulesActive={isSchedulesOpen}
           onOpenSettings={handleOpenSettings}
         />
         <div
           className={`workspace-resizer workspace-resizer-sidebar ${resizingPane === "sidebar" ? "active" : ""}`}
           {...getSeparatorProps("sidebar")}
         />
-        <div className="editor-workbench">
+        <div className={`editor-workbench${isSchedulesOpen ? " is-schedules" : ""}`}>
+          {isSchedulesOpen ? (
+            <SchedulesView
+              knowledgeBases={currentSnapshot.knowledgeBases}
+              activeKnowledgeBaseId={activeKnowledgeBase.id}
+              isBusy={isBusy}
+              onBusy={async (label, task) => {
+                beginBusy(label);
+                try {
+                  await task();
+                } catch (error) {
+                  setNotice(formatErrorMessage(error));
+                } finally {
+                  endBusy();
+                }
+              }}
+              onNotice={setNotice}
+              onOpenSession={(sessionId) => {
+                setIsSchedulesOpen(false);
+                if (!agentOpen) {
+                  setAgentOpen(true);
+                }
+                void (async () => {
+                  beginBusy("正在打开任务会话...");
+                  try {
+                    const sessions = await loadSessions(currentSnapshot);
+                    commitSnapshot(await restoreSessionContext({ ...currentSnapshot, sessions }, sessionId));
+                  } catch (error) {
+                    setNotice(formatErrorMessage(error));
+                  } finally {
+                    endBusy();
+                  }
+                })();
+              }}
+            />
+          ) : (
+            <>
           <EditorTabBar
             tabs={editorTabs}
             activeTab={activeEditorTab}
@@ -713,6 +790,8 @@ export function WorkspaceShell() {
               />
             )}
           </div>
+            </>
+          )}
         </div>
         {agentOpen && (
           <div

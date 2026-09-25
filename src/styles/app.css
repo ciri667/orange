@@ -292,6 +292,10 @@ select:focus-visible,
   background: var(--surface);
 }
 
+.editor-workbench.is-schedules {
+  grid-template-rows: minmax(0, 1fr);
+}
+
 .editor-file-panel {
   min-width: 0;
   min-height: 0;

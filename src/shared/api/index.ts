@@ -10,3 +10,4 @@ export * from "./documents";
 export * from "./history";
 export * from "./logs";
 export * from "./agent";
+export * from "./schedules";
