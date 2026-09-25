@@ -126,6 +126,7 @@ mod tests {
             id: "session-a".to_owned(),
             title: "第一句".to_owned(),
             im_identity: None,
+            schedule_identity: None,
             r#type: "knowledge-base".to_owned(),
             knowledge_base_ids: vec!["kb-a".to_owned()],
             active_note_id: None,

@@ -61,6 +61,7 @@ mod tests {
             id: "session-a".to_owned(),
             title: "多知识库会话".to_owned(),
             im_identity: None,
+            schedule_identity: None,
             r#type: "knowledge-base".to_owned(),
             knowledge_base_ids: vec!["kb-a".to_owned(), "kb-b".to_owned()],
             active_note_id: Some("note-b".to_owned()),

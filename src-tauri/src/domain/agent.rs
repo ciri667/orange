@@ -1,4 +1,5 @@
 use super::im::ImSessionIdentity;
+use super::schedules::ScheduleSessionIdentity;
 use serde::{Deserialize, Serialize};
 
 /** Agent 首版支持的用户意图类型。 */
@@ -378,6 +379,9 @@ pub struct AgentSession {
     /** IM 来源身份；普通本地会话保持为空，避免将 provider 细节散落到 UI。 */
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub im_identity: Option<ImSessionIdentity>,
+    /** 定时任务身份；普通本地会话和 IM 会话保持为空。 */
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub schedule_identity: Option<ScheduleSessionIdentity>,
     pub r#type: String,
     pub knowledge_base_ids: Vec<String>,
     pub active_note_id: Option<String>,

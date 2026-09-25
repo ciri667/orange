@@ -307,6 +307,7 @@ pub(crate) fn build_im_agent_session(
         id: create_id("session-im"),
         title: format_im_session_title(&identity),
         im_identity: Some(identity),
+        schedule_identity: None,
         r#type: "knowledge-base".to_owned(),
         knowledge_base_ids,
         active_note_id: None,

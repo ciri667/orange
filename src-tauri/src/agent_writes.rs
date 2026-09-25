@@ -500,6 +500,7 @@ mod tests {
                 initial_message_preview: "m".to_owned(),
                 last_message_preview: "m".to_owned(),
             }),
+            schedule_identity: None,
             r#type: "knowledge-base".to_owned(),
             knowledge_base_ids: vec!["kb-a".to_owned()],
             active_note_id: None,

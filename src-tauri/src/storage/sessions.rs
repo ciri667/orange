@@ -871,6 +871,7 @@ mod tests {
             id: id.to_owned(),
             title: id.to_owned(),
             im_identity: None,
+            schedule_identity: None,
             r#type: "knowledge-base".to_owned(),
             knowledge_base_ids: vec!["kb-a".to_owned()],
             active_note_id: None,
