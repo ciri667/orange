@@ -132,6 +132,7 @@ mod memory;
 mod note_tags;
 mod project_instructions;
 mod rewind;
+mod schedules;
 mod sessions;
 mod workspace;
 
@@ -146,6 +147,7 @@ pub use memory::*;
 pub use note_tags::*;
 pub use project_instructions::*;
 pub use rewind::*;
+pub use schedules::*;
 pub use sessions::*;
 pub use workspace::*;
 

@@ -192,6 +192,9 @@ pub(crate) fn ensure_database_schema(
             "#,
         )
         .map_err(|error| format!("无法初始化 SQLite schema：{error}"))?;
+    connection
+        .execute_batch(SCHEDULED_JOBS_SCHEMA)
+        .map_err(|error| format!("无法初始化定时任务 schema：{error}"))?;
     ensure_audit_log_columns(&connection)?;
 
     let mut initialized_paths = initialized_paths
