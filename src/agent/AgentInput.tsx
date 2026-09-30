@@ -1,4 +1,5 @@
 import { ArrowRight, BrainCircuit, FileText, Image, ImagePlus, Sparkles, Square } from "lucide-react";
+import { VoiceDictationButton } from "../shared/VoiceDictationButton";
 import {
   useMemo,
   useRef,
@@ -840,6 +841,12 @@ export function AgentInput({
           >
             <ImagePlus size={16} />
           </Button>
+          <VoiceDictationButton
+            getTextarea={() => promptTextareaRef.current}
+            onValueChange={onPromptChange}
+            onNotice={onNotice}
+            disabled={Boolean(queuedFollowUp)}
+          />
           {!activeSession.imIdentity && (
             <AgentSecurityLevelControl
               activeSession={activeSession}

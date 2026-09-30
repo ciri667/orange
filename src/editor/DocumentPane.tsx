@@ -1,6 +1,8 @@
 import { convertFileSrc } from "@tauri-apps/api/core";
 import { Clock3, Eye, FilePenLine, FileText, Save } from "lucide-react";
+import { useRef } from "react";
 import { Button } from "../shared/Button";
+import { VoiceDictationButton } from "../shared/VoiceDictationButton";
 import { logInfo, logWarn } from "../shared/logger";
 import type { DocumentFileType, DocumentPreview, ExportFormat, KnowledgeBase, WorkspaceDocument } from "../shared/types";
 import { EditorEmptyHeader, EditorFileHeader, EditorMetaStrip, EditorMoreActionMenu } from "./EditorFileChrome";
@@ -73,6 +75,7 @@ export function DocumentPane({
   onOpenHistory,
   onRenameDocument,
   onDeleteDocument,
+  onNotice,
 }: {
   document?: WorkspaceDocument;
   knowledgeBase: KnowledgeBase;
@@ -87,7 +90,10 @@ export function DocumentPane({
   onOpenHistory: () => void;
   onRenameDocument: () => void;
   onDeleteDocument: () => void;
+  onNotice?: (message: string) => void;
 }) {
+  const textAreaRef = useRef<HTMLTextAreaElement | null>(null);
+
   if (!document) {
     return (
       <section className="editor-pane" aria-label="文档预览">
@@ -118,6 +124,14 @@ export function DocumentPane({
         }}
         actions={
           <>
+          {isTextDocument && (
+            <VoiceDictationButton
+              getTextarea={() => textAreaRef.current}
+              onValueChange={onContentChange}
+              onNotice={onNotice}
+              disabled={isBusy}
+            />
+          )}
           {isTextDocument && (
             <Button variant="text" onClick={onSaveDocument} disabled={isBusy || !isDirty}>
               <Save size={16} />
@@ -159,6 +173,7 @@ export function DocumentPane({
 
       {isTextDocument ? (
         <LineNumberedTextarea
+          ref={textAreaRef}
           fileType="txt"
           value={content}
           onChange={(event) => onContentChange(event.target.value)}

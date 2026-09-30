@@ -3,6 +3,7 @@ import {
   Brain,
   History,
   MessageCircle,
+  Mic,
   ScrollText,
   Settings2,
   ShieldCheck,
@@ -58,10 +59,11 @@ import {
   ModelSettingsSection,
   AgentSecuritySettingsSection,
   SkillsSettingsSection,
+  VoiceSettingsSection,
 } from "./SettingsSections";
 
 /** 设置页左侧导航的可选分区，和右侧主内容一一对应。 */
-type SettingsSectionId = "knowledge" | "model" | "agentSecurity" | "im" | "skills" | "agentMemory" | "eventLogs" | "auditLogs";
+type SettingsSectionId = "knowledge" | "model" | "voice" | "agentSecurity" | "im" | "skills" | "agentMemory" | "eventLogs" | "auditLogs";
 
 /** 设置页导航分组，帮助用户区分可配置项和只读诊断项。 */
 type SettingsSectionGroup = "配置" | "诊断";
@@ -250,6 +252,15 @@ export function SettingsDrawer({
         meta: settingsDraft.modelConfig.enabled ? "已启用" : "未启用",
         icon: Settings2,
         tone: settingsDraft.modelConfig.enabled ? "success" : "neutral",
+      },
+      {
+        id: "voice",
+        group: "配置",
+        label: "语音输入",
+        description: "本机中文听写模型",
+        meta: "本机",
+        icon: Mic,
+        tone: "neutral",
       },
       {
         id: "agentSecurity",
@@ -1118,6 +1129,10 @@ export function SettingsDrawer({
           onRemoveProviderModel={removeProviderModel}
         />
       );
+    }
+
+    if (activeSection === "voice") {
+      return <VoiceSettingsSection />;
     }
 
     if (activeSection === "skills") {

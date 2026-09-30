@@ -760,6 +760,7 @@ export function WorkspaceShell() {
             onOpenHistory={() => openDocumentHistory()}
             onRenameDocument={() => openRenameDocumentDialog()}
             onDeleteDocument={() => handleDeleteDocument()}
+            onNotice={setNotice}
               />
             ) : (
               <EditorPane
@@ -787,6 +788,7 @@ export function WorkspaceShell() {
             onSubmitReviewComments={handleSubmitReviewComments}
             onCreateMarkdown={(parentPath) => openCreateDialog("markdown", parentPath)}
             onCreateText={(parentPath) => openCreateDialog("text", parentPath)}
+            onNotice={setNotice}
               />
             )}
           </div>

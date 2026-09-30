@@ -1,5 +1,6 @@
 export { KnowledgeSettingsSection } from "./KnowledgeSettingsSection";
 export { ModelSettingsSection } from "./ModelSettingsSection";
+export { VoiceSettingsSection } from "./VoiceSettingsSection";
 export { SkillsSettingsSection } from "./SkillsSettingsSection";
 export { AgentSecuritySettingsSection } from "./AgentSecuritySettingsSection";
 export { ImSettingsSection } from "./ImSettingsSection";

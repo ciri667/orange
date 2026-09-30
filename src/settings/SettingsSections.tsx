@@ -7,4 +7,5 @@ export {
   KnowledgeSettingsSection,
   ModelSettingsSection,
   SkillsSettingsSection,
+  VoiceSettingsSection,
 } from "./sections";

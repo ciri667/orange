@@ -8,6 +8,7 @@ import type { Options as RehypeSanitizeOptions } from "rehype-sanitize";
 import { DiffPanel } from "../diff/DiffPanel";
 import type { ReviewCommentDraft } from "../diff/DiffPanel";
 import { Button } from "../shared/Button";
+import { VoiceDictationButton } from "../shared/VoiceDictationButton";
 import {
   createMarkdownComponents,
   markdownPreviewClassName,
@@ -89,6 +90,7 @@ export function EditorPane({
   onSubmitReviewComments,
   onCreateMarkdown,
   onCreateText,
+  onNotice,
 }: {
   note?: Note;
   knowledgeBase: KnowledgeBase;
@@ -114,6 +116,7 @@ export function EditorPane({
   onSubmitReviewComments: () => void;
   onCreateMarkdown: (parentPath: string) => void;
   onCreateText: (parentPath: string) => void;
+  onNotice?: (message: string) => void;
 }) {
   /** 分屏模式下同步源码和预览滚动；非分屏时 hook 会保持静默。 */
   const { editorRef, previewRef, handleEditorScroll, handlePreviewScroll } = useSyncedMarkdownScroll(viewMode === "split");
@@ -190,6 +193,14 @@ export function EditorPane({
         }}
         actions={
           <>
+          {viewMode !== "preview" ? (
+            <VoiceDictationButton
+              getTextarea={() => editorRef.current}
+              onValueChange={onContentChange}
+              onNotice={onNotice}
+              disabled={isBusy}
+            />
+          ) : null}
           <SegmentedControl aria-label="Markdown 视图模式">
             {MARKDOWN_VIEW_OPTIONS.map(({ mode, label, title, icon: Icon }) => (
               <SegmentedControlItem

@@ -3,6 +3,7 @@ import { useEffect, useRef, useState } from "react";
 import ReactMarkdown from "react-markdown";
 import rehypeSanitize from "rehype-sanitize";
 import { Button } from "../shared/Button";
+import { VoiceDictationButton } from "../shared/VoiceDictationButton";
 import { Checkbox } from "../shared/Checkbox";
 import { Chip } from "../shared/Chip";
 import { cn } from "../shared/cn";
@@ -943,6 +944,7 @@ function UserMessageEditor({
         value={draft}
       />
       <div className="flex justify-end gap-2">
+        <VoiceDictationButton getTextarea={() => textareaRef.current} onValueChange={setDraft} />
         <Button type="button" variant="ghost" size="compact" onClick={onCancel}>
           取消
         </Button>
