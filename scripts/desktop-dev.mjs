@@ -3,6 +3,7 @@ import { createRequire } from "node:module";
 import { fileURLToPath } from "node:url";
 import { resolve } from "node:path";
 import { ensureDevelopmentSigningIdentity } from "./macos-dev-signing-init.mjs";
+import { ensureSherpaPrebuilt, sherpaArchiveEnvironment } from "./fetch-sherpa-prebuilt.mjs";
 
 /** 当前 Node 脚本所在目录，用于生成不受 Tauri 工作目录影响的 runner 绝对路径。 */
 const scriptsDirectory = resolve(fileURLToPath(new URL(".", import.meta.url)));
@@ -24,8 +25,12 @@ function cargoRunnerEnvironmentName() {
 }
 
 /** 启动 Tauri 开发模式；仅 macOS 注入一次性 Cargo runner，避免影响普通 Cargo 测试。 */
-function runDesktopDevelopment() {
-  const environment = { ...process.env };
+async function runDesktopDevelopment() {
+  if (process.platform === "win32") {
+    await ensureSherpaPrebuilt();
+  }
+
+  const environment = sherpaArchiveEnvironment();
 
   if (process.platform === "darwin") {
     ensureDevelopmentSigningIdentity();
@@ -53,7 +58,7 @@ function runDesktopDevelopment() {
 }
 
 try {
-  runDesktopDevelopment();
+  await runDesktopDevelopment();
 } catch (error) {
   const message = error instanceof Error ? error.message : String(error);
 

@@ -1,0 +1,3 @@
+[env]
+# 相对包仓库根目录。sherpa-onnx 的构建脚本只在 Windows 上读取这个目录里的预编译库。
+SHERPA_ONNX_ARCHIVE_DIR = { value = "src-tauri/sherpa-prebuilt", relative = true }

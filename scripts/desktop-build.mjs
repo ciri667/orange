@@ -3,6 +3,7 @@ import { createRequire } from "node:module";
 import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
+import { ensureSherpaPrebuilt, sherpaArchiveEnvironment } from "./fetch-sherpa-prebuilt.mjs";
 
 /** macOS 发布包所需的显式正式签名身份环境变量名称。 */
 const RELEASE_SIGNING_IDENTITY_ENV = "ORANGE_RELEASE_SIGNING_IDENTITY";
@@ -131,7 +132,11 @@ function createLocalDmg() {
 }
 
 /** 启动 Tauri 打包；本机包使用 ad-hoc 签名，正式发布包必须使用显式的发布签名身份。 */
-function runDesktopBuild() {
+async function runDesktopBuild() {
+  if (process.platform === "win32") {
+    await ensureSherpaPrebuilt();
+  }
+
   const { buildMode, tauriArguments } = parseBuildArguments();
   const args = ["build"];
 
@@ -139,7 +144,10 @@ function runDesktopBuild() {
   console.info(`[desktop-build] level=info event=build_started platform=${process.platform} mode=${buildMode}`);
 
   args.push(...tauriArguments);
-  const result = spawnSync(process.execPath, [TAURI_CLI_ENTRY, ...args], { stdio: "inherit" });
+  const result = spawnSync(process.execPath, [TAURI_CLI_ENTRY, ...args], {
+    env: sherpaArchiveEnvironment(),
+    stdio: "inherit",
+  });
 
   if (result.error) {
     throw result.error;
@@ -155,7 +163,7 @@ function runDesktopBuild() {
 }
 
 try {
-  runDesktopBuild();
+  await runDesktopBuild();
 } catch (error) {
   const message = error instanceof Error ? error.message : String(error);
 
