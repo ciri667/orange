@@ -8,6 +8,7 @@ mod schedules;
 mod session;
 mod settings;
 mod skills;
+mod voice;
 
 pub use agent::*;
 pub use history::*;
@@ -19,3 +20,4 @@ pub use schedules::*;
 pub use session::*;
 pub use settings::*;
 pub use skills::*;
+pub use voice::*;

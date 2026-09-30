@@ -18,6 +18,7 @@ mod skills;
 pub(crate) use skills::execution as skill_execution;
 mod storage;
 mod text_edit;
+mod voice;
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use tauri::{Manager, RunEvent, WindowEvent};
@@ -340,7 +341,12 @@ pub fn run() {
             commands::agent::apply_agent_change_set,
             commands::agent::reject_agent_change_set,
             commands::agent::apply_proposed_change,
-            commands::agent::reject_proposed_change
+            commands::agent::reject_proposed_change,
+            commands::voice::load_voice_model_status,
+            commands::voice::download_voice_model,
+            commands::voice::delete_voice_model,
+            commands::voice::start_voice_capture,
+            commands::voice::stop_voice_capture
         ])
         .build(tauri::generate_context!())
         .expect("failed to build Orange desktop app")

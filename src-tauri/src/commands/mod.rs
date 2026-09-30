@@ -10,6 +10,7 @@ pub mod schedules;
 pub mod sessions;
 pub mod settings;
 pub mod skills;
+pub mod voice;
 pub mod workspace;
 
 pub(crate) use agent::{
