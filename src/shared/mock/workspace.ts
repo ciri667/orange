@@ -724,13 +724,6 @@ export function runMockAgentTurn(
 ): WorkspaceSnapshot {
   const nextSnapshot = cloneWorkspaceSnapshot(snapshot);
   const session = nextSnapshot.sessions.find((item) => item.id === nextSnapshot.activeSessionId) ?? nextSnapshot.sessions[0];
-  const activeNote = nextSnapshot.activeNoteId
-    ? nextSnapshot.notes.find((note) => note.id === nextSnapshot.activeNoteId)
-    : undefined;
-  /** 浏览器开发态也允许 Agent 对当前 TXT 生成待确认纯文本 diff。 */
-  const activeTextDocument = nextSnapshot.activeDocumentId
-    ? nextSnapshot.documents.find((document) => document.id === nextSnapshot.activeDocumentId && document.fileType === "txt")
-    : undefined;
   const activeKnowledgeBase =
     nextSnapshot.knowledgeBases.find((knowledgeBase) => knowledgeBase.id === nextSnapshot.activeKnowledgeBaseId) ??
     nextSnapshot.knowledgeBases[0];
@@ -738,6 +731,30 @@ export function runMockAgentTurn(
   if (!session) {
     throw new Error("当前没有可用 Agent 会话。");
   }
+
+  const scopeIds = new Set(session.knowledgeBaseIds);
+  const mentionedNote = mentionedFileIds
+    .map((fileId) => nextSnapshot.notes.find((note) => note.id === fileId && scopeIds.has(note.knowledgeBaseId)))
+    .find((note): note is Note => Boolean(note));
+  const mentionedTextDocument = mentionedFileIds
+    .map((fileId) =>
+      nextSnapshot.documents.find(
+        (document) => document.id === fileId && document.fileType === "txt" && scopeIds.has(document.knowledgeBaseId),
+      ),
+    )
+    .find((document): document is WorkspaceDocument => Boolean(document));
+  const pendingChange = session.pendingChange?.status === "pending" ? session.pendingChange : undefined;
+  /** 浏览器 mock 的改写目标只来自本轮 @ 或已有待确认 diff，不读取编辑器焦点。 */
+  const rewriteTextDocument =
+    mentionedTextDocument ??
+    (pendingChange?.fileType === "txt" && pendingChange.targetId
+      ? nextSnapshot.documents.find((document) => document.id === pendingChange.targetId && document.fileType === "txt")
+      : undefined);
+  const rewriteNote =
+    mentionedNote ??
+    (pendingChange?.noteId
+      ? nextSnapshot.notes.find((note) => note.id === pendingChange.noteId && scopeIds.has(note.knowledgeBaseId))
+      : undefined);
 
   const existingUserMessage = clientMessageId
     ? session.messages.find((message) => message.id === clientMessageId)
@@ -788,20 +805,20 @@ export function runMockAgentTurn(
     session.messages.push(userMessage);
   }
 
-  if (action === "rewrite" && activeTextDocument) {
-    const original = activeTextDocument.content ?? "";
+  if (action === "rewrite" && rewriteTextDocument && !mentionedNote) {
+    const original = rewriteTextDocument.content ?? "";
     const next = shouldAppendToNote(prompt) ? `${original}${buildAppendText(prompt)}` : buildRewriteText(original);
     const nextChange: ProposedChange = {
-      id: createLocalId("change"), knowledgeBaseId: activeTextDocument.knowledgeBaseId,
-      targetId: activeTextDocument.id, targetKind: "document", fileType: "txt", type: "rewrite",
-      operation: shouldAppendToNote(prompt) ? "append" : "replace", title: `改写《${activeTextDocument.title}》`,
-      targetPath: activeTextDocument.path, original, next, originalHash: activeTextDocument.contentHash, status: "pending",
+      id: createLocalId("change"), knowledgeBaseId: rewriteTextDocument.knowledgeBaseId,
+      targetId: rewriteTextDocument.id, targetKind: "document", fileType: "txt", type: "rewrite",
+      operation: shouldAppendToNote(prompt) ? "append" : "replace", title: `改写《${rewriteTextDocument.title}》`,
+      targetPath: rewriteTextDocument.path, original, next, originalHash: rewriteTextDocument.contentHash, status: "pending",
     };
     nextChange.diffStats = buildMarkdownDiff(original, next).stats;
     toolCalls.push(
-      createToolCall("edit", `已为 TXT《${activeTextDocument.title}》生成待确认改写`, {
-        fileId: activeTextDocument.id,
-        targetPath: activeTextDocument.path,
+      createToolCall("edit", `已为 TXT《${rewriteTextDocument.title}》生成待确认改写`, {
+        fileId: rewriteTextDocument.id,
+        targetPath: rewriteTextDocument.path,
         title: nextChange.title,
         operation: nextChange.operation,
         original,
@@ -811,43 +828,43 @@ export function runMockAgentTurn(
     session.pendingChange = nextChange;
     content = "我已经生成 TXT 纯文本改写建议；确认前不会写入本地文件。";
   } else if (action === "rewrite") {
-    if (!activeNote) {
-      content = "当前没有可改写的 Markdown 笔记。";
+    if (!rewriteNote) {
+      content = "这一轮没有指定要改的文件。请用 @ 引用 Markdown 或 TXT。";
     } else {
       const isAppend = shouldAppendToNote(prompt);
       const isMultiEdit = !isAppend && shouldMultiEditNote(prompt);
-      const original = isAppend ? activeNote.content : getFirstBodyParagraph(activeNote.content);
+      const original = isAppend ? rewriteNote.content : getFirstBodyParagraph(rewriteNote.content);
 
       if (!original) {
         content = "我没有找到适合改写的正文段落。你可以先补充内容，再让我生成改写建议。";
       } else {
         const appendText = isAppend ? buildAppendText(prompt) : "";
         const nextContent = isMultiEdit
-          ? activeNote.content.replace(original, buildRewriteText(original)).replace(/重复/g, "")
+          ? rewriteNote.content.replace(original, buildRewriteText(original)).replace(/重复/g, "")
           : isAppend
-            ? `${activeNote.content.trimEnd()}\n\n${appendText}`
+            ? `${rewriteNote.content.trimEnd()}\n\n${appendText}`
             : buildRewriteText(original);
         const nextChange: ProposedChange = {
           id: createLocalId("change"),
-          knowledgeBaseId: activeKnowledgeBase.id,
-          noteId: activeNote.id,
-          targetId: activeNote.id,
+          knowledgeBaseId: rewriteNote.knowledgeBaseId,
+          noteId: rewriteNote.id,
+          targetId: rewriteNote.id,
           targetKind: "note",
           fileType: "markdown",
           type: "rewrite",
           operation: isAppend ? "append" : isMultiEdit ? "multi_replace" : "replace",
-          title: isAppend ? `追加到《${activeNote.title}》文末` : isMultiEdit ? `多处编辑《${activeNote.title}》` : `改写《${activeNote.title}》的核心段落`,
-          targetPath: activeNote.path,
-          original: isMultiEdit ? activeNote.content : original,
+          title: isAppend ? `追加到《${rewriteNote.title}》文末` : isMultiEdit ? `多处编辑《${rewriteNote.title}》` : `改写《${rewriteNote.title}》的核心段落`,
+          targetPath: rewriteNote.path,
+          original: isMultiEdit ? rewriteNote.content : original,
           next: nextContent,
-          originalHash: activeNote.contentHash,
+          originalHash: rewriteNote.contentHash,
           status: "pending",
         };
         nextChange.diffStats = buildMarkdownDiff(nextChange.original, nextChange.next).stats;
         toolCalls.push(
-          createToolCall("edit", `已为《${activeNote.title}》生成待确认改写`, {
-            fileId: activeNote.id,
-            targetPath: activeNote.path,
+          createToolCall("edit", `已为《${rewriteNote.title}》生成待确认改写`, {
+            fileId: rewriteNote.id,
+            targetPath: rewriteNote.path,
             title: nextChange.title,
             operation: nextChange.operation,
             original: nextChange.original,
@@ -855,8 +872,6 @@ export function runMockAgentTurn(
           }),
         );
         session.pendingChange = nextChange;
-        session.activeNoteId = activeNote.id;
-        session.pinnedNoteIds = Array.from(new Set([...session.pinnedNoteIds, activeNote.id]));
         content = "我已经生成一份改写建议。它现在只是待确认 diff，确认前不会修改本地 Markdown 文件。";
       }
     }
@@ -900,11 +915,7 @@ export function runMockAgentTurn(
     session.pendingChange = nextChange;
     content = "我已经生成新笔记草稿，但它还没有写入本地目录。确认 diff 后才会创建 Markdown 文件。";
   } else if (action === "organize") {
-    if (!activeNote) {
-      content = "当前知识库没有可整理的 Markdown 笔记。";
-    } else {
-      content = `建议继续把《${activeNote.title}》保留在「${activeKnowledgeBase.name}」中，并补充更稳定的标签和相关链接。该建议不涉及写入；若要落盘请确认后再用 edit 或 write。`;
-    }
+    content = `建议在「${activeKnowledgeBase.name}」中补充更稳定的标签和相关链接。该建议不涉及写入；若要改某个文件，请先用 @ 引用它。`;
   } else if (shouldUseSearchTool(action, prompt)) {
     citations = searchNotes(nextSnapshot, session, prompt);
     toolCalls.push(

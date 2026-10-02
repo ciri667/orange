@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { decodeModelSelection } from "../shared/modelSelection";
 import { logInfo } from "../shared/logger";
-import { getActiveDocument, getActiveKnowledgeBase, getActiveNote } from "../shared/selectors";
+import { getActiveKnowledgeBase } from "../shared/selectors";
 import {
   applyAgentChangeSet,
   applySkillChangeSet,
@@ -255,8 +255,6 @@ export function useAgentTurn(options: AgentTurnOptions) {
 
   const currentSnapshot = snapshot;
   const activeKnowledgeBase = getActiveKnowledgeBase(currentSnapshot);
-  const activeNote = getActiveNote(currentSnapshot);
-  const activeDocument = getActiveDocument(currentSnapshot);
   const persistedActiveSession = resolveActiveSessionForKnowledgeBase(currentSnapshot, activeKnowledgeBase);
   const defaultSecurityLevel = resolveNewSessionSecurityLevel(userSettings?.agentSecurity.defaultLevel);
   const activeSession = persistedActiveSession ?? buildDraftAgentSession(activeKnowledgeBase, defaultSecurityLevel);
@@ -446,9 +444,6 @@ export function useAgentTurn(options: AgentTurnOptions) {
     const sourceActiveKnowledgeBase =
       sourceSnapshot.knowledgeBases.find((knowledgeBase) => knowledgeBase.id === sourceSnapshot.activeKnowledgeBaseId) ??
       activeKnowledgeBase;
-    const sourceActiveNote = sourceSnapshot.notes.find((note) => note.id === sourceSnapshot.activeNoteId) ?? activeNote;
-    const sourceActiveDocument =
-      sourceSnapshot.documents.find((document) => document.id === sourceSnapshot.activeDocumentId) ?? activeDocument;
     const requestedSessionId = replay?.sessionId ?? sourceSnapshot.activeSessionId;
     const sourceActiveSession =
       sourceSnapshot.sessions.find((session) => session.id === requestedSessionId) ??
@@ -649,8 +644,9 @@ export function useAgentTurn(options: AgentTurnOptions) {
         ...snapshotForTurn,
         activeSessionId: sessionForTurn.id,
         activeKnowledgeBaseId: sourceActiveKnowledgeBase.id,
-        activeNoteId: sourceActiveNote?.id ?? "",
-        activeDocumentId: sourceActiveDocument?.id ?? "",
+        // 编辑器焦点留在工作台。本轮请求不带默认文件，文件只通过 @ 进入。
+        activeNoteId: "",
+        activeDocumentId: "",
       };
       const decodedTurnModelSelection = decodeModelSelection(turnModelSelectionForRun);
       const result = await runAgentTurn(
