@@ -60,8 +60,7 @@ export function getSessionKnowledgeBaseLabel(session: AgentSession, knowledgeBas
 /**
  * 返回会话恢复时尝试重新打开的笔记名称。
  *
- * `activeNoteId` 是历史会话的恢复锚点，不代表工作台当前正在编辑的文件；
- * 调用方展示当前文件时必须使用工作台焦点而不是这个值。
+ * `activeNoteId` 只是编辑器位置，不会成为 Agent 的默认文件。
  */
 export function getSessionRecoveryNoteLabel(session: AgentSession, notes: Note[]) {
   if (!session.activeNoteId) {

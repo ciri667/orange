@@ -812,10 +812,6 @@ export function WorkspaceShell() {
             knowledgeBases={currentSnapshot.knowledgeBases}
             notes={currentSnapshot.notes}
             documents={currentSnapshot.documents}
-            currentFileLabel={
-              activeNote?.title ??
-              (activeDocument?.fileType === "txt" ? activeDocument.title : "当前打开文件不可作为编辑目标")
-            }
             prompt={agentPrompt}
             skills={agentSkills}
             selectedSkillIds={explicitSkillIds}

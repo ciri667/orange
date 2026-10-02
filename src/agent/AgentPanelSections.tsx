@@ -1,4 +1,4 @@
-import { Check, Clock, Copy, Database, FileText, FolderOpen, Gauge, Layers3, Loader2, MessageSquareText, Pencil, Sparkles, Trash2, X } from "lucide-react";
+import { Check, Clock, Copy, Database, FolderOpen, Gauge, Layers3, Loader2, MessageSquareText, Pencil, Sparkles, Trash2, X } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import ReactMarkdown from "react-markdown";
 import rehypeSanitize from "rehype-sanitize";
@@ -62,17 +62,14 @@ import {
 } from "./agentTrace";
 import { ToolCallList } from "./ToolCallList";
 
-/** 会话摘要条只保留当前文件、上下文占用和待确认写入，避免和输入条、范围入口重复。 */
+/** 会话摘要条只保留上下文占用和待确认写入。知识库范围由旁边的范围入口展示，文件不在这里绑定。 */
 export function AgentSessionSummary({
   activeSession,
   sessions,
-  currentFileLabel,
   modelConfig,
 }: {
   activeSession: AgentSession;
   sessions: AgentSession[];
-  /** 工作台当前焦点文件；它是本轮默认编辑目标，独立于会话恢复锚点。 */
-  currentFileLabel: string;
   modelConfig: ModelConfig;
 }) {
   const isPendingWrite = activeSession.pendingChange?.status === "pending" || activeSession.pendingChangeSet?.status === "pending";
@@ -84,10 +81,6 @@ export function AgentSessionSummary({
 
   return (
     <div className="flex min-h-0 min-w-0 flex-1 flex-nowrap items-center gap-1.5 overflow-hidden" aria-label="当前会话摘要">
-      <Chip className="max-w-full flex-1 font-normal">
-        <FileText size={13} className="shrink-0" />
-        <OverflowTooltipText className="min-w-0 truncate" text={currentFileLabel} logArea="agent_session_current_file_summary" />
-      </Chip>
       {contextMeterLabel && (
         <span
           className="inline-flex shrink-0"
@@ -300,12 +293,11 @@ export function AgentSessionHistoryPopover({
   );
 }
 
-/** 会话上下文浮层，集中展示工具范围、工作台文件、恢复锚点和会话默认模型。 */
+/** 会话上下文浮层，集中展示工具范围、恢复锚点和会话默认模型。 */
 export function AgentSessionContextPopover({
   activeSession,
   knowledgeBases,
   notes,
-  currentFileLabel,
   modelConfig,
   isBusy,
   onToggleSessionContext,
@@ -316,8 +308,6 @@ export function AgentSessionContextPopover({
   activeSession: AgentSession;
   knowledgeBases: KnowledgeBase[];
   notes: Note[];
-  /** 工作台当前焦点文件；本轮 Agent 默认以它作为编辑目标。 */
-  currentFileLabel: string;
   modelConfig: ModelConfig;
   isBusy: boolean;
   onToggleSessionContext: () => void;
@@ -417,10 +407,6 @@ export function AgentSessionContextPopover({
             />
           </div>
           <div className="rounded-control border border-border-translucent bg-surface-translucent p-[9px]">
-            <span className="text-xs text-ink-muted">当前文件</span>
-            <OverflowTooltipText as="strong" className="mt-1 block text-[13px] text-ink-strong" text={currentFileLabel} logArea="agent_context_current_file" />
-          </div>
-          <div className="rounded-control border border-border-translucent bg-surface-translucent p-[9px]">
             <span className="text-xs text-ink-muted">会话恢复笔记</span>
             <OverflowTooltipText
               as="strong"
@@ -505,7 +491,7 @@ export function AgentSessionContextPopover({
           )}
         </section>
         <p className="text-xs text-ink-muted">
-          占用取最近一次有效模型 usage；窗口来自当前模型目录，Provider 未提供时显示未知。当前文件是本轮默认编辑目标；会话恢复笔记只用于恢复旧会话位置。Agent 会按模型窗口装入尽量多的最近对话，更早内容进入工作记忆，也可按需检索会话历史和其他文件。
+          占用取最近一次有效模型 usage；窗口来自当前模型目录，Provider 未提供时显示未知。会话只绑定知识库；要让 Agent 读取或修改某个文件，在输入框用 @ 引用。会话恢复笔记只用于恢复旧会话位置。Agent 会按模型窗口装入尽量多的最近对话，更早内容进入工作记忆，也可按需检索会话历史和其他文件。
         </p>
       </div>
     </section>

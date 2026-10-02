@@ -34,7 +34,6 @@ export function AgentPanel({
   knowledgeBases,
   notes,
   documents,
-  currentFileLabel,
   prompt,
   skills,
   selectedSkillIds,
@@ -88,8 +87,6 @@ export function AgentPanel({
   notes: Note[];
   /** 所有已索引普通文档，用于历史 @ 文件名称回显。 */
   documents: WorkspaceDocument[];
-  /** 工作台焦点的展示标签；由 WorkspaceShell 计算，避免读取会话恢复锚点。 */
-  currentFileLabel: string;
   prompt: string;
   skills: AgentSkill[];
   /** 本轮 slash picker 显式选择的 Skill ID，只作用于下一次用户提交。 */
@@ -212,7 +209,6 @@ export function AgentPanel({
         <AgentSessionSummary
           activeSession={activeSession}
           sessions={sessions}
-          currentFileLabel={currentFileLabel}
           modelConfig={modelConfig}
         />
       </div>
@@ -235,7 +231,6 @@ export function AgentPanel({
           activeSession={activeSession}
           knowledgeBases={knowledgeBases}
           notes={notes}
-          currentFileLabel={currentFileLabel}
           modelConfig={modelConfig}
           isBusy={isComposerBusy}
           onToggleSessionContext={onToggleSessionContext}
