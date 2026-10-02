@@ -152,6 +152,19 @@ textarea:focus-visible,
   box-shadow: none;
 }
 
+/*
+ * WebView2 会把单独的 Shift / Ctrl / Alt / Meta 当成键盘操作，
+ * 鼠标点过的按钮会重新匹配 :focus-visible，出现橙色描边。
+ * 只有 Tab、方向键等非修饰键才给可点击控件保留描边。
+ */
+html:not(.using-keyboard) :is(button, a, summary, [role="button"], [role="tab"], [role="menuitem"], .workspace-resizer):focus-visible {
+  outline: none;
+}
+
+html.using-keyboard .peer:focus-visible + .checkbox-box {
+  box-shadow: 0 0 0 3px var(--control-ring);
+}
+
 /**
  * 下拉框自己已有边框，不再套第二层偏移描边。
  * 键盘焦点改由 SelectControl 加深边框来表示。

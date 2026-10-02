@@ -2,9 +2,12 @@ import { Component, StrictMode, type ErrorInfo, type ReactNode } from "react";
 import { createRoot } from "react-dom/client";
 import App from "./App";
 import { BootErrorMessage, BootScreen } from "./shared/BootScreen";
+import { installFocusModality } from "./shared/focusModality";
 import { logError } from "./shared/logger";
 import "./styles/tailwind.css";
 import "./styles/app.css";
+
+installFocusModality();
 
 /** 根错误边界，捕获 React 渲染异常并写入前端诊断日志。 */
 class RootErrorBoundary extends Component<{ children: ReactNode }, { hasError: boolean }> {

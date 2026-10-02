@@ -18,8 +18,8 @@ export function Checkbox({
         className={cn(
           "relative inline-grid size-[18px] shrink-0 place-items-center rounded-[5px] border border-border-strong bg-white text-white transition-[background,border-color,box-shadow] duration-[160ms]",
           "after:h-1 after:w-2 after:-translate-y-px after:-rotate-45 after:border-b-2 after:border-l-2 after:border-current after:opacity-0 after:content-['']",
+          "checkbox-box",
           "peer-checked:border-agent peer-checked:bg-agent peer-checked:after:opacity-100",
-          "peer-focus-visible:shadow-[0_0_0_3px_var(--control-ring)]",
           "peer-disabled:border-[rgba(213,203,189,0.7)] peer-disabled:bg-[#f4f1eb]",
           boxClassName,
         )}
