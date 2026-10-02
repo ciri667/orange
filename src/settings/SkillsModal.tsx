@@ -14,7 +14,7 @@ import { ModalBackdrop, ModalHeader, ModalPanel } from "../shared/Modal";
 import { OverflowTooltipText } from "../shared/OverflowTooltipText";
 import { SegmentedControl, SegmentedControlItem } from "../shared/SegmentedControl";
 import { ToggleRow } from "../shared/ToggleRow";
-import { fieldControlClassName, fieldLabelClassName, fieldTextareaClassName, sectionLabelClassName } from "../shared/ui";
+import { fieldControlClassName, fieldLabelClassName, fieldTextareaClassName, focusShellClassName, sectionLabelClassName } from "../shared/ui";
 import type {
   AgentSkill,
   AgentSkillSource,
@@ -576,7 +576,7 @@ export function SkillsModal({
         {panel === "discover" ? (
           <div className="grid min-h-0 overflow-hidden grid-cols-[300px_minmax(0,1fr)] max-[980px]:grid-cols-[minmax(220px,280px)_minmax(0,1fr)] max-[760px]:grid-cols-1 max-[760px]:grid-rows-[minmax(180px,38%)_minmax(0,1fr)]">
             <aside className="grid min-h-0 grid-rows-[auto_auto_minmax(0,1fr)_auto] gap-2.5 overflow-hidden border-r border-border bg-warm-panel p-3.5 max-[760px]:border-r-0 max-[760px]:border-b">
-              <div className="flex items-center gap-[7px] rounded-[7px] border border-border bg-surface-translucent px-[9px] text-ink-muted">
+              <div className={cn("flex items-center gap-[7px] rounded-[7px] border border-border bg-surface-translucent px-[9px] text-ink-muted", focusShellClassName)}>
                 <Search size={15} />
                 <input
                   className="min-h-[34px] w-full border-0 bg-transparent outline-0"
@@ -676,7 +676,7 @@ export function SkillsModal({
                 自定义
               </span>
             </div>
-            <div className="flex items-center gap-[7px] rounded-[7px] border border-border bg-surface-translucent px-[9px] text-ink-muted">
+            <div className={cn("flex items-center gap-[7px] rounded-[7px] border border-border bg-surface-translucent px-[9px] text-ink-muted", focusShellClassName)}>
               <Search size={15} />
               <input className="min-h-[34px] w-full border-0 bg-transparent outline-0" value={searchTerm} onChange={(event) => setSearchTerm(event.target.value)} placeholder="搜索 skill" />
             </div>

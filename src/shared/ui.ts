@@ -11,9 +11,12 @@ export const pathLabelClassName =
 /** 设置 / 表单字段标签。 */
 export const fieldLabelClassName = "grid min-w-0 gap-2 text-xs font-bold text-ink-muted";
 
-/** 文本输入的共用控件外观。 */
+/** 文本输入的共用控件外观。焦点描边跟控件自己的圆角走。 */
 export const fieldControlClassName =
   "w-full min-w-0 min-h-[var(--control-height)] rounded-control border border-border bg-control px-2.5 font-normal text-ink";
+
+/** 图标和输入共用圆角外壳时使用，焦点描边画在外壳上。 */
+export const focusShellClassName = "focus-shell";
 
 /** 多行输入。 */
 export const fieldTextareaClassName = cn(fieldControlClassName, "min-h-24 resize-y py-2.5 leading-[1.55]");

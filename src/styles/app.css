@@ -146,11 +146,31 @@ select::-ms-expand {
 button:focus-visible,
 input:focus-visible,
 textarea:focus-visible,
-select:focus-visible,
 .workspace-resizer:focus-visible {
   outline: 2px solid rgba(var(--accent-rgb), 0.35);
   outline-offset: 2px;
   box-shadow: none;
+}
+
+/**
+ * 下拉框自己已有边框，不再套第二层偏移描边。
+ * 键盘焦点改由 SelectControl 加深边框来表示。
+ */
+select:focus-visible {
+  outline: none;
+}
+
+/**
+ * 图标和输入包在同一个圆角外壳里时，焦点描边跟外壳走。
+ * 内层 input 被全局规则收成直角，描边会画成外壳里的方框。
+ */
+.focus-shell:focus-within {
+  outline: 2px solid rgba(var(--accent-rgb), 0.35);
+  outline-offset: 2px;
+}
+
+.focus-shell :is(input, textarea):focus-visible {
+  outline: none;
 }
 
 /** 全局溢出文本 Tooltip 通过 portal 挂到 body，避免被侧栏和弹层滚动容器裁剪。 */

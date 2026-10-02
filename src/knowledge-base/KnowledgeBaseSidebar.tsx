@@ -5,7 +5,7 @@ import { cn } from "../shared/cn";
 import { ListRow } from "../shared/ListRow";
 import { OperationNotice } from "../shared/OperationNotice";
 import { OverflowTooltipText } from "../shared/OverflowTooltipText";
-import { sectionLabelClassName } from "../shared/ui";
+import { focusShellClassName, sectionLabelClassName } from "../shared/ui";
 import type { FileTreeNode, KnowledgeBase } from "../shared/types";
 
 /** 生成单个资料库文件数量摘要，用于 tooltip，不占侧栏两行。 */
@@ -133,7 +133,7 @@ export function KnowledgeBaseSidebar({
 
       <OperationNotice isBusy={isBusy} busyLabel={busyLabel} notice={notice} />
 
-      <label className="mx-1 flex min-h-8 items-center gap-2 rounded-control bg-white/70 px-2 text-ink-muted">
+      <label className={cn("mx-1 flex min-h-8 items-center gap-2 rounded-control bg-white/70 px-2 text-ink-muted", focusShellClassName)}>
         <Search size={14} />
         <input
           className="min-w-0 w-full border-0 bg-transparent text-[13px] outline-0"

@@ -5,7 +5,8 @@ import { ConfirmDialog } from "../shared/ConfirmDialog";
 import { ListRow } from "../shared/ListRow";
 import { Menu, MenuItem, MenuPanel } from "../shared/Menu";
 import { OverflowTooltipText } from "../shared/OverflowTooltipText";
-import { fieldControlClassName } from "../shared/ui";
+import { cn } from "../shared/cn";
+import { fieldControlClassName, focusShellClassName } from "../shared/ui";
 import {
   createScheduledJob,
   deleteScheduledJob,
@@ -233,7 +234,7 @@ export function SchedulesView({
 
       <div className="grid min-h-0 grid-cols-[minmax(0,1fr)_minmax(240px,320px)] max-[960px]:grid-cols-1">
         <div className="grid min-h-0 content-start gap-6 overflow-auto px-6 py-5 max-[760px]:px-4">
-          <label className="flex min-h-10 items-center gap-2 rounded-full border border-border bg-surface px-3 text-ink-muted">
+          <label className={cn("flex min-h-10 items-center gap-2 rounded-full border border-border bg-surface px-3 text-ink-muted", focusShellClassName)}>
             <Search size={16} />
             <input
               className="min-w-0 w-full border-0 bg-transparent text-sm text-ink outline-0"

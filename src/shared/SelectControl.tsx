@@ -12,7 +12,7 @@ export function SelectControl({ className, ...props }: SelectHTMLAttributes<HTML
         className={cn(
           "w-full min-w-0 min-h-[var(--control-height)] appearance-none rounded-control border border-border bg-control px-[11px] pr-[34px] text-[13px] font-normal leading-[var(--control-height)] text-ink",
           "hover:border-border-strong hover:bg-control-hover",
-          "focus-visible:border-border-strong focus-visible:outline-2 focus-visible:outline-[var(--control-ring)] focus-visible:outline-offset-1",
+          "focus-visible:border-border-strong focus-visible:outline-none",
           className,
         )}
         {...props}
