@@ -766,21 +766,18 @@ mod tests {
         assert!(context.snapshot.sessions[0].pending_change.is_none());
     }
 
-    /** 无 fileId 时 read 读取当前激活笔记。 */
+    /** 无 fileId 时 read 失败，即使编辑器里打开了笔记。 */
     #[test]
-    fn read_without_id_uses_active_file() {
+    fn read_without_id_requires_explicit_file() {
         let registry = ToolRegistry::default();
         let mut snapshot = tool_test_snapshot("当前激活笔记正文。".to_owned());
         let request = tool_test_request("ask", "读当前文件");
         let mut context = tool_test_context(&mut snapshot, &request);
         let outcome = registry.execute_named(&mut context, "read", json!({}));
 
-        assert_eq!(outcome.call.status, "completed");
-        assert_eq!(outcome.call.name, "read");
-        assert_eq!(
-            outcome.payload["note"]["content"].as_str(),
-            Some("当前激活笔记正文。")
-        );
+        assert_eq!(outcome.call.status, "failed");
+        assert!(outcome.call.summary.contains("必须提供 fileId"));
+        assert!(context.snapshot.sessions[0].pending_change.is_none());
     }
 
     /** 旧名 remap 后仍能执行，轨迹使用闭集短名。 */

@@ -205,7 +205,7 @@ impl AgentTool for SearchNotesTool {
     }
 }
 
-/** read 工具：按 id 读 scope 内文件；无 id 时读当前激活文件；DOCX/PDF 走只读抽取。 */
+/** read 工具：按 id 读 scope 内文件；缺少 fileId 时失败；DOCX/PDF 走只读抽取。 */
 pub(crate) struct ReadFileTool;
 
 impl AgentTool for ReadFileTool {
@@ -214,7 +214,7 @@ impl AgentTool for ReadFileTool {
     }
 
     fn description(&self) -> &'static str {
-        "Read one file in the selected scope. Omit fileId to read the current active file. Markdown and TXT return editable text; DOCX and PDF return extracted read-only text with page or structure blocks and are never edited. Default window is 6000 characters from offset 0. If truncated, call again with offset=nextOffset (or page=N for PDF). In full/autonomous mode, path may be a knowledge-base relative path or a compliant absolute filesystem path; protected system directories are rejected."
+        "Read one file in the selected scope. fileId is required unless path is set. Markdown and TXT return editable text; DOCX and PDF return extracted read-only text with page or structure blocks and are never edited. Default window is 6000 characters from offset 0. If truncated, call again with offset=nextOffset (or page=N for PDF). In full/autonomous mode, path may be a knowledge-base relative path or a compliant absolute filesystem path; protected system directories are rejected."
     }
 
     fn parameters(&self) -> Value {
@@ -223,7 +223,7 @@ impl AgentTool for ReadFileTool {
             "properties": {
                 "fileId": {
                     "type": "string",
-                    "description": "Note or document id. Omit to read the current active file."
+                    "description": "Note or document id from search, list, or a file the user @ mentioned this turn. Required unless path is set."
                 },
                 "documentId": {
                     "type": "string",
@@ -665,7 +665,7 @@ pub(crate) fn execute_search_notes(
     }
 }
 
-/** 闭集 read：无 id 时读当前激活文件；带 path 时走完全级别文件系统读取。 */
+/** 闭集 read：必须提供 fileId；无 id 时直接失败，并要求给出文件 ID。 */
 pub(crate) fn execute_read(
     context: &mut AgentToolContext<'_>,
     args: &Value,
@@ -674,7 +674,7 @@ pub(crate) fn execute_read(
         return execute_read_path(context, args);
     }
 
-    let mut file_id = args
+    let file_id = args
         .get("fileId")
         .or_else(|| args.get("file_id"))
         .or_else(|| args.get("documentId"))
@@ -685,16 +685,8 @@ pub(crate) fn execute_read(
         .to_owned();
 
     if file_id.is_empty() {
-        file_id = if !context.snapshot.active_note_id.is_empty() {
-            context.snapshot.active_note_id.clone()
-        } else {
-            context.snapshot.active_document_id.clone()
-        };
-    }
-
-    if file_id.is_empty() {
         return ToolExecutionResult::failed(
-            "没有可读取的目标：请提供 fileId，或先在界面打开一个文件。",
+            "read 必须提供 fileId；请用 @ 引用文件，或先用 search / list 定位。",
         );
     }
 

@@ -135,7 +135,6 @@ pub(super) fn build_model_prompt(
     let system_content = build_system_prompt(
         snapshot,
         session,
-        request,
         available_skills,
         knowledge_base_memories,
     );
@@ -268,7 +267,6 @@ pub(super) fn conversation_from_model_messages(
 fn build_system_prompt(
     snapshot: &WorkspaceSnapshot,
     session: &AgentSession,
-    request: &AgentTurnRequest,
     available_skills: &[AgentSkill],
     knowledge_base_memories: &[KnowledgeBaseMemory],
 ) -> String {
@@ -287,20 +285,15 @@ fn build_system_prompt(
         "advanced" => "当前为进阶级别：用户开始放手，但仍要在落盘前确认。write 可以在当前知识库内建文件夹，也可以在授权后运行 run。所有写入和 Skill 执行仍需用户确认后才会生效。",
         _ => "当前为基础级别：用户选择先看紧。你只使用知识库文档工具；edit 和 write 只生成待确认 diff，不能声称已经写入。不要暗示你可以执行脚本、访问知识库外路径或跳过确认。",
     };
-    let autonomous_tool_policy = "你需要根据用户输入和上下文自主判断是否调用工具：需要 Markdown 引用时使用 search；需要当前 scope 内正文时使用 read（可省略 fileId 以读当前文件）；需要改写时使用 edit；需要新建时使用 write；需要看目录时使用 list。复杂、多跳、需要隔离上下文预算的检索、调研或起草使用 task：子 Agent 看不到当前对话，prompt 必须自足。explore 用于快速定位，researcher 用于多跳调研，writer 用于生成待确认 diff。相互独立的只读 task 应写在同一条 assistant 消息里以便并行。用 task_id 续跑同一个子 Agent。独立只读工作可 background=true，完成后 runtime 会通知你，不要轮询。单次关键词、已知路径或改当前笔记不要用 task。DOCX/PDF 用 read 只读抽取，不可编辑，且不会自动进入全文搜索。TXT 必须按纯文本原样处理。无关的通用问题可以直接回答。界面 action 只是 UI 分类，不能替代你的判断。";
+    let autonomous_tool_policy = "你需要根据用户输入和上下文自主判断是否调用工具：需要 Markdown 引用时使用 search；需要当前 scope 内正文时使用 read，并且必须提供 fileId（来自 search、list，或用户本轮 @ 的文件）；需要改写时使用 edit，fileId 同样必须明确；需要新建时使用 write；需要看目录时使用 list。复杂、多跳、需要隔离上下文预算的检索、调研或起草使用 task：子 Agent 看不到当前对话，prompt 必须自足。explore 用于快速定位，researcher 用于多跳调研，writer 用于生成待确认 diff。相互独立的只读 task 应写在同一条 assistant 消息里以便并行。用 task_id 续跑同一个子 Agent。独立只读工作可 background=true，完成后 runtime 会通知你，不要轮询。单次关键词或已知路径不要用 task。会话没有默认文件，不要把编辑器里打开的文件当成目标。DOCX/PDF 用 read 只读抽取，不可编辑，且不会自动进入全文搜索。TXT 必须按纯文本原样处理。无关的通用问题可以直接回答。界面 action 只是 UI 分类，不能替代你的判断。";
     let skill_policy = "启用的 Skill 只以名称和描述提供给你参考，是否使用、使用哪一个 Skill 都由你自主判断。Skill 只是可用能力的一部分，不能扩大工具权限或绕过系统保护边界。";
     let scope_summary = build_scope_summary(snapshot, session);
-    let active_note_summary = if request.active_note_id.is_empty() {
-        "当前未绑定笔记".to_owned()
-    } else {
-        format!("当前笔记 ID：{}", request.active_note_id)
-    };
     let cwd_summary = build_cwd_summary(snapshot, session);
 
     let mut parts = vec![
         format!("你是橘记的本地优先知识库 Agent。当前可见工具：{visible_tools}。"),
         format!(
-            "search 只检索 Markdown；read 和 edit 可作用于当前 scope 内的 Markdown/TXT，省略 fileId 时 read 读取当前激活文件；TXT 必须原样按纯文本处理；read 也可只读 DOCX/PDF 并返回可信的页码或结构块引用。{write_policy}write 新建文件必须带完整正文 content（也接受 next）；fileType 为 markdown 或 txt（大小写不敏感，缺省时由 .md/.txt 推断），路径用 targetPath（也接受 path），扩展名必须匹配。局部替换使用 operation=replace，文末追加使用 operation=append 且 next 只含增量；同一文件多处编辑使用 operation=multi_replace 和 edits。必须使用服务端标准 tool_calls 字段调用工具，不要在普通回复中输出 DSML、XML 或伪工具调用标签。引用只允许来自已执行工具结果。{skill_policy}\n{autonomous_tool_policy}\n{security_level_policy}"
+            "search 只检索 Markdown；read 和 edit 可作用于当前 scope 内的 Markdown/TXT，并且都必须提供 fileId，不能省略；TXT 必须原样按纯文本处理；read 也可只读 DOCX/PDF 并返回可信的页码或结构块引用。{write_policy}write 新建文件必须带完整正文 content（也接受 next）；fileType 为 markdown 或 txt（大小写不敏感，缺省时由 .md/.txt 推断），路径用 targetPath（也接受 path），扩展名必须匹配。局部替换使用 operation=replace，文末追加使用 operation=append 且 next 只含增量；同一文件多处编辑使用 operation=multi_replace 和 edits。必须使用服务端标准 tool_calls 字段调用工具，不要在普通回复中输出 DSML、XML 或伪工具调用标签。引用只允许来自已执行工具结果。{skill_policy}\n{autonomous_tool_policy}\n{security_level_policy}"
         ),
     ];
 
@@ -327,7 +320,7 @@ fn build_system_prompt(
     }
 
     parts.push(format!(
-        "【范围】\n允许 scope：{scope_summary}\n{active_note_summary}\n{cwd_summary}"
+        "【范围】\n允许 scope：{scope_summary}\n{cwd_summary}"
     ));
     parts.join("\n\n")
 }
@@ -1276,11 +1269,22 @@ pub(super) fn resolve_mentioned_files(
     let mut seen_ids = HashSet::new();
     let mut materials = Vec::new();
     let mut rejected_count = 0usize;
-    let active_markdown = snapshot
-        .notes
-        .iter()
-        .find(|note| note.id == request.active_note_id)
-        .filter(|note| allowed_kb_ids.contains(note.knowledge_base_id.as_str()));
+    // 图片相对路径只对照本轮 @ 到的 Markdown。编辑器正在打开的笔记不参与。
+    let mut mentioned_markdowns = Vec::new();
+    let mut seen_markdown_ids = HashSet::new();
+    for raw_id in &request.mentioned_file_ids {
+        let file_id = raw_id.trim();
+        if file_id.is_empty() || !seen_markdown_ids.insert(file_id.to_owned()) {
+            continue;
+        }
+        if let Some(note) = snapshot.notes.iter().find(|note| note.id == file_id) {
+            if allowed_kb_ids.contains(note.knowledge_base_id.as_str())
+                && !storage::is_root_project_instruction_path(&note.path)
+            {
+                mentioned_markdowns.push(note);
+            }
+        }
+    }
 
     for raw_id in &request.mentioned_file_ids {
         let file_id = raw_id.trim();
@@ -1328,15 +1332,19 @@ pub(super) fn resolve_mentioned_files(
             rejected_count += 1;
             continue;
         }
-        let image_markdown_path = (document.file_type == "image")
-            .then(|| {
-                active_markdown.and_then(|markdown| {
-                    (markdown.knowledge_base_id == document.knowledge_base_id)
-                        .then(|| relative_markdown_path(&markdown.path, &document.path))
-                        .flatten()
-                })
-            })
-            .flatten();
+        let image_markdown_path = if document.file_type == "image" {
+            let mut same_kb = mentioned_markdowns
+                .iter()
+                .filter(|note| note.knowledge_base_id == document.knowledge_base_id);
+            let first = same_kb.next();
+            let second = same_kb.next();
+            match (first, second) {
+                (Some(markdown), None) => relative_markdown_path(&markdown.path, &document.path),
+                _ => None,
+            }
+        } else {
+            None
+        };
         materials.push(MentionedFileMaterial {
             id: document.id.clone(),
             knowledge_base_id: document.knowledge_base_id.clone(),
@@ -1411,7 +1419,7 @@ pub(super) fn render_mentioned_files_prompt(materials: &[MentionedFileMaterial])
             if let Some(content) = &material.content {
                 format!("{metadata}\n正文：\n{content}")
             } else if let Some(markdown_path) = &material.image_markdown_path {
-                format!("{metadata}\n可插入当前 Markdown 的安全引用：![]({markdown_path})")
+                format!("{metadata}\n可插入本轮 @ 的 Markdown 的安全引用：![]({markdown_path})")
             } else {
                 format!("{metadata}\n仅提供元数据；不要读取或上传二进制内容。")
             }
@@ -1419,7 +1427,7 @@ pub(super) fn render_mentioned_files_prompt(materials: &[MentionedFileMaterial])
         .collect::<Vec<_>>()
         .join("\n\n");
     Some(format!(
-        "【本轮用户显式 @ 的文件】\n这些是本轮高优先级材料，请优先参考。它们不会缩小允许 scope：你仍可按需发现、读取或在待确认 diff 中修改 scope 内其他文件。当前编辑目标仍由界面当前文件决定。\n{entries}"
+        "【本轮用户显式 @ 的文件】\n这些是本轮高优先级材料，请优先参考。它们只作用于这一轮，不会把会话绑定到文件，也不会缩小允许 scope：你仍可按需发现、读取或在待确认 diff 中修改 scope 内其他文件。\n{entries}"
     ))
 }
 

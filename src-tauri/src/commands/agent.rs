@@ -103,9 +103,10 @@ pub async fn run_agent_turn(
     })
     .await?;
 
-    // request 中的 active 信息来自 UI 当前焦点；会话 scope 已由 SQLite 中恢复的 session 决定。
+    // 知识库范围来自已持久化的会话。编辑器焦点不进入本轮，避免把打开的文件当成默认目标。
     snapshot.active_knowledge_base_id = request.active_knowledge_base_id.clone();
-    snapshot.active_note_id = request.active_note_id.clone();
+    snapshot.active_note_id.clear();
+    snapshot.active_document_id.clear();
     if snapshot
         .sessions
         .iter()

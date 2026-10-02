@@ -3559,7 +3559,7 @@ mod tests {
         assert!(!prompt.contains("private"));
     }
 
-    /** 同知识库图片仅生成相对当前 Markdown 的引用，跨库或非 Markdown 当前文件不生成。 */
+    /** 同知识库图片只在本轮同时 @ 了唯一 Markdown 时生成相对引用。 */
     #[test]
     fn mentioned_image_exposes_safe_relative_markdown_path() {
         let mut snapshot = runtime_test_snapshot("正文".to_owned());
@@ -3576,16 +3576,47 @@ mod tests {
             preview_available: true,
         });
         let mut request = runtime_test_request("ask", "插入图片");
-        request.mentioned_file_ids = vec!["image-a".to_owned()];
+        request.mentioned_file_ids = vec!["note-a".to_owned(), "image-a".to_owned()];
         let materials = resolve_mentioned_files(&snapshot, &snapshot.sessions[0], &request);
+        let image = materials
+            .iter()
+            .find(|material| material.id == "image-a")
+            .unwrap();
 
         assert_eq!(
-            materials[0].image_markdown_path.as_deref(),
+            image.image_markdown_path.as_deref(),
             Some("../assets/diagram.png")
         );
         assert!(render_mentioned_files_prompt(&materials)
             .unwrap()
             .contains("![](../assets/diagram.png)"));
+    }
+
+    /** 只 @ 图片时，不拿编辑器当前笔记来生成相对路径。 */
+    #[test]
+    fn mentioned_image_without_markdown_ignores_editor_note() {
+        let mut snapshot = runtime_test_snapshot("正文".to_owned());
+        snapshot.notes[0].path = "Notes/目标.md".to_owned();
+        snapshot.documents.push(crate::domain::WorkspaceDocument {
+            id: "image-a".to_owned(),
+            knowledge_base_id: "kb-a".to_owned(),
+            title: "图示".to_owned(),
+            path: "assets/diagram.png".to_owned(),
+            file_type: "image".to_owned(),
+            updated_at: "刚刚".to_owned(),
+            content_hash: "hash".to_owned(),
+            content: None,
+            preview_available: true,
+        });
+        let mut request = runtime_test_request("ask", "插入图片");
+        request.active_note_id = "note-a".to_owned();
+        request.mentioned_file_ids = vec!["image-a".to_owned()];
+        let materials = resolve_mentioned_files(&snapshot, &snapshot.sessions[0], &request);
+
+        assert_eq!(materials[0].image_markdown_path, None);
+        assert!(!render_mentioned_files_prompt(&materials)
+            .unwrap()
+            .contains("![]("));
     }
 
     /** 构造已启用云端模型的测试设置，默认 provider 指向测试 endpoint 和模型。 */

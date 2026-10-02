@@ -394,7 +394,7 @@ export const browserBuiltInSkills: AgentSkill[] = [
     displayName: "知识库研究",
     description: "基于已选知识库发现支持文档、检索和阅读 Markdown 笔记，并给出带引用的回答。",
     instructions:
-      "当用户要求查找、总结、对比或引用本地知识库时，先调用 list、search 或 read 获取依据。search 只覆盖 Markdown；read 可读取授权范围内的 Markdown/TXT，省略 fileId 时读取当前文件；TXT 不产生知识库引用。DOCX/PDF 也用 read 只读抽取。",
+      "当用户要求查找、总结、对比或引用本地知识库时，先调用 list、search 或 read 获取依据。search 只覆盖 Markdown；read 可读取授权范围内的 Markdown/TXT，必须提供 fileId；TXT 不产生知识库引用。DOCX/PDF 也用 read 只读抽取。",
     tags: ["研究", "检索", "引用"],
     enabled: true,
     source: "built-in",
@@ -406,9 +406,9 @@ export const browserBuiltInSkills: AgentSkill[] = [
     id: "skill-note-rewrite",
     name: "note-rewrite",
     displayName: "笔记改写",
-    description: "改写当前笔记内容，并通过待确认 diff 交给用户决定是否写入。",
+    description: "改写用户指定的 Markdown 或 TXT，并通过待确认 diff 交给用户决定是否写入。",
     instructions:
-      "当用户要求润色、改写、压缩、扩写、多处编辑或文末追加 Markdown/TXT 时，先用 read 读取目标（可省略 fileId 以读当前文件）。只能调用 edit 生成待确认 diff；TXT 必须保持纯文本。局部改写用 replace，追加用 append，多处编辑用 multi_replace 和 edits。",
+      "当用户要求润色、改写、压缩、扩写、多处编辑或文末追加 Markdown/TXT 时，先用 read 读取目标，fileId 来自用户本轮 @ 或 search、list 的结果。只能调用 edit 生成待确认 diff；TXT 必须保持纯文本。局部改写用 replace，追加用 append，多处编辑用 multi_replace 和 edits。",
     tags: ["写作", "改写", "diff"],
     enabled: true,
     source: "built-in",

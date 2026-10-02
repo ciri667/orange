@@ -58,7 +58,7 @@ pub struct AgentToolContext<'a> {
     pub snapshot: &'a mut WorkspaceSnapshot,
     /** 当前会话在 snapshot.sessions 中的位置，用于统一 scope 校验。 */
     pub session_index: usize,
-    /** 用户本轮请求，提供当前笔记、知识库和 prompt 等 UI 上下文。 */
+    /** 用户本轮请求，提供知识库范围、prompt 和显式 @ 文件。 */
     pub request: &'a AgentTurnRequest,
 }
 

@@ -568,6 +568,7 @@ pub struct AgentTurnRequest {
     pub action: String,
     pub session_id: String,
     pub active_knowledge_base_id: String,
+    /** 旧客户端仍会传来编辑器焦点。Runtime 忽略该字段，会话不因此绑定文件。 */
     pub active_note_id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub client_message_id: Option<String>,
