@@ -39,6 +39,7 @@ import {
   appendUserMessageToSession,
   buildAgentSession,
   buildDraftAgentSession,
+  resolveNewSessionSecurityLevel,
   buildOptimisticUserMessage,
   buildTitleFromFirstPrompt,
   collectTouchedFileIds,
@@ -84,6 +85,7 @@ interface QueuedFollowUp {
 export function useAgentTurn(options: AgentTurnOptions) {
   const {
     snapshot,
+    userSettings,
     beginBusy,
     endBusy,
     setNotice,
@@ -256,7 +258,8 @@ export function useAgentTurn(options: AgentTurnOptions) {
   const activeNote = getActiveNote(currentSnapshot);
   const activeDocument = getActiveDocument(currentSnapshot);
   const persistedActiveSession = resolveActiveSessionForKnowledgeBase(currentSnapshot, activeKnowledgeBase);
-  const activeSession = persistedActiveSession ?? buildDraftAgentSession(activeKnowledgeBase);
+  const defaultSecurityLevel = resolveNewSessionSecurityLevel(userSettings?.agentSecurity.defaultLevel);
+  const activeSession = persistedActiveSession ?? buildDraftAgentSession(activeKnowledgeBase, defaultSecurityLevel);
 
   /** 把 ref 中的排队表同步到展示态，供当前会话过滤气泡和输入条。 */
   function syncQueuedFollowUps() {
@@ -533,6 +536,7 @@ export function useAgentTurn(options: AgentTurnOptions) {
           sessionForTurn = buildAgentSession({
             knowledgeBase: sourceActiveKnowledgeBase,
             title: buildTitleFromFirstPrompt(prompt, turnImages.length),
+            securityLevel: defaultSecurityLevel,
           });
           snapshotForTurn = {
             ...sourceSnapshot,

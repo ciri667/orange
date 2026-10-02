@@ -33,7 +33,7 @@ import {
   joinRelativePath,
 } from "./fileNameUtils";
 import { extractNoteTags } from "../shared/noteTags";
-import { buildDraftAgentSession, resolveActiveSessionForKnowledgeBase, resolveKnowledgeBaseSessionId } from "./sessionUtils";
+import { buildDraftAgentSession, resolveActiveSessionForKnowledgeBase, resolveKnowledgeBaseSessionId, resolveNewSessionSecurityLevel } from "./sessionUtils";
 import type { WorkspaceChrome } from "./workspaceChrome";
 
 function formatErrorMessage(error: unknown) {
@@ -70,6 +70,7 @@ const noop = (..._args: unknown[]) => {};
 export function useEditorActions(options: EditorActionsOptions) {
   const {
     snapshot,
+    userSettings,
     beginBusy,
     endBusy,
     setNotice,
@@ -131,7 +132,10 @@ export function useEditorActions(options: EditorActionsOptions) {
   const activeNote = getActiveNote(currentSnapshot);
   const activeDocument = getActiveDocument(currentSnapshot);
   const persistedActiveSession = resolveActiveSessionForKnowledgeBase(currentSnapshot, activeKnowledgeBase);
-  const activeSession = persistedActiveSession ?? buildDraftAgentSession(activeKnowledgeBase);
+  const activeSession = persistedActiveSession ?? buildDraftAgentSession(
+    activeKnowledgeBase,
+    resolveNewSessionSecurityLevel(userSettings?.agentSecurity.defaultLevel),
+  );
 
 
   /** 把指定文件加入临时标签并激活，同时保持原有知识库与 Agent 会话选择语义。 */

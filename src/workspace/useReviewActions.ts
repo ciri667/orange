@@ -6,7 +6,7 @@ import { getActiveDocument, getActiveKnowledgeBase, getActiveNote } from "../sha
 import { acceptProposedChange, loadAppEventLogs, rejectProposedChange, saveSession } from "../shared/tauriApi";
 import type { AgentActionType, AppEventLog, ProposedChange, ReviewComment, WorkspaceSnapshot } from "../shared/types";
 import { buildReviewFeedbackPrompt, buildReviewState, updateActivePendingChange } from "./reviewUtils";
-import { buildDraftAgentSession, isPersistedSession, resolveActiveSessionForKnowledgeBase } from "./sessionUtils";
+import { buildDraftAgentSession, isPersistedSession, resolveActiveSessionForKnowledgeBase, resolveNewSessionSecurityLevel } from "./sessionUtils";
 import type { WorkspaceChrome } from "./workspaceChrome";
 
 interface ReviewActionsOptions extends WorkspaceChrome {
@@ -18,7 +18,7 @@ const noopAsync = async (..._args: unknown[]) => {};
 
 /** Diff 审阅评论与确认/拒绝写入。 */
 export function useReviewActions(options: ReviewActionsOptions) {
-  const { snapshot, beginBusy, endBusy, setNotice, commitSnapshot, setAppEventLogs, handleSubmitPrompt } = options;
+  const { snapshot, userSettings, beginBusy, endBusy, setNotice, commitSnapshot, setAppEventLogs, handleSubmitPrompt } = options;
 
   if (!snapshot) {
     return {
@@ -34,7 +34,10 @@ export function useReviewActions(options: ReviewActionsOptions) {
   const activeNote = getActiveNote(currentSnapshot);
   const activeDocument = getActiveDocument(currentSnapshot);
   const persistedActiveSession = resolveActiveSessionForKnowledgeBase(currentSnapshot, activeKnowledgeBase);
-  const activeSession = persistedActiveSession ?? buildDraftAgentSession(activeKnowledgeBase);
+  const activeSession = persistedActiveSession ?? buildDraftAgentSession(
+    activeKnowledgeBase,
+    resolveNewSessionSecurityLevel(userSettings?.agentSecurity.defaultLevel),
+  );
 
 
   /** 为当前待写入 diff 添加行评论；日志只记录行号、侧别和计数，不记录评论正文。 */

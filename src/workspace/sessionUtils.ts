@@ -61,8 +61,21 @@ export function buildAgentSession({
   };
 }
 
+/** 新本地会话使用的权限；缺省或未知值回落到基础。 */
+export function resolveNewSessionSecurityLevel(
+  defaultLevel?: AgentSession["securityLevel"],
+): AgentSession["securityLevel"] {
+  if (defaultLevel === "advanced" || defaultLevel === "autonomous") {
+    return defaultLevel;
+  }
+  return "basic";
+}
+
 /** 构造未落库的侧栏占位会话，避免仅切换文档时隐式创建真实会话。 */
-export function buildDraftAgentSession(knowledgeBase: KnowledgeBase): AgentSession {
+export function buildDraftAgentSession(
+  knowledgeBase: KnowledgeBase,
+  securityLevel: AgentSession["securityLevel"] = "basic",
+): AgentSession {
   return {
     id: DRAFT_SESSION_ID,
     title: DEFAULT_SESSION_TITLE,
@@ -70,7 +83,7 @@ export function buildDraftAgentSession(knowledgeBase: KnowledgeBase): AgentSessi
     knowledgeBaseIds: [knowledgeBase.id],
     pinnedNoteIds: [],
     messages: [],
-    securityLevel: "basic",
+    securityLevel: resolveNewSessionSecurityLevel(securityLevel),
     createdAt: "未保存",
     updatedAt: "未保存",
   };

@@ -49,6 +49,7 @@ import type {
   RequestAuditLog,
   UserSettings,
 } from "../shared/types";
+import { AGENT_SECURITY_LEVEL_COPY } from "../agent/AgentPanelSections";
 import { SkillsModal } from "./SkillsModal";
 import {
   AgentMemorySettingsSection,
@@ -266,8 +267,12 @@ export function SettingsDrawer({
         id: "agentSecurity",
         group: "配置",
         label: "Agent 权限",
-        description: "你愿意把多少执行权交给 Agent",
-        meta: `${settingsDraft.agentSecurity.resourceLimits.timeoutSeconds}s`,
+        description: "新会话的默认权限",
+        meta: AGENT_SECURITY_LEVEL_COPY[
+          settingsDraft.agentSecurity.defaultLevel === "advanced" || settingsDraft.agentSecurity.defaultLevel === "autonomous"
+            ? settingsDraft.agentSecurity.defaultLevel
+            : "basic"
+        ].label,
         icon: ShieldCheck,
         tone: "neutral",
       },
@@ -328,7 +333,7 @@ export function SettingsDrawer({
       settingsSummary.feishuStatus,
       knowledgeBases,
       settingsDraft.modelConfig.enabled,
-      settingsDraft.agentSecurity.resourceLimits.timeoutSeconds,
+      settingsDraft.agentSecurity.defaultLevel,
       skills.length,
     ],
   );

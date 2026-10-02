@@ -36,7 +36,7 @@ import {
   getCreatePlaceholder,
   getCreateSubmitLabel,
 } from "./fileNameUtils";
-import { DRAFT_SESSION_ID, buildDraftAgentSession, buildMentionableFiles, resolveActiveSessionForKnowledgeBase } from "./sessionUtils";
+import { DRAFT_SESSION_ID, buildDraftAgentSession, buildMentionableFiles, resolveActiveSessionForKnowledgeBase, resolveNewSessionSecurityLevel } from "./sessionUtils";
 import { useAgentTurn } from "./useAgentTurn";
 import { useAgentTurnDraft } from "./useAgentTurnDraft";
 import { useDocumentPreview } from "./useDocumentPreview";
@@ -500,7 +500,10 @@ export function WorkspaceShell() {
 
   const activeKnowledgeBase = getActiveKnowledgeBase(currentSnapshot);
   const persistedActiveSession = resolveActiveSessionForKnowledgeBase(currentSnapshot, activeKnowledgeBase);
-  const activeSession = persistedActiveSession ?? buildDraftAgentSession(activeKnowledgeBase);
+  const activeSession = persistedActiveSession ?? buildDraftAgentSession(
+    activeKnowledgeBase,
+    resolveNewSessionSecurityLevel(userSettings.agentSecurity.defaultLevel),
+  );
   const activeDocument = getActiveDocument(currentSnapshot);
   const activeNote = getActiveNote(currentSnapshot);
   /** 当前会话可 @ 的文件仅来自既有工具授权范围，不因显式材料扩大权限。 */

@@ -9,6 +9,7 @@ import {
   buildAgentSession,
   buildDraftAgentSession,
   isPersistedSession,
+  resolveNewSessionSecurityLevel,
   resolveActiveSessionForKnowledgeBase,
 } from "./sessionUtils";
 import type { WorkspaceChrome } from "./workspaceChrome";
@@ -80,7 +81,8 @@ export function useSessionActions(options: SessionActionsOptions) {
   const activeNote = getActiveNote(currentSnapshot);
   const activeDocument = getActiveDocument(currentSnapshot);
   const persistedActiveSession = resolveActiveSessionForKnowledgeBase(currentSnapshot, activeKnowledgeBase);
-  const activeSession = persistedActiveSession ?? buildDraftAgentSession(activeKnowledgeBase);
+  const defaultSecurityLevel = resolveNewSessionSecurityLevel(currentUserSettings.agentSecurity.defaultLevel);
+  const activeSession = persistedActiveSession ?? buildDraftAgentSession(activeKnowledgeBase, defaultSecurityLevel);
 
 
   /** 新建一个空白知识库会话；标题等到首条用户输入后再确定。 */
@@ -96,6 +98,7 @@ export function useSessionActions(options: SessionActionsOptions) {
 
     const nextSession = buildAgentSession({
       knowledgeBase: activeKnowledgeBase,
+      securityLevel: defaultSecurityLevel,
     });
     const nextSnapshot = {
       ...currentSnapshot,
