@@ -17,7 +17,7 @@ import {
   saveNoteContent,
   saveNoteImageAttachments,
 } from "../shared/tauriApi";
-import type { EditorFileTab, ExportFormat, NoteImageAttachmentInput, WorkspaceSnapshot } from "../shared/types";
+import type { EditorFileTab, ExportFormat, Note, NoteImageAttachmentInput, WorkspaceDocument, WorkspaceSnapshot } from "../shared/types";
 import {
   insertMarkdownAtSelection,
   MAX_PASTE_IMAGE_BATCH_BYTES,
@@ -48,6 +48,14 @@ interface EditorActionsOptions extends WorkspaceChrome {
   dirtyDocumentIds: Set<string>;
   editingBaseHashes: Record<string, string>;
   editingBaseDocumentHashes: Record<string, string>;
+  rememberCleanNote: (note: Note) => void;
+  rememberCleanDocument: (document: WorkspaceDocument) => void;
+  discardWorkspaceDraft: (
+    snapshot: WorkspaceSnapshot,
+    tab: EditorFileTab,
+    dirtyNotes: Set<string>,
+    dirtyDocuments: Set<string>,
+  ) => { snapshot: WorkspaceSnapshot; dirtyNoteIds: Set<string>; dirtyDocumentIds: Set<string> };
   openFileTabs: EditorFileTab[];
   setOpenFileTabs: (value: EditorFileTab[] | ((current: EditorFileTab[]) => EditorFileTab[])) => void;
   historyDialog: { targetKind: "note" | "document"; targetId: string } | null;
@@ -83,6 +91,9 @@ export function useEditorActions(options: EditorActionsOptions) {
     dirtyDocumentIds,
     editingBaseHashes,
     editingBaseDocumentHashes,
+    rememberCleanNote,
+    rememberCleanDocument,
+    discardWorkspaceDraft,
     openFileTabs,
     setOpenFileTabs,
     historyDialog,
@@ -139,24 +150,29 @@ export function useEditorActions(options: EditorActionsOptions) {
 
 
   /** 把指定文件加入临时标签并激活，同时保持原有知识库与 Agent 会话选择语义。 */
-  function activateEditorTab(tab: EditorFileTab, source: "tree" | "tab" | "create" | "keyboard") {
+  function activateEditorTab(
+    tab: EditorFileTab,
+    source: "tree" | "tab" | "create" | "keyboard",
+    draftCommit?: { snapshot: WorkspaceSnapshot; dirtyNoteIds: Set<string>; dirtyDocumentIds: Set<string> },
+  ) {
+    const baseSnapshot = draftCommit?.snapshot ?? currentSnapshot;
     const target =
       tab.kind === "note"
-        ? currentSnapshot.notes.find((note) => note.id === tab.id)
-        : currentSnapshot.documents.find((document) => document.id === tab.id);
+        ? baseSnapshot.notes.find((note) => note.id === tab.id)
+        : baseSnapshot.documents.find((document) => document.id === tab.id);
 
     if (!target) {
       return;
     }
 
     const nextKnowledgeBase =
-      currentSnapshot.knowledgeBases.find((knowledgeBase) => knowledgeBase.id === target.knowledgeBaseId) ?? activeKnowledgeBase;
+      baseSnapshot.knowledgeBases.find((knowledgeBase) => knowledgeBase.id === target.knowledgeBaseId) ?? activeKnowledgeBase;
     const activatedSnapshot = {
-      ...currentSnapshot,
+      ...baseSnapshot,
       activeKnowledgeBaseId: nextKnowledgeBase.id,
       activeNoteId: tab.kind === "note" ? tab.id : "",
       activeDocumentId: tab.kind === "document" ? tab.id : "",
-      activeSessionId: resolveKnowledgeBaseSessionId(currentSnapshot, nextKnowledgeBase.id),
+      activeSessionId: resolveKnowledgeBaseSessionId(baseSnapshot, nextKnowledgeBase.id),
     };
 
     setOpenFileTabs((currentTabs) =>
@@ -168,7 +184,7 @@ export function useEditorActions(options: EditorActionsOptions) {
       status: "completed",
       metadata: { fileKind: tab.kind, source, openTabCount: openFileTabs.length + 1 },
     });
-    commitSnapshot(activatedSnapshot);
+    commitSnapshot(activatedSnapshot, draftCommit?.dirtyNoteIds, draftCommit?.dirtyDocumentIds);
   }
 
   /** 重命名会生成新的稳定文件 ID，需要保留原标签的位置而非把它当作失效标签移除。 */
@@ -204,6 +220,10 @@ export function useEditorActions(options: EditorActionsOptions) {
   function handleContentChange(content: string) {
     if (!activeNote) {
       return;
+    }
+
+    if (!dirtyNoteIds.has(activeNote.id)) {
+      rememberCleanNote(activeNote);
     }
 
     setSnapshot({
@@ -315,6 +335,10 @@ export function useEditorActions(options: EditorActionsOptions) {
   function handleDocumentContentChange(content: string) {
     if (!activeDocument || activeDocument.fileType !== "txt") {
       return;
+    }
+
+    if (!dirtyDocumentIds.has(activeDocument.id)) {
+      rememberCleanDocument(activeDocument);
     }
 
     setSnapshot({
@@ -618,25 +642,11 @@ export function useEditorActions(options: EditorActionsOptions) {
     const nextTabs = openFileTabs.filter((item) => item.kind !== tab.kind || item.id !== tab.id);
     const isActive = (tab.kind === "note" && currentSnapshot.activeNoteId === tab.id) ||
       (tab.kind === "document" && currentSnapshot.activeDocumentId === tab.id);
+    // 放弃更改要在同一次快照提交里退回正文并清掉 dirty。单独 setDirty 会被这次提交用旧集合覆盖。
+    const discarded = isDirty
+      ? discardWorkspaceDraft(currentSnapshot, tab, dirtyNoteIds, dirtyDocumentIds)
+      : null;
 
-    // “放弃更改”关闭后必须清理 dirty 集合，否则后续删除/重命名会被不可见草稿错误阻止。
-    if (isDirty) {
-      if (tab.kind === "note") {
-        setDirtyNoteIds((currentIds) => {
-          const nextIds = new Set(currentIds);
-
-          nextIds.delete(tab.id);
-          return nextIds;
-        });
-      } else {
-        setDirtyDocumentIds((currentIds) => {
-          const nextIds = new Set(currentIds);
-
-          nextIds.delete(tab.id);
-          return nextIds;
-        });
-      }
-    }
     setOpenFileTabs(nextTabs);
     logInfo("关闭编辑器文件标签。", {
       category: "frontend",
@@ -646,18 +656,25 @@ export function useEditorActions(options: EditorActionsOptions) {
     });
 
     if (!isActive) {
+      if (discarded) {
+        commitSnapshot(discarded.snapshot, discarded.dirtyNoteIds, discarded.dirtyDocumentIds);
+      }
       return;
     }
 
     const nextActiveTab = nextTabs[tabIndex] ?? nextTabs[tabIndex - 1];
 
     if (nextActiveTab) {
-      activateEditorTab(nextActiveTab, "tab");
+      activateEditorTab(nextActiveTab, "tab", discarded ?? undefined);
       return;
     }
 
     // 关闭最后一个标签后显式清空焦点，selectors 不会再自动回退到首个文件。
-    commitSnapshot({ ...currentSnapshot, activeNoteId: "", activeDocumentId: "" });
+    commitSnapshot(
+      { ...(discarded?.snapshot ?? currentSnapshot), activeNoteId: "", activeDocumentId: "" },
+      discarded?.dirtyNoteIds,
+      discarded?.dirtyDocumentIds,
+    );
   }
 
   /** 导出前保存当前脏草稿；保存冲突会抛出错误并阻止后续导出。 */

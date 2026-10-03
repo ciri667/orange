@@ -94,6 +94,9 @@ export function WorkspaceShell() {
     setDirtyDocumentIds,
     initializeDraftBaselines,
     commitDraftSnapshot,
+    rememberCleanNote,
+    rememberCleanDocument,
+    discardWorkspaceDraft,
   } = useWorkspaceDrafts();
   /** Markdown 编辑区视图模式，保持编辑/预览切换不影响文件内容。 */
   const [markdownViewMode, setMarkdownViewMode] = useState<MarkdownViewMode>("edit");
@@ -353,6 +356,9 @@ export function WorkspaceShell() {
     dirtyDocumentIds,
     editingBaseHashes,
     editingBaseDocumentHashes,
+    rememberCleanNote,
+    rememberCleanDocument,
+    discardWorkspaceDraft,
     openFileTabs,
     setOpenFileTabs,
     historyDialog,
