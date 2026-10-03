@@ -177,7 +177,6 @@ export function useSessionActions(options: SessionActionsOptions) {
           const nextSnapshot = await deleteSession(latestSnapshot, sessionId);
 
           commitSnapshot(nextSnapshot);
-          setIsSessionListOpen(true);
           setIsSessionContextOpen(false);
           setIsScopeSelectorOpen(false);
           setNotice("已删除会话。");

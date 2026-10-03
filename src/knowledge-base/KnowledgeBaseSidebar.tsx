@@ -1,12 +1,15 @@
+import { useState } from "react";
 import { AlertCircle, Clock, Database, MessageSquarePlus, Plus, RefreshCw, Search, Settings } from "lucide-react";
+import { SessionList } from "../agent/SessionList";
 import { FileTree } from "./FileTree";
 import { Button } from "../shared/Button";
 import { cn } from "../shared/cn";
 import { ListRow } from "../shared/ListRow";
 import { OperationNotice } from "../shared/OperationNotice";
 import { OverflowTooltipText } from "../shared/OverflowTooltipText";
+import { SegmentedControl, SegmentedControlItem } from "../shared/SegmentedControl";
 import { focusShellClassName, sectionLabelClassName } from "../shared/ui";
-import type { FileTreeNode, KnowledgeBase } from "../shared/types";
+import type { AgentSession, FileTreeNode, KnowledgeBase } from "../shared/types";
 
 /** 生成单个资料库文件数量摘要，用于 tooltip，不占侧栏两行。 */
 function getKnowledgeBaseFileSummary(knowledgeBase: KnowledgeBase) {
@@ -15,7 +18,10 @@ function getKnowledgeBaseFileSummary(knowledgeBase: KnowledgeBase) {
   return `${fileCount} 个文件 · ${knowledgeBase.noteCount} 个 Markdown`;
 }
 
-/** 左侧知识库导航，包含品牌、新对话、知识库切换、搜索和本地目录树。 */
+/** 侧栏下半区一次只展开一块，避免会话列表和文件树抢高度。 */
+type SidebarPane = "sessions" | "files";
+
+/** 左侧导航：会话和文件分栏切换，同一时间只展开一块。 */
 export function KnowledgeBaseSidebar({
   knowledgeBases,
   activeKnowledgeBase,
@@ -27,6 +33,10 @@ export function KnowledgeBaseSidebar({
   isBusy,
   busyLabel,
   notice,
+  sessions,
+  activeSessionId,
+  inFlightSessionIds = [],
+  queuedSessionIds = [],
   onSearchChange,
   onSelectKnowledgeBase,
   onAddKnowledgeBase,
@@ -48,6 +58,8 @@ export function KnowledgeBaseSidebar({
   onOpenSchedules,
   schedulesActive = false,
   onOpenSettings,
+  onSelectSession,
+  onDeleteSession,
 }: {
   knowledgeBases: KnowledgeBase[];
   activeKnowledgeBase: KnowledgeBase;
@@ -59,6 +71,10 @@ export function KnowledgeBaseSidebar({
   isBusy: boolean;
   busyLabel: string;
   notice: string;
+  sessions: AgentSession[];
+  activeSessionId: string;
+  inFlightSessionIds?: string[];
+  queuedSessionIds?: string[];
   onSearchChange: (value: string) => void;
   onSelectKnowledgeBase: (knowledgeBaseId: string) => void;
   onAddKnowledgeBase: () => void;
@@ -80,24 +96,29 @@ export function KnowledgeBaseSidebar({
   onOpenSchedules?: () => void;
   schedulesActive?: boolean;
   onOpenSettings: () => void;
+  onSelectSession: (sessionId: string) => void;
+  onDeleteSession: (sessionId: string) => void;
 }) {
+  const [sidebarPane, setSidebarPane] = useState<SidebarPane>("sessions");
+  const runningSessionCount = inFlightSessionIds.length;
+
   return (
     <aside className="sidebar" aria-label="知识库导航">
-      <div className="flex items-center gap-2 px-2 py-1">
+      <div className="flex shrink-0 items-center gap-2 px-2 py-1">
         <div className="grid size-7 place-items-center overflow-hidden rounded-md">
           <img className="block size-full object-contain" src="/orange-logo.svg" alt="" />
         </div>
         <strong className="text-[15px] font-semibold text-ink-strong">橘记</strong>
       </div>
 
-      <Button variant="ghost" className="w-full justify-start gap-2 px-2.5 text-[13px]" onClick={onCreateSession}>
+      <Button variant="ghost" className="w-full shrink-0 justify-start gap-2 px-2.5 text-[13px]" onClick={onCreateSession}>
         <MessageSquarePlus size={16} />
         新对话
       </Button>
       {onOpenSchedules ? (
         <Button
           variant="ghost"
-          className={cn("w-full justify-start gap-2 px-2.5 text-[13px]", schedulesActive && "bg-surface-muted text-ink-strong")}
+          className={cn("w-full shrink-0 justify-start gap-2 px-2.5 text-[13px]", schedulesActive && "bg-surface-muted text-ink-strong")}
           onClick={onOpenSchedules}
         >
           <Clock size={16} />
@@ -105,82 +126,133 @@ export function KnowledgeBaseSidebar({
         </Button>
       ) : null}
 
-      <section className="grid gap-0.5" aria-label="知识库切换">
-        <p className={sectionLabelClassName}>知识库</p>
-        {knowledgeBases.map((knowledgeBase) => {
-          const knowledgeBaseSummary = `${getKnowledgeBaseFileSummary(knowledgeBase)} · ${getKnowledgeBaseStatusLabel(knowledgeBase)}`;
+      <SegmentedControl aria-label="侧栏内容" role="radiogroup" className="flex w-full shrink-0">
+        <SegmentedControlItem
+          active={sidebarPane === "sessions"}
+          role="radio"
+          aria-checked={sidebarPane === "sessions"}
+          className="flex-1"
+          title={runningSessionCount > 0 ? `${runningSessionCount} 个任务运行中` : "会话"}
+          onClick={() => setSidebarPane("sessions")}
+        >
+          会话
+          {runningSessionCount > 0 ? (
+            <span className="inline-flex min-w-4 items-center justify-center rounded-full bg-accent px-1 text-[10px] font-medium leading-4 text-white">
+              {runningSessionCount}
+            </span>
+          ) : null}
+        </SegmentedControlItem>
+        <SegmentedControlItem
+          active={sidebarPane === "files"}
+          role="radio"
+          aria-checked={sidebarPane === "files"}
+          className="flex-1"
+          onClick={() => setSidebarPane("files")}
+        >
+          文件
+        </SegmentedControlItem>
+      </SegmentedControl>
 
-          return (
-            <ListRow
-              key={knowledgeBase.id}
-              active={knowledgeBase.id === activeKnowledgeBase.id}
-              error={knowledgeBase.status === "error"}
-              className="py-1.5"
-              aria-label={`${knowledgeBase.name}，${knowledgeBaseSummary}`}
-              title={knowledgeBaseSummary}
-              onClick={() => onSelectKnowledgeBase(knowledgeBase.id)}
-            >
-              {knowledgeBase.status === "error" ? <AlertCircle size={15} /> : <Database size={15} />}
-              <OverflowTooltipText as="span" className="min-w-0 truncate text-[13px]" text={knowledgeBase.name} logArea="knowledge_base_row_name" />
-            </ListRow>
-          );
-        })}
-        <Button variant="ghost" className="w-full justify-start px-2.5 text-[13px] text-ink-muted" onClick={onAddKnowledgeBase}>
-          <Plus size={15} />
-          连接资料库
-        </Button>
+      <div className="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden">
+      <section
+        className={cn("flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden", sidebarPane !== "sessions" && "hidden")}
+        aria-label="会话"
+      >
+        <SessionList
+          sessions={sessions}
+          activeSessionId={activeSessionId}
+          knowledgeBases={knowledgeBases}
+          inFlightSessionIds={inFlightSessionIds}
+          queuedSessionIds={queuedSessionIds}
+          onSelectSession={onSelectSession}
+          onDeleteSession={onDeleteSession}
+        />
       </section>
 
-      <OperationNotice isBusy={isBusy} busyLabel={busyLabel} notice={notice} />
+      <section
+        className={cn("flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden", sidebarPane !== "files" && "hidden")}
+        aria-label="文件"
+      >
+        <div className="grid max-h-[45%] shrink-0 gap-0.5 overflow-auto" aria-label="知识库切换">
+          <p className={sectionLabelClassName}>知识库</p>
+          {knowledgeBases.map((knowledgeBase) => {
+            const knowledgeBaseSummary = `${getKnowledgeBaseFileSummary(knowledgeBase)} · ${getKnowledgeBaseStatusLabel(knowledgeBase)}`;
 
-      <label className={cn("mx-1 flex min-h-8 items-center gap-2 rounded-control bg-white/70 px-2 text-ink-muted", focusShellClassName)}>
-        <Search size={14} />
-        <input
-          className="min-w-0 w-full border-0 bg-transparent text-[13px] outline-0"
-          value={searchTerm}
-          onChange={(event) => onSearchChange(event.target.value)}
-          placeholder="过滤文件"
-          type="search"
-        />
-      </label>
-
-      <div className="flex min-h-0 min-w-0 flex-1 flex-col overflow-auto pt-1 pr-0.5" aria-label="本地目录树">
-        <div className="flex items-center justify-between gap-2 px-1">
-          <p className={sectionLabelClassName}>文件</p>
-          <Button
-            variant="icon"
-            size="compact"
-            title="手动刷新目录树"
-            onClick={() => onRefreshKnowledgeBase(activeKnowledgeBase.id)}
-            disabled={isBusy}
-          >
-            <RefreshCw size={13} />
+            return (
+              <ListRow
+                key={knowledgeBase.id}
+                active={knowledgeBase.id === activeKnowledgeBase.id}
+                error={knowledgeBase.status === "error"}
+                className="py-1.5"
+                aria-label={`${knowledgeBase.name}，${knowledgeBaseSummary}`}
+                title={knowledgeBaseSummary}
+                onClick={() => onSelectKnowledgeBase(knowledgeBase.id)}
+              >
+                {knowledgeBase.status === "error" ? <AlertCircle size={15} /> : <Database size={15} />}
+                <OverflowTooltipText as="span" className="min-w-0 truncate text-[13px]" text={knowledgeBase.name} logArea="knowledge_base_row_name" />
+              </ListRow>
+            );
+          })}
+          <Button variant="ghost" className="w-full justify-start px-2.5 text-[13px] text-ink-muted" onClick={onAddKnowledgeBase}>
+            <Plus size={15} />
+            连接资料库
           </Button>
         </div>
-        <ScanReportSummary knowledgeBase={activeKnowledgeBase} />
-        <FileTree
-          nodes={fileTree}
-          activeNoteId={activeNoteId}
-          activeDocumentId={activeDocumentId}
-          collapsedFolderPaths={collapsedFolderPaths}
-          isFiltered={Boolean(searchTerm.trim())}
-          onToggleFolder={onToggleFolder}
-          onSelectNote={onSelectNote}
-          onSelectDocument={onSelectDocument}
-          onRenameNote={onRenameNote}
-          onDeleteNote={onDeleteNote}
-          onOpenNoteHistory={onOpenNoteHistory}
-          onRenameDocument={onRenameDocument}
-          onDeleteDocument={onDeleteDocument}
-          onOpenDocumentHistory={onOpenDocumentHistory}
-          onCreateMarkdown={onCreateMarkdown}
-          onCreateText={onCreateText}
-          onCreateFolder={onCreateFolder}
-          onCreateProjectInstruction={onCreateProjectInstruction}
-        />
+
+        <OperationNotice isBusy={isBusy} busyLabel={busyLabel} notice={notice} />
+
+        <div className="shrink-0 px-1.5 py-1.5">
+          <label className={cn("flex min-h-8 items-center gap-2 rounded-control bg-white/70 px-2 text-ink-muted", focusShellClassName)}>
+            <Search size={14} />
+            <input
+              className="min-w-0 w-full border-0 bg-transparent text-[13px] outline-0"
+              value={searchTerm}
+              onChange={(event) => onSearchChange(event.target.value)}
+              placeholder="过滤文件"
+              type="search"
+            />
+          </label>
+        </div>
+
+        <div className="flex min-h-0 min-w-0 flex-1 flex-col overflow-auto pt-1 pr-0.5" aria-label="本地目录树">
+          <div className="flex items-center justify-between gap-2 px-1">
+            <p className={sectionLabelClassName}>文件</p>
+            <Button
+              variant="icon"
+              size="compact"
+              title="手动刷新目录树"
+              onClick={() => onRefreshKnowledgeBase(activeKnowledgeBase.id)}
+              disabled={isBusy}
+            >
+              <RefreshCw size={13} />
+            </Button>
+          </div>
+          <ScanReportSummary knowledgeBase={activeKnowledgeBase} />
+          <FileTree
+            nodes={fileTree}
+            activeNoteId={activeNoteId}
+            activeDocumentId={activeDocumentId}
+            collapsedFolderPaths={collapsedFolderPaths}
+            isFiltered={Boolean(searchTerm.trim())}
+            onToggleFolder={onToggleFolder}
+            onSelectNote={onSelectNote}
+            onSelectDocument={onSelectDocument}
+            onRenameNote={onRenameNote}
+            onDeleteNote={onDeleteNote}
+            onOpenNoteHistory={onOpenNoteHistory}
+            onRenameDocument={onRenameDocument}
+            onDeleteDocument={onDeleteDocument}
+            onOpenDocumentHistory={onOpenDocumentHistory}
+            onCreateMarkdown={onCreateMarkdown}
+            onCreateText={onCreateText}
+            onCreateFolder={onCreateFolder}
+            onCreateProjectInstruction={onCreateProjectInstruction}
+          />
+        </div>
+      </section>
       </div>
 
-      <Button variant="ghost" className="mt-auto w-full justify-start px-2.5 text-[13px] text-ink-muted" onClick={onOpenSettings}>
+      <Button variant="ghost" className="w-full shrink-0 justify-start px-2.5 text-[13px] text-ink-muted" onClick={onOpenSettings}>
         <Settings size={16} />
         设置
       </Button>

@@ -1,6 +1,5 @@
 import { History, Book, PanelRightClose, Play, Plus, ShieldAlert, X } from "lucide-react";
-import { cn } from "../shared/cn";
-import { useRef } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Button } from "../shared/Button";
 import { Checkbox } from "../shared/Checkbox";
 import { OverflowTooltipText } from "../shared/OverflowTooltipText";
@@ -151,7 +150,10 @@ export function AgentPanel({
   // AgentPanel 三个 popover 共用同一个外层 aside 作为 ref 容器：
   // 点击 Agent 面板以外的区域才关闭浮层；面板内切入别的功能按钮时由各按钮的 toggle 自行处理。
   const panelRef = useRef<HTMLElement | null>(null);
-  useDismissable(isSessionListOpen, onToggleSessionList, { externalRef: panelRef });
+  /** 窄屏会整栏隐藏左侧导航，会话列表改回协作区浮层。 */
+  const sidebarHidden = useSidebarHidden();
+  const showSessionPopover = sidebarHidden && isSessionListOpen;
+  useDismissable(showSessionPopover, onToggleSessionList, { externalRef: panelRef });
   useDismissable(isSessionContextOpen, onToggleSessionContext, { externalRef: panelRef });
   useDismissable(isScopeSelectorOpen, onToggleScopeSelector, { externalRef: panelRef });
 
@@ -170,24 +172,24 @@ export function AgentPanel({
           <Button variant="icon" title="查看上下文" onClick={onToggleSessionContext}>
             <Book size={16} />
           </Button>
-          <Button
-            variant="icon"
-            className="relative"
-            title={inFlightSessionIds.length ? `${inFlightSessionIds.length} 个任务运行中` : "会话历史"}
-            onClick={onToggleSessionList}
-          >
-            <History size={16} />
-            {inFlightSessionIds.length > 0 && (
-              <span
-                className={cn(
-                  "absolute -top-0.5 -right-0.5 flex size-3.5 items-center justify-center rounded-full bg-accent text-[9px] font-bold text-white",
-                )}
-                aria-label={`${inFlightSessionIds.length} 个任务运行中`}
-              >
-                {inFlightSessionIds.length}
-              </span>
-            )}
-          </Button>
+          {sidebarHidden && (
+            <Button
+              variant="icon"
+              className="relative"
+              title={inFlightSessionIds.length ? `${inFlightSessionIds.length} 个任务运行中` : "会话历史"}
+              onClick={onToggleSessionList}
+            >
+              <History size={16} />
+              {inFlightSessionIds.length > 0 && (
+                <span
+                  className="absolute -top-0.5 -right-0.5 flex size-3.5 items-center justify-center rounded-full bg-accent text-[9px] font-bold text-white"
+                  aria-label={`${inFlightSessionIds.length} 个任务运行中`}
+                >
+                  {inFlightSessionIds.length}
+                </span>
+              )}
+            </Button>
+          )}
           <Button variant="icon" title="新建会话" onClick={onCreateSession}>
             <Plus size={16} />
           </Button>
@@ -213,7 +215,7 @@ export function AgentPanel({
         />
       </div>
 
-      {isSessionListOpen && (
+      {showSessionPopover && (
         <AgentSessionHistoryPopover
           sessions={sessions}
           activeSession={activeSession}
@@ -337,4 +339,20 @@ export function AgentPanel({
       />
     </aside>
   );
+}
+
+/** 与样式里隐藏左侧栏的断点一致，窄窗口才把会话入口放回协作区。 */
+function useSidebarHidden() {
+  const query = "(max-width: 760px)";
+  const [hidden, setHidden] = useState(() => typeof window !== "undefined" && window.matchMedia(query).matches);
+
+  useEffect(() => {
+    const media = window.matchMedia(query);
+    const onChange = () => setHidden(media.matches);
+    onChange();
+    media.addEventListener("change", onChange);
+    return () => media.removeEventListener("change", onChange);
+  }, []);
+
+  return hidden;
 }

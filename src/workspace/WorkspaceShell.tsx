@@ -697,6 +697,18 @@ export function WorkspaceShell() {
           onOpenSchedules={() => setIsSchedulesOpen(true)}
           schedulesActive={isSchedulesOpen}
           onOpenSettings={handleOpenSettings}
+          sessions={currentSnapshot.sessions}
+          activeSessionId={activeSession.id}
+          inFlightSessionIds={inFlightSessionIds}
+          queuedSessionIds={queuedSessionIds}
+          onSelectSession={(sessionId) => {
+            setIsSchedulesOpen(false);
+            if (!agentOpen) {
+              setAgentOpen(true);
+            }
+            void handleSelectSession(sessionId);
+          }}
+          onDeleteSession={handleDeleteSession}
         />
         <div
           className={`workspace-resizer workspace-resizer-sidebar ${resizingPane === "sidebar" ? "active" : ""}`}
