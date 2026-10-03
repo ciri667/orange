@@ -1,4 +1,4 @@
-import { Check, Clock, Copy, Database, FolderOpen, Gauge, Layers3, Loader2, MessageSquareText, Pencil, Sparkles, Trash2, X } from "lucide-react";
+import { Check, Clock, Copy, Database, FolderOpen, Gauge, Layers3, Pencil, Sparkles, X } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import ReactMarkdown from "react-markdown";
 import rehypeSanitize from "rehype-sanitize";
@@ -8,6 +8,7 @@ import { Checkbox } from "../shared/Checkbox";
 import { Chip } from "../shared/Chip";
 import { cn } from "../shared/cn";
 import { listRowClassName } from "../shared/ListRow";
+import { SessionList } from "./SessionList";
 import { logWarn } from "../shared/logger";
 import {
   createMarkdownComponents,
@@ -19,11 +20,8 @@ import { OverflowTooltipText } from "../shared/OverflowTooltipText";
 import { agentPopoverClassName, fieldTextareaClassName, popoverHeaderClassName, sectionLabelClassName } from "../shared/ui";
 import {
   getScopeSummaryLabel,
-  getImSessionRecentMessageLabel,
-  getImSessionSourceLabel,
   getSessionKnowledgeBaseLabel,
   getSessionRecoveryNoteLabel,
-  getSessionTypeLabel,
 } from "../shared/selectors";
 import { conversationImageSrc } from "./conversationImages";
 import {
@@ -174,7 +172,7 @@ export function AgentSecurityLevelControl({
   );
 }
 
-/** 会话历史浮层，展示可恢复会话并提供删除入口。 */
+/** 窄屏侧栏被隐藏时，用同一套紧凑列表补回会话入口。 */
 export function AgentSessionHistoryPopover({
   sessions,
   activeSession,
@@ -194,8 +192,6 @@ export function AgentSessionHistoryPopover({
   onSelectSession: (sessionId: string) => void;
   onDeleteSession: (sessionId: string) => void;
 }) {
-  const runningIds = new Set(inFlightSessionIds);
-  const queuedIds = new Set(queuedSessionIds);
   return (
     <section className={agentPopoverClassName} aria-label="会话历史">
       <div className={popoverHeaderClassName}>
@@ -207,88 +203,15 @@ export function AgentSessionHistoryPopover({
           <X size={15} />
         </Button>
       </div>
-      <div className="mt-3 grid content-start gap-2 overflow-auto pr-0.5">
-        {sessions.map((session) => (
-          <div
-            className={listRowClassName({
-              active: session.id === activeSession.id,
-              className: "grid grid-cols-[minmax(0,1fr)_auto] border-border-translucent bg-surface-translucent p-1.5",
-            })}
-            key={session.id}
-          >
-            <button className="grid min-w-0 gap-1 p-1 text-left" type="button" onClick={() => onSelectSession(session.id)}>
-              <span className="flex min-w-0 items-center gap-1.5">
-                {runningIds.has(session.id) ? (
-                  <Loader2 size={14} className="shrink-0 animate-spin text-accent" aria-label="运行中" />
-                ) : (
-                  <MessageSquareText size={14} className="shrink-0" />
-                )}
-                <OverflowTooltipText as="strong" className="min-w-0 truncate text-ink-strong" text={session.title} logArea="agent_session_history_title" />
-              </span>
-              <span className="grid min-w-0 grid-cols-[minmax(0,max-content)_minmax(0,1fr)] items-center gap-x-1.5 gap-y-[3px] text-xs text-ink-muted">
-                {session.imIdentity ? (
-                  <span className="max-w-full shrink-0 truncate rounded-full border border-border px-1.5 py-px text-[11px] font-medium text-ink-muted">
-                    {getImSessionSourceLabel(session)}
-                  </span>
-                ) : (
-                  <OverflowTooltipText className="min-w-0 truncate leading-[1.35]" text={getSessionTypeLabel(session.type)} logArea="agent_session_history_type" />
-                )}
-                <OverflowTooltipText className="min-w-0 truncate leading-[1.35]" text={getSessionKnowledgeBaseLabel(session, knowledgeBases)} logArea="agent_session_history_scope" />
-                {getImSessionRecentMessageLabel(session) && (
-                  <OverflowTooltipText
-                    className="col-span-full min-w-0 truncate"
-                    text={getImSessionRecentMessageLabel(session)}
-                    logArea="agent_session_history_recent_message"
-                  />
-                )}
-                <OverflowTooltipText
-                  as="time"
-                  className="col-span-full min-w-0 truncate leading-[1.35]"
-                  dateTime={session.createdAt}
-                  text={`创建：${session.createdAt}`}
-                  logArea="agent_session_history_created_at"
-                />
-                <OverflowTooltipText
-                  as="time"
-                  className="col-span-full min-w-0 truncate leading-[1.35]"
-                  dateTime={session.updatedAt}
-                  text={`最近：${session.updatedAt}`}
-                  logArea="agent_session_history_updated_at"
-                />
-              </span>
-              {runningIds.has(session.id) && (
-                <span className="rounded-full border border-border px-1.5 py-0.5 text-xs text-ink-muted">
-                  运行中
-                </span>
-              )}
-              {queuedIds.has(session.id) && !runningIds.has(session.id) && (
-                <span className="rounded-control border border-border bg-surface px-1.5 py-0.5 text-xs text-ink-muted">
-                  排队
-                </span>
-              )}
-              {session.pendingChange?.status === "pending" && (
-                <span className="rounded-control border border-[rgba(var(--danger-rgb),0.26)] bg-danger-soft px-1.5 py-0.5 text-xs text-danger">
-                  {sessionHasPendingWriteConflict(session, sessions) ? "与其它会话改同一文件" : "待确认 diff"}
-                </span>
-              )}
-              {session.pendingChangeSet?.status === "pending" && session.pendingChange?.status !== "pending" && (
-                <span className="rounded-control border border-[rgba(var(--danger-rgb),0.26)] bg-danger-soft px-1.5 py-0.5 text-xs text-danger">
-                  {sessionHasPendingWriteConflict(session, sessions) ? "与其它会话改同一文件" : "待确认变更集"}
-                </span>
-              )}
-            </button>
-            <Button
-              variant="icon"
-              tone="danger"
-              className="size-[30px] min-h-[30px] shrink-0"
-              title="删除会话"
-              onClick={() => onDeleteSession(session.id)}
-            >
-              <Trash2 size={14} />
-            </Button>
-          </div>
-        ))}
-      </div>
+      <SessionList
+        sessions={sessions}
+        activeSessionId={activeSession.id}
+        knowledgeBases={knowledgeBases}
+        inFlightSessionIds={inFlightSessionIds}
+        queuedSessionIds={queuedSessionIds}
+        onSelectSession={onSelectSession}
+        onDeleteSession={onDeleteSession}
+      />
     </section>
   );
 }
