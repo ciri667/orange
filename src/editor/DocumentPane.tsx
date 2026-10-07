@@ -4,7 +4,8 @@ import { useRef } from "react";
 import { Button } from "../shared/Button";
 import { VoiceDictationButton } from "../shared/VoiceDictationButton";
 import { logInfo, logWarn } from "../shared/logger";
-import type { DocumentFileType, DocumentPreview, ExportFormat, KnowledgeBase, WorkspaceDocument } from "../shared/types";
+import type { AgentSession, DocumentFileType, DocumentPreview, ExportFormat, KnowledgeBase, WorkspaceDocument } from "../shared/types";
+import { RelatedSessionsButton } from "../agent/RelatedSessionsButton";
 import { EditorEmptyHeader, EditorFileHeader, EditorMetaStrip, EditorMoreActionMenu } from "./EditorFileChrome";
 import { LineNumberedTextarea } from "./LineNumberedTextarea";
 import { countLogicalLines } from "./lineNumberUtils";
@@ -76,6 +77,8 @@ export function DocumentPane({
   onRenameDocument,
   onDeleteDocument,
   onNotice,
+  sessions = [],
+  onSelectSession,
 }: {
   document?: WorkspaceDocument;
   knowledgeBase: KnowledgeBase;
@@ -91,6 +94,8 @@ export function DocumentPane({
   onRenameDocument: () => void;
   onDeleteDocument: () => void;
   onNotice?: (message: string) => void;
+  sessions?: AgentSession[];
+  onSelectSession?: (sessionId: string) => void;
 }) {
   const textAreaRef = useRef<HTMLTextAreaElement | null>(null);
 
@@ -124,6 +129,13 @@ export function DocumentPane({
         }}
         actions={
           <>
+          {onSelectSession ? (
+            <RelatedSessionsButton
+              sessions={sessions}
+              file={{ id: document.id, knowledgeBaseId: document.knowledgeBaseId, path: document.path }}
+              onSelectSession={onSelectSession}
+            />
+          ) : null}
           {isTextDocument && (
             <VoiceDictationButton
               getTextarea={() => textAreaRef.current}

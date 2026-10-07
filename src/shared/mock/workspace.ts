@@ -486,6 +486,39 @@ function createInitialSessions(): AgentSession[] {
       updatedAt: "今天 14:18",
       messages: [],
     },
+    {
+      id: "session-orange-peel",
+      title: "帮我看看收录标准",
+      type: "knowledge-base",
+      knowledgeBaseIds: ["kb-personal", "kb-work"],
+      pinnedNoteIds: [],
+      securityLevel: "basic",
+      createdAt: "2026/10/01 09:12",
+      updatedAt: "2026/10/01 09:40",
+      messages: [
+        {
+          id: "user-orange",
+          role: "user",
+          content: "橙皮收录标准后来写进立项笔记了吗？",
+        },
+        {
+          id: "assistant-orange",
+          role: "assistant",
+          content: "立项笔记里已经有产品边界，还没有单独的收录标准。",
+          citations: [
+            {
+              knowledgeBaseId: "kb-personal",
+              knowledgeBaseName: "个人知识库",
+              noteId: "note-product-brief",
+              title: "Agent 笔记应用立项",
+              path: "00-Inbox/Agent 笔记应用立项.md",
+              snippet: "产品边界",
+              score: 1,
+            },
+          ],
+        },
+      ],
+    },
   ];
 }
 

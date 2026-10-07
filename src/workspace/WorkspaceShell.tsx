@@ -791,6 +791,14 @@ export function WorkspaceShell() {
             onRenameDocument={() => openRenameDocumentDialog()}
             onDeleteDocument={() => handleDeleteDocument()}
             onNotice={setNotice}
+            sessions={currentSnapshot.sessions}
+            onSelectSession={(sessionId) => {
+              setIsSchedulesOpen(false);
+              if (!agentOpen) {
+                setAgentOpen(true);
+              }
+              void handleSelectSession(sessionId);
+            }}
               />
             ) : (
               <EditorPane
@@ -819,6 +827,14 @@ export function WorkspaceShell() {
             onCreateMarkdown={(parentPath) => openCreateDialog("markdown", parentPath)}
             onCreateText={(parentPath) => openCreateDialog("text", parentPath)}
             onNotice={setNotice}
+            sessions={currentSnapshot.sessions}
+            onSelectSession={(sessionId) => {
+              setIsSchedulesOpen(false);
+              if (!agentOpen) {
+                setAgentOpen(true);
+              }
+              void handleSelectSession(sessionId);
+            }}
               />
             )}
           </div>

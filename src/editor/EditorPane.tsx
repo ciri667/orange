@@ -5,6 +5,7 @@ import ReactMarkdown, { defaultUrlTransform } from "react-markdown";
 import type { UrlTransform } from "react-markdown";
 import rehypeSanitize, { defaultSchema } from "rehype-sanitize";
 import type { Options as RehypeSanitizeOptions } from "rehype-sanitize";
+import { RelatedSessionsButton } from "../agent/RelatedSessionsButton";
 import { DiffPanel } from "../diff/DiffPanel";
 import type { ReviewCommentDraft } from "../diff/DiffPanel";
 import { Button } from "../shared/Button";
@@ -17,7 +18,7 @@ import {
 } from "../shared/markdown";
 import { applyNoteTags, extractNoteTags } from "../shared/noteTags";
 import { SegmentedControl, SegmentedControlItem } from "../shared/SegmentedControl";
-import type { ExportFormat, KnowledgeBase, MarkdownViewMode, Note, ProposedChange } from "../shared/types";
+import type { AgentSession, ExportFormat, KnowledgeBase, MarkdownViewMode, Note, ProposedChange } from "../shared/types";
 import { useDismissable } from "../shared/useDismissable";
 import { EditorEmptyHeader, EditorFileHeader, EditorMetaStrip, EditorMoreActionMenu } from "./EditorFileChrome";
 import { LineNumberedTextarea } from "./LineNumberedTextarea";
@@ -91,6 +92,8 @@ export function EditorPane({
   onCreateMarkdown,
   onCreateText,
   onNotice,
+  sessions = [],
+  onSelectSession,
 }: {
   note?: Note;
   knowledgeBase: KnowledgeBase;
@@ -116,6 +119,8 @@ export function EditorPane({
   onSubmitReviewComments: () => void;
   onCreateMarkdown: (parentPath: string) => void;
   onCreateText: (parentPath: string) => void;
+  sessions?: AgentSession[];
+  onSelectSession?: (sessionId: string) => void;
   onNotice?: (message: string) => void;
 }) {
   /** 分屏模式下同步源码和预览滚动；非分屏时 hook 会保持静默。 */
@@ -193,6 +198,13 @@ export function EditorPane({
         }}
         actions={
           <>
+          {onSelectSession ? (
+            <RelatedSessionsButton
+              sessions={sessions}
+              file={{ id: note.id, knowledgeBaseId: note.knowledgeBaseId, path: note.path }}
+              onSelectSession={onSelectSession}
+            />
+          ) : null}
           {viewMode !== "preview" ? (
             <VoiceDictationButton
               getTextarea={() => editorRef.current}
