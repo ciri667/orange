@@ -4,7 +4,10 @@ import { cn } from "../shared/cn";
 import { OverflowTooltipText } from "../shared/OverflowTooltipText";
 import type { AgentToolCall } from "../shared/types";
 
-/** 工具调用轨迹列表，让用户知道 Agent 本轮是否访问了知识库。 */
+/**
+ * 2026-08-22 之前的扁平「运行信息」。
+ * 只给没有 trace / turnDurationMs 的历史消息用；过程区覆盖这些会话后可整文件删除。
+ */
 export function ToolCallList({ toolCalls }: { toolCalls?: AgentToolCall[] }) {
   /** 判断是否存在运行中或失败的调用，异常状态默认展开以免被折叠隐藏。 */
   const hasAttentionStatus = useMemo(

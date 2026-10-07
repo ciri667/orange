@@ -794,6 +794,8 @@ function AgentMessageItem({
         />
       ) : null}
       {body}
+      {/* 2026-08-22 之前落盘的消息没有 trace / turnDurationMs，仍走扁平「运行信息」。
+          旧会话不再需要兼容时，连同 ToolCallList 一起删除。 */}
       {!usesTurnTrace ? <ToolCallList toolCalls={message.toolCalls} /> : null}
       <CitationList citations={message.citations} />
     </article>
