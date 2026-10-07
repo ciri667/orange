@@ -248,6 +248,9 @@ pub fn build_schedule_agent_session(job: &ScheduledJob) -> AgentSession {
         model_provider_id: job.model_provider_id.clone(),
         model_id: job.model_id.clone(),
         context_usage: None,
+        title_customized: false,
+        pinned_at: None,
+        archived_at: None,
     }
 }
 

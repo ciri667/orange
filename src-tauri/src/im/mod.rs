@@ -324,6 +324,9 @@ pub(crate) fn build_im_agent_session(
         model_provider_id: None,
         model_id: None,
         context_usage: None,
+        title_customized: false,
+        pinned_at: None,
+        archived_at: None,
     }
 }
 

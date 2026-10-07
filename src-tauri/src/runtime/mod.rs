@@ -3117,6 +3117,10 @@ fn resolve_session_index(
 
 /** 空白新会话的标题直接使用用户第一条输入；纯图片消息用张数兜底。 */
 fn apply_first_prompt_title(session: &mut AgentSession, prompt: &str, image_count: usize) {
+    if session.title_customized {
+        return;
+    }
+
     let has_user_message = session
         .messages
         .iter()
@@ -3449,7 +3453,7 @@ mod tests {
                 id: "session-a".to_owned(),
                 title: "测试会话".to_owned(),
                 im_identity: None,
-            schedule_identity: None,
+                schedule_identity: None,
                 r#type: "knowledge-base".to_owned(),
                 knowledge_base_ids: vec!["kb-a".to_owned()],
                 active_note_id: Some("note-a".to_owned()),
@@ -3466,6 +3470,9 @@ mod tests {
                 model_provider_id: None,
                 model_id: None,
                 context_usage: None,
+                title_customized: false,
+                pinned_at: None,
+                archived_at: None,
             }],
             active_knowledge_base_id: "kb-a".to_owned(),
             active_note_id: "note-a".to_owned(),

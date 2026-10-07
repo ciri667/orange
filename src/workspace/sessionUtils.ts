@@ -400,9 +400,11 @@ export function rewindSessionToUserMessage(session: AgentSession, messageId: str
   return {
     ...session,
     title:
-      isFirstUser && session.title.trim() === oldContent.trim()
-        ? buildTitleFromFirstPrompt(nextPrompt, session.messages[messageIndex].images?.length ?? 0)
-        : session.title,
+      session.titleCustomized
+        ? session.title
+        : isFirstUser && session.title.trim() === oldContent.trim()
+          ? buildTitleFromFirstPrompt(nextPrompt, session.messages[messageIndex].images?.length ?? 0)
+          : session.title,
     messages,
     pendingChange: undefined,
     pendingChangeSet: undefined,

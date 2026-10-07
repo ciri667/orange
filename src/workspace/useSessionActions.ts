@@ -72,6 +72,9 @@ export function useSessionActions(options: SessionActionsOptions) {
       handleToggleScopeSelector: noop,
       handleToggleAgentPanel: noop,
       handleSessionSecurityLevelChange: noopAsync,
+      handleRenameSession: noopAsync,
+      handleTogglePinSession: noopAsync,
+      handleToggleArchiveSession: noopAsync,
     };
   }
 
@@ -430,6 +433,72 @@ export function useSessionActions(options: SessionActionsOptions) {
     await persistSecurityLevel();
   }
 
+  /** 改标题、置顶或归档都只回写当前这一条会话。 */
+  async function persistSessionFields(sessionId: string, busyLabel: string, patch: (session: AgentSession) => AgentSession | null) {
+    const latestSnapshot = snapshotRef.current ?? currentSnapshot;
+    const session = latestSnapshot.sessions.find((item) => item.id === sessionId);
+    if (!session || !isPersistedSession(latestSnapshot, session)) {
+      setNotice("请先新建或发送一条消息创建会话。");
+      return;
+    }
+
+    const nextSession = patch(session);
+    if (!nextSession) {
+      return;
+    }
+
+    beginBusy(busyLabel);
+
+    try {
+      commitSnapshot(await saveSession(latestSnapshot, nextSession));
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : String(error));
+    } finally {
+      endBusy();
+    }
+  }
+
+  /** 用户标题优先于首条消息和 IM 自动标题。空白标题不保存。 */
+  function handleRenameSession(sessionId: string, title: string) {
+    const nextTitle = title.trim();
+    if (!nextTitle) {
+      return;
+    }
+
+    void persistSessionFields(sessionId, "正在更新会话标题...", (session) => {
+      if (session.title === nextTitle && session.titleCustomized) {
+        return null;
+      }
+      return {
+        ...session,
+        title: nextTitle,
+        titleCustomized: true,
+        updatedAt: formatLocalDateTime(),
+      };
+    });
+  }
+
+  /** 置顶只改变列表分组，不改变会话范围和消息。 */
+  function handleTogglePinSession(sessionId: string) {
+    void persistSessionFields(sessionId, "正在更新置顶...", (session) => ({
+      ...session,
+      pinnedAt: session.pinnedAt ? undefined : formatLocalDateTime(),
+      updatedAt: formatLocalDateTime(),
+    }));
+  }
+
+  /** 归档从默认列表收起。定时任务和 IM 映射仍指向这条会话。 */
+  function handleToggleArchiveSession(sessionId: string) {
+    const latestSnapshot = snapshotRef.current ?? currentSnapshot;
+    const session = latestSnapshot.sessions.find((item) => item.id === sessionId);
+    const archiving = !session?.archivedAt;
+    void persistSessionFields(sessionId, archiving ? "正在归档会话..." : "正在取消归档...", (current) => ({
+      ...current,
+      archivedAt: current.archivedAt ? undefined : formatLocalDateTime(),
+      updatedAt: formatLocalDateTime(),
+    }));
+  }
+
   return {
     handleCreateSession,
     handleSelectSession,
@@ -442,5 +511,8 @@ export function useSessionActions(options: SessionActionsOptions) {
     handleToggleScopeSelector,
     handleToggleAgentPanel,
     handleSessionSecurityLevelChange,
+    handleRenameSession,
+    handleTogglePinSession,
+    handleToggleArchiveSession,
   };
 }

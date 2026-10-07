@@ -172,6 +172,10 @@ fn build_local_response(
 
 /** 空白新会话的标题直接使用用户第一条输入，避免按知识库或文档名组装默认标题。 */
 fn apply_first_prompt_title(session: &mut crate::domain::AgentSession, prompt: &str) {
+    if session.title_customized {
+        return;
+    }
+
     let has_user_message = session
         .messages
         .iter()
@@ -344,6 +348,9 @@ mod tests {
             model_provider_id: None,
             model_id: None,
             context_usage: None,
+            title_customized: false,
+            pinned_at: None,
+            archived_at: None,
         };
         let request = AgentTurnRequest {
             prompt: "已发送消息".to_owned(),
@@ -408,6 +415,9 @@ mod tests {
             model_provider_id: None,
             model_id: None,
             context_usage: None,
+            title_customized: false,
+            pinned_at: None,
+            archived_at: None,
         };
         let request = AgentTurnRequest {
             prompt: "新正文".to_owned(),

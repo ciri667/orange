@@ -976,7 +976,9 @@ pub(super) fn resolve_or_create_im_session(
             } else {
                 // 旧版映射会话首次再次收到 IM 消息时补齐完整身份和标题。
                 session.im_identity = Some(im_identity.clone());
-                session.title = crate::im::format_im_session_title(im_identity);
+                if !session.title_customized {
+                    session.title = crate::im::format_im_session_title(im_identity);
+                }
                 "migrated"
             };
 

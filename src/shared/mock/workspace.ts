@@ -793,6 +793,7 @@ export function runMockAgentTurn(
   );
 
   if (
+    !session.titleCustomized &&
     session.title.trim() === "新会话" &&
     !session.messages.some((message) => message.role === "user" && message.id !== clientMessageId)
   ) {

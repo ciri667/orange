@@ -1003,6 +1003,9 @@ mod tests {
             model_provider_id: None,
             model_id: None,
             context_usage: None,
+            title_customized: false,
+            pinned_at: None,
+            archived_at: None,
         };
         fold_pending_change_into_change_set(&mut session);
         assert!(session.pending_change.is_none());
@@ -1055,7 +1058,7 @@ mod tests {
                 id: "session-a".to_owned(),
                 title: "测试会话".to_owned(),
                 im_identity: None,
-            schedule_identity: None,
+                schedule_identity: None,
                 r#type: "knowledge-base".to_owned(),
                 knowledge_base_ids: vec!["kb-a".to_owned()],
                 active_note_id: Some("note-a".to_owned()),
@@ -1072,6 +1075,9 @@ mod tests {
                 model_provider_id: None,
                 model_id: None,
                 context_usage: None,
+                title_customized: false,
+                pinned_at: None,
+                archived_at: None,
             }],
             active_knowledge_base_id: "kb-a".to_owned(),
             active_note_id: "note-a".to_owned(),

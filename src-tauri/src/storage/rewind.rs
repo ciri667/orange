@@ -38,7 +38,10 @@ pub fn rewind_session_to_user_message(
     session.pending_execution = None;
     reconcile_context_summary_after_rewind(session);
 
-    if is_first_user_message && session.title.trim() == old_content.trim() {
+    if !session.title_customized
+        && is_first_user_message
+        && session.title.trim() == old_content.trim()
+    {
         session.title = if prompt.is_empty() {
             match session.messages[message_index].images.len() {
                 0 => session.title.clone(),
@@ -143,6 +146,9 @@ mod tests {
             model_provider_id: None,
             model_id: None,
             context_usage: None,
+            title_customized: false,
+            pinned_at: None,
+            archived_at: None,
         }
     }
 
@@ -191,6 +197,17 @@ mod tests {
         assert_eq!(ids, vec!["user-1", "assistant-1", "user-2"]);
         assert_eq!(session.messages[2].content, "改过的第二句");
         assert_eq!(session.title, "第一句");
+    }
+
+    #[test]
+    fn rewind_keeps_customized_title_even_when_it_matches_first_prompt() {
+        let mut session = two_turn_session();
+        session.title_customized = true;
+
+        rewind_session_to_user_message(&mut session, "user-1", "改过的第一句").unwrap();
+
+        assert_eq!(session.title, "第一句");
+        assert!(session.title_customized);
     }
 
     #[test]

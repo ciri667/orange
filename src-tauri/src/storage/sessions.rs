@@ -566,7 +566,9 @@ pub fn migrate_legacy_im_session_identities(
             last_message,
         );
 
-        session.title = crate::im::format_im_session_title(&identity);
+        if !session.title_customized {
+            session.title = crate::im::format_im_session_title(&identity);
+        }
         session.im_identity = Some(identity);
         migrated_sessions.push(session.clone());
     }
@@ -888,7 +890,34 @@ mod tests {
             model_provider_id: None,
             model_id: None,
             context_usage: None,
+            title_customized: false,
+            pinned_at: None,
+            archived_at: None,
         }
+    }
+
+    #[test]
+    fn old_session_json_defaults_title_pin_and_archive() {
+        let session: AgentSession = serde_json::from_str(
+            r#"{
+                "id": "session-old",
+                "title": "旧会话",
+                "type": "knowledge-base",
+                "knowledgeBaseIds": ["kb-a"],
+                "activeNoteId": null,
+                "pinnedNoteIds": [],
+                "messages": [],
+                "pendingChange": null,
+                "securityLevel": "basic",
+                "createdAt": "2026/01/01 10:00",
+                "updatedAt": "2026/01/01 10:00"
+            }"#,
+        )
+        .expect("旧会话 JSON 应能反序列化");
+
+        assert!(!session.title_customized);
+        assert!(session.pinned_at.is_none());
+        assert!(session.archived_at.is_none());
     }
 
     #[test]

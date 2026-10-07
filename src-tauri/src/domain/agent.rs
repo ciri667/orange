@@ -411,6 +411,15 @@ pub struct AgentSession {
     /** 最近一次非 abort、非 error、usage>0 的成功响应记账，供界面展示占用。 */
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub context_usage: Option<AgentContextUsage>,
+    /** 用户改过标题后为 true，首条消息和 IM 自动标题不再覆盖。 */
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub title_customized: bool,
+    /** 有值表示置顶。使用和 updated_at 相同的本地时间字符串。 */
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pinned_at: Option<String>,
+    /** 有值表示从默认列表收起。搜索和「已归档」仍能找到。 */
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub archived_at: Option<String>,
 }
 
 /** 跨会话记忆的分类枚举，覆盖计划文档列举的长期偏好类型。 */

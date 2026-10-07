@@ -606,6 +606,12 @@ export interface AgentSecuritySettings {
 export interface AgentSession {
   id: string;
   title: string;
+  /** 用户改过标题后为 true，首条消息和 IM 标题不再覆盖。 */
+  titleCustomized?: boolean;
+  /** 有值表示置顶。使用和 updatedAt 相同的本地时间字符串。 */
+  pinnedAt?: string;
+  /** 有值表示从默认列表收起。搜索和「已归档」仍能找到。 */
+  archivedAt?: string;
   /** IM 会话身份；本地创建的 Agent 会话不携带该字段。 */
   imIdentity?: ImSessionIdentity;
   /** 定时任务身份；普通本地会话和 IM 会话不携带该字段。 */
