@@ -58,6 +58,10 @@ export function AgentPanel({
   onCreateSession,
   onSelectSession,
   onDeleteSession,
+  onRenameSession,
+  onTogglePinSession,
+  onToggleArchiveSession,
+  onShowSessionList,
   onToggleScopeKnowledgeBase,
   onPromptChange,
   onSelectedSkillIdsChange,
@@ -121,6 +125,11 @@ export function AgentPanel({
   onCreateSession: () => void;
   onSelectSession: (sessionId: string) => void;
   onDeleteSession: (sessionId: string) => void;
+  onRenameSession: (sessionId: string, title: string) => void;
+  onTogglePinSession: (sessionId: string) => void;
+  onToggleArchiveSession: (sessionId: string) => void;
+  /** 侧栏可见时切回会话列表；窄屏仍用本面板里的历史浮层。 */
+  onShowSessionList: () => void;
   onToggleScopeKnowledgeBase: (knowledgeBaseId: string) => void;
   onPromptChange: (value: string) => void;
   onSelectedSkillIdsChange: (skillIds: string[]) => void;
@@ -172,24 +181,28 @@ export function AgentPanel({
           <Button variant="icon" title="查看上下文" onClick={onToggleSessionContext}>
             <Book size={16} />
           </Button>
-          {sidebarHidden && (
-            <Button
-              variant="icon"
-              className="relative"
-              title={inFlightSessionIds.length ? `${inFlightSessionIds.length} 个任务运行中` : "会话历史"}
-              onClick={onToggleSessionList}
-            >
-              <History size={16} />
-              {inFlightSessionIds.length > 0 && (
-                <span
-                  className="absolute -top-0.5 -right-0.5 flex size-3.5 items-center justify-center rounded-full bg-accent text-[9px] font-bold text-white"
-                  aria-label={`${inFlightSessionIds.length} 个任务运行中`}
-                >
-                  {inFlightSessionIds.length}
-                </span>
-              )}
-            </Button>
-          )}
+          <Button
+            variant="icon"
+            className="relative"
+            title={inFlightSessionIds.length ? `${inFlightSessionIds.length} 个任务运行中` : "会话历史"}
+            onClick={() => {
+              if (sidebarHidden) {
+                onToggleSessionList();
+              } else {
+                onShowSessionList();
+              }
+            }}
+          >
+            <History size={16} />
+            {inFlightSessionIds.length > 0 && (
+              <span
+                className="absolute -top-0.5 -right-0.5 flex size-3.5 items-center justify-center rounded-full bg-accent text-[9px] font-bold text-white"
+                aria-label={`${inFlightSessionIds.length} 个任务运行中`}
+              >
+                {inFlightSessionIds.length}
+              </span>
+            )}
+          </Button>
           <Button variant="icon" title="新建会话" onClick={onCreateSession}>
             <Plus size={16} />
           </Button>
@@ -223,8 +236,12 @@ export function AgentPanel({
           inFlightSessionIds={inFlightSessionIds}
           queuedSessionIds={queuedSessionIds}
           onToggleSessionList={onToggleSessionList}
+          activeKnowledgeBaseId={activeKnowledgeBase.id}
           onSelectSession={onSelectSession}
           onDeleteSession={onDeleteSession}
+          onRenameSession={onRenameSession}
+          onTogglePinSession={onTogglePinSession}
+          onToggleArchiveSession={onToggleArchiveSession}
         />
       )}
 

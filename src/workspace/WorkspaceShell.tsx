@@ -69,6 +69,8 @@ export function WorkspaceShell() {
   const [collapsedFolderPaths, setCollapsedFolderPaths] = useState<Set<string>>(new Set());
   /** 会话历史浮层开关，和上下文、scope 浮层互斥。 */
   const [isSessionListOpen, setIsSessionListOpen] = useState(false);
+  /** 递增后让侧栏从文件树切回会话列表。 */
+  const [sessionPaneRequest, setSessionPaneRequest] = useState(0);
   /** 当前会话上下文浮层开关，避免长消息列表挤占主输入区。 */
   const [isSessionContextOpen, setIsSessionContextOpen] = useState(false);
   /** 会话工具范围选择器开关，用于多知识库 scope 管理。 */
@@ -424,6 +426,9 @@ export function WorkspaceShell() {
     handleToggleScopeSelector,
     handleToggleAgentPanel,
     handleSessionSecurityLevelChange,
+    handleRenameSession,
+    handleTogglePinSession,
+    handleToggleArchiveSession,
   } = useSessionActions({
     snapshot,
     userSettings,
@@ -715,6 +720,10 @@ export function WorkspaceShell() {
             void handleSelectSession(sessionId);
           }}
           onDeleteSession={handleDeleteSession}
+          onRenameSession={handleRenameSession}
+          onTogglePinSession={handleTogglePinSession}
+          onToggleArchiveSession={handleToggleArchiveSession}
+          sessionPaneRequest={sessionPaneRequest}
         />
         <div
           className={`workspace-resizer workspace-resizer-sidebar ${resizingPane === "sidebar" ? "active" : ""}`}
@@ -855,6 +864,10 @@ export function WorkspaceShell() {
             onCreateSession={handleCreateSession}
             onSelectSession={handleSelectSession}
             onDeleteSession={handleDeleteSession}
+            onRenameSession={handleRenameSession}
+            onTogglePinSession={handleTogglePinSession}
+            onToggleArchiveSession={handleToggleArchiveSession}
+            onShowSessionList={() => setSessionPaneRequest((current) => current + 1)}
             onToggleScopeKnowledgeBase={handleToggleScopeKnowledgeBase}
             onPromptChange={setAgentPrompt}
             onSelectedSkillIdsChange={setExplicitSkillIds}

@@ -182,6 +182,10 @@ export function AgentSessionHistoryPopover({
   onToggleSessionList,
   onSelectSession,
   onDeleteSession,
+  onRenameSession,
+  onTogglePinSession,
+  onToggleArchiveSession,
+  activeKnowledgeBaseId,
 }: {
   sessions: AgentSession[];
   activeSession: AgentSession;
@@ -191,6 +195,10 @@ export function AgentSessionHistoryPopover({
   onToggleSessionList: () => void;
   onSelectSession: (sessionId: string) => void;
   onDeleteSession: (sessionId: string) => void;
+  onRenameSession: (sessionId: string, title: string) => void;
+  onTogglePinSession: (sessionId: string) => void;
+  onToggleArchiveSession: (sessionId: string) => void;
+  activeKnowledgeBaseId?: string;
 }) {
   return (
     <section className={agentPopoverClassName} aria-label="会话历史">
@@ -209,8 +217,12 @@ export function AgentSessionHistoryPopover({
         knowledgeBases={knowledgeBases}
         inFlightSessionIds={inFlightSessionIds}
         queuedSessionIds={queuedSessionIds}
+        activeKnowledgeBaseId={activeKnowledgeBaseId}
         onSelectSession={onSelectSession}
         onDeleteSession={onDeleteSession}
+        onRenameSession={onRenameSession}
+        onTogglePinSession={onTogglePinSession}
+        onToggleArchiveSession={onToggleArchiveSession}
       />
     </section>
   );

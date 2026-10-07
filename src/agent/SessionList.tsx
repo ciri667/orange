@@ -1,16 +1,21 @@
-import { Loader2, MessageSquareText, Search, Trash2 } from "lucide-react";
-import { useState } from "react";
+import { Archive, ListFilter, Loader2, MessageSquareText, MoreHorizontal, Pin, Search, Trash2 } from "lucide-react";
+import { useRef, useState } from "react";
 import { Button } from "../shared/Button";
 import { listRowClassName } from "../shared/ListRow";
+import { Menu, MenuItem, MenuPanel } from "../shared/Menu";
 import { OverflowTooltipText } from "../shared/OverflowTooltipText";
 import { cn } from "../shared/cn";
-import { focusShellClassName } from "../shared/ui";
-import {
-  getImSessionSourceLabel,
-  getSessionKnowledgeBaseLabel,
-} from "../shared/selectors";
+import { focusShellClassName, sectionLabelClassName } from "../shared/ui";
 import { sessionHasPendingWriteConflict } from "../workspace/sessionUtils";
 import type { AgentSession, KnowledgeBase } from "../shared/types";
+import {
+  SESSION_LIST_FACETS,
+  groupSessionsForList,
+  isSessionVisible,
+  sessionSearchSnippet,
+  sessionSubtitle,
+  type SessionListFacet,
+} from "./sessionListModel";
 
 /** 侧栏和窄屏浮层共用的紧凑会话列表。 */
 export function SessionList({
@@ -19,10 +24,12 @@ export function SessionList({
   knowledgeBases,
   inFlightSessionIds = [],
   queuedSessionIds = [],
-  filterKnowledgeBaseId,
   activeKnowledgeBaseId,
   onSelectSession,
   onDeleteSession,
+  onRenameSession,
+  onTogglePinSession,
+  onToggleArchiveSession,
   onOpenKnowledgeBase,
 }: {
   sessions: AgentSession[];
@@ -30,33 +37,73 @@ export function SessionList({
   knowledgeBases: KnowledgeBase[];
   inFlightSessionIds?: string[];
   queuedSessionIds?: string[];
-  /** 传入时只展示绑定了该知识库的会话；运行中和当前会话始终保留。 */
-  filterKnowledgeBaseId?: string;
-  /** 正在浏览的知识库，用来标出会话标签里的当前库。 */
+  /** 正在浏览的知识库，用来筛选「含当前知识库」并标出标签。 */
   activeKnowledgeBaseId?: string;
   onSelectSession: (sessionId: string) => void;
   onDeleteSession: (sessionId: string) => void;
+  onRenameSession: (sessionId: string, title: string) => void;
+  onTogglePinSession: (sessionId: string) => void;
+  onToggleArchiveSession: (sessionId: string) => void;
   /** 点击会话上的知识库标签时，切到该会话并浏览这个库。 */
   onOpenKnowledgeBase?: (sessionId: string, knowledgeBaseId: string) => void;
 }) {
   const [searchTerm, setSearchTerm] = useState("");
+  const [facet, setFacet] = useState<SessionListFacet>("all");
+  const [facetMenuOpen, setFacetMenuOpen] = useState(false);
+  const [menuSessionId, setMenuSessionId] = useState<string | null>(null);
+  const [renamingSessionId, setRenamingSessionId] = useState<string | null>(null);
+  const [renameDraft, setRenameDraft] = useState("");
+  const skipRenameCommitRef = useRef(false);
   const runningIds = new Set(inFlightSessionIds);
   const queuedIds = new Set(queuedSessionIds);
   const normalizedSearch = searchTerm.trim().toLowerCase();
-  const scopedSessions = filterKnowledgeBaseId
-    ? sessions.filter((session) =>
-        sessionBelongsToKnowledgeBase(session, filterKnowledgeBaseId, session.id === activeSessionId, runningIds, queuedIds),
-      )
-    : sessions;
-  const visibleSessions = normalizedSearch
-    ? scopedSessions.filter((session) => sessionMatchesSearch(session, knowledgeBases, normalizedSearch))
-    : scopedSessions;
+  const visibleSessions = sessions.filter((session) =>
+    isSessionVisible(session, {
+      knowledgeBases,
+      term: normalizedSearch,
+      facet,
+      activeKnowledgeBaseId,
+      isActive: session.id === activeSessionId,
+      isRunning: runningIds.has(session.id),
+      isQueued: queuedIds.has(session.id),
+    }),
+  );
+  const groups = normalizedSearch ? null : groupSessionsForList(visibleSessions, new Date());
+  const facetLabel = SESSION_LIST_FACETS.find((item) => item.id === facet)?.label ?? "全部";
+
+  /** 开始改标题。空白草稿不提交，Escape 放弃。 */
+  function beginRename(session: AgentSession) {
+    skipRenameCommitRef.current = false;
+    setMenuSessionId(null);
+    setRenamingSessionId(session.id);
+    setRenameDraft(session.title);
+  }
+
+  function commitRename(sessionId: string) {
+    if (skipRenameCommitRef.current) {
+      skipRenameCommitRef.current = false;
+      setRenamingSessionId(null);
+      return;
+    }
+
+    const nextTitle = renameDraft.trim();
+    setRenamingSessionId(null);
+    if (!nextTitle || nextTitle === sessions.find((session) => session.id === sessionId)?.title) {
+      return;
+    }
+    onRenameSession(sessionId, nextTitle);
+  }
+
+  function cancelRename() {
+    skipRenameCommitRef.current = true;
+    setRenamingSessionId(null);
+  }
 
   return (
     <div className="flex h-full min-h-0 flex-1 flex-col">
       {/* 侧栏和浮层都是 overflow-hidden，外扩的焦点描边需要自己的空隙，否则上边和左右会被裁掉。 */}
-      <div className="shrink-0 px-1.5 pt-1.5 pb-1.5">
-        <label className={cn("flex min-h-8 items-center gap-2 rounded-control bg-white/70 px-2 text-ink-muted", focusShellClassName)}>
+      <div className="flex shrink-0 items-center gap-1 px-1.5 pt-1.5 pb-1.5">
+        <label className={cn("flex min-h-8 min-w-0 flex-1 items-center gap-2 rounded-control bg-white/70 px-2 text-ink-muted", focusShellClassName)}>
           <Search size={14} />
           <input
             className="min-w-0 w-full border-0 bg-transparent text-[13px] outline-0"
@@ -67,132 +114,312 @@ export function SessionList({
             aria-label="搜索会话"
           />
         </label>
+        <Menu open={facetMenuOpen} onClose={() => setFacetMenuOpen(false)}>
+          <Button
+            variant="icon"
+            size="compact"
+            title={facet === "all" ? "筛选会话" : `筛选：${facetLabel}`}
+            aria-label="筛选会话"
+            aria-haspopup="menu"
+            aria-expanded={facetMenuOpen}
+            className={cn(facet !== "all" && "bg-accent-soft text-accent")}
+            onClick={() => setFacetMenuOpen((open) => !open)}
+          >
+            <ListFilter size={14} />
+          </Button>
+          {facetMenuOpen && (
+            <MenuPanel placement="bottom-end" className="min-w-[148px]">
+              {SESSION_LIST_FACETS.map((item) => (
+                <MenuItem
+                  key={item.id}
+                  className={cn(item.id === facet && "bg-surface-muted text-ink-strong")}
+                  onClick={() => {
+                    setFacet(item.id);
+                    setFacetMenuOpen(false);
+                  }}
+                >
+                  {item.label}
+                </MenuItem>
+              ))}
+            </MenuPanel>
+          )}
+        </Menu>
       </div>
 
       <div className="flex min-h-0 flex-1 flex-col gap-0.5 overflow-auto pr-0.5" aria-label="会话列表">
         {visibleSessions.length === 0 ? (
           <p className="px-2.5 py-3 text-xs text-ink-muted">
-            {sessions.length === 0
-              ? "还没有会话"
-              : normalizedSearch
-                ? "没有匹配的会话"
-                : "当前知识库还没有会话"}
+            {sessions.length === 0 ? "还没有会话" : normalizedSearch || facet !== "all" ? "没有匹配的会话" : "没有可显示的会话"}
           </p>
+        ) : groups ? (
+          groups.map((group) => (
+            <section key={group.id} className="grid gap-0.5" aria-label={group.label}>
+              <h3 className={cn(sectionLabelClassName, "pt-1.5")}>{group.label}</h3>
+              {group.sessions.map((session) => (
+                <SessionRow
+                  key={session.id}
+                  session={session}
+                  snippet={null}
+                  active={session.id === activeSessionId}
+                  running={runningIds.has(session.id)}
+                  queued={queuedIds.has(session.id) && !runningIds.has(session.id)}
+                  pendingLabel={getPendingSessionLabel(session, sessions)}
+                  knowledgeBases={knowledgeBases}
+                  activeKnowledgeBaseId={activeKnowledgeBaseId}
+                  menuOpen={menuSessionId === session.id}
+                  renaming={renamingSessionId === session.id}
+                  renameDraft={renameDraft}
+                  onRenameDraftChange={setRenameDraft}
+                  onBeginRename={() => beginRename(session)}
+                  onCommitRename={() => commitRename(session.id)}
+                  onCancelRename={cancelRename}
+                  onToggleMenu={() => setMenuSessionId((current) => (current === session.id ? null : session.id))}
+                  onCloseMenu={() => setMenuSessionId(null)}
+                  onSelectSession={onSelectSession}
+                  onDeleteSession={onDeleteSession}
+                  onTogglePinSession={onTogglePinSession}
+                  onToggleArchiveSession={onToggleArchiveSession}
+                  onOpenKnowledgeBase={onOpenKnowledgeBase}
+                />
+              ))}
+            </section>
+          ))
         ) : (
-          visibleSessions.map((session) => {
-            const isActive = session.id === activeSessionId;
-            const running = runningIds.has(session.id);
-            const queued = queuedIds.has(session.id) && !running;
-            const pendingLabel = getPendingSessionLabel(session, sessions);
-            const boundKnowledgeBases = getBoundKnowledgeBases(session, knowledgeBases);
-            const subtitle = getSessionSubtitle(session, knowledgeBases);
-            const showKnowledgeBaseChips = !getImSessionSourceLabel(session) && boundKnowledgeBases.length > 1;
-            // 多库标签自己是按钮，不能再套进选择按钮里。
-            const interactiveChips = showKnowledgeBaseChips && Boolean(onOpenKnowledgeBase);
-
-            return (
-              <div
-                key={session.id}
-                className={listRowClassName({
-                  active: isActive,
-                  className: "group relative cursor-pointer items-start py-1.5 pr-1.5 pl-2",
-                })}
-                onClick={() => onSelectSession(session.id)}
-              >
-                {/* 未引入 Preflight，按钮必须去掉原生边框，否则标题会画出系统灰框。 */}
-                <button
-                  className="flex min-w-0 flex-1 items-start gap-2 border-0 bg-transparent p-0 text-left text-inherit"
-                  type="button"
-                  onClick={(event) => {
-                    event.stopPropagation();
-                    onSelectSession(session.id);
-                  }}
-                >
-                  {running ? (
-                    <Loader2 size={15} className="mt-0.5 shrink-0 animate-spin text-accent" aria-label="运行中" />
-                  ) : (
-                    <MessageSquareText
-                      size={15}
-                      className={cn("mt-0.5 shrink-0", isActive ? "text-ink-muted" : "text-ink-soft")}
-                    />
-                  )}
-                  <span className="grid min-w-0 flex-1 gap-0.5">
-                    <OverflowTooltipText
-                      as="strong"
-                      className="block min-w-0 truncate pr-7 text-[13px] font-medium leading-5 text-ink-strong"
-                      text={session.title}
-                      logArea="agent_session_history_title"
-                    />
-                    <span className="flex min-w-0 items-center gap-1.5 text-[11px] leading-4 text-ink-muted">
-                      {showKnowledgeBaseChips ? (
-                        interactiveChips ? (
-                          <span className="min-w-0 flex-1" aria-hidden />
-                        ) : (
-                          <SessionKnowledgeBaseChips
-                            sessionId={session.id}
-                            knowledgeBases={boundKnowledgeBases}
-                            activeKnowledgeBaseId={activeKnowledgeBaseId}
-                            scheduled={Boolean(session.scheduleIdentity)}
-                          />
-                        )
-                      ) : (
-                        <OverflowTooltipText
-                          className="min-w-0 flex-1 truncate"
-                          text={subtitle}
-                          logArea="agent_session_history_scope"
-                        />
-                      )}
-                      <SessionMetaTrailing queued={queued} pendingLabel={pendingLabel} updatedAt={session.updatedAt} />
-                    </span>
-                  </span>
-                </button>
-                {interactiveChips ? (
-                  <div className="absolute bottom-1.5 left-8 right-16 z-[1] min-w-0">
-                    <SessionKnowledgeBaseChips
-                      sessionId={session.id}
-                      knowledgeBases={boundKnowledgeBases}
-                      activeKnowledgeBaseId={activeKnowledgeBaseId}
-                      scheduled={Boolean(session.scheduleIdentity)}
-                      onOpenKnowledgeBase={onOpenKnowledgeBase}
-                    />
-                  </div>
-                ) : null}
-                <Button
-                  variant="icon"
-                  size="compact"
-                  className="pointer-events-none absolute right-1 bottom-1 text-ink-soft opacity-0 group-hover:pointer-events-auto group-hover:opacity-100 focus-visible:pointer-events-auto focus-visible:opacity-100 hover:enabled:bg-danger-soft hover:enabled:text-danger"
-                  title="删除会话"
-                  aria-label={`删除${session.title}`}
-                  onClick={(event) => {
-                    event.stopPropagation();
-                    onDeleteSession(session.id);
-                  }}
-                >
-                  <Trash2 size={14} />
-                </Button>
-              </div>
-            );
-          })
+          visibleSessions.map((session) => (
+            <SessionRow
+              key={session.id}
+              session={session}
+              snippet={sessionSearchSnippet(session, normalizedSearch)}
+              active={session.id === activeSessionId}
+              running={runningIds.has(session.id)}
+              queued={queuedIds.has(session.id) && !runningIds.has(session.id)}
+              pendingLabel={getPendingSessionLabel(session, sessions)}
+              knowledgeBases={knowledgeBases}
+              activeKnowledgeBaseId={activeKnowledgeBaseId}
+              menuOpen={menuSessionId === session.id}
+              renaming={renamingSessionId === session.id}
+              renameDraft={renameDraft}
+              onRenameDraftChange={setRenameDraft}
+              onBeginRename={() => beginRename(session)}
+              onCommitRename={() => commitRename(session.id)}
+              onCancelRename={() => setRenamingSessionId(null)}
+              onToggleMenu={() => setMenuSessionId((current) => (current === session.id ? null : session.id))}
+              onCloseMenu={() => setMenuSessionId(null)}
+              onSelectSession={onSelectSession}
+              onDeleteSession={onDeleteSession}
+              onTogglePinSession={onTogglePinSession}
+              onToggleArchiveSession={onToggleArchiveSession}
+              onOpenKnowledgeBase={onOpenKnowledgeBase}
+            />
+          ))
         )}
       </div>
     </div>
   );
 }
 
-/** 当前库筛选时仍露出正在看的会话，以及别的库上还在跑或排队的会话。 */
-function sessionBelongsToKnowledgeBase(
-  session: AgentSession,
-  knowledgeBaseId: string,
-  isActive: boolean,
-  runningIds: Set<string>,
-  queuedIds: Set<string>,
-) {
+function SessionRow({
+  session,
+  snippet,
+  active,
+  running,
+  queued,
+  pendingLabel,
+  knowledgeBases,
+  activeKnowledgeBaseId,
+  menuOpen,
+  renaming,
+  renameDraft,
+  onRenameDraftChange,
+  onBeginRename,
+  onCommitRename,
+  onCancelRename,
+  onToggleMenu,
+  onCloseMenu,
+  onSelectSession,
+  onDeleteSession,
+  onTogglePinSession,
+  onToggleArchiveSession,
+  onOpenKnowledgeBase,
+}: {
+  session: AgentSession;
+  snippet: string | null;
+  active: boolean;
+  running: boolean;
+  queued: boolean;
+  pendingLabel: string;
+  knowledgeBases: KnowledgeBase[];
+  activeKnowledgeBaseId?: string;
+  menuOpen: boolean;
+  renaming: boolean;
+  renameDraft: string;
+  onRenameDraftChange: (value: string) => void;
+  onBeginRename: () => void;
+  onCommitRename: () => void;
+  onCancelRename: () => void;
+  onToggleMenu: () => void;
+  onCloseMenu: () => void;
+  onSelectSession: (sessionId: string) => void;
+  onDeleteSession: (sessionId: string) => void;
+  onTogglePinSession: (sessionId: string) => void;
+  onToggleArchiveSession: (sessionId: string) => void;
+  onOpenKnowledgeBase?: (sessionId: string, knowledgeBaseId: string) => void;
+}) {
+  const boundKnowledgeBases = getBoundKnowledgeBases(session, knowledgeBases);
+  const subtitle = snippet ?? sessionSubtitle(session, knowledgeBases);
+  const showKnowledgeBaseChips = !snippet && !getImLabel(session) && boundKnowledgeBases.length > 1;
+  const interactiveChips = showKnowledgeBaseChips && Boolean(onOpenKnowledgeBase);
+
   return (
-    isActive ||
-    runningIds.has(session.id) ||
-    queuedIds.has(session.id) ||
-    session.knowledgeBaseIds.includes(knowledgeBaseId)
+    <div
+      className={listRowClassName({
+        active,
+        className: "group relative cursor-pointer items-start py-1.5 pr-1.5 pl-2",
+      })}
+      onClick={() => onSelectSession(session.id)}
+    >
+      <button
+        className="flex min-w-0 flex-1 items-start gap-2 border-0 bg-transparent p-0 text-left text-inherit"
+        type="button"
+        onClick={(event) => {
+          event.stopPropagation();
+          if (!renaming) {
+            onSelectSession(session.id);
+          }
+        }}
+      >
+        {running ? (
+          <Loader2 size={15} className="mt-0.5 shrink-0 animate-spin text-accent" aria-label="运行中" />
+        ) : (
+          <MessageSquareText size={15} className={cn("mt-0.5 shrink-0", active ? "text-ink-muted" : "text-ink-soft")} />
+        )}
+        <span className="grid min-w-0 flex-1 gap-0.5">
+          <span className="flex min-w-0 items-center gap-1 pr-7">
+            {session.pinnedAt ? <Pin size={12} className="shrink-0 text-accent" aria-label="已置顶" /> : null}
+            {renaming ? (
+              <input
+                className="min-w-0 flex-1 border-0 bg-transparent text-[13px] font-medium text-ink-strong outline-0"
+                value={renameDraft}
+                aria-label="会话标题"
+                autoFocus
+                onChange={(event) => onRenameDraftChange(event.target.value)}
+                onClick={(event) => event.stopPropagation()}
+                onKeyDown={(event) => {
+                  if (event.key === "Enter") {
+                    event.preventDefault();
+                    onCommitRename();
+                  }
+                  if (event.key === "Escape") {
+                    event.preventDefault();
+                    onCancelRename();
+                  }
+                }}
+                onBlur={onCommitRename}
+              />
+            ) : (
+              <OverflowTooltipText
+                as="strong"
+                className="block min-w-0 truncate text-[13px] font-medium leading-5 text-ink-strong"
+                text={session.title}
+                logArea="agent_session_history_title"
+              />
+            )}
+            {session.archivedAt ? <span className="shrink-0 text-[10px] text-ink-soft">归档</span> : null}
+          </span>
+          <span className="flex min-w-0 items-center gap-1.5 text-[11px] leading-4 text-ink-muted">
+            {showKnowledgeBaseChips ? (
+              interactiveChips ? (
+                <span className="min-w-0 flex-1" aria-hidden />
+              ) : (
+                <SessionKnowledgeBaseChips
+                  sessionId={session.id}
+                  knowledgeBases={boundKnowledgeBases}
+                  activeKnowledgeBaseId={activeKnowledgeBaseId}
+                  scheduled={Boolean(session.scheduleIdentity)}
+                />
+              )
+            ) : (
+              <OverflowTooltipText className="min-w-0 flex-1 truncate" text={subtitle} logArea="agent_session_history_scope" />
+            )}
+            <SessionMetaTrailing queued={queued} pendingLabel={pendingLabel} updatedAt={session.updatedAt} />
+          </span>
+        </span>
+      </button>
+      {interactiveChips ? (
+        <div className="absolute bottom-1.5 left-8 right-16 z-[1] min-w-0">
+          <SessionKnowledgeBaseChips
+            sessionId={session.id}
+            knowledgeBases={boundKnowledgeBases}
+            activeKnowledgeBaseId={activeKnowledgeBaseId}
+            scheduled={Boolean(session.scheduleIdentity)}
+            onOpenKnowledgeBase={onOpenKnowledgeBase}
+          />
+        </div>
+      ) : null}
+      <div
+        className={cn(
+          "pointer-events-none absolute right-1 bottom-1 z-[2] flex items-center group-hover:pointer-events-auto",
+          menuOpen && "pointer-events-auto",
+        )}
+        onClick={(event) => event.stopPropagation()}
+      >
+        <Menu open={menuOpen} onClose={onCloseMenu}>
+          <Button
+            variant="icon"
+            size="compact"
+            className={cn(
+              "pointer-events-none text-ink-soft opacity-0 group-hover:pointer-events-auto group-hover:opacity-100 focus-visible:pointer-events-auto focus-visible:opacity-100",
+              menuOpen && "pointer-events-auto opacity-100",
+            )}
+            title="会话操作"
+            aria-label={`${session.title}的更多操作`}
+            aria-haspopup="menu"
+            aria-expanded={menuOpen}
+            onClick={onToggleMenu}
+          >
+            <MoreHorizontal size={14} />
+          </Button>
+          {menuOpen && (
+            <MenuPanel placement="bottom-end" className="min-w-[132px]">
+              <MenuItem onClick={onBeginRename}>重命名</MenuItem>
+              <MenuItem
+                onClick={() => {
+                  onCloseMenu();
+                  onTogglePinSession(session.id);
+                }}
+              >
+                <Pin size={14} />
+                {session.pinnedAt ? "取消置顶" : "置顶"}
+              </MenuItem>
+              <MenuItem
+                onClick={() => {
+                  onCloseMenu();
+                  onToggleArchiveSession(session.id);
+                }}
+              >
+                <Archive size={14} />
+                {session.archivedAt ? "取消归档" : "归档"}
+              </MenuItem>
+            </MenuPanel>
+          )}
+        </Menu>
+        <Button
+          variant="icon"
+          size="compact"
+          className="pointer-events-none text-ink-soft opacity-0 group-hover:pointer-events-auto group-hover:opacity-100 focus-visible:pointer-events-auto focus-visible:opacity-100 hover:enabled:bg-danger-soft hover:enabled:text-danger"
+          title="删除会话"
+          aria-label={`删除${session.title}`}
+          onClick={() => onDeleteSession(session.id)}
+        >
+          <Trash2 size={14} />
+        </Button>
+      </div>
+    </div>
   );
+}
+
+function getImLabel(session: AgentSession) {
+  return Boolean(session.imIdentity);
 }
 
 /** 按会话记录的顺序取出仍然存在的知识库，供多库标签点击。 */
@@ -203,7 +430,7 @@ function getBoundKnowledgeBases(session: AgentSession, knowledgeBases: Knowledge
   });
 }
 
-/** 第二行右侧的状态和时间。悬停整行时让出位置给删除按钮。 */
+/** 第二行右侧的状态和时间。悬停整行时让出位置给操作按钮。 */
 function SessionMetaTrailing({
   queued,
   pendingLabel,
@@ -221,10 +448,7 @@ function SessionMetaTrailing({
           {pendingLabel}
         </span>
       ) : null}
-      <time
-        className="ml-auto shrink-0 tabular-nums text-ink-soft group-hover:invisible"
-        dateTime={updatedAt}
-      >
+      <time className="ml-auto shrink-0 tabular-nums text-ink-soft group-hover:invisible" dateTime={updatedAt}>
         {formatSessionListTime(updatedAt)}
       </time>
     </>
@@ -282,22 +506,6 @@ function SessionKnowledgeBaseChips({
   );
 }
 
-/** 第二行优先展示 IM 来源和最近消息，否则展示知识库范围。 */
-function getSessionSubtitle(session: AgentSession, knowledgeBases: KnowledgeBase[]) {
-  const imLabel = getImSessionSourceLabel(session);
-  if (imLabel) {
-    const preview = session.imIdentity?.lastMessagePreview;
-    return preview ? `${imLabel} · ${preview}` : imLabel;
-  }
-
-  const knowledgeBaseLabel = getSessionKnowledgeBaseLabel(session, knowledgeBases);
-  if (session.scheduleIdentity) {
-    return `定时任务 · ${knowledgeBaseLabel}`;
-  }
-
-  return knowledgeBaseLabel;
-}
-
 /** 只在有待确认写入时给出短标签，避免每条会话都占第三行。 */
 function getPendingSessionLabel(session: AgentSession, sessions: AgentSession[]) {
   const conflict = sessionHasPendingWriteConflict(session, sessions);
@@ -310,19 +518,6 @@ function getPendingSessionLabel(session: AgentSession, sessions: AgentSession[])
   }
 
   return "";
-}
-
-/** 搜索标题、知识库、IM 来源和最近消息，不改会话数据。 */
-function sessionMatchesSearch(session: AgentSession, knowledgeBases: KnowledgeBase[], term: string) {
-  const haystack = [
-    session.title,
-    getSessionSubtitle(session, knowledgeBases),
-    session.scheduleIdentity?.jobName ?? "",
-  ]
-    .join(" ")
-    .toLowerCase();
-
-  return haystack.includes(term);
 }
 
 /**

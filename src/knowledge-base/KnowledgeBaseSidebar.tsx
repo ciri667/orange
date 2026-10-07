@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { AlertCircle, Clock, Database, MessageSquarePlus, Plus, RefreshCw, Search, Settings } from "lucide-react";
 import { SessionList } from "../agent/SessionList";
 import { FileTree } from "./FileTree";
@@ -60,6 +60,10 @@ export function KnowledgeBaseSidebar({
   onOpenSettings,
   onSelectSession,
   onDeleteSession,
+  onRenameSession,
+  onTogglePinSession,
+  onToggleArchiveSession,
+  sessionPaneRequest = 0,
 }: {
   knowledgeBases: KnowledgeBase[];
   activeKnowledgeBase: KnowledgeBase;
@@ -98,9 +102,18 @@ export function KnowledgeBaseSidebar({
   onOpenSettings: () => void;
   onSelectSession: (sessionId: string) => void;
   onDeleteSession: (sessionId: string) => void;
+  onRenameSession: (sessionId: string, title: string) => void;
+  onTogglePinSession: (sessionId: string) => void;
+  onToggleArchiveSession: (sessionId: string) => void;
+  /** 外部递增时把侧栏切回会话列表，文件树保持原样。 */
+  sessionPaneRequest?: number;
 }) {
   const [sidebarPane, setSidebarPane] = useState<SidebarPane>("sessions");
   const runningSessionCount = inFlightSessionIds.length;
+
+  useEffect(() => {
+    setSidebarPane("sessions");
+  }, [sessionPaneRequest]);
 
   return (
     <aside className="sidebar" aria-label="知识库导航">
@@ -164,8 +177,12 @@ export function KnowledgeBaseSidebar({
           knowledgeBases={knowledgeBases}
           inFlightSessionIds={inFlightSessionIds}
           queuedSessionIds={queuedSessionIds}
+          activeKnowledgeBaseId={activeKnowledgeBase.id}
           onSelectSession={onSelectSession}
           onDeleteSession={onDeleteSession}
+          onRenameSession={onRenameSession}
+          onTogglePinSession={onTogglePinSession}
+          onToggleArchiveSession={onToggleArchiveSession}
         />
       </section>
 
