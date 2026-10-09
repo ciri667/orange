@@ -30,6 +30,7 @@ pub fn default_user_settings() -> UserSettings {
         privacy_policy: "allow-selected-scope".to_owned(),
         write_confirmation_required: true,
         agent_security: Default::default(),
+        web_search: Default::default(),
     }
 }
 
@@ -157,10 +158,14 @@ pub fn save_user_settings(
         // 短时 Skill 信任授权只允许后端执行器写入，普通设置 payload 不能伪造或延长授权。
         normalized_settings.agent_security.trusted_skill_grants =
             persisted_settings.agent_security.trusted_skill_grants;
+        // 探测状态只由搜索和探测命令写入，普通设置保存不能把它改成已验证。
+        normalized_settings.web_search.credential_status =
+            persisted_settings.web_search.credential_status;
     }
 
     model_provider::normalize_model_config(&mut normalized_settings.model_config);
     normalize_agent_security_settings(&mut normalized_settings.agent_security);
+    crate::web::normalize_web_search_settings(&mut normalized_settings.web_search);
 
     persist_user_settings(app, &normalized_settings)?;
 

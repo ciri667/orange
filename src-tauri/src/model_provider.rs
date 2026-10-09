@@ -629,6 +629,7 @@ pub fn parse_or_migrate_user_settings_json(
         Ok(mut settings) => {
             // 归一化 key_reference 和模型列表，自动修复历史设置记录里的兼容字段。
             normalize_model_config(&mut settings.model_config);
+            crate::web::normalize_web_search_settings(&mut settings.web_search);
 
             return Ok(settings);
         }
@@ -675,6 +676,7 @@ fn migrate_legacy_user_settings(legacy: LegacyUserSettings, now: &str) -> UserSe
         privacy_policy: legacy.privacy_policy,
         write_confirmation_required: legacy.write_confirmation_required,
         agent_security: Default::default(),
+        web_search: Default::default(),
     }
 }
 
@@ -766,6 +768,7 @@ mod tests {
             privacy_policy: "allow-selected-scope".to_owned(),
             write_confirmation_required: true,
             agent_security: Default::default(),
+            web_search: Default::default(),
         })
         .unwrap();
 
@@ -789,6 +792,7 @@ mod tests {
             privacy_policy: "allow-selected-scope".to_owned(),
             write_confirmation_required: true,
             agent_security: Default::default(),
+            web_search: Default::default(),
         };
 
         let serialized = serde_json::to_value(settings).unwrap();
@@ -1327,6 +1331,7 @@ mod tests {
             privacy_policy: "allow-selected-scope".to_owned(),
             write_confirmation_required: true,
             agent_security: Default::default(),
+            web_search: Default::default(),
         })
         .unwrap();
 

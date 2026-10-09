@@ -19,6 +19,7 @@ pub(crate) use skills::execution as skill_execution;
 mod storage;
 mod text_edit;
 mod voice;
+mod web;
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use tauri::{Manager, RunEvent, WindowEvent};

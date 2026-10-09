@@ -66,7 +66,44 @@ pub struct ModelConfig {
     pub providers: Vec<LlmProviderConfig>,
 }
 
-/** 用户设置聚合模型、隐私和写入确认策略，供 M3 Runtime 读取。 */
+/** 联网搜索设置。API key 只进 keyring，这里保留引用和最近一次探测状态。 */
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WebSearchSettings {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default = "default_web_search_provider")]
+    pub provider: String,
+    #[serde(default = "default_web_search_key_reference")]
+    pub key_reference: String,
+    #[serde(default = "default_web_search_credential_status")]
+    pub credential_status: String,
+}
+
+fn default_web_search_provider() -> String {
+    "tavily".to_owned()
+}
+
+fn default_web_search_key_reference() -> String {
+    "orange-web-search-tavily".to_owned()
+}
+
+fn default_web_search_credential_status() -> String {
+    "untested".to_owned()
+}
+
+impl Default for WebSearchSettings {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            provider: default_web_search_provider(),
+            key_reference: default_web_search_key_reference(),
+            credential_status: default_web_search_credential_status(),
+        }
+    }
+}
+
+/** 用户设置聚合模型、隐私、写入确认和联网搜索，供 Runtime 读取。 */
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct UserSettings {
@@ -75,6 +112,8 @@ pub struct UserSettings {
     pub write_confirmation_required: bool,
     #[serde(default)]
     pub agent_security: AgentSecuritySettings,
+    #[serde(default)]
+    pub web_search: WebSearchSettings,
 }
 
 /** 模型密钥保存状态，只暴露是否可读取，不返回明文密钥。 */

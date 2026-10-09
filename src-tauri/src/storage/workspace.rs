@@ -640,6 +640,9 @@ pub(crate) fn search_note_fts(
                 snippet,
                 score: 1.0 / (1.0 + rank.abs()),
                 location: None,
+                kind: None,
+                url: None,
+                published_at: None,
             });
         }
     }
@@ -716,6 +719,9 @@ pub(crate) fn search_snapshot_notes(
                 snippet: extract_snippet(&note.content, prompt),
                 score,
                 location: None,
+                kind: None,
+                url: None,
+                published_at: None,
             })
         })
         .collect();

@@ -50,6 +50,15 @@ pub struct Citation {
     /** DOCX/PDF 等只读文档的块或页码定位；Markdown 引用保持为空。 */
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub location: Option<String>,
+    /** 缺省为笔记引用。网页引用为 "web"。 */
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kind: Option<String>,
+    /** 网页引用的最终 URL。笔记引用保持为空。 */
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub url: Option<String>,
+    /** 搜索结果上的发布时间，有则原样保留。 */
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub published_at: Option<String>,
 }
 
 /** Agent loop 中的一次工具调用记录。 */
