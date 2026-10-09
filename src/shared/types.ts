@@ -304,7 +304,7 @@ export interface FolderEntry {
   updatedAt: string;
 }
 
-/** Agent 回答引用的笔记来源信息，必须来自已执行的检索或读取工具。 */
+/** Agent 回答引用的来源。笔记引用不带 url；网页引用 kind 为 web。 */
 export interface Citation {
   knowledgeBaseId: string;
   knowledgeBaseName: string;
@@ -314,6 +314,24 @@ export interface Citation {
   snippet: string;
   score: number;
   location?: string;
+  kind?: "note" | "web";
+  url?: string;
+  publishedAt?: string;
+}
+
+/** 联网搜索设置。密钥本身不在这里，只保留是否配过和最近一次探测状态。 */
+export interface WebSearchSettings {
+  enabled: boolean;
+  provider: "tavily";
+  keyReference: string;
+  credentialStatus: "untested" | "valid" | "invalid_credentials" | "rate_limited" | "network_error" | "not_configured";
+}
+
+/** 设置页读取的联网搜索密钥状态，不含明文。 */
+export interface WebSearchCredentialStatus {
+  configured: boolean;
+  credentialStatus: WebSearchSettings["credentialStatus"];
+  message: string;
 }
 
 /** Agent loop 中的一次工具调用记录。 */
@@ -710,6 +728,7 @@ export interface UserSettings {
   privacyPolicy: PrivacyPolicy;
   writeConfirmationRequired: boolean;
   agentSecurity: AgentSecuritySettings;
+  webSearch: WebSearchSettings;
 }
 
 /** 当前内置 IM provider；新增 provider 时继续使用稳定小写 ID。 */

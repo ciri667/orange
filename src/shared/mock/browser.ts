@@ -79,6 +79,12 @@ export const defaultBrowserUserSettings: UserSettings = {
     trustedSkillGrants: [],
     allowedNetworkDomains: [],
   },
+  webSearch: {
+    enabled: false,
+    provider: "tavily",
+    keyReference: "orange-web-search-tavily",
+    credentialStatus: "not_configured",
+  },
 };
 
 /** 浏览器开发态默认飞书 provider；桌面端真实设置由 SQLite 和系统 keyring 保存。 */
@@ -739,6 +745,7 @@ export function cloneUserSettings(settings: UserSettings): UserSettings {
       trustedSkillGrants: settings.agentSecurity.trustedSkillGrants.map((grant) => ({ ...grant })),
       allowedNetworkDomains: [...settings.agentSecurity.allowedNetworkDomains],
     },
+    webSearch: { ...settings.webSearch },
     modelConfig: {
       ...settings.modelConfig,
       providers: settings.modelConfig.providers.map((provider) => ({
@@ -1257,6 +1264,7 @@ function createMockGatewayStatus(providerId: ImProviderId, domain: string): ImGa
 
 export const browserMock: {
   userSettings: UserSettings;
+  webSearchKeyConfigured: boolean;
   imSettings: ImIntegrationSettings;
   feishuGatewayStatus: ImGatewayStatus;
   imGatewayByProvider: Record<ImProviderId, ImGatewayStatus>;
@@ -1270,6 +1278,7 @@ export const browserMock: {
   promptDumps: Map<string, AgentPromptDump>;
 } = {
   userSettings: defaultBrowserUserSettings,
+  webSearchKeyConfigured: false,
   imSettings: defaultBrowserImSettings,
   feishuGatewayStatus: createMockGatewayStatus("feishu", "feishu"),
   imGatewayByProvider: {

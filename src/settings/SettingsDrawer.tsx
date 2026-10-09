@@ -1,6 +1,7 @@
 import {
   BookOpen,
   Brain,
+  Globe,
   History,
   MessageCircle,
   Mic,
@@ -61,10 +62,11 @@ import {
   AgentSecuritySettingsSection,
   SkillsSettingsSection,
   VoiceSettingsSection,
+  WebSearchSettingsSection,
 } from "./SettingsSections";
 
 /** 设置页左侧导航的可选分区，和右侧主内容一一对应。 */
-type SettingsSectionId = "knowledge" | "model" | "voice" | "agentSecurity" | "im" | "skills" | "agentMemory" | "eventLogs" | "auditLogs";
+type SettingsSectionId = "knowledge" | "model" | "voice" | "webSearch" | "agentSecurity" | "im" | "skills" | "agentMemory" | "eventLogs" | "auditLogs";
 
 /** 设置页导航分组，帮助用户区分可配置项和只读诊断项。 */
 type SettingsSectionGroup = "配置" | "诊断";
@@ -264,6 +266,15 @@ export function SettingsDrawer({
         tone: "neutral",
       },
       {
+        id: "webSearch",
+        group: "配置",
+        label: "联网搜索",
+        description: "用 Tavily 查公开网页",
+        meta: settingsDraft.webSearch.enabled ? "已开启" : "已关闭",
+        icon: Globe,
+        tone: settingsDraft.webSearch.enabled ? "success" : "neutral",
+      },
+      {
         id: "agentSecurity",
         group: "配置",
         label: "Agent 权限",
@@ -333,6 +344,7 @@ export function SettingsDrawer({
       settingsSummary.feishuStatus,
       knowledgeBases,
       settingsDraft.modelConfig.enabled,
+      settingsDraft.webSearch.enabled,
       settingsDraft.agentSecurity.defaultLevel,
       skills.length,
     ],
@@ -1148,6 +1160,17 @@ export function SettingsDrawer({
           customSkillCount={customSkillCount}
           isBusy={isBusy}
           onOpenSkillsModal={() => setIsSkillsModalOpen(true)}
+          onSaveSettings={handleSaveSettings}
+        />
+      );
+    }
+
+    if (activeSection === "webSearch") {
+      return (
+        <WebSearchSettingsSection
+          settingsDraft={settingsDraft}
+          isBusy={isBusy}
+          onSettingsChange={setSettingsDraft}
           onSaveSettings={handleSaveSettings}
         />
       );
