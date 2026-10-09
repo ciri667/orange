@@ -485,14 +485,33 @@ pub fn is_user_visible_tool(name: &str) -> bool {
 pub fn running_tool_summary(name: &str, args: &Value) -> String {
     let canonical = canonical_running_tool_name(name);
     match canonical {
-        "search" => match first_arg_string(args, &["query"]) {
-            Some(query) => format!("搜索「{}」", truncate_label(&query, 32)),
-            None => "搜索笔记".to_owned(),
-        },
-        "read" => match first_display_path(args, &["path", "targetPath", "title"]) {
-            Some(label) => format!("读取 {label}"),
-            None => "读取文件".to_owned(),
-        },
+        "search" => {
+            if first_arg_string(args, &["target"]).is_some_and(|target| target == "web") {
+                match first_arg_string(args, &["query"]) {
+                    Some(query) => format!("联网搜索：{}", truncate_label(&query, 32)),
+                    None => "联网搜索".to_owned(),
+                }
+            } else {
+                match first_arg_string(args, &["query"]) {
+                    Some(query) => format!("搜索「{}」", truncate_label(&query, 32)),
+                    None => "搜索笔记".to_owned(),
+                }
+            }
+        }
+        "read" => {
+            if let Some(url) = first_arg_string(args, &["url"]) {
+                let host = reqwest::Url::parse(&url)
+                    .ok()
+                    .and_then(|parsed| parsed.host_str().map(str::to_owned))
+                    .unwrap_or_else(|| truncate_label(&url, 32));
+                format!("打开网页：{host}")
+            } else {
+                match first_display_path(args, &["path", "targetPath", "title"]) {
+                    Some(label) => format!("读取 {label}"),
+                    None => "读取文件".to_owned(),
+                }
+            }
+        }
         "list" => match first_display_path(args, &["path", "prefix"]) {
             Some(label) => format!("查看 {label}"),
             None => "查看目录".to_owned(),
