@@ -348,6 +348,13 @@ pub struct SaveModelApiKeyPayload {
     pub api_key: String,
 }
 
+/** 保存 Tavily 密钥的命令入参；明文只进入 keyring。 */
+#[derive(Clone, Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SaveWebSearchApiKeyPayload {
+    pub api_key: String,
+}
+
 /** 用户主动查看模型密钥的命令入参；只接受 providerId，不接受 keyReference。 */
 #[derive(Clone, Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]

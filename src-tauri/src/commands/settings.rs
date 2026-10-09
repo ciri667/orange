@@ -250,6 +250,98 @@ pub async fn save_model_api_key(
     result
 }
 
+/** 保存联网搜索密钥。审计只记录是否配置，不记录明文。 */
+#[tauri::command]
+pub async fn save_web_search_api_key(
+    app: AppHandle,
+    payload: SaveWebSearchApiKeyPayload,
+) -> Result<crate::web::WebSearchCredentialView, String> {
+    let started_at = Instant::now();
+    let settings_app = app.clone();
+    let result = run_blocking("保存联网搜索密钥", move || {
+        crate::web::save_web_search_api_key(&settings_app, &payload.api_key)
+    })
+    .await;
+    match &result {
+        Ok(status) => logging::write_app_event_best_effort(
+            &app,
+            AppEventBuilder::new(
+                AppLogLevel::Info,
+                AppLogCategory::Security,
+                "save_web_search_api_key",
+                "completed",
+                "已更新联网搜索密钥状态。",
+            )
+            .duration(started_at.elapsed())
+            .metadata(json!({
+                "configured": status.configured,
+                "credentialStatus": status.credential_status,
+            })),
+        ),
+        Err(error) => logging::write_app_event_best_effort(
+            &app,
+            AppEventBuilder::new(
+                AppLogLevel::Error,
+                AppLogCategory::Security,
+                "save_web_search_api_key",
+                "failed",
+                error,
+            )
+            .duration(started_at.elapsed()),
+        ),
+    }
+    result
+}
+
+/** 读取联网搜索密钥是否已配置。不返回明文。 */
+#[tauri::command]
+pub async fn load_web_search_credential_status(
+    app: AppHandle,
+) -> Result<crate::web::WebSearchCredentialView, String> {
+    run_blocking("读取联网搜索密钥状态", move || {
+        crate::web::load_web_search_credential_view(&app)
+    })
+    .await
+}
+
+/** 用一条短查询确认 Tavily 密钥。失败原因不包含响应体。 */
+#[tauri::command]
+pub async fn probe_web_search(
+    app: AppHandle,
+) -> Result<crate::web::WebSearchCredentialView, String> {
+    let started_at = Instant::now();
+    let settings_app = app.clone();
+    let result = run_blocking("探测联网搜索", move || {
+        crate::web::probe_web_search(&settings_app)
+    })
+    .await;
+    match &result {
+        Ok(_) => logging::write_app_event_best_effort(
+            &app,
+            AppEventBuilder::new(
+                AppLogLevel::Info,
+                AppLogCategory::Security,
+                "probe_web_search",
+                "completed",
+                "联网搜索探测完成。",
+            )
+            .duration(started_at.elapsed()),
+        ),
+        Err(error) => logging::write_app_event_best_effort(
+            &app,
+            AppEventBuilder::new(
+                AppLogLevel::Error,
+                AppLogCategory::Security,
+                "probe_web_search",
+                "failed",
+                error,
+            )
+            .duration(started_at.elapsed()),
+        ),
+    }
+    result
+}
+
 /** 按用户请求读取单个 provider 的明文模型密钥；审计只记录 providerId，不记录密钥。 */
 #[tauri::command]
 pub async fn reveal_model_api_key(

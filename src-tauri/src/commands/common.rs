@@ -20,6 +20,7 @@ pub(super) use crate::domain::{
     SaveAgentSkillPayload, SaveConversationImageAttachmentsPayload, SaveDocumentContentPayload,
     SaveFeishuSecretPayload, SaveImProviderSecretPayload, SaveImSettingsPayload,
     SaveKnowledgeBaseMemoryPayload, SaveModelApiKeyPayload, SaveNoteContentPayload,
+    SaveWebSearchApiKeyPayload,
     SaveNoteImageAttachmentsPayload, SaveSessionPayload, SaveUserSettingsPayload,
     ScanKnowledgeBasePayload, ScanReport, SearchOnlineSkillsPayload, ToggleAgentSkillPayload,
     UpdateSessionScopePayload, UserSettings, WorkspaceBootstrapState, WorkspaceEditorState,
