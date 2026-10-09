@@ -60,6 +60,8 @@ pub struct AgentToolContext<'a> {
     pub session_index: usize,
     /** 用户本轮请求，提供知识库范围、prompt 和显式 @ 文件。 */
     pub request: &'a AgentTurnRequest,
+    /** 测试注入的联网替身。生产调用保持 None。 */
+    pub web_override: Option<std::sync::Arc<crate::web::WebOverride>>,
 }
 
 /** 单个工具执行的标准结果，模型、UI 轨迹和审计日志都从这里派生。 */

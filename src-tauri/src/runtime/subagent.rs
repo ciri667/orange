@@ -294,7 +294,12 @@ async fn run_nested_loop(
         })?
     } else {
         let system =
-            build_subagent_system_prompt(params.snapshot, params.session_index, &parsed.agent);
+            build_subagent_system_prompt(
+                params.snapshot,
+                params.session_index,
+                &parsed.agent,
+                crate::web::web_search_ready(params.app),
+            );
         vec![
             json!({ "role": "system", "content": system }),
             json!({ "role": "user", "content": parsed.prompt }),
@@ -459,6 +464,7 @@ async fn run_nested_loop(
                     snapshot: params.snapshot,
                     session_index: params.session_index,
                     request: params.request,
+                    web_override: None,
                 };
                 registry.execute_model_tool_call(&mut tool_context, &model_tool_call)
             };
@@ -1085,7 +1091,7 @@ mod tests {
             active_session_id: "session-a".to_owned(),
         };
         let writer = resolve_agent("writer").unwrap();
-        let prompt = build_subagent_system_prompt(&snapshot, 0, &writer);
+        let prompt = build_subagent_system_prompt(&snapshot, 0, &writer, false);
         assert!(prompt.contains("edit / write"));
         assert!(prompt.contains("search, read, list, edit, write"));
         let names = ToolRegistry::for_subagent_tools(&writer.tools).tool_names();

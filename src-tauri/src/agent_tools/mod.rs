@@ -2,6 +2,9 @@ mod execute;
 mod registry;
 mod types;
 
+#[cfg(test)]
+mod web_tests;
+
 pub use registry::ToolRegistry;
 pub(crate) use registry::{model_tool_call_name, parse_tool_args};
 pub use types::{AgentToolContext, ToolOutcome};
@@ -142,6 +145,7 @@ mod tests {
             snapshot,
             session_index: 0,
             request,
+            web_override: None,
         }
     }
 

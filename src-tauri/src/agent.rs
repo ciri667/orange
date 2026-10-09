@@ -111,6 +111,7 @@ fn execute_local_tool(
         snapshot,
         session_index,
         request,
+        web_override: None,
     };
 
     registry.execute_named(&mut context, name, args)
@@ -257,7 +258,12 @@ fn deduplicate_citations(citations: Vec<Citation>) -> Vec<Citation> {
 
     for citation in citations {
         // search 与 read 可能命中同一笔记，前端引用列表只需要展示一次。
-        if seen_note_ids.insert(citation.note_id.clone()) {
+        let key = if citation.kind.as_deref() == Some("web") {
+            format!("web:{}", citation.url.as_deref().unwrap_or_default())
+        } else {
+            format!("note:{}", citation.note_id)
+        };
+        if seen_note_ids.insert(key) {
             next_citations.push(citation);
         }
     }

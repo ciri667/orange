@@ -71,6 +71,7 @@ fn run_scripted_tool_loop(
                 snapshot,
                 session_index: 0,
                 request,
+                web_override: None,
             };
             let outcome = registry.execute_model_tool_call(&mut context, &model_tool_call);
             tool_names.push(outcome.call.name.clone());
@@ -335,6 +336,7 @@ mod tests {
             snapshot: &mut snapshot,
             session_index: 0,
             request: &request,
+            web_override: None,
         };
         let first_outcome =
             registry.execute_named(&mut context, "read", json!({ "fileId": "note-a" }));

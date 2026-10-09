@@ -319,6 +319,10 @@ fn build_system_prompt(
         parts.push(memory);
     }
 
+    if crate::web::web_prompt_is_armed_for(&session.id) {
+        parts.push(crate::web::WEB_PROMPT_CLAUSE.to_owned());
+    }
+
     parts.push(format!(
         "【范围】\n允许 scope：{scope_summary}\n{cwd_summary}"
     ));

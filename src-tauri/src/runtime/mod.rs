@@ -673,6 +673,13 @@ async fn run_model_loop(
     cancel: &AgentCancel,
 ) -> Result<RuntimeTurnResult, String> {
     let session_index = resolve_session_index(&snapshot, &request)?;
+    let session_id_for_web = snapshot.sessions[session_index].id.clone();
+    crate::web::begin_web_turn(&session_id_for_web);
+    // 守卫覆盖整个模型循环，包括中途重建 prompt。结束时清掉，避免串到下一次调用。
+    let _web_prompt = crate::web::WebPromptReadyGuard::arm(
+        &session_id_for_web,
+        crate::web::web_search_ready(app),
+    );
 
     remember_requested_provider_on_session(
         &mut snapshot.sessions[session_index],
@@ -1188,6 +1195,7 @@ async fn run_model_loop(
                     snapshot: &mut snapshot,
                     session_index,
                     request: &request,
+                    web_override: None,
                 };
 
                 tool_registry.execute_model_tool_call(&mut tool_context, &model_tool_call)
