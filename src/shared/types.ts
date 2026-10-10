@@ -1118,3 +1118,94 @@ export interface ScheduledJobUpdatedEvent {
   job: ScheduledJob;
   sessionId?: string;
 }
+
+/** 服务器连接状态，与 Rust Slot.state 对齐：disabled / connecting / ready / failed。 */
+export type McpServerState = "disabled" | "connecting" | "ready" | "failed";
+
+/** 传输类型，与 Rust McpServerView.transport 对齐。 */
+export type McpTransportKind = "stdio" | "http";
+
+/** 设置页看到的一台 MCP 服务器；密钥不在这里。 */
+export interface McpServerView {
+  name: string;
+  enabled: boolean;
+  transport: McpTransportKind | string;
+  state: McpServerState | string;
+  command: string;
+  args: string[];
+  url: string;
+  cwd: string;
+  timeoutSeconds: number;
+  hasAuthorization: boolean;
+  error: string | null;
+  stderrTail: string;
+  exposedToolCount: number;
+  tools: McpToolView[];
+}
+
+/** 服务器上的一个工具，以及它现在会不会进入模型工具列表。 */
+export interface McpToolView {
+  rawName: string;
+  publicName: string;
+  description: string;
+  readOnly: boolean;
+  exposed: boolean;
+}
+
+/** 配置文件里被跳过的条目。 */
+export interface McpConfigIssue {
+  serverName: string;
+  message: string;
+}
+
+/** 设置页一次读取的 MCP 概览。 */
+export interface McpOverview {
+  configPath: string;
+  servers: McpServerView[];
+  issues: McpConfigIssue[];
+}
+
+/**
+ * 设置页保存一台服务器的草稿。
+ * authorizationToken：undefined 保持原令牌，空字符串清除，其余文本覆盖。
+ */
+export interface McpServerDraft {
+  name: string;
+  enabled: boolean;
+  transport: McpTransportKind;
+  command: string;
+  /** 每行一个参数。 */
+  argsText: string;
+  url: string;
+  cwd: string;
+  timeoutSeconds: number;
+  /** 每行 KEY=VALUE，支持 ${ENV} 插值。 */
+  envText: string;
+  /** 每行 KEY=VALUE，仅 HTTP 传输使用。 */
+  headersText: string;
+  disabledTools: string[];
+  authorizationToken?: string | null;
+}
+
+/** 测试连接的结果，不改变启用状态。 */
+export interface McpProbeResult {
+  serverName: string;
+  ok: boolean;
+  message: string;
+  toolNames: string[];
+}
+
+/** 回合中等待用户确认的一次 MCP 调用。 */
+export interface McpApprovalRequest {
+  approvalId: string;
+  sessionId: string;
+  serverName: string;
+  toolName: string;
+  argumentsPreview: string;
+}
+
+/** 前端对确认弹窗的决定。 */
+export interface McpApprovalDecision {
+  approvalId: string;
+  approved: boolean;
+}

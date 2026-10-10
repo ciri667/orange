@@ -5,6 +5,7 @@ import {
   History,
   MessageCircle,
   Mic,
+  Plug,
   ScrollText,
   Settings2,
   ShieldCheck,
@@ -58,6 +59,7 @@ import {
   EventLogsSettingsSection,
   ImSettingsSection,
   KnowledgeSettingsSection,
+  McpSettingsSection,
   ModelSettingsSection,
   AgentSecuritySettingsSection,
   SkillsSettingsSection,
@@ -66,7 +68,7 @@ import {
 } from "./SettingsSections";
 
 /** 设置页左侧导航的可选分区，和右侧主内容一一对应。 */
-type SettingsSectionId = "knowledge" | "model" | "voice" | "webSearch" | "agentSecurity" | "im" | "skills" | "agentMemory" | "eventLogs" | "auditLogs";
+type SettingsSectionId = "knowledge" | "model" | "voice" | "webSearch" | "agentSecurity" | "im" | "skills" | "mcp" | "agentMemory" | "eventLogs" | "auditLogs";
 
 /** 设置页导航分组，帮助用户区分可配置项和只读诊断项。 */
 type SettingsSectionGroup = "配置" | "诊断";
@@ -304,6 +306,15 @@ export function SettingsDrawer({
         meta: `${enabledSkillCount}/${skills.length}`,
         icon: Sparkles,
         tone: enabledSkillCount > 0 ? "success" : "neutral",
+      },
+      {
+        id: "mcp",
+        group: "配置",
+        label: "MCP 服务",
+        description: "接入外部工具服务器",
+        meta: "stdio / HTTP",
+        icon: Plug,
+        tone: "neutral",
       },
       {
         id: "agentMemory",
@@ -1163,6 +1174,10 @@ export function SettingsDrawer({
           onSaveSettings={handleSaveSettings}
         />
       );
+    }
+
+    if (activeSection === "mcp") {
+      return <McpSettingsSection isBusy={isBusy} />;
     }
 
     if (activeSection === "webSearch") {

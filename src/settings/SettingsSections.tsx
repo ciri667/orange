@@ -6,6 +6,7 @@ export {
   EventLogsSettingsSection,
   ImSettingsSection,
   KnowledgeSettingsSection,
+  McpSettingsSection,
   ModelSettingsSection,
   SkillsSettingsSection,
   VoiceSettingsSection,

@@ -2,6 +2,7 @@ export { KnowledgeSettingsSection } from "./KnowledgeSettingsSection";
 export { ModelSettingsSection } from "./ModelSettingsSection";
 export { VoiceSettingsSection } from "./VoiceSettingsSection";
 export { SkillsSettingsSection } from "./SkillsSettingsSection";
+export { McpSettingsSection } from "./McpSettingsSection";
 export { AgentSecuritySettingsSection } from "./AgentSecuritySettingsSection";
 export { ImSettingsSection } from "./ImSettingsSection";
 export { EventLogsSettingsSection } from "./EventLogsSettingsSection";
