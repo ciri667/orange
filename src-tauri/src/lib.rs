@@ -10,6 +10,7 @@ mod export;
 mod fs_guard;
 mod im;
 mod logging;
+mod mcp;
 mod model_provider;
 mod provider_error;
 mod runtime;
@@ -129,6 +130,7 @@ pub fn run() {
                         }
                     }
                     TRAY_MENU_QUIT => {
+                        mcp::shutdown_processes();
                         if !begin_app_quit(app) {
                             app.exit(0);
                         }
@@ -184,6 +186,12 @@ pub fn run() {
             }
 
             scheduler::start(handle.clone());
+            let mcp_handle = handle.clone();
+            tauri::async_runtime::spawn(async move {
+                if let Err(error) = mcp::install(&mcp_handle).await {
+                    log::warn!(target: "mcp", "MCP 启动失败：{error}");
+                }
+            });
 
             let im_handle = handle.clone();
             tauri::async_runtime::spawn(async move {
@@ -350,7 +358,14 @@ pub fn run() {
             commands::voice::download_voice_model,
             commands::voice::delete_voice_model,
             commands::voice::start_voice_capture,
-            commands::voice::stop_voice_capture
+            commands::voice::stop_voice_capture,
+            commands::mcp::load_mcp_overview,
+            commands::mcp::save_mcp_server,
+            commands::mcp::remove_mcp_server,
+            commands::mcp::set_mcp_server_enabled,
+            commands::mcp::reload_mcp_servers,
+            commands::mcp::test_mcp_server,
+            commands::mcp::decide_mcp_tool_call
         ])
         .build(tauri::generate_context!())
         .expect("failed to build Orange desktop app")
@@ -362,6 +377,7 @@ pub fn run() {
                 }
             }
             RunEvent::Exit => {
+                mcp::shutdown_processes();
                 im::stop_all_gateways(app);
             }
             _ => {}

@@ -5,6 +5,7 @@ pub mod history;
 pub mod im;
 pub mod knowledge;
 pub mod logs;
+pub mod mcp;
 pub mod notes;
 pub mod schedules;
 pub mod sessions;

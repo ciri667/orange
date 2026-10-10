@@ -1,5 +1,6 @@
 mod agent;
 mod history;
+mod mcp;
 mod im;
 mod knowledge;
 mod logs;
@@ -13,6 +14,7 @@ mod voice;
 pub use agent::*;
 pub use history::*;
 pub use im::*;
+pub use mcp::*;
 pub use knowledge::*;
 pub use logs::*;
 pub use payloads::*;

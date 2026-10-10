@@ -52,6 +52,12 @@ impl AgentCancel {
         *self.tx.borrow()
     }
 
+    /** 测试构造一个尚未取消的令牌。 */
+    #[cfg(test)]
+    pub(crate) fn testing_token() -> Self {
+        Self::new()
+    }
+
     /** 直到取消或发送端被丢弃。已取消时立即返回。 */
     pub async fn cancelled(&self) {
         let mut rx = self.tx.subscribe();
