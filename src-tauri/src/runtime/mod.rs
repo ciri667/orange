@@ -742,7 +742,12 @@ async fn run_model_loop(
     let endpoint = model_provider::chat_completions_endpoint(&provider.api_base);
     let tool_registry =
         ToolRegistry::for_session(&snapshot.sessions[session_index], &agent_security);
-    let tool_schemas = tool_registry.schemas();
+    let mut tool_schemas = tool_registry.schemas();
+    if let Some(items) = tool_schemas.as_array_mut() {
+        items.extend(
+            crate::mcp::prepare_turn_schemas(app, &snapshot.sessions[session_index]).await,
+        );
+    }
     let mut tool_calls = vec![skill_context_tool_call(&available_skills)];
     tool_calls.extend(activate_skill_tool_calls(
         &explicit_skills,
@@ -1156,7 +1161,16 @@ async fn run_model_loop(
                 tool_args.clone(),
                 Some(app),
             );
-            let tool_outcome = if tool_name == "task" {
+            let tool_outcome = if tool_name.starts_with("mcp__") {
+                crate::mcp::execute_model_tool(
+                    app,
+                    &snapshot.sessions[session_index],
+                    &tool_name,
+                    tool_args.clone(),
+                    cancel,
+                )
+                .await
+            } else if tool_name == "task" {
                 let live_id = tracer.live_message_id().to_owned();
                 let shared = Arc::new(Mutex::new(std::mem::replace(
                     tracer,

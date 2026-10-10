@@ -483,6 +483,9 @@ pub fn is_user_visible_tool(name: &str) -> bool {
 
 /** 工具刚开始执行时的折叠标题：优先模型 description，否则从关键参数拼。 */
 pub fn running_tool_summary(name: &str, args: &Value) -> String {
+    if let Some(label) = crate::mcp::naming::trace_label(name) {
+        return label;
+    }
     let canonical = canonical_running_tool_name(name);
     match canonical {
         "search" => {
