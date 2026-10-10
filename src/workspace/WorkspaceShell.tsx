@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { AgentPanel } from "../agent/AgentPanel";
+import { McpApprovalDialog } from "../agent/McpApprovalDialog";
 import { DocumentPane } from "../editor/DocumentPane";
 import { EditorTabBar, type EditorTabBarItem } from "../editor/EditorTabBar";
 import { EditorPane } from "../editor/EditorPane";
@@ -1060,6 +1061,8 @@ export function WorkspaceShell() {
           }
         />
       )}
+      {/* MCP 工具确认由 agent 模块自订阅事件，这里只负责挂载。 */}
+      <McpApprovalDialog />
     </div>
   );
 }
