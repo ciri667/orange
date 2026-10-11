@@ -404,6 +404,9 @@ pub struct AgentSession {
     /** 安全级别按会话固化；IM 会话始终由入口强制降为 basic。 */
     #[serde(default = "default_agent_security_level")]
     pub security_level: String,
+    /** 规划模式开关：开启后工具集收缩为只读，Agent 先出执行计划，用户确认后才进入执行。IM/定时会话强制为 false。 */
+    #[serde(default)]
+    pub plan_mode: bool,
     /** 会话滚动工作记忆，用于让模型在只带最近历史时仍保留早期目标和决定。 */
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub context_summary: Option<AgentContextSummary>,

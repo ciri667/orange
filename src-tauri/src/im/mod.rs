@@ -317,6 +317,7 @@ pub(crate) fn build_im_agent_session(
         pending_change_set: None,
         pending_execution: None,
         security_level: "basic".to_owned(),
+        plan_mode: false,
         context_summary: None,
         created_at: now.clone(),
         updated_at: now,

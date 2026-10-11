@@ -93,6 +93,14 @@ pub(super) fn is_parallelizable_task(args: &Value) -> bool {
     !parsed.background && !parsed.agent.writable()
 }
 
+/** 规划模式遇到 writable 角色时返回拒绝文案，其余情况返回 None。 */
+fn plan_mode_writable_rejection(plan_mode: bool, agent: &ResolvedAgent) -> Option<&'static str> {
+    if plan_mode && agent.writable() {
+        return Some("规划模式仅允许只读子 Agent 角色（explore / researcher 或用户自定义只读角色）。");
+    }
+    None
+}
+
 pub(super) fn parallel_window_size(args_list: &[Value]) -> usize {
     let mut count = 0usize;
     for args in args_list {
@@ -128,6 +136,14 @@ pub(super) async fn run_one_shot(mut params: SubagentRunParams<'_>) -> ToolOutco
             "writer 以及带 edit/write 的自定义角色不能在后台运行，以免和父级抢同一份待确认写入。",
             Some(&parsed.task_id),
         );
+    }
+
+    // 规划模式：子 Agent 同样只允许只读角色，防止 writable persona 经 task 产生待确认写入。
+    if let Some(message) = plan_mode_writable_rejection(
+        params.snapshot.sessions[params.session_index].plan_mode,
+        &parsed.agent,
+    ) {
+        return failed_outcome(params.args, message, Some(&parsed.task_id));
     }
 
     if params.cancel.is_aborted() {
@@ -968,6 +984,18 @@ mod tests {
         assert_eq!(parallel_window_size(&[explore, background]), 1);
     }
 
+    /** 规划模式拒绝 writable 角色，放行只读角色；非规划模式不受影响。 */
+    #[test]
+    fn plan_mode_task_rejects_writable_persona() {
+        use super::super::subagent_personas::resolve_agent;
+
+        let writer = resolve_agent("writer").expect("writer 角色应存在");
+        let explore = resolve_agent("explore").expect("explore 角色应存在");
+        assert!(plan_mode_writable_rejection(true, &writer).is_some());
+        assert!(plan_mode_writable_rejection(true, &explore).is_none());
+        assert!(plan_mode_writable_rejection(false, &writer).is_none());
+    }
+
     #[test]
     fn fold_pending_change_merges_into_agent_direct_set() {
         let mut session = AgentSession {
@@ -1002,6 +1030,7 @@ mod tests {
             pending_change_set: None,
             pending_execution: None,
             security_level: "basic".to_owned(),
+            plan_mode: false,
             context_summary: None,
             created_at: "刚刚".to_owned(),
             updated_at: "刚刚".to_owned(),
@@ -1074,6 +1103,7 @@ mod tests {
                 pending_change_set: None,
                 pending_execution: None,
                 security_level: "basic".to_owned(),
+                plan_mode: false,
                 context_summary: None,
                 created_at: "刚刚".to_owned(),
                 updated_at: "刚刚".to_owned(),

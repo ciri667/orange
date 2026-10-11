@@ -528,6 +528,7 @@ mod tests {
             pending_change_set: None,
             pending_execution: None,
             security_level: level.to_owned(),
+            plan_mode: false,
             context_summary: None,
             created_at: "t".to_owned(),
             updated_at: "t".to_owned(),

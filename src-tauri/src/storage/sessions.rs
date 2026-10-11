@@ -797,11 +797,17 @@ pub fn normalize_session_for_snapshot(
         session.security_level = "basic".to_owned();
         session.pending_execution = None;
         session.pending_change_set = None;
+        session.plan_mode = false;
     } else if !matches!(
         session.security_level.as_str(),
         "basic" | "advanced" | "autonomous"
     ) {
         session.security_level = "basic".to_owned();
+    }
+
+    // 定时任务无人值守，没有「用户确认计划」的环节，规划模式一律关闭。
+    if session.schedule_identity.is_some() {
+        session.plan_mode = false;
     }
 
     if session.deleted_at.is_some() {
@@ -865,7 +871,7 @@ pub(crate) fn ordered_valid_scope_ids(
 
 #[cfg(test)]
 mod tests {
-    use super::retain_viewer_session_id;
+    use super::{normalize_session_for_snapshot, retain_viewer_session_id};
     use crate::domain::{AgentSession, WorkspaceSnapshot};
 
     fn test_session(id: &str) -> AgentSession {
@@ -883,6 +889,7 @@ mod tests {
             pending_change_set: None,
             pending_execution: None,
             security_level: "basic".to_owned(),
+            plan_mode: false,
             context_summary: None,
             created_at: "t".to_owned(),
             updated_at: "t".to_owned(),
@@ -918,6 +925,44 @@ mod tests {
         assert!(!session.title_customized);
         assert!(session.pinned_at.is_none());
         assert!(session.archived_at.is_none());
+        assert!(!session.plan_mode);
+    }
+
+    /** IM 与定时会话强制关闭规划模式，无论前端或历史 payload 如何声明。 */
+    #[test]
+    fn remote_sessions_cannot_keep_plan_mode() {
+        let snapshot = WorkspaceSnapshot {
+            knowledge_bases: Vec::new(),
+            folders: Vec::new(),
+            notes: Vec::new(),
+            documents: Vec::new(),
+            sessions: Vec::new(),
+            active_knowledge_base_id: String::new(),
+            active_note_id: String::new(),
+            active_document_id: String::new(),
+            active_session_id: String::new(),
+        };
+
+        let mut im_session = test_session("session-im");
+        im_session.plan_mode = true;
+        im_session.im_identity = Some(crate::domain::ImSessionIdentity {
+            provider_id: "feishu".to_owned(),
+            conversation_kind: "direct".to_owned(),
+            channel_hash: "redacted".to_owned(),
+            initial_message_preview: "IM".to_owned(),
+            last_message_preview: "IM".to_owned(),
+        });
+        normalize_session_for_snapshot(&mut im_session, &snapshot);
+        assert!(!im_session.plan_mode);
+
+        let mut schedule_session = test_session("session-schedule");
+        schedule_session.plan_mode = true;
+        schedule_session.schedule_identity = Some(crate::domain::ScheduleSessionIdentity {
+            job_id: "job-a".to_owned(),
+            job_name: "每日整理".to_owned(),
+        });
+        normalize_session_for_snapshot(&mut schedule_session, &snapshot);
+        assert!(!schedule_session.plan_mode);
     }
 
     #[test]

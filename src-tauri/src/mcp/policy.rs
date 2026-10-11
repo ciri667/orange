@@ -31,9 +31,9 @@ pub struct ProjectedCall {
     pub text: String,
 }
 
-/** 只有本机交互会话的进阶或完全级别能看见 MCP 工具。 */
-pub fn session_exposes_mcp(local_interactive: bool, security_level: &str) -> bool {
-    local_interactive && matches!(security_level, "advanced" | "autonomous")
+/** 只有本机交互会话的进阶或完全级别能看见 MCP 工具；规划模式一律隐藏。 */
+pub fn session_exposes_mcp(local_interactive: bool, security_level: &str, plan_mode: bool) -> bool {
+    !plan_mode && local_interactive && matches!(security_level, "advanced" | "autonomous")
 }
 
 /** 完全级别不再打断。其余级别只放行显式标注只读的工具。 */
@@ -123,11 +123,18 @@ mod tests {
 
     #[test]
     fn basic_and_remote_sessions_hide_mcp() {
-        assert!(!session_exposes_mcp(true, "basic"));
-        assert!(!session_exposes_mcp(false, "advanced"));
-        assert!(!session_exposes_mcp(false, "autonomous"));
-        assert!(session_exposes_mcp(true, "advanced"));
-        assert!(session_exposes_mcp(true, "autonomous"));
+        assert!(!session_exposes_mcp(true, "basic", false));
+        assert!(!session_exposes_mcp(false, "advanced", false));
+        assert!(!session_exposes_mcp(false, "autonomous", false));
+        assert!(session_exposes_mcp(true, "advanced", false));
+        assert!(session_exposes_mcp(true, "autonomous", false));
+    }
+
+    /** 规划模式下任何级别的本机会话都不得暴露 MCP。 */
+    #[test]
+    fn plan_mode_hides_mcp() {
+        assert!(!session_exposes_mcp(true, "advanced", true));
+        assert!(!session_exposes_mcp(true, "autonomous", true));
     }
 
     #[test]

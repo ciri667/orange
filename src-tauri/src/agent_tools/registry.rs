@@ -30,6 +30,13 @@ impl Default for ToolRegistry {
 impl ToolRegistry {
     /** 按会话安全级别构造工具集；高权限工具在注册层不可见，而不是执行时才软拒绝。 */
     pub fn for_session(session: &AgentSession, settings: &AgentSecuritySettings) -> Self {
+        // 规划模式：只读闭集 + task；edit/write/run 对模型不可见，写入由运行时硬保证不可能。
+        if session.plan_mode {
+            let mut registry = Self::for_subagent();
+            registry.tools.push(Box::new(TaskTool));
+            return registry;
+        }
+
         let mut registry = Self::default();
         let local_session = session.im_identity.is_none();
         let can_run_skills = local_session

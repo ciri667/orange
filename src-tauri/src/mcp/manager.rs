@@ -180,11 +180,12 @@ impl McpManager {
         session_id: &str,
         security_level: &str,
         local_interactive: bool,
+        plan_mode: bool,
         public_name: &str,
         arguments: Value,
         cancel: &AgentCancel,
     ) -> ToolOutcome {
-        if !session_exposes_mcp(local_interactive, security_level) {
+        if !session_exposes_mcp(local_interactive, security_level, plan_mode) {
             return failed(public_name, &arguments, "当前会话不能使用 MCP。");
         }
         let Some(tool) = self.find_tool(public_name) else {
@@ -615,7 +616,8 @@ pub fn manager(app: &AppHandle) -> Option<McpManager> {
 
 pub async fn prepare_turn_schemas(app: &AppHandle, session: &AgentSession) -> Vec<Value> {
     let local_interactive = session.im_identity.is_none() && session.schedule_identity.is_none();
-    if !session_exposes_mcp(local_interactive, &session.security_level) {
+    // 规划模式只读：MCP 工具连 schema 都不注入，模型无从调用。
+    if !session_exposes_mcp(local_interactive, &session.security_level, session.plan_mode) {
         return Vec::new();
     }
     let Some(manager) = manager(app) else {
@@ -633,6 +635,10 @@ pub async fn execute_model_tool(
     cancel: &AgentCancel,
 ) -> ToolOutcome {
     let local_interactive = session.im_identity.is_none() && session.schedule_identity.is_none();
+    // 执行侧兜底：即使历史 transcript 回放旧 MCP tool_call，规划模式也一律拒绝。
+    if session.plan_mode {
+        return failed(public_name, &arguments, "规划模式下不能使用 MCP 工具。");
+    }
     let Some(manager) = manager(app) else {
         return failed(public_name, &arguments, "MCP 还没有启动。");
     };
@@ -642,6 +648,7 @@ pub async fn execute_model_tool(
             &session.id,
             &session.security_level,
             local_interactive,
+            session.plan_mode,
             public_name,
             arguments,
             cancel,

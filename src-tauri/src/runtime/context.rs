@@ -263,6 +263,9 @@ pub(super) fn conversation_from_model_messages(
     messages.get(prefix_len..).unwrap_or(&[]).to_vec()
 }
 
+/** 规划模式的系统策略：替代默认写入与安全级别说明，避免两套政策互相矛盾。 */
+const PLAN_MODE_POLICY: &str = "【规划模式】本会话已开启规划模式：你当前只有 search、read、list 和只读 task 工具，edit、write、run 与 MCP 均不可用。规划模式要求先计划、经用户确认后才执行：除了问候、与知识库无关且无需工具就能回答的通用问题、以及用户对计划本身的追问，任何请求——包括列出、查看、检索、对比、总结知识库内容，以及改写、新建、移动、重命名、整理文件或运行 Skill——都必须先输出一份执行计划，然后停下等待用户在界面上确认，禁止在本轮直接交付任务的最终结果。规划轮只允许做制定计划所需的最小只读侦查（例如 list 目录、抽查少量关键文件），计划获批前不要批量读取全文或完成整套检索。执行计划格式：标题行固定包含「执行计划」四个字，正文用 1. 2. 3. 编号步骤清单，写明目标、涉及的文件或目录路径、每一步的具体动作与完成标准；目标不明确或存在多种合理方案时，先提出澄清问题再出计划。禁止声称已经开始、正在或已经完成任何写入、移动或运行——你此刻不具备这些能力；用户确认计划后，宿主会关闭规划模式并自动发送确认消息，下一回合才进入执行阶段。相互独立的只读侦查可以用 explore 或 researcher 角色并行。";
+
 /** 拼唯一 system：角色、工具、guideline、安全级别、项目指令、Skill 目录、跨会话记忆、范围。 */
 fn build_system_prompt(
     snapshot: &WorkspaceSnapshot,
@@ -270,7 +273,9 @@ fn build_system_prompt(
     available_skills: &[AgentSkill],
     knowledge_base_memories: &[KnowledgeBaseMemory],
 ) -> String {
-    let visible_tools = if session.im_identity.is_some() || session.security_level == "basic" {
+    let visible_tools = if session.plan_mode {
+        "search, read, list, task（仅只读角色）"
+    } else if session.im_identity.is_some() || session.security_level == "basic" {
         "search, read, list, edit, write, task"
     } else {
         "search, read, list, edit, write, run, task"
@@ -290,12 +295,15 @@ fn build_system_prompt(
     let scope_summary = build_scope_summary(snapshot, session);
     let cwd_summary = build_cwd_summary(snapshot, session);
 
-    let mut parts = vec![
-        format!("你是橘记的本地优先知识库 Agent。当前可见工具：{visible_tools}。"),
-        format!(
+    let mut parts = vec![format!("你是橘记的本地优先知识库 Agent。当前可见工具：{visible_tools}。")];
+    if session.plan_mode {
+        // 规划模式用专属只读策略替代写入与安全级别说明，其余上下文段照常注入。
+        parts.push(PLAN_MODE_POLICY.to_owned());
+    } else {
+        parts.push(format!(
             "search 只检索 Markdown；read 和 edit 可作用于当前 scope 内的 Markdown/TXT，并且都必须提供 fileId，不能省略；TXT 必须原样按纯文本处理；read 也可只读 DOCX/PDF 并返回可信的页码或结构块引用。{write_policy}write 新建文件必须带完整正文 content（也接受 next）；fileType 为 markdown 或 txt（大小写不敏感，缺省时由 .md/.txt 推断），路径用 targetPath（也接受 path），扩展名必须匹配。局部替换使用 operation=replace，文末追加使用 operation=append 且 next 只含增量；同一文件多处编辑使用 operation=multi_replace 和 edits。必须使用服务端标准 tool_calls 字段调用工具，不要在普通回复中输出 DSML、XML 或伪工具调用标签。引用只允许来自已执行工具结果。{skill_policy}\n{autonomous_tool_policy}\n{security_level_policy}"
-        ),
-    ];
+        ));
+    }
 
     if let Some(identity) = &session.schedule_identity {
         parts.push(format!(
@@ -1608,6 +1616,52 @@ mod tests {
             .as_str()
             .unwrap_or_default()
             .contains("继续")));
+    }
+
+    /** 规划模式会话注入只读规划策略；普通会话保持写入与安全级别策略。 */
+    #[test]
+    fn system_prompt_switches_policy_for_plan_mode() {
+        let snapshot = WorkspaceSnapshot {
+            knowledge_bases: Vec::new(),
+            folders: Vec::new(),
+            notes: Vec::new(),
+            documents: Vec::new(),
+            sessions: Vec::new(),
+            active_knowledge_base_id: String::new(),
+            active_note_id: String::new(),
+            active_document_id: String::new(),
+            active_session_id: String::new(),
+        };
+        let session_json = |plan_mode: bool| {
+            json!({
+                "id": "session-a",
+                "title": "测试",
+                "type": "knowledge-base",
+                "knowledgeBaseIds": [],
+                "activeNoteId": null,
+                "pinnedNoteIds": [],
+                "messages": [],
+                "planMode": plan_mode,
+                "createdAt": "刚刚",
+                "updatedAt": "刚刚"
+            })
+        };
+
+        let plan_session: crate::domain::AgentSession =
+            serde_json::from_value(session_json(true)).expect("规划模式会话应能反序列化");
+        let plan_prompt = build_system_prompt(&snapshot, &plan_session, &[], &[]);
+        assert!(plan_prompt.contains("【规划模式】"));
+        assert!(!plan_prompt.contains("edit 和 write"));
+        // 回归锁：检索类任务也必须先出计划等确认，旧的「检索类请求直接回答」豁免不能回来。
+        assert!(plan_prompt.contains("先输出一份执行计划"));
+        assert!(plan_prompt.contains("列出、查看、检索"));
+        assert!(!plan_prompt.contains("直接用已核实的证据回答"));
+
+        let normal_session: crate::domain::AgentSession =
+            serde_json::from_value(session_json(false)).expect("普通会话应能反序列化");
+        let normal_prompt = build_system_prompt(&snapshot, &normal_session, &[], &[]);
+        assert!(!normal_prompt.contains("【规划模式】"));
+        assert!(normal_prompt.contains("edit"));
     }
 
     #[test]

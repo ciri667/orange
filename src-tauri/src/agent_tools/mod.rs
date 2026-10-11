@@ -100,6 +100,7 @@ mod tests {
                 pending_change_set: None,
                 pending_execution: None,
                 security_level: "basic".to_owned(),
+                plan_mode: false,
                 context_summary: None,
                 created_at: "刚刚".to_owned(),
                 updated_at: "刚刚".to_owned(),
@@ -254,6 +255,39 @@ mod tests {
             im_tools,
             vec!["search", "read", "list", "edit", "write", "task"]
         );
+    }
+
+    /** 规划模式无论安全级别多高都只暴露只读闭集；模型硬调 edit 也按未知工具拒绝。 */
+    #[test]
+    fn plan_mode_session_omits_write_and_skill_tools() {
+        let mut snapshot = tool_test_snapshot("正文内容足够用于测试。".to_owned());
+        let mut settings = AgentSecuritySettings::default();
+        settings.advanced_execution_enabled = true;
+        settings.autonomous_mode_enabled = true;
+        snapshot.sessions[0].plan_mode = true;
+
+        for level in ["basic", "advanced", "autonomous"] {
+            snapshot.sessions[0].security_level = level.to_owned();
+            let names = ToolRegistry::for_session(&snapshot.sessions[0], &settings).tool_names();
+            assert_eq!(
+                names,
+                vec!["search", "read", "list", "task"],
+                "级别 {level} 的规划模式工具集应为只读闭集"
+            );
+        }
+
+        // 执行层兜底：transcript 回放旧 edit 调用时不产生任何待确认写入。
+        snapshot.sessions[0].security_level = "basic".to_owned();
+        let registry = ToolRegistry::for_session(&snapshot.sessions[0], &settings);
+        let request = tool_test_request("rewrite", "改一下");
+        let mut context = tool_test_context(&mut snapshot, &request);
+        let outcome = registry.execute_named(
+            &mut context,
+            "edit",
+            json!({ "fileId": "note-a", "operation": "replace", "original": "正文", "next": "新文" }),
+        );
+        assert_eq!(outcome.call.status, "failed");
+        assert!(snapshot.sessions[0].pending_change.is_none());
     }
 
     /** 子 Agent 注册表只有只读工具，不能再委派或写入。 */

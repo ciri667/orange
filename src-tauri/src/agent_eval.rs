@@ -205,6 +205,7 @@ fn eval_snapshot(note_content: String) -> WorkspaceSnapshot {
             pending_change_set: None,
             pending_execution: None,
             security_level: "basic".to_owned(),
+            plan_mode: false,
             context_summary: None,
             created_at: "刚刚".to_owned(),
             updated_at: "刚刚".to_owned(),
