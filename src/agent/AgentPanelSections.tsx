@@ -1,4 +1,4 @@
-import { Check, Clock, Copy, Database, FolderOpen, Gauge, Layers3, ListChecks, Pencil, Sparkles, X } from "lucide-react";
+import { Check, ChevronDown, Clock, Copy, Database, FolderOpen, Gauge, Layers3, ListChecks, Pencil, Sparkles, X } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import ReactMarkdown from "react-markdown";
 import rehypeSanitize from "rehype-sanitize";
@@ -20,6 +20,7 @@ import {
   protectGfmTablePipesInInlineCode,
 } from "../shared/markdown";
 import { OverflowTooltipText } from "../shared/OverflowTooltipText";
+import { Menu, MenuItem, MenuPanel } from "../shared/Menu";
 import { agentPopoverClassName, fieldTextareaClassName, popoverHeaderClassName, sectionLabelClassName } from "../shared/ui";
 import {
   getScopeSummaryLabel,
@@ -126,7 +127,7 @@ export const AGENT_SECURITY_LEVEL_COPY = {
   },
 } as const;
 
-/** 钉在输入条上的三级权限开关；IM 会话不渲染。 */
+/** 钉在输入条上的三级权限下拉；IM 会话不渲染。选择更高档仍会走原有授权确认。 */
 export function AgentSecurityLevelControl({
   activeSession,
   agentSecurity,
@@ -138,40 +139,73 @@ export function AgentSecurityLevelControl({
   isBusy: boolean;
   onSecurityLevelChange?: (level: AgentSession["securityLevel"]) => void;
 }) {
+  const [isOpen, setIsOpen] = useState(false);
+
   if (!agentSecurity) {
     return null;
   }
 
-  return (
-    <div className="inline-flex min-w-0 shrink items-center gap-1 bg-transparent p-0 text-xs" aria-label="当前会话权限" role="radiogroup">
-      {([
-        ["basic", true],
-        ["advanced", agentSecurity.advancedExecutionEnabled],
-        ["autonomous", agentSecurity.autonomousModeEnabled],
-      ] as const).map(([level, isEnabled]) => {
-        const copy = AGENT_SECURITY_LEVEL_COPY[level];
-        const active = activeSession.securityLevel === level;
+  const selectedCopy = AGENT_SECURITY_LEVEL_COPY[activeSession.securityLevel];
+  const levels = [
+    ["basic", true],
+    ["advanced", agentSecurity.advancedExecutionEnabled],
+    ["autonomous", agentSecurity.autonomousModeEnabled],
+  ] as const;
 
-        return (
-          <button
-            className={cn(
-              "rounded-full border-0 bg-transparent px-1.5 py-0.5 text-[12px] font-medium",
-              active ? "text-accent" : "text-ink-soft hover:text-ink",
-            )}
-            type="button"
-            role="radio"
-            aria-checked={active}
-            aria-label={`${copy.label}权限。${copy.description}`}
-            title={`${copy.description}${isEnabled ? "" : "选择后将启用此能力。"}`}
-            disabled={isBusy}
-            key={level}
-            onClick={() => onSecurityLevelChange?.(level)}
-          >
-            {copy.label}
-          </button>
-        );
-      })}
-    </div>
+  return (
+    <Menu className="shrink-0" open={isOpen} onClose={() => setIsOpen(false)}>
+      <button
+        className={cn(
+          "inline-flex h-7 items-center gap-1 rounded-control border border-border bg-surface px-2 text-[12px] font-medium text-ink",
+          "hover:border-border-strong hover:bg-surface-hover",
+          "focus-visible:border-border-strong focus-visible:outline-none",
+          "disabled:cursor-not-allowed disabled:opacity-50",
+        )}
+        type="button"
+        aria-haspopup="menu"
+        aria-expanded={isOpen}
+        aria-label={`当前会话权限：${selectedCopy.label}。${selectedCopy.description}`}
+        title={selectedCopy.description}
+        disabled={isBusy}
+        onClick={() => setIsOpen((open) => !open)}
+      >
+        <span>{selectedCopy.label}</span>
+        <ChevronDown size={13} className={cn("shrink-0 text-ink-muted transition-transform", isOpen && "rotate-180")} />
+      </button>
+      {isOpen && (
+        <MenuPanel
+          placement="top-end"
+          className="bottom-[calc(100%+6px)] left-0 w-[248px] min-w-0 whitespace-normal"
+        >
+          {levels.map(([level, isEnabled]) => {
+            const copy = AGENT_SECURITY_LEVEL_COPY[level];
+            const active = activeSession.securityLevel === level;
+            const hint = isEnabled ? copy.description : `${copy.description}选择后将启用此能力。`;
+
+            return (
+              <MenuItem
+                key={level}
+                role="menuitemradio"
+                aria-checked={active}
+                aria-label={`${copy.label}权限。${hint}`}
+                title={hint}
+                className="h-auto items-start gap-2 py-1.5 whitespace-normal"
+                onClick={() => {
+                  setIsOpen(false);
+                  onSecurityLevelChange?.(level);
+                }}
+              >
+                <span className="grid min-w-0 flex-1 gap-0.5 text-left">
+                  <span className={cn("font-medium", active && "text-accent")}>{copy.label}</span>
+                  <span className="text-[11px] leading-snug font-normal text-ink-muted">{hint}</span>
+                </span>
+                {active ? <Check size={14} className="mt-0.5 shrink-0 text-accent" /> : <span className="size-3.5 shrink-0" aria-hidden="true" />}
+              </MenuItem>
+            );
+          })}
+        </MenuPanel>
+      )}
+    </Menu>
   );
 }
 
@@ -192,7 +226,7 @@ export function PlanModeToggle({
       type="button"
       role="switch"
       aria-checked={active}
-      aria-label="先规划模式"
+      aria-label="计划模式"
       title={active ? "规划中：Agent 只读探索并先给出执行计划，你确认后才执行。点击可关闭。" : "开启后 Agent 先给出执行计划，你确认后才动手。"}
       disabled={isBusy}
       className={cn(
@@ -203,7 +237,7 @@ export function PlanModeToggle({
       )}
       onClick={() => onPlanModeChange(!active)}
     >
-      先规划
+      计划模式
     </button>
   );
 }
