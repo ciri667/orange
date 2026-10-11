@@ -1,5 +1,6 @@
 import { traceFromToolCalls } from "../../agent/agentTrace";
 import { createContentHash, createLocalId, formatLocalDateTime } from "../id";
+import { assistantReplyLooksLikePlan } from "../planMode";
 import { buildMarkdownDiff } from "../../diff/markdownDiff";
 import { extractNoteTags } from "../noteTags";
 import { isRootProjectInstructionPath } from "../projectInstructions";
@@ -482,6 +483,7 @@ function createInitialSessions(): AgentSession[] {
       knowledgeBaseIds: ["kb-personal"],
       pinnedNoteIds: [],
       securityLevel: "basic",
+      planMode: false,
       createdAt: "今天 14:18",
       updatedAt: "今天 14:18",
       messages: [],
@@ -493,6 +495,7 @@ function createInitialSessions(): AgentSession[] {
       knowledgeBaseIds: ["kb-personal", "kb-work"],
       pinnedNoteIds: [],
       securityLevel: "basic",
+      planMode: false,
       createdAt: "2026/10/01 09:12",
       updatedAt: "2026/10/01 09:40",
       messages: [
@@ -839,7 +842,39 @@ export function runMockAgentTurn(
     session.messages.push(userMessage);
   }
 
-  if (action === "rewrite" && rewriteTextDocument && !mentionedNote) {
+  // 浏览器 mock 规划模式：凡是要动用知识库或文件的任务（含检索、列出、总结类）只输出计划文本、不直接交付结果，对齐桌面端「先计划、确认后执行」约束；问候与通用闲聊保持直接回答。
+  const lastAssistantMessage = [...session.messages].reverse().find((message) => message.role === "assistant");
+  const wantsPlanReply =
+    Boolean(session.planMode) &&
+    (action === "rewrite" ||
+      action === "create" ||
+      action === "organize" ||
+      /整理|改写|新建|创建|移动|删除|重命名|运行|计划|列出|汇总|总结|梳理|检索|搜索|查找|查看|有哪些|读取|分析|对比|内容|写了什么/.test(prompt) ||
+      assistantReplyLooksLikePlan(lastAssistantMessage));
+  if (wantsPlanReply) {
+    toolCalls.push(
+      createToolCall("task", "浏览器 mock 已模拟只读角色查看目录结构；规划回合不调用任何写入类工具。", {
+        agent: "explore",
+        background: false,
+      }),
+    );
+    content = [
+      `# 执行计划：${prompt.trim() || "完成本回合请求"}`,
+      "",
+      `**目标：** ${prompt.trim() || "完成本回合请求的任务"}。先只读核对范围，确认后再动手。`,
+      "",
+      "**当前侦查结果：** 浏览器 mock 只模拟目录结构，不读取真实文件正文。",
+      "",
+      "## 步骤",
+      "",
+      "1. 用 list 扫描知识库目录，确认任务涉及的文件范围。",
+      "2. 用 read 逐篇核对相关笔记与文档正文。",
+      "3. 按要求汇总产出结果，并附上依据的文件清单。",
+      "4. 输出结果供你核对，确认无误后收尾。",
+      "",
+      "**完成标准：** 所有涉及文件均已核对，结果清单与知识库当前内容一致。",
+    ].join("\n");
+  } else if (action === "rewrite" && rewriteTextDocument && !mentionedNote) {
     const original = rewriteTextDocument.content ?? "";
     const next = shouldAppendToNote(prompt) ? `${original}${buildAppendText(prompt)}` : buildRewriteText(original);
     const nextChange: ProposedChange = {

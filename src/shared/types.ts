@@ -644,6 +644,8 @@ export interface AgentSession {
   pendingChangeSet?: ProposedChangeSet;
   pendingExecution?: SkillExecutionRequest;
   securityLevel: AgentSecurityLevel;
+  /** 规划模式开关：开启后 Agent 只用只读工具先出执行计划，用户确认后才执行。IM/定时会话恒为 false。 */
+  planMode: boolean;
   /** 会话滚动工作记忆，用于让模型在只带最近历史时仍保留早期目标和决定。 */
   contextSummary?: AgentContextSummary;
   createdAt: string;

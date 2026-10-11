@@ -26,7 +26,8 @@ import {
   validateConversationImageFiles,
   type ConversationImageDraft,
 } from "./conversationImages";
-import { AgentSecurityLevelControl } from "./AgentPanelSections";
+import { AgentSecurityLevelControl, PlanModeToggle, PlanReadyBanner } from "./AgentPanelSections";
+import { assistantReplyLooksLikePlan } from "../shared/planMode";
 
 /** 输入法结束组词后的短保护窗口；部分中文输入法会先触发 compositionend，再派发 Enter keydown。 */
 const PROMPT_IME_ENTER_GUARD_MS = 150;
@@ -145,6 +146,8 @@ export function AgentInput({
   onClearQueuedFollowUp,
   onTurnModelSelectionChange,
   onSecurityLevelChange,
+  onPlanModeChange,
+  onExecutePlan,
 }: {
   activeSession: AgentSession;
   prompt: string;
@@ -175,6 +178,10 @@ export function AgentInput({
   onClearQueuedFollowUp?: () => void;
   onTurnModelSelectionChange: (selection: string) => void;
   onSecurityLevelChange: (level: AgentSession["securityLevel"]) => void;
+  /** 切换规划模式；开启后 Agent 只用只读工具先出执行计划。 */
+  onPlanModeChange: (planMode: boolean) => void;
+  /** 用户批准计划：关闭规划模式并自动发送执行回合。 */
+  onExecutePlan: () => void;
 }) {
   /** 已启用的 Provider 列表；未启用的 provider 不出现在选择器中。 */
   const enabledProviders = modelConfig.providers.filter((provider) => provider.enabled);
@@ -664,6 +671,9 @@ export function AgentInput({
       : "问橘记，或 @ 文件、/ Skill";
   const sendTitle = queuedFollowUp ? "已有一条排队指令" : isBusy ? "排队到当前回合之后发送" : "发送";
   const showStopButton = isBusy;
+  /** 规划模式开启、且最后一条回复确实是「执行计划」形状时才出横幅；问候、通用问答与澄清追问不满足形状，不打扰。 */
+  const showPlanReadyBanner =
+    activeSession.planMode && !isBusy && assistantReplyLooksLikePlan(activeSession.messages[activeSession.messages.length - 1]);
 
   return (
     <footer
@@ -671,6 +681,9 @@ export function AgentInput({
       onDragOver={handleComposerDragOver}
       onDrop={handleComposerDrop}
     >
+      {showPlanReadyBanner ? (
+        <PlanReadyBanner onExecutePlan={onExecutePlan} onRefinePlan={() => promptTextareaRef.current?.focus()} />
+      ) : null}
       {queuedFollowUp ? (
         <div className="flex min-w-0 items-center gap-2 px-0.5 pt-0.5" role="status" aria-label="输入区的排队指令">
           <Chip className="max-w-full flex-1" onRemove={onClearQueuedFollowUp} removeLabel="取消排队指令">
@@ -854,6 +867,9 @@ export function AgentInput({
               isBusy={isBusy}
               onSecurityLevelChange={onSecurityLevelChange}
             />
+          )}
+          {!activeSession.imIdentity && (
+            <PlanModeToggle activeSession={activeSession} isBusy={isBusy} onPlanModeChange={onPlanModeChange} />
           )}
           <div className="ml-auto flex min-w-0 items-center justify-end gap-1.5">
             {modelConfig.enabled && enabledProviders.length > 0 && (

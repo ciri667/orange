@@ -1,4 +1,4 @@
-import { Check, Clock, Copy, Database, FolderOpen, Gauge, Layers3, Pencil, Sparkles, X } from "lucide-react";
+import { Check, Clock, Copy, Database, FolderOpen, Gauge, Layers3, ListChecks, Pencil, Sparkles, X } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import ReactMarkdown from "react-markdown";
 import rehypeSanitize from "rehype-sanitize";
@@ -168,6 +168,69 @@ export function AgentSecurityLevelControl({
           </button>
         );
       })}
+    </div>
+  );
+}
+
+/** 规划模式开关：与安全级别正交，决定 Agent 是否先出计划、经用户确认后才执行。 */
+export function PlanModeToggle({
+  activeSession,
+  isBusy,
+  onPlanModeChange,
+}: {
+  activeSession: AgentSession;
+  isBusy: boolean;
+  onPlanModeChange: (planMode: boolean) => void;
+}) {
+  const active = activeSession.planMode;
+
+  return (
+    <button
+      type="button"
+      role="switch"
+      aria-checked={active}
+      aria-label="先规划模式"
+      title={active ? "规划中：Agent 只读探索并先给出执行计划，你确认后才执行。点击可关闭。" : "开启后 Agent 先给出执行计划，你确认后才动手。"}
+      disabled={isBusy}
+      className={cn(
+        "shrink-0 rounded-full px-1.5 py-0.5 text-[12px] font-medium",
+        active
+          ? "border border-[rgba(var(--accent-rgb),0.35)] bg-accent-soft text-accent"
+          : "border border-transparent bg-transparent text-ink-soft hover:text-ink",
+      )}
+      onClick={() => onPlanModeChange(!active)}
+    >
+      先规划
+    </button>
+  );
+}
+
+/** 规划模式下回合结束后的确认横幅：执行走宿主流程，改计划回到输入框。窄面板时按钮组自动换行，文本保持单行省略。 */
+export function PlanReadyBanner({
+  onExecutePlan,
+  onRefinePlan,
+}: {
+  onExecutePlan: () => void;
+  onRefinePlan: () => void;
+}) {
+  return (
+    <div
+      className="flex w-full min-w-0 flex-wrap items-center gap-x-2 gap-y-1 rounded-control border border-[rgba(var(--accent-rgb),0.3)] bg-accent-soft px-2 py-1.5"
+      role="status"
+      aria-label="计划确认横幅"
+    >
+      <span className="inline-flex min-w-[8rem] flex-1 items-center gap-1.5 text-xs text-ink">
+        <ListChecks size={14} className="shrink-0 text-accent" />
+        <OverflowTooltipText className="min-w-0 truncate" text="计划已就绪：确认后开始执行，或直接输入修改意见。" logArea="agent_plan_banner" />
+      </span>
+      <span className="ml-auto inline-flex shrink-0 items-center gap-1.5">
+        <Button variant="ghost" size="compact" onClick={onRefinePlan}>
+          继续修改计划
+        </Button>
+        <Button variant="primary" size="compact" onClick={onExecutePlan}>
+          执行计划
+        </Button>
+      </span>
     </div>
   );
 }

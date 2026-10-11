@@ -72,6 +72,7 @@ export function useSessionActions(options: SessionActionsOptions) {
       handleToggleScopeSelector: noop,
       handleToggleAgentPanel: noop,
       handleSessionSecurityLevelChange: noopAsync,
+      handleSessionPlanModeChange: noopAsync,
       handleRenameSession: noopAsync,
       handleTogglePinSession: noopAsync,
       handleToggleArchiveSession: noopAsync,
@@ -433,6 +434,40 @@ export function useSessionActions(options: SessionActionsOptions) {
     await persistSecurityLevel();
   }
 
+  /** 切换规划模式；onPersisted 在持久化成功后收到最新快照，供「执行计划」衔接执行回合。 */
+  async function handleSessionPlanModeChange(
+    planMode: boolean,
+    onPersisted?: (nextSnapshot: import("../shared/types").WorkspaceSnapshot) => void,
+  ) {
+    if (!userSettings || activeSession.imIdentity || planMode === activeSession.planMode) {
+      return;
+    }
+
+    beginBusy("正在更新规划模式...");
+
+    try {
+      const nextSession = { ...activeSession, planMode, updatedAt: formatLocalDateTime() };
+      const nextSnapshot = {
+        ...currentSnapshot,
+        sessions: currentSnapshot.sessions.map((session) =>
+          session.id === activeSession.id ? nextSession : session,
+        ),
+      };
+      const savedSnapshot = await saveSession(nextSnapshot, nextSession);
+      commitSnapshot(savedSnapshot);
+      setNotice(
+        planMode
+          ? "已开启规划模式：Agent 将只读探索并先给出执行计划，经你确认后才动手。"
+          : "已关闭规划模式：Agent 恢复正常读写流程。",
+      );
+      onPersisted?.(savedSnapshot);
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : String(error));
+    } finally {
+      endBusy();
+    }
+  }
+
   /** 改标题、置顶或归档都只回写当前这一条会话。 */
   async function persistSessionFields(sessionId: string, busyLabel: string, patch: (session: AgentSession) => AgentSession | null) {
     const latestSnapshot = snapshotRef.current ?? currentSnapshot;
@@ -511,6 +546,7 @@ export function useSessionActions(options: SessionActionsOptions) {
     handleToggleScopeSelector,
     handleToggleAgentPanel,
     handleSessionSecurityLevelChange,
+    handleSessionPlanModeChange,
     handleRenameSession,
     handleTogglePinSession,
     handleToggleArchiveSession,

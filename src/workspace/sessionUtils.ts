@@ -56,6 +56,7 @@ export function buildAgentSession({
     pinnedNoteIds: [],
     messages: [],
     securityLevel,
+    planMode: false,
     createdAt,
     updatedAt: createdAt,
   };
@@ -84,6 +85,7 @@ export function buildDraftAgentSession(
     pinnedNoteIds: [],
     messages: [],
     securityLevel: resolveNewSessionSecurityLevel(securityLevel),
+    planMode: false,
     createdAt: "未保存",
     updatedAt: "未保存",
   };

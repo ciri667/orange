@@ -38,6 +38,7 @@ import {
   getCreateSubmitLabel,
 } from "./fileNameUtils";
 import { DRAFT_SESSION_ID, buildDraftAgentSession, buildMentionableFiles, resolveActiveSessionForKnowledgeBase, resolveNewSessionSecurityLevel } from "./sessionUtils";
+import { PLAN_EXECUTION_PROMPT } from "../shared/planMode";
 import { useAgentTurn } from "./useAgentTurn";
 import { useAgentTurnDraft } from "./useAgentTurnDraft";
 import { useDocumentPreview } from "./useDocumentPreview";
@@ -427,6 +428,7 @@ export function WorkspaceShell() {
     handleToggleScopeSelector,
     handleToggleAgentPanel,
     handleSessionSecurityLevelChange,
+    handleSessionPlanModeChange,
     handleRenameSession,
     handleTogglePinSession,
     handleToggleArchiveSession,
@@ -904,6 +906,13 @@ export function WorkspaceShell() {
             onApplyChangeSet={handleApplySkillChangeSet}
             onRejectChangeSet={handleRejectSkillChangeSet}
             onSecurityLevelChange={handleSessionSecurityLevelChange}
+            onPlanModeChange={handleSessionPlanModeChange}
+            onExecutePlan={() =>
+              // 批准计划是宿主流程：先持久化关闭规划模式，再用最新快照自动发起执行回合。
+              void handleSessionPlanModeChange(false, (savedSnapshot) => {
+                void handleSubmitPrompt("ask", PLAN_EXECUTION_PROMPT, savedSnapshot);
+              })
+            }
             onToggleChangeOperation={handleToggleSkillChangeOperation}
           />
         )}

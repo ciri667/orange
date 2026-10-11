@@ -81,6 +81,8 @@ export function AgentPanel({
   onApplyChangeSet,
   onRejectChangeSet,
   onSecurityLevelChange,
+  onPlanModeChange,
+  onExecutePlan,
   onToggleChangeOperation,
 }: {
   sessions: AgentSession[];
@@ -152,6 +154,10 @@ export function AgentPanel({
   onApplyChangeSet: () => void;
   onRejectChangeSet: () => void;
   onSecurityLevelChange: (level: AgentSession["securityLevel"]) => void;
+  /** 切换会话规划模式。 */
+  onPlanModeChange: (planMode: boolean) => void;
+  /** 用户批准计划：关闭规划模式并自动发送执行回合。 */
+  onExecutePlan: () => void;
   onToggleChangeOperation: (operationId: string, selected: boolean) => void;
 }) {
   /** 当前 IM 来源标签仅用于补充标题，不替代稳定会话名称。 */
@@ -353,6 +359,8 @@ export function AgentPanel({
         onClearQueuedFollowUp={onClearQueuedFollowUp}
         onTurnModelSelectionChange={onTurnModelSelectionChange}
         onSecurityLevelChange={onSecurityLevelChange}
+        onPlanModeChange={onPlanModeChange}
+        onExecutePlan={onExecutePlan}
       />
     </aside>
   );
