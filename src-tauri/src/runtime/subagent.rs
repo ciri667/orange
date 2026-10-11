@@ -96,7 +96,9 @@ pub(super) fn is_parallelizable_task(args: &Value) -> bool {
 /** 规划模式遇到 writable 角色时返回拒绝文案，其余情况返回 None。 */
 fn plan_mode_writable_rejection(plan_mode: bool, agent: &ResolvedAgent) -> Option<&'static str> {
     if plan_mode && agent.writable() {
-        return Some("规划模式仅允许只读子 Agent 角色（explore / researcher 或用户自定义只读角色）。");
+        return Some(
+            "规划模式仅允许只读子 Agent 角色（explore / researcher 或用户自定义只读角色）。",
+        );
     }
     None
 }
@@ -309,13 +311,12 @@ async fn run_nested_loop(
             )
         })?
     } else {
-        let system =
-            build_subagent_system_prompt(
-                params.snapshot,
-                params.session_index,
-                &parsed.agent,
-                crate::web::web_search_ready(params.app),
-            );
+        let system = build_subagent_system_prompt(
+            params.snapshot,
+            params.session_index,
+            &parsed.agent,
+            crate::web::web_search_ready(params.app),
+        );
         vec![
             json!({ "role": "system", "content": system }),
             json!({ "role": "user", "content": parsed.prompt }),

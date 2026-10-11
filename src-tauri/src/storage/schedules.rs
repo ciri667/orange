@@ -1,11 +1,13 @@
 use super::*;
 use crate::domain::{
-    schedule_display, CreateScheduledJobPayload, JobSchedule, JobWeekday, ScheduledJob,
-    ScheduledJobRun, ScheduleOutputMode, ScheduleSessionPolicy, UpdateScheduledJobPayload,
+    schedule_display, CreateScheduledJobPayload, JobSchedule, JobWeekday, ScheduleOutputMode,
+    ScheduleSessionPolicy, ScheduledJob, ScheduledJobRun, UpdateScheduledJobPayload,
     DEFAULT_SCHEDULE_INBOX_FOLDER, SCHEDULE_CATCH_UP_MAX_SECS, SCHEDULE_CATCH_UP_MIN_SECS,
     SCHEDULE_FAILURE_PAUSE_STREAK,
 };
-use chrono::{DateTime, Datelike, Duration as ChronoDuration, Local, NaiveTime, TimeZone, Timelike, Utc};
+use chrono::{
+    DateTime, Datelike, Duration as ChronoDuration, Local, NaiveTime, TimeZone, Timelike, Utc,
+};
 use rusqlite::{params, Connection, OptionalExtension};
 
 pub(crate) const SCHEDULED_JOBS_SCHEMA: &str = r#"
@@ -160,8 +162,7 @@ pub fn list_scheduled_jobs(app: &AppHandle) -> Result<Vec<ScheduledJob>, String>
 #[allow(dead_code)]
 pub fn get_scheduled_job(app: &AppHandle, job_id: &str) -> Result<ScheduledJob, String> {
     let connection = open_database(app)?;
-    get_scheduled_job_on(&connection, job_id)?
-        .ok_or_else(|| "找不到该定时任务。".to_owned())
+    get_scheduled_job_on(&connection, job_id)?.ok_or_else(|| "找不到该定时任务。".to_owned())
 }
 
 /** 创建任务并计算首次 next_run_at。过去的一次性任务会被拒绝。 */
@@ -188,7 +189,8 @@ pub fn create_scheduled_job(
         return Err("一次性任务的时间必须晚于现在。".to_owned());
     }
 
-    let output_mode = ScheduleOutputMode::parse(payload.output_mode.as_deref().unwrap_or("session"));
+    let output_mode =
+        ScheduleOutputMode::parse(payload.output_mode.as_deref().unwrap_or("session"));
     let session_policy =
         ScheduleSessionPolicy::parse(payload.session_policy.as_deref().unwrap_or("newEachRun"));
     let now = format_utc(Utc::now());
@@ -201,7 +203,9 @@ pub fn create_scheduled_job(
         timezone: "local".to_owned(),
         knowledge_base_ids: payload.knowledge_base_ids,
         output_mode: output_mode.as_str().to_owned(),
-        inbox_knowledge_base_id: payload.inbox_knowledge_base_id.filter(|value| !value.is_empty()),
+        inbox_knowledge_base_id: payload
+            .inbox_knowledge_base_id
+            .filter(|value| !value.is_empty()),
         inbox_folder: Some(
             payload
                 .inbox_folder
@@ -442,8 +446,8 @@ pub fn claim_manual_run(
     job_id: &str,
     now: DateTime<Utc>,
 ) -> Result<ClaimedScheduledRun, String> {
-    let job = get_scheduled_job_on(connection, job_id)?
-        .ok_or_else(|| "找不到该定时任务。".to_owned())?;
+    let job =
+        get_scheduled_job_on(connection, job_id)?.ok_or_else(|| "找不到该定时任务。".to_owned())?;
     let slot = format!("manual:{}", create_id("slot"));
     let run_id = insert_run_slot(connection, job_id, &slot, "running", None)?
         .ok_or_else(|| "无法登记立即运行。".to_owned())?;
@@ -474,8 +478,8 @@ pub fn finish_scheduled_run(
         )
         .map_err(|error| format!("无法更新运行记录：{error}"))?;
 
-    let mut job = get_scheduled_job_on(connection, job_id)?
-        .ok_or_else(|| "找不到该定时任务。".to_owned())?;
+    let mut job =
+        get_scheduled_job_on(connection, job_id)?.ok_or_else(|| "找不到该定时任务。".to_owned())?;
     job.last_run_at = Some(now.clone());
     job.last_status = Some(status.to_owned());
     job.last_error = error
@@ -667,8 +671,8 @@ fn get_scheduled_job_on(
 }
 
 fn insert_scheduled_job_on(connection: &Connection, job: &ScheduledJob) -> Result<(), String> {
-    let schedule_json = serde_json::to_string(&job.schedule)
-        .map_err(|error| format!("无法序列化周期：{error}"))?;
+    let schedule_json =
+        serde_json::to_string(&job.schedule).map_err(|error| format!("无法序列化周期：{error}"))?;
     let knowledge_base_ids_json = serde_json::to_string(&job.knowledge_base_ids)
         .map_err(|error| format!("无法序列化知识库范围：{error}"))?;
     let explicit_skill_ids_json = serde_json::to_string(&job.explicit_skill_ids)
@@ -716,8 +720,8 @@ fn insert_scheduled_job_on(connection: &Connection, job: &ScheduledJob) -> Resul
 }
 
 fn persist_scheduled_job_on(connection: &Connection, job: &ScheduledJob) -> Result<(), String> {
-    let schedule_json = serde_json::to_string(&job.schedule)
-        .map_err(|error| format!("无法序列化周期：{error}"))?;
+    let schedule_json =
+        serde_json::to_string(&job.schedule).map_err(|error| format!("无法序列化周期：{error}"))?;
     let knowledge_base_ids_json = serde_json::to_string(&job.knowledge_base_ids)
         .map_err(|error| format!("无法序列化知识库范围：{error}"))?;
     let explicit_skill_ids_json = serde_json::to_string(&job.explicit_skill_ids)

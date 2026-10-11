@@ -108,7 +108,11 @@ fn hash8(server: &str, raw: &str) -> String {
     hasher.update([0]);
     hasher.update(raw.as_bytes());
     let digest = hasher.finalize();
-    digest.iter().take(4).map(|byte| format!("{byte:02x}")).collect()
+    digest
+        .iter()
+        .take(4)
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
 }
 
 #[cfg(test)]
@@ -118,7 +122,10 @@ mod tests {
     #[test]
     fn sanitize_replaces_non_ascii_identifiers() {
         assert_eq!(sanitize_name_component("get.item/v2"), "get_item_v2");
-        assert_eq!(natural_public_name("my-server", "get.item"), "mcp__my_server__get_item");
+        assert_eq!(
+            natural_public_name("my-server", "get.item"),
+            "mcp__my_server__get_item"
+        );
     }
 
     #[test]

@@ -52,7 +52,8 @@ pub fn normalize_input_schema(schema: Value) -> Value {
     if !object.contains_key("type") {
         object.insert("type".to_owned(), Value::String("object".to_owned()));
     }
-    if object.get("type").and_then(Value::as_str) == Some("object") && !object.contains_key("properties")
+    if object.get("type").and_then(Value::as_str) == Some("object")
+        && !object.contains_key("properties")
     {
         object.insert("properties".to_owned(), Value::Object(Map::new()));
     }

@@ -79,7 +79,10 @@ pub fn orange_home_dir() -> Result<PathBuf, String> {
 }
 
 /** 读取并校验 mcp.json。文件不存在时当作没有服务器。 */
-pub fn load_mcp_config(path: &Path, env: &HashMap<String, String>) -> Result<LoadedMcpConfig, String> {
+pub fn load_mcp_config(
+    path: &Path,
+    env: &HashMap<String, String>,
+) -> Result<LoadedMcpConfig, String> {
     if !path.exists() {
         return Ok(LoadedMcpConfig {
             servers: Vec::new(),
@@ -92,8 +95,12 @@ pub fn load_mcp_config(path: &Path, env: &HashMap<String, String>) -> Result<Loa
 }
 
 /** 解析 JSON 文本。整份文件不是对象时才返回错误。 */
-pub fn parse_mcp_config(text: &str, env: &HashMap<String, String>) -> Result<LoadedMcpConfig, String> {
-    let root: Value = serde_json::from_str(text).map_err(|error| format!("MCP 配置不是合法 JSON：{error}"))?;
+pub fn parse_mcp_config(
+    text: &str,
+    env: &HashMap<String, String>,
+) -> Result<LoadedMcpConfig, String> {
+    let root: Value =
+        serde_json::from_str(text).map_err(|error| format!("MCP 配置不是合法 JSON：{error}"))?;
     let root_object = root
         .as_object()
         .ok_or_else(|| "MCP 配置的顶层必须是对象。".to_owned())?;
@@ -164,7 +171,11 @@ pub fn interpolate(value: &str, env: &HashMap<String, String>) -> Result<String,
             return Err("环境变量插值缺少 }。".to_owned());
         };
         let name = &after[..end];
-        if name.is_empty() || !name.chars().all(|ch| ch.is_ascii_alphanumeric() || ch == '_') {
+        if name.is_empty()
+            || !name
+                .chars()
+                .all(|ch| ch.is_ascii_alphanumeric() || ch == '_')
+        {
             return Err(format!("环境变量名无效：{name}"));
         }
         let resolved = env
@@ -178,7 +189,11 @@ pub fn interpolate(value: &str, env: &HashMap<String, String>) -> Result<String,
 }
 
 /** 按原始工具名过滤。写了 enabledTools 时只认白名单，否则用 disabledTools 排除。 */
-pub fn tool_is_exposed(raw_name: &str, enabled_tools: Option<&[String]>, disabled_tools: &[String]) -> bool {
+pub fn tool_is_exposed(
+    raw_name: &str,
+    enabled_tools: Option<&[String]>,
+    disabled_tools: &[String],
+) -> bool {
     if let Some(enabled) = enabled_tools {
         return enabled.iter().any(|name| name == raw_name);
     }
@@ -203,7 +218,9 @@ fn resolve_server(
     }
     namespaces.insert(namespace, name.to_owned());
 
-    let object = value.as_object().ok_or_else(|| "服务器配置必须是对象。".to_owned())?;
+    let object = value
+        .as_object()
+        .ok_or_else(|| "服务器配置必须是对象。".to_owned())?;
     if object
         .get("type")
         .and_then(Value::as_str)
@@ -212,13 +229,20 @@ fn resolve_server(
         return Err("不支持旧的 SSE 传输。请改用 streamable HTTP 的 url。".to_owned());
     }
 
-    let enabled = object.get("enabled").and_then(Value::as_bool).unwrap_or(false);
+    let enabled = object
+        .get("enabled")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
     let timeout_seconds = match object.get("timeout") {
         None => DEFAULT_TIMEOUT_SECONDS,
         Some(Value::Number(number)) => {
-            let seconds = number.as_u64().ok_or_else(|| "timeout 必须是正整数秒。".to_owned())?;
+            let seconds = number
+                .as_u64()
+                .ok_or_else(|| "timeout 必须是正整数秒。".to_owned())?;
             if !(1..=MAX_TIMEOUT_SECONDS).contains(&seconds) {
-                return Err(format!("timeout 必须在 1 到 {MAX_TIMEOUT_SECONDS} 秒之间。"));
+                return Err(format!(
+                    "timeout 必须在 1 到 {MAX_TIMEOUT_SECONDS} 秒之间。"
+                ));
             }
             seconds
         }
@@ -389,7 +413,9 @@ mod tests {
         assert_eq!(loaded.servers.len(), 1);
         assert!(!loaded.servers[0].enabled);
         match &loaded.servers[0].transport {
-            McpTransport::Stdio { command, args, env, .. } => {
+            McpTransport::Stdio {
+                command, args, env, ..
+            } => {
                 assert_eq!(command, "npx");
                 assert_eq!(args, &vec!["-y".to_owned(), "server".to_owned()]);
                 assert_eq!(env.get("GITHUB_TOKEN").map(String::as_str), Some("secret"));

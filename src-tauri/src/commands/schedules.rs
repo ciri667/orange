@@ -16,7 +16,10 @@ pub struct ScheduledTurnOutcome {
 
 #[tauri::command]
 pub async fn list_scheduled_jobs(app: AppHandle) -> Result<Vec<ScheduledJob>, String> {
-    run_blocking("读取定时任务", move || storage::list_scheduled_jobs(&app)).await
+    run_blocking("读取定时任务", move || {
+        storage::list_scheduled_jobs(&app)
+    })
+    .await
 }
 
 #[tauri::command]

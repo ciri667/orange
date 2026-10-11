@@ -1,6 +1,6 @@
 use crate::domain::{
-    AgentMessage, AgentSession, ScheduleSessionIdentity, ScheduledJob, ScheduledJobUpdatedEvent,
-    ScheduleSessionPolicy,
+    AgentMessage, AgentSession, ScheduleSessionIdentity, ScheduleSessionPolicy, ScheduledJob,
+    ScheduledJobUpdatedEvent,
 };
 use crate::logging::{self, AppEventBuilder, AppLogCategory, AppLogLevel};
 use crate::runtime;

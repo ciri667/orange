@@ -127,10 +127,7 @@ pub enum JobSchedule {
     #[serde(rename_all = "camelCase")]
     Weekdays { time: String },
     #[serde(rename_all = "camelCase")]
-    Weekly {
-        days: Vec<JobWeekday>,
-        time: String,
-    },
+    Weekly { days: Vec<JobWeekday>, time: String },
     #[serde(rename_all = "camelCase")]
     Once { at: String },
 }

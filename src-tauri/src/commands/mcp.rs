@@ -54,7 +54,10 @@ pub async fn test_mcp_server(app: AppHandle, name: String) -> Result<McpProbeRes
 
 /** 把进阶级别弹窗的选择送回正在等待的回合。 */
 #[tauri::command]
-pub async fn decide_mcp_tool_call(app: AppHandle, decision: McpApprovalDecision) -> Result<(), String> {
+pub async fn decide_mcp_tool_call(
+    app: AppHandle,
+    decision: McpApprovalDecision,
+) -> Result<(), String> {
     let Some(manager) = manager(&app) else {
         return Err("MCP 还没有启动。".to_owned());
     };

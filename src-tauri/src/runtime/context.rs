@@ -132,12 +132,8 @@ pub(super) fn build_model_prompt(
     previous_transcript: Option<&[Value]>,
 ) -> ModelPrompt {
     let session = &snapshot.sessions[session_index];
-    let system_content = build_system_prompt(
-        snapshot,
-        session,
-        available_skills,
-        knowledge_base_memories,
-    );
+    let system_content =
+        build_system_prompt(snapshot, session, available_skills, knowledge_base_memories);
     let mut messages = vec![json!({
         "role": "system",
         "content": system_content
@@ -295,7 +291,9 @@ fn build_system_prompt(
     let scope_summary = build_scope_summary(snapshot, session);
     let cwd_summary = build_cwd_summary(snapshot, session);
 
-    let mut parts = vec![format!("你是橘记的本地优先知识库 Agent。当前可见工具：{visible_tools}。")];
+    let mut parts = vec![format!(
+        "你是橘记的本地优先知识库 Agent。当前可见工具：{visible_tools}。"
+    )];
     if session.plan_mode {
         // 规划模式用专属只读策略替代写入与安全级别说明，其余上下文段照常注入。
         parts.push(PLAN_MODE_POLICY.to_owned());

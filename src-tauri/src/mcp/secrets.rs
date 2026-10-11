@@ -14,7 +14,10 @@ pub fn save_secret(reference: &str, secret: &str) -> Result<(), String> {
 
 pub fn load_secret(reference: &str) -> Option<String> {
     let entry = keyring::Entry::new(service(), reference).ok()?;
-    entry.get_password().ok().filter(|secret| !secret.trim().is_empty())
+    entry
+        .get_password()
+        .ok()
+        .filter(|secret| !secret.trim().is_empty())
 }
 
 pub fn delete_secret(reference: &str) {

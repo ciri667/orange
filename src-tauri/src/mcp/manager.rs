@@ -8,8 +8,8 @@ use tokio::sync::{mpsc, oneshot, watch, Semaphore};
 
 use crate::agent_tools::ToolOutcome;
 use crate::domain::{
-    AgentSession, AgentToolCall, Citation, McpConfigIssue, McpOverview, McpProbeResult, McpServerDraft,
-    McpServerView, McpToolView,
+    AgentSession, AgentToolCall, Citation, McpConfigIssue, McpOverview, McpProbeResult,
+    McpServerDraft, McpServerView, McpToolView,
 };
 use crate::runtime::AgentCancel;
 use crate::storage::create_id;
@@ -21,7 +21,9 @@ use super::config::{
     ResolvedMcpServer, CONNECT_CONCURRENCY, MAX_RECONNECT_ATTEMPTS, TURN_WAIT_SECONDS,
 };
 use super::naming::{assign_public_names, collides_with_host_tool};
-use super::policy::{self, model_tool_schema, project_call, session_exposes_mcp, CatalogTool, ContentPiece};
+use super::policy::{
+    self, model_tool_schema, project_call, session_exposes_mcp, CatalogTool, ContentPiece,
+};
 use super::secrets;
 
 const CALL_CHANNEL: usize = 8;
@@ -89,9 +91,13 @@ impl McpManager {
     pub async fn wait_initial(&self) {
         let deadline = tokio::time::Instant::now() + Duration::from_secs(TURN_WAIT_SECONDS);
         while tokio::time::Instant::now() < deadline {
-            let connecting = self.shared.slots.lock().expect("slots").values().any(|slot| {
-                slot.server.enabled && slot.state == "connecting"
-            });
+            let connecting = self
+                .shared
+                .slots
+                .lock()
+                .expect("slots")
+                .values()
+                .any(|slot| slot.server.enabled && slot.state == "connecting");
             if !connecting {
                 return;
             }
@@ -155,7 +161,12 @@ impl McpManager {
                 let names: Vec<String> = session
                     .list_tools()
                     .await
-                    .map(|tools| tools.into_iter().map(|tool| tool.name.to_string()).collect())
+                    .map(|tools| {
+                        tools
+                            .into_iter()
+                            .map(|tool| tool.name.to_string())
+                            .collect()
+                    })
                     .unwrap_or_default();
                 session.close().await;
                 Ok(McpProbeResult {
@@ -223,12 +234,17 @@ impl McpManager {
     }
 
     fn find_tool(&self, public_name: &str) -> Option<CatalogTool> {
-        self.shared.slots.lock().expect("slots").values().find_map(|slot| {
-            slot.tools
-                .iter()
-                .find(|tool| tool.public_name == public_name)
-                .cloned()
-        })
+        self.shared
+            .slots
+            .lock()
+            .expect("slots")
+            .values()
+            .find_map(|slot| {
+                slot.tools
+                    .iter()
+                    .find(|tool| tool.public_name == public_name)
+                    .cloned()
+            })
     }
 
     async fn dispatch_call(
@@ -276,12 +292,7 @@ impl McpManager {
     }
 
     fn spawn_enabled(&self) {
-        let shutdown = self
-            .shared
-            .shutdown
-            .lock()
-            .expect("shutdown")
-            .subscribe();
+        let shutdown = self.shared.shutdown.lock().expect("shutdown").subscribe();
         let names: Vec<String> = self
             .shared
             .slots
@@ -298,7 +309,11 @@ impl McpManager {
 
     fn spawn_one(&self, name: String, mut shutdown: watch::Receiver<bool>) {
         let (tx, mut rx) = mpsc::channel(CALL_CHANNEL);
-        self.shared.calls.lock().expect("calls").insert(name.clone(), tx);
+        self.shared
+            .calls
+            .lock()
+            .expect("calls")
+            .insert(name.clone(), tx);
         let shared = self.shared.clone();
         tokio::spawn(async move {
             let mut attempt = 0u32;
@@ -347,7 +362,8 @@ impl McpManager {
                 if let Ok(raw) = session.list_tools().await {
                     publish_tools(&shared, &server, &raw, &session.stderr_tail());
                 }
-                let drive = drive_session(&shared, &name, &mut session, &mut rx, &mut shutdown).await;
+                let drive =
+                    drive_session(&shared, &name, &mut session, &mut rx, &mut shutdown).await;
                 let tail = session.stderr_tail();
                 session.close().await;
                 if drive == Drive::Stop || *shutdown.borrow() {
@@ -480,7 +496,12 @@ fn set_state(shared: &Shared, name: &str, state: &'static str, error: Option<Str
     }
 }
 
-fn publish_tools(shared: &Shared, server: &ResolvedMcpServer, raw: &[client::RawTool], stderr_tail: &str) {
+fn publish_tools(
+    shared: &Shared,
+    server: &ResolvedMcpServer,
+    raw: &[client::RawTool],
+    stderr_tail: &str,
+) {
     let names: Vec<&str> = raw.iter().map(|tool| tool.name.as_str()).collect();
     let named = assign_public_names(&server.name, &names);
     let tools = raw
@@ -515,12 +536,21 @@ fn publish_tools(shared: &Shared, server: &ResolvedMcpServer, raw: &[client::Raw
 
 fn slot_from_server(server: ResolvedMcpServer) -> Slot {
     let (command, args, url, cwd) = match &server.transport {
-        McpTransport::Stdio { command, args, cwd, .. } => {
-            (command.clone(), args.clone(), String::new(), cwd.clone().unwrap_or_default())
-        }
+        McpTransport::Stdio {
+            command, args, cwd, ..
+        } => (
+            command.clone(),
+            args.clone(),
+            String::new(),
+            cwd.clone().unwrap_or_default(),
+        ),
         McpTransport::Http { url, .. } => (String::new(), Vec::new(), url.clone(), String::new()),
     };
-    let state = if server.enabled { "connecting" } else { "disabled" };
+    let state = if server.enabled {
+        "connecting"
+    } else {
+        "disabled"
+    };
     Slot {
         server,
         state,
@@ -611,13 +641,18 @@ pub async fn install(app: &AppHandle) -> Result<McpManager, String> {
 }
 
 pub fn manager(app: &AppHandle) -> Option<McpManager> {
-    app.try_state::<McpManager>().map(|state| state.inner().clone())
+    app.try_state::<McpManager>()
+        .map(|state| state.inner().clone())
 }
 
 pub async fn prepare_turn_schemas(app: &AppHandle, session: &AgentSession) -> Vec<Value> {
     let local_interactive = session.im_identity.is_none() && session.schedule_identity.is_none();
     // 规划模式只读：MCP 工具连 schema 都不注入，模型无从调用。
-    if !session_exposes_mcp(local_interactive, &session.security_level, session.plan_mode) {
+    if !session_exposes_mcp(
+        local_interactive,
+        &session.security_level,
+        session.plan_mode,
+    ) {
         return Vec::new();
     }
     let Some(manager) = manager(app) else {
@@ -657,11 +692,17 @@ pub async fn execute_model_tool(
 }
 
 /** 把设置页草稿写成 mcp.json 里的一条。令牌进 keyring。 */
-pub fn upsert_draft(loaded_raw: &mut Map<String, Value>, draft: &McpServerDraft) -> Result<(), String> {
+pub fn upsert_draft(
+    loaded_raw: &mut Map<String, Value>,
+    draft: &McpServerDraft,
+) -> Result<(), String> {
     validate_draft(draft)?;
     let mut object = Map::new();
     object.insert("enabled".to_owned(), Value::Bool(draft.enabled));
-    object.insert("timeout".to_owned(), json!(draft.timeout_seconds.clamp(1, config::MAX_TIMEOUT_SECONDS)));
+    object.insert(
+        "timeout".to_owned(),
+        json!(draft.timeout_seconds.clamp(1, config::MAX_TIMEOUT_SECONDS)),
+    );
     if draft.transport == "http" {
         object.insert("url".to_owned(), Value::String(draft.url.trim().to_owned()));
         let headers = parse_pairs(&draft.headers_text)?;
@@ -669,7 +710,10 @@ pub fn upsert_draft(loaded_raw: &mut Map<String, Value>, draft: &McpServerDraft)
             object.insert("headers".to_owned(), map_value(headers));
         }
     } else {
-        object.insert("command".to_owned(), Value::String(draft.command.trim().to_owned()));
+        object.insert(
+            "command".to_owned(),
+            Value::String(draft.command.trim().to_owned()),
+        );
         let args = split_lines(&draft.args_text);
         if !args.is_empty() {
             object.insert("args".to_owned(), json!(args));
@@ -776,7 +820,12 @@ fn parse_pairs(text: &str) -> Result<BTreeMap<String, String>, String> {
 }
 
 fn map_value(pairs: BTreeMap<String, String>) -> Value {
-    Value::Object(pairs.into_iter().map(|(key, value)| (key, Value::String(value))).collect())
+    Value::Object(
+        pairs
+            .into_iter()
+            .map(|(key, value)| (key, Value::String(value)))
+            .collect(),
+    )
 }
 
 #[cfg(test)]

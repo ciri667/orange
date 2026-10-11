@@ -744,9 +744,8 @@ async fn run_model_loop(
         ToolRegistry::for_session(&snapshot.sessions[session_index], &agent_security);
     let mut tool_schemas = tool_registry.schemas();
     if let Some(items) = tool_schemas.as_array_mut() {
-        items.extend(
-            crate::mcp::prepare_turn_schemas(app, &snapshot.sessions[session_index]).await,
-        );
+        items
+            .extend(crate::mcp::prepare_turn_schemas(app, &snapshot.sessions[session_index]).await);
     }
     let mut tool_calls = vec![skill_context_tool_call(&available_skills)];
     tool_calls.extend(activate_skill_tool_calls(

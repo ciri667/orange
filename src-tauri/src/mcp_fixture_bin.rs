@@ -45,7 +45,10 @@ fn main() {
                 }]
             }),
             "tools/call" => {
-                let name = message.pointer("/params/name").and_then(Value::as_str).unwrap_or("");
+                let name = message
+                    .pointer("/params/name")
+                    .and_then(Value::as_str)
+                    .unwrap_or("");
                 if name != "echo" {
                     json!({
                         "content": [{ "type": "text", "text": "未知工具" }],

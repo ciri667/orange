@@ -3,9 +3,7 @@ use std::process::Stdio;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use rmcp::model::{
-    CallToolRequestParams, ClientCapabilities, ClientConfig, Implementation, Tool,
-};
+use rmcp::model::{CallToolRequestParams, ClientCapabilities, ClientConfig, Implementation, Tool};
 use rmcp::service::{NotificationContext, RoleClient};
 use rmcp::{ClientHandler, ServiceExt};
 use serde_json::{Map, Value};
@@ -13,7 +11,7 @@ use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::ChildStderr;
 use tokio::sync::Notify;
 
-use super::config::{ResolvedMcpServer, McpTransport, STARTUP_TIMEOUT_SECONDS};
+use super::config::{McpTransport, ResolvedMcpServer, STARTUP_TIMEOUT_SECONDS};
 use super::policy::ContentPiece;
 
 const STDERR_TAIL_BYTES: usize = 8 * 1024;
@@ -72,7 +70,10 @@ impl LiveSession {
                 }
             }
         };
-        Ok((result.is_error.unwrap_or(false), project_blocks(&result.content)))
+        Ok((
+            result.is_error.unwrap_or(false),
+            project_blocks(&result.content),
+        ))
     }
 
     pub fn stderr_tail(&self) -> String {
@@ -110,7 +111,10 @@ impl Drop for LiveSession {
 }
 
 /** 连接一台服务器并完成 tools/list。失败时不会留下子进程。 */
-pub async fn connect(server: &ResolvedMcpServer, bearer_token: Option<String>) -> Result<LiveSession, String> {
+pub async fn connect(
+    server: &ResolvedMcpServer,
+    bearer_token: Option<String>,
+) -> Result<LiveSession, String> {
     let progress = Arc::new(Notify::new());
     let tools_changed = Arc::new(Notify::new());
     let closed = Arc::new(Notify::new());
@@ -122,7 +126,12 @@ pub async fn connect(server: &ResolvedMcpServer, bearer_token: Option<String>) -
     };
 
     let (pid, session) = match &server.transport {
-        McpTransport::Stdio { command, args, env, cwd } => {
+        McpTransport::Stdio {
+            command,
+            args,
+            env,
+            cwd,
+        } => {
             let (transport, stderr, pid) = spawn_stdio(command, args, env, cwd.as_deref())?;
             if let Some(stderr) = stderr {
                 let tail = stderr_tail.clone();
@@ -162,13 +171,20 @@ pub async fn connect(server: &ResolvedMcpServer, bearer_token: Option<String>) -
     if let Err(error) = session.list_tools().await {
         let tail = session.stderr_tail();
         session.close().await;
-        return Err(if tail.is_empty() { error } else { format!("{error}\n{tail}") });
+        return Err(if tail.is_empty() {
+            error
+        } else {
+            format!("{error}\n{tail}")
+        });
     }
     Ok(session)
 }
 
 fn with_stderr(error: &str, tail: &Mutex<String>) -> String {
-    let tail = tail.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).clone();
+    let tail = tail
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .clone();
     if tail.trim().is_empty() {
         error.to_owned()
     } else {
@@ -191,10 +207,13 @@ where
     T: rmcp::transport::IntoTransport<RoleClient, E, A>,
     E: std::error::Error + Send + Sync + 'static,
 {
-    tokio::time::timeout(Duration::from_secs(STARTUP_TIMEOUT_SECONDS), handler.serve(transport))
-        .await
-        .map_err(|_| "MCP 服务器启动超时。".to_owned())?
-        .map_err(|error| format!("MCP 初始化失败：{error}"))
+    tokio::time::timeout(
+        Duration::from_secs(STARTUP_TIMEOUT_SECONDS),
+        handler.serve(transport),
+    )
+    .await
+    .map_err(|_| "MCP 服务器启动超时。".to_owned())?
+    .map_err(|error| format!("MCP 初始化失败：{error}"))
 }
 
 fn spawn_stdio(
@@ -202,11 +221,19 @@ fn spawn_stdio(
     args: &[String],
     env: &BTreeMap<String, String>,
     cwd: Option<&str>,
-) -> Result<(rmcp::transport::TokioChildProcess, Option<ChildStderr>, Option<u32>), String> {
+) -> Result<
+    (
+        rmcp::transport::TokioChildProcess,
+        Option<ChildStderr>,
+        Option<u32>,
+    ),
+    String,
+> {
     let mut process = if command.contains('\\') || command.contains('/') {
         tokio::process::Command::new(command)
     } else {
-        rmcp::transport::which_command(command).map_err(|error| format!("找不到命令 {command}：{error}"))?
+        rmcp::transport::which_command(command)
+            .map_err(|error| format!("找不到命令 {command}：{error}"))?
     };
     process.args(args);
     if let Some(cwd) = cwd {
@@ -232,15 +259,20 @@ fn http_transport(
     headers: &BTreeMap<String, String>,
     bearer_token: Option<String>,
 ) -> Result<rmcp::transport::StreamableHttpClientTransport<reqwest::Client>, String> {
-    let mut config = rmcp::transport::streamable_http_client::StreamableHttpClientTransportConfig::with_uri(url);
+    let mut config =
+        rmcp::transport::streamable_http_client::StreamableHttpClientTransportConfig::with_uri(url);
     if let Some(token) = bearer_token.filter(|token| !token.is_empty()) {
-        if !headers.keys().any(|key| key.eq_ignore_ascii_case("authorization")) {
+        if !headers
+            .keys()
+            .any(|key| key.eq_ignore_ascii_case("authorization"))
+        {
             config = config.auth_header(token);
         }
     }
     let mut custom = std::collections::HashMap::new();
     for (key, value) in headers {
-        let name = http::HeaderName::try_from(key.as_str()).map_err(|_| format!("请求头名称无效：{key}"))?;
+        let name = http::HeaderName::try_from(key.as_str())
+            .map_err(|_| format!("请求头名称无效：{key}"))?;
         let header_value = http::HeaderValue::try_from(value.as_str())
             .map_err(|_| format!("请求头 {key} 的值无效。"))?;
         custom.insert(name, header_value);
@@ -248,11 +280,14 @@ fn http_transport(
     if !custom.is_empty() {
         config = config.custom_headers(custom);
     }
-    Ok(rmcp::transport::StreamableHttpClientTransport::from_config(config))
+    Ok(rmcp::transport::StreamableHttpClientTransport::from_config(
+        config,
+    ))
 }
 
 fn raw_tool_from_model(tool: Tool) -> RawTool {
-    let schema = serde_json::to_value(tool.input_schema.as_ref()).unwrap_or_else(|_| serde_json::json!({}));
+    let schema =
+        serde_json::to_value(tool.input_schema.as_ref()).unwrap_or_else(|_| serde_json::json!({}));
     RawTool {
         name: tool.name.to_string(),
         description: tool
@@ -337,11 +372,17 @@ fn append_tail(tail: &Mutex<String>, line: &str) {
 }
 
 fn remember_pid(pid: u32) {
-    pids().lock().unwrap_or_else(|poisoned| poisoned.into_inner()).insert(pid);
+    pids()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .insert(pid);
 }
 
 fn forget_pid(pid: u32) {
-    pids().lock().unwrap_or_else(|poisoned| poisoned.into_inner()).remove(&pid);
+    pids()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .remove(&pid);
 }
 
 fn pids() -> &'static Mutex<std::collections::HashSet<u32>> {
