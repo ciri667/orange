@@ -3,6 +3,9 @@ import { useEffect, useRef, useState } from "react";
 import ReactMarkdown from "react-markdown";
 import rehypeSanitize from "rehype-sanitize";
 import { Button } from "../shared/Button";
+import { copyTextToClipboard } from "../shared/clipboard";
+import { assistantReplyLooksLikePlan } from "../shared/planMode";
+import { PlanMessageCard } from "./PlanMessageCard";
 import { VoiceDictationButton } from "../shared/VoiceDictationButton";
 import { Checkbox } from "../shared/Checkbox";
 import { Chip } from "../shared/Chip";
@@ -676,7 +679,7 @@ export function AgentMessageList({
           <span className="text-xs leading-[1.45] text-ink-soft">@ 引用文件，/ 选择 Skill</span>
         </div>
       )}
-      {activeSession.messages.map((message) => (
+      {activeSession.messages.map((message, index) => (
         <AgentMessageItem
           canEdit={Boolean(onEditUserMessage) && !activeSession.imIdentity && message.role === "user"}
           documents={documents}
@@ -684,6 +687,7 @@ export function AgentMessageList({
           message={message}
           notes={notes}
           onEditUserMessage={onEditUserMessage}
+          planInitiallyExpanded={activeSession.planMode && index === activeSession.messages.length - 1}
         />
       ))}
       {showLiveTurn && liveTurn && (
@@ -725,6 +729,7 @@ function AgentMessageItem({
   queued = false,
   canEdit = false,
   onEditUserMessage,
+  planInitiallyExpanded = false,
 }: {
   message: AgentMessage;
   notes: Note[];
@@ -734,6 +739,8 @@ function AgentMessageItem({
   queued?: boolean;
   canEdit?: boolean;
   onEditUserMessage?: (messageId: string, prompt: string) => void;
+  /** 仍在规划模式里、且是最新一条时，计划卡片默认展开，方便确认前通读。 */
+  planInitiallyExpanded?: boolean;
 }) {
   const [isEditing, setIsEditing] = useState(false);
   const usesTurnTrace =
@@ -792,6 +799,9 @@ function AgentMessageItem({
     </div>
   ) : null;
 
+  // 流式输出仍走普通 Markdown；落盘且形状符合执行计划后，才换成可折叠卡片。
+  const showPlanCard = liveStatus == null && assistantReplyLooksLikePlan(message);
+
   const body = isEditing ? (
     <UserMessageEditor
       initialContent={message.content}
@@ -802,6 +812,8 @@ function AgentMessageItem({
         onEditUserMessage?.(message.id, prompt);
       }}
     />
+  ) : showPlanCard ? (
+    <PlanMessageCard content={message.content} initiallyExpanded={planInitiallyExpanded} />
   ) : (
     <>
       {message.content ? (
@@ -1011,42 +1023,6 @@ async function copyMessageContent(
         contentLength: content.length,
       },
     });
-  }
-}
-
-/** 把文本写入系统剪贴板；优先 Clipboard API，失败时回退到隐藏 textarea。 */
-async function copyTextToClipboard(text: string) {
-  if (typeof navigator !== "undefined" && navigator.clipboard?.writeText) {
-    try {
-      await navigator.clipboard.writeText(text);
-      return;
-    } catch {
-      // 无权限或非安全上下文时走 execCommand 回退。
-    }
-  }
-
-  copyTextWithExecCommand(text);
-}
-
-/** Clipboard API 不可用时的同步回退，依赖用户点击手势。 */
-function copyTextWithExecCommand(text: string) {
-  const textarea = document.createElement("textarea");
-  textarea.value = text;
-  textarea.setAttribute("readonly", "");
-  textarea.style.position = "fixed";
-  textarea.style.top = "0";
-  textarea.style.left = "0";
-  textarea.style.opacity = "0";
-  textarea.style.pointerEvents = "none";
-  document.body.appendChild(textarea);
-  textarea.focus();
-  textarea.select();
-  textarea.setSelectionRange(0, textarea.value.length);
-  const copied = document.execCommand("copy");
-  textarea.remove();
-
-  if (!copied) {
-    throw new Error("clipboard_exec_command_failed");
   }
 }
 

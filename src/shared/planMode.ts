@@ -16,3 +16,24 @@ export function assistantReplyLooksLikePlan(message: AgentMessage | undefined): 
   const numberedSteps = message.content.match(/\b\d{1,2}\s*[.、)）]/g) ?? [];
   return numberedSteps.length >= 2;
 }
+
+/** 折叠态最多露出的计划高度。超过这个高度才提供展开，短计划保持整张卡片一次看完。 */
+export const PLAN_CARD_COLLAPSED_MAX_PX = 220;
+
+/** 用计划标题生成下载文件名。去掉 Markdown 标记和「执行计划」前缀，并清掉 Windows 文件名非法字符。 */
+export function planDownloadFilename(content: string): string {
+  const firstLine =
+    content
+      .split(/\r?\n/)
+      .map((line) => line.trim())
+      .find((line) => line.length > 0) ?? "";
+  const heading = firstLine.replace(/^#{1,6}\s+/, "").replace(/^\*\*(.+)\*\*$/, "$1").trim();
+  const titled = heading.replace(/^执行计划\s*[:：]\s*/, "").trim();
+  const base = (titled || "执行计划")
+    .replace(/[<>:"/\\|?*\u0000-\u001f]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim()
+    .slice(0, 80);
+
+  return `${base || "执行计划"}.md`;
+}
