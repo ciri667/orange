@@ -215,6 +215,14 @@ pub struct ExportFileResult {
     pub byte_size: u64,
 }
 
+/** 执行计划下载入参。正文只写入用户选定的文件，不进入日志。 */
+#[derive(Clone, Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DownloadPlanMarkdownPayload {
+    pub content: String,
+    pub file_name: String,
+}
+
 /** 移除知识库授权记录的命令入参，不会删除用户 Markdown 文件。 */
 #[derive(Clone, Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]

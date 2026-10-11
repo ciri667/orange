@@ -1,6 +1,6 @@
 use crate::domain::{
-    DocumentPreviewBlock, ExportCurrentFilePayload, ExportFileResult, ExportFormat,
-    ExportTargetKind, KnowledgeBase, Note, WorkspaceDocument,
+    DocumentPreviewBlock, DownloadPlanMarkdownPayload, ExportCurrentFilePayload, ExportFileResult,
+    ExportFormat, ExportTargetKind, KnowledgeBase, Note, WorkspaceDocument,
 };
 use crate::logging::{self, AppEventBuilder, AppLogCategory, AppLogLevel};
 use crate::storage;
@@ -11,6 +11,9 @@ use std::path::{Path, PathBuf};
 use std::time::Instant;
 use tauri::{AppHandle, Manager};
 use tauri_plugin_dialog::DialogExt;
+
+/** 执行计划 Markdown 的上限。这是会话里的一段文本，不接受任意大载荷。 */
+const MAX_PLAN_MARKDOWN_BYTES: usize = 2 * 1024 * 1024;
 
 /** 生成阅读版 PDF 时使用的默认标题字号。 */
 const PDF_TITLE_FONT_SIZE: u8 = 20;
@@ -358,6 +361,16 @@ async fn pick_export_file_path(
     suggested_file_name: &str,
     extension: &str,
 ) -> Result<Option<PathBuf>, String> {
+    pick_save_file_path(app, "导出当前文件", suggested_file_name, extension).await
+}
+
+/** 打开系统保存对话框。用户取消时返回 None，不把选择的路径写入日志。 */
+async fn pick_save_file_path(
+    app: &AppHandle,
+    title: &str,
+    suggested_file_name: &str,
+    extension: &str,
+) -> Result<Option<PathBuf>, String> {
     let (sender, mut receiver) = tauri::async_runtime::channel(1);
     let download_dir = app
         .path()
@@ -366,7 +379,7 @@ async fn pick_export_file_path(
 
     app.dialog()
         .file()
-        .set_title("导出当前文件")
+        .set_title(title)
         .set_directory(download_dir)
         .set_file_name(suggested_file_name)
         .add_filter(format!("{} 文件", extension.to_uppercase()), &[extension])
@@ -379,6 +392,158 @@ async fn pick_export_file_path(
         .await
         .flatten()
         .and_then(|path| path.as_path().map(PathBuf::from)))
+}
+
+/** 保存执行计划。桌面 WebView 会丢掉页面里的 blob 下载，所以改走系统保存对话框。 */
+#[tauri::command]
+pub async fn download_plan_markdown(
+    app: AppHandle,
+    payload: DownloadPlanMarkdownPayload,
+) -> Result<Option<String>, String> {
+    validate_plan_markdown(&payload.content)?;
+    let suggested_file_name = plan_download_file_name(&payload.file_name);
+    let byte_size = payload.content.len();
+    log_plan_download(
+        &app,
+        AppLogLevel::Info,
+        "started",
+        "开始保存执行计划。",
+        byte_size,
+    );
+
+    let selected_path =
+        match pick_save_file_path(&app, "下载执行计划", &suggested_file_name, "md").await {
+            Ok(path) => path,
+            Err(error) => {
+                log_plan_download(&app, AppLogLevel::Error, "failed", &error, byte_size);
+                return Err(error);
+            }
+        };
+    let Some(selected_path) = selected_path else {
+        log_plan_download(
+            &app,
+            AppLogLevel::Info,
+            "cancelled",
+            "已取消保存执行计划。",
+            byte_size,
+        );
+        return Ok(None);
+    };
+
+    let target_path = normalize_export_target_path(selected_path, "md");
+    if let Err(error) = write_plan_markdown(&target_path, &payload.content) {
+        log_plan_download(&app, AppLogLevel::Error, "failed", &error, byte_size);
+        return Err(error);
+    }
+
+    let file_name = target_path
+        .file_name()
+        .and_then(|value| value.to_str())
+        .unwrap_or(suggested_file_name.as_str())
+        .to_owned();
+    log_plan_download(
+        &app,
+        AppLogLevel::Info,
+        "completed",
+        "执行计划已保存。",
+        byte_size,
+    );
+
+    Ok(Some(file_name))
+}
+
+/** 拒绝空计划和超长正文。长度按 UTF-8 字节计，避免按字符数放行超大载荷。 */
+fn validate_plan_markdown(content: &str) -> Result<(), String> {
+    if content.trim().is_empty() {
+        return Err("计划内容为空，无法下载。".to_owned());
+    }
+    if content.len() > MAX_PLAN_MARKDOWN_BYTES {
+        return Err("计划内容过长，无法下载。".to_owned());
+    }
+
+    Ok(())
+}
+
+/** 把前端建议名收成单个 Markdown 文件名，去掉路径、扩展名和 Windows 非法字符。 */
+fn plan_download_file_name(file_name: &str) -> String {
+    let leaf = Path::new(file_name)
+        .file_name()
+        .and_then(|value| value.to_str())
+        .unwrap_or("");
+    let stem = strip_markdown_extension(leaf);
+    let sanitized = sanitize_export_file_stem(stem)
+        .map(avoid_windows_device_name)
+        .unwrap_or_else(|| "执行计划".to_owned());
+    let trimmed = sanitized.chars().take(80).collect::<String>();
+    let base = if trimmed.is_empty() {
+        "执行计划".to_owned()
+    } else {
+        trimmed
+    };
+
+    format!("{base}.md")
+}
+
+/** 去掉已有的 Markdown 扩展名，避免保存对话框建议名变成 `标题.md.md`。 */
+fn strip_markdown_extension(file_name: &str) -> &str {
+    let lower = file_name.to_ascii_lowercase();
+    if lower.ends_with(".markdown") {
+        &file_name[..file_name.len() - ".markdown".len()]
+    } else if lower.ends_with(".md") {
+        &file_name[..file_name.len() - ".md".len()]
+    } else {
+        file_name
+    }
+}
+
+/** Windows 把 CON、NUL 等设备名当成特殊文件，保存前改成普通文件名。 */
+fn avoid_windows_device_name(stem: String) -> String {
+    const RESERVED: &[&str] = &[
+        "CON", "PRN", "AUX", "NUL", "COM1", "COM2", "COM3", "COM4", "COM5", "COM6", "COM7", "COM8",
+        "COM9", "LPT1", "LPT2", "LPT3", "LPT4", "LPT5", "LPT6", "LPT7", "LPT8", "LPT9",
+    ];
+    let device = stem.split('.').next().unwrap_or(stem.as_str());
+    if RESERVED
+        .iter()
+        .any(|name| device.eq_ignore_ascii_case(name))
+    {
+        format!("_{stem}")
+    } else {
+        stem
+    }
+}
+
+/** 把计划原文写入用户选定路径。调用前应已经过空内容和长度校验。 */
+fn write_plan_markdown(target_path: &Path, content: &str) -> Result<(), String> {
+    validate_plan_markdown(content)?;
+    if let Some(parent) = target_path.parent() {
+        if !parent.as_os_str().is_empty() && !parent.exists() {
+            return Err("保存目录不存在。".to_owned());
+        }
+    }
+
+    fs::write(target_path, content).map_err(|error| format!("无法写入计划文件：{error}"))
+}
+
+/** 记录计划下载的阶段。只记字节数，不记正文和用户选择的路径。 */
+fn log_plan_download(
+    app: &AppHandle,
+    level: AppLogLevel,
+    status: &str,
+    message: &str,
+    byte_size: usize,
+) {
+    logging::write_app_event_best_effort(
+        app,
+        AppEventBuilder::new(
+            level,
+            AppLogCategory::Agent,
+            "download_plan_markdown",
+            status,
+            message.to_owned(),
+        )
+        .metadata(json!({ "byteSize": byte_size })),
+    );
 }
 
 /** 对用户选择路径补齐目标扩展名，扩展不匹配时改成目标格式扩展。 */
@@ -919,6 +1084,33 @@ mod tests {
             }
             Err(error) => panic!("unexpected PDF generation error: {error}"),
         }
+    }
+
+    #[test]
+    fn plan_download_file_name_drops_path_and_illegal_characters() {
+        assert_eq!(
+            super::plan_download_file_name("../../知识库:清单.md"),
+            "知识库_清单.md"
+        );
+        assert_eq!(super::plan_download_file_name("CON.md"), "_CON.md");
+        assert_eq!(super::plan_download_file_name("   "), "执行计划.md");
+        assert_eq!(super::plan_download_file_name("标题.markdown"), "标题.md");
+    }
+
+    #[test]
+    fn write_plan_markdown_persists_utf8_and_rejects_empty() {
+        let dir = tempfile::tempdir().unwrap();
+        let target_path = dir.path().join("计划.md");
+
+        super::write_plan_markdown(&target_path, "# 执行计划\n").unwrap();
+        assert_eq!(fs::read_to_string(&target_path).unwrap(), "# 执行计划\n");
+
+        let empty_path = dir.path().join("empty.md");
+        assert!(super::write_plan_markdown(&empty_path, "  \n").is_err());
+        assert!(!empty_path.exists());
+
+        let oversized = "a".repeat(super::MAX_PLAN_MARKDOWN_BYTES + 1);
+        assert!(super::validate_plan_markdown(&oversized).is_err());
     }
 
     #[test]

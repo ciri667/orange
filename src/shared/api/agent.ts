@@ -285,6 +285,43 @@ export async function applyAgentChangeSet(snapshot: WorkspaceSnapshot): Promise<
   return invokeLogged<WorkspaceSnapshot>("apply_agent_change_set", { payload: { snapshot } });
 }
 
+/**
+ * 把执行计划保存为 Markdown。
+ * 桌面端走系统保存对话框：WebView2 会丢掉页面里的 blob 下载，按钮看起来像没点上。
+ * 浏览器开发态仍用锚点下载，并推迟释放对象 URL，避免下载还没开始链接就失效。
+ */
+export async function downloadPlanMarkdownFile(
+  content: string,
+  fileName: string,
+): Promise<"saved" | "cancelled"> {
+  if (!isTauriRuntime()) {
+    downloadPlanMarkdownInBrowser(content, fileName);
+    return "saved";
+  }
+
+  const savedName = await invokeLogged<string | null>("download_plan_markdown", {
+    payload: { content, fileName },
+  });
+  return savedName ? "saved" : "cancelled";
+}
+
+/** 浏览器里触发一次 Markdown 下载。对象 URL 要等下载开始后再释放。 */
+function downloadPlanMarkdownInBrowser(content: string, fileName: string) {
+  const blob = new Blob([content], { type: "text/markdown;charset=utf-8" });
+  const url = URL.createObjectURL(blob);
+  const anchor = document.createElement("a");
+  anchor.href = url;
+  anchor.download = fileName;
+  anchor.rel = "noopener";
+  anchor.style.display = "none";
+  document.body.appendChild(anchor);
+  anchor.click();
+  window.setTimeout(() => {
+    anchor.remove();
+    URL.revokeObjectURL(url);
+  }, 1500);
+}
+
 /** 拒绝 Agent 直接产出的多文件变更集。 */
 export async function rejectAgentChangeSet(snapshot: WorkspaceSnapshot): Promise<WorkspaceSnapshot> {
   if (!isTauriRuntime()) {

@@ -3,6 +3,7 @@ import { useEffect, useRef, useState } from "react";
 import ReactMarkdown from "react-markdown";
 import rehypeSanitize from "rehype-sanitize";
 import { Button } from "../shared/Button";
+import { downloadPlanMarkdownFile } from "../shared/tauriApi";
 import { copyTextToClipboard } from "../shared/clipboard";
 import { cn } from "../shared/cn";
 import { logWarn } from "../shared/logger";
@@ -32,8 +33,11 @@ export function PlanMessageCard({
   const [expanded, setExpanded] = useState(initiallyExpanded);
   const [canCollapse, setCanCollapse] = useState(false);
   const [copied, setCopied] = useState(false);
+  const [downloadFeedback, setDownloadFeedback] = useState<"idle" | "saving" | "saved" | "failed">("idle");
   const bodyRef = useRef<HTMLDivElement>(null);
   const resetTimerRef = useRef<number | null>(null);
+  const downloadResetTimerRef = useRef<number | null>(null);
+  const downloadingRef = useRef(false);
 
   // 不再是待确认的最新计划时收回去，历史里只留卡片标头和预览。
   useEffect(() => {
@@ -63,8 +67,19 @@ export function PlanMessageCard({
       if (resetTimerRef.current != null) {
         window.clearTimeout(resetTimerRef.current);
       }
+      if (downloadResetTimerRef.current != null) {
+        window.clearTimeout(downloadResetTimerRef.current);
+      }
     };
   }, []);
+
+  function showDownloadFeedback(next: "saved" | "failed") {
+    setDownloadFeedback(next);
+    if (downloadResetTimerRef.current != null) {
+      window.clearTimeout(downloadResetTimerRef.current);
+    }
+    downloadResetTimerRef.current = window.setTimeout(() => setDownloadFeedback("idle"), PLAN_COPY_RESET_MS);
+  }
 
   const collapsed = canCollapse && !expanded;
 
@@ -82,12 +97,59 @@ export function PlanMessageCard({
           <Button
             variant="icon"
             size="compact"
-            className="text-ink-soft"
-            title="下载计划"
-            aria-label="下载计划"
-            onClick={() => downloadPlanMarkdown(content)}
+            className={cn("text-ink-soft", downloadFeedback === "saved" && "text-success", downloadFeedback === "failed" && "text-danger")}
+            title={
+              downloadFeedback === "saving"
+                ? "正在打开保存对话框"
+                : downloadFeedback === "saved"
+                  ? "已保存"
+                  : downloadFeedback === "failed"
+                    ? "保存失败"
+                    : "下载计划"
+            }
+            aria-label={
+              downloadFeedback === "saving"
+                ? "正在打开保存对话框"
+                : downloadFeedback === "saved"
+                  ? "已保存"
+                  : downloadFeedback === "failed"
+                    ? "保存失败"
+                    : "下载计划"
+            }
+            disabled={downloadFeedback === "saving"}
+            onClick={() => {
+              if (downloadingRef.current) {
+                return;
+              }
+              downloadingRef.current = true;
+              if (downloadResetTimerRef.current != null) {
+                window.clearTimeout(downloadResetTimerRef.current);
+                downloadResetTimerRef.current = null;
+              }
+              setDownloadFeedback("saving");
+              void downloadPlanMarkdownFile(content, planDownloadFilename(content))
+                .then((outcome) => {
+                  if (outcome === "saved") {
+                    showDownloadFeedback("saved");
+                  } else {
+                    setDownloadFeedback("idle");
+                  }
+                })
+                .catch((error: unknown) => {
+                  logWarn("下载计划失败", {
+                    category: "frontend",
+                    event: "download_agent_plan",
+                    error,
+                    metadata: { contentLength: content.length },
+                  });
+                  showDownloadFeedback("failed");
+                })
+                .finally(() => {
+                  downloadingRef.current = false;
+                });
+            }}
           >
-            <Download size={14} />
+            {downloadFeedback === "saved" ? <Check size={14} /> : <Download size={14} />}
           </Button>
           <Button
             variant="icon"
@@ -159,7 +221,6 @@ export function PlanMessageCard({
     </section>
   );
 }
-
 /** 复制计划原文；失败只记长度，不把正文写入诊断。 */
 async function copyPlanContent(content: string, onCopied: () => void) {
   try {
@@ -173,17 +234,4 @@ async function copyPlanContent(content: string, onCopied: () => void) {
       metadata: { contentLength: content.length },
     });
   }
-}
-
-/** 把计划 Markdown 下载到本地，方便离开会话后单独留存。 */
-function downloadPlanMarkdown(content: string) {
-  const blob = new Blob([content], { type: "text/markdown;charset=utf-8" });
-  const url = URL.createObjectURL(blob);
-  const anchor = document.createElement("a");
-  anchor.href = url;
-  anchor.download = planDownloadFilename(content);
-  document.body.appendChild(anchor);
-  anchor.click();
-  anchor.remove();
-  URL.revokeObjectURL(url);
 }

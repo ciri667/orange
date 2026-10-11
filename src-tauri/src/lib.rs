@@ -334,6 +334,7 @@ pub fn run() {
             commands::history::clear_document_history,
             commands::documents::load_document_preview,
             export::export_current_file,
+            export::download_plan_markdown,
             commands::schedules::list_scheduled_jobs,
             commands::schedules::list_schedule_blueprints,
             commands::schedules::create_scheduled_job,
