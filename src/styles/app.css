@@ -35,6 +35,14 @@
   --success-soft: #ecfdf3;
   --warning: #b54708;
   --warning-soft: #fffaeb;
+  /* 代码块语法色，接近 GitHub 浅色主题，保证白底上能分开关键字、字符串和注释。 */
+  --code-keyword: #cf222e;
+  --code-string: #0a3069;
+  --code-comment: #6e7781;
+  --code-number: #0550ae;
+  --code-function: #8250df;
+  --code-type: #953800;
+  --code-property: #116329;
   --radius-panel: 16px;
   --radius-control: 8px;
   --radius-small: 6px;

@@ -50,6 +50,13 @@
   --color-success-soft: var(--success-soft);
   --color-warning: var(--warning);
   --color-warning-soft: var(--warning-soft);
+  --color-code-keyword: var(--code-keyword);
+  --color-code-string: var(--code-string);
+  --color-code-comment: var(--code-comment);
+  --color-code-number: var(--code-number);
+  --color-code-function: var(--code-function);
+  --color-code-type: var(--code-type);
+  --color-code-property: var(--code-property);
   --color-control: var(--control-bg);
   --color-control-hover: var(--control-bg-hover);
   --color-primary-border: var(--color-primary-border);
