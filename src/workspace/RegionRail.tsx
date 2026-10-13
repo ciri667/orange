@@ -114,20 +114,13 @@ export function RegionRail({
 
     const rect = button.getBoundingClientRect();
     const margin = 8;
-
-    if (edge === "left" || edge === "right") {
-      const left = edge === "left" ? rect.right + PREVIEW_GAP : rect.left - PREVIEW_GAP;
-      setPreviewPosition({
-        left,
-        // 浮层用 translateX(-100%) 从图标右侧/左侧向外展开，这里只保证纵向不越出视口。
-        top: Math.min(Math.max(margin, rect.top), Math.max(margin, window.innerHeight - margin)),
-      });
-      return;
-    }
+    // 左栏浮层挂在图标右侧、右栏挂在图标左侧；横向位置由各自的 translateX 收拢。
+    const left = edge === "left" ? rect.right + PREVIEW_GAP : rect.left - PREVIEW_GAP;
 
     setPreviewPosition({
-      left: Math.min(Math.max(margin, rect.left), Math.max(margin, window.innerWidth - margin)),
-      top: edge === "top" ? rect.bottom + PREVIEW_GAP : rect.top - PREVIEW_GAP,
+      left,
+      // 这里只保证纵向不越出视口。
+      top: Math.min(Math.max(margin, rect.top), Math.max(margin, window.innerHeight - margin)),
     });
   }, [edge]);
 
@@ -296,7 +289,7 @@ export function RegionRail({
         ref={railRef}
         className={cn("region-rail", `region-rail-${edge}`)}
         aria-label={`${label}（已收起）`}
-        aria-orientation={edge === "top" || edge === "bottom" ? "horizontal" : "vertical"}
+        aria-orientation="vertical"
       >
         <ul className="region-rail-list">
           {items.map((item) => {

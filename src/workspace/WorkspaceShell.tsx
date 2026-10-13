@@ -33,7 +33,6 @@ import { getRegion } from "./collapsibleRegions";
 import type { RegionItemId } from "./collapsibleRegions";
 import { RegionPreviewNote } from "./RegionPreviewNote";
 import { RegionRail } from "./RegionRail";
-import { TopBar } from "./TopBar";
 import {
   getCreateDialogAriaLabel,
   getCreateDialogTitle,
@@ -138,7 +137,6 @@ export function WorkspaceShell() {
     setRegionOpen,
     setRegionActiveItem,
     openRegionItem,
-    topBarHeight,
     agentOpen,
     setAgentOpen,
   } = useResizableWorkspaceLayout();
@@ -933,21 +931,6 @@ export function WorkspaceShell() {
 
   return (
     <div className="app-shell">
-      <TopBar
-        onOpenSettings={handleOpenSettings}
-        agentOpen={agentOpen}
-        onToggleAgent={handleToggleAgentPanel}
-        height={topBarHeight}
-        collapsed={!regionOpen.top}
-        onToggleCollapsed={() => toggleRegion("top")}
-        onCreateSession={() => {
-          setIsSchedulesOpen(false);
-          if (!agentOpen) {
-            setAgentOpen(true);
-          }
-          void handleCreateSession();
-        }}
-      />
       <main
         className={`workspace-grid${resizingPane ? " is-resizing" : ""}${agentOpen ? " agent-open" : ""}`}
         ref={workspaceRef}

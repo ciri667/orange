@@ -269,37 +269,6 @@ select:focus-visible {
   }
 }
 
-/* 顶栏参与 app-shell 的纵向 flex，高度由布局 hook 给出。 */
-.top-bar {
-  display: flex;
-  flex: none;
-  align-items: center;
-  justify-content: space-between;
-  gap: 8px;
-  border-bottom: 1px solid var(--border);
-  padding: 0 12px;
-  background: var(--surface);
-  transition: height var(--region-transition) ease;
-}
-
-.top-bar.is-collapsed {
-  justify-content: flex-start;
-  padding: 0;
-}
-
-/* 收起态顶栏本身就是一条横向图标栏，不再额外加内边距和边框。 */
-.top-bar.is-collapsed .region-rail-top {
-  width: 100%;
-  border-bottom: 0;
-  padding: 0 6px;
-}
-
-@media (prefers-reduced-motion: reduce) {
-  .top-bar {
-    transition: none;
-  }
-}
-
 /* ---------------------------------------------------------------- 收起态图标栏 */
 
 .region-rail {
@@ -327,23 +296,6 @@ select:focus-visible {
 
 .region-rail-right {
   border-left: 1px solid var(--border);
-}
-
-.region-rail-top,
-.region-rail-bottom {
-  flex-direction: row;
-  align-items: center;
-  justify-content: flex-start;
-  gap: 2px;
-  padding: 0 6px;
-}
-
-.region-rail-top {
-  border-bottom: 1px solid var(--border);
-}
-
-.region-rail-bottom {
-  border-top: 1px solid var(--border);
 }
 
 .region-rail-list {
@@ -381,7 +333,7 @@ select:focus-visible {
   color: var(--accent);
 }
 
-/* 竖向图标栏用左侧竖条标记当前条目，横向栏改用下划线。 */
+/* 竖向图标栏用竖条标记当前条目：左栏挂在图标左侧，右栏镜像到右侧。 */
 .region-rail-left .region-rail-item.is-active::before,
 .region-rail-right .region-rail-item.is-active::before {
   position: absolute;
@@ -399,25 +351,6 @@ select:focus-visible {
 
 .region-rail-right .region-rail-item.is-active::before {
   right: -6px;
-}
-
-.region-rail-top .region-rail-item.is-active::before,
-.region-rail-bottom .region-rail-item.is-active::before {
-  position: absolute;
-  right: 6px;
-  left: 6px;
-  height: 2px;
-  border-radius: 999px;
-  background: var(--accent);
-  content: "";
-}
-
-.region-rail-top .region-rail-item.is-active::before {
-  bottom: -2px;
-}
-
-.region-rail-bottom .region-rail-item.is-active::before {
-  top: -2px;
 }
 
 /* --------------------------------------------------- 收起态悬浮浮层（真内容预览） */
@@ -443,21 +376,12 @@ select:focus-visible {
 .region-preview-left,
 .region-preview-right {
   width: var(--region-preview-width, 380px);
-}
-
-.region-preview-left {
-  /* 浮层贴在左栏图标右侧；右栏同理镜像到左侧。 */
   height: min(640px, calc(100vh - 40px));
 }
 
+/* 左栏浮层贴在图标右侧不动，右栏镜像到图标左侧。 */
 .region-preview-right {
-  height: min(640px, calc(100vh - 40px));
   transform: translateX(-100%);
-}
-
-.region-preview-top {
-  width: min(520px, calc(100vw - 32px));
-  height: var(--region-preview-height, 320px);
 }
 
 .region-preview-body {

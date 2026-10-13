@@ -9,7 +9,7 @@
  * 这里只把这些变量登记成 Tailwind token，供 bg-accent、text-ink 等使用。
  *
  * 新 UI 用这些 token 和 <Button>。
- * TopBar、编辑器、Agent 面板的布局仍走 app.css，不要整页重写。
+ * 编辑器、Agent 面板的布局仍走 app.css，不要整页重写。
  */
 @layer theme, base, components, utilities;
 

@@ -12,7 +12,7 @@ export type RegionOpenState = Record<RegionId, boolean>;
 /** 各区域在收起态图标栏上当前激活的条目，用于决定浮层预览哪一块内容。 */
 export type RegionActiveItems = Partial<Record<RegionId, RegionItemId>>;
 
-/** 主工作台可持久化的布局：两侧栏宽度、四个区域的显隐、各区域激活条目。 */
+/** 主工作台可持久化的布局：两侧栏宽度、两个区域的显隐、各区域激活条目。 */
 interface WorkspaceLayoutSizes {
   sidebarWidth: number;
   agentWidth: number;
@@ -20,11 +20,6 @@ interface WorkspaceLayoutSizes {
   regions: RegionOpenState;
   activeItems: RegionActiveItems;
 }
-
-/** 顶栏展开高度，与 TopBar 的 h-11 保持一致，收起后压到图标栏厚度。 */
-const TOP_BAR_EXPANDED_HEIGHT = 44;
-/** 顶栏收起高度；横向栏比竖向栏矮一档，避免占据过多正文高度。 */
-const TOP_BAR_COLLAPSED_HEIGHT = 32;
 
 /** 指针拖拽过程中的起始状态，用于把鼠标位移稳定换算成目标栏宽。 */
 interface ResizeDragState {
@@ -42,16 +37,14 @@ const LEGACY_BRAND_LAYOUT_STORAGE_KEY = "cici-note.workspace-layout.v1";
 /** 浮窗时期的几何存储，只读取宽度和开关，用于迁回停靠工作台。 */
 const AGENT_FLOAT_STORAGE_KEY = "orange.agent-float.v1";
 
-/** 四个区域的默认显隐；默认全部展开，保持与升级前一致的观感。 */
+/** 两个区域的默认显隐；默认全部展开，保持与升级前一致的观感。 */
 const DEFAULT_REGION_OPEN_STATE: RegionOpenState = {
-  top: true,
   sidebar: true,
   agent: true,
 };
 
 /** 各区域默认激活的条目，决定收起态图标栏初始高亮和浮层内容。 */
 const DEFAULT_REGION_ACTIVE_ITEMS: RegionActiveItems = {
-  top: "main",
   sidebar: "sessions",
   agent: "main",
 };
@@ -371,7 +364,8 @@ function setRegionOpenState(
   );
 }
 
-/** 计算某个分隔条当前可表达的 aria 最小值和最大值；对应区域收起时返回 null，表示没有可用把手。 */function getPaneBounds(pane: ResizablePane, sizes: WorkspaceLayoutSizes, containerWidth: number) {
+/** 计算某个分隔条当前可表达的 aria 最小值和最大值；对应区域收起时返回 null，表示没有可用把手。 */
+function getPaneBounds(pane: ResizablePane, sizes: WorkspaceLayoutSizes, containerWidth: number) {
   const availableSidePanelWidth = getAvailableSidePanelWidth(containerWidth, sizes.regions);
 
   if (pane === "sidebar") {
@@ -695,8 +689,6 @@ export function useResizableWorkspaceLayout() {
     toggleRegion,
     setRegionActiveItem,
     openRegionItem,
-    /** 顶栏高度由 hook 统一给出，收起时压到横向图标栏厚度。 */
-    topBarHeight: sizes.regions.top ? TOP_BAR_EXPANDED_HEIGHT : TOP_BAR_COLLAPSED_HEIGHT,
     agentOpen: sizes.regions.agent,
     setAgentOpen,
   };
