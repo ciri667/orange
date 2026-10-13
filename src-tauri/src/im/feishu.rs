@@ -1495,6 +1495,7 @@ mod tests {
             next: "新内容".to_owned(),
             original_hash: "hash".to_owned(),
             status: "pending".to_owned(),
+            occurrence: None,
             review_comments: None,
             review_state: None,
             diff_stats: None,

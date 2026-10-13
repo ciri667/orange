@@ -3682,6 +3682,7 @@ mod tests {
             next: "新正文里有较长内容".to_owned(),
             original_hash: hash_content("旧正文里有较长内容"),
             status: status.to_owned(),
+            occurrence: None,
             review_comments: None,
             review_state: None,
             diff_stats: Some(crate::domain::ProposedChangeDiffStats {

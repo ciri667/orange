@@ -544,6 +544,8 @@ export interface ProposedChange {
   next: string;
   originalHash: string;
   status: "pending" | "accepted" | "rejected";
+  /** replace 时的 1-based 命中序号；缺省表示 original 必须唯一。 */
+  occurrence?: number;
   reviewComments?: ReviewComment[];
   reviewState?: ProposedChangeReviewState;
   diffStats?: ProposedChangeDiffStats;

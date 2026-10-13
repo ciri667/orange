@@ -11,7 +11,7 @@ use crate::domain::{
 use crate::storage::{create_id, format_local_datetime, hash_content};
 use crate::text_edit::{
     count_non_overlapping_matches, replace_occurrence, replace_unique, OccurrenceReplacementError,
-    UniqueReplacementError,
+    TextFileShape, UniqueReplacementError,
 };
 use serde_json::{json, Value};
 use std::collections::HashSet;
@@ -320,7 +320,7 @@ impl AgentTool for ProposeFileChangeTool {
     }
 
     fn description(&self) -> &'static str {
-        "Create a pending rewrite diff for an existing editable Markdown or TXT file."
+        "Create a pending rewrite diff for an existing editable Markdown or TXT file. Use operation=replace for one unique fragment (or pass occurrence to target the Nth match of a repeated fragment), append for end-of-note additions (the increment is trimmed and, for Markdown, separated by one blank line), and multi_replace for several unique edits in one diff. Matching tolerates CRLF and a UTF-8 BOM: pass LF fragments and the original line endings and BOM are preserved on write."
     }
 
     fn parameters(&self) -> Value {
@@ -336,6 +336,11 @@ impl AgentTool for ProposeFileChangeTool {
                 },
                 "original": { "type": "string" },
                 "next": { "type": "string", "description": "Replacement text for replace, or increment-only text for append. It may be empty for deletion in replace mode." },
+                "occurrence": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "description": "replace only. Optional 1-based match index for when original intentionally appears multiple times (for example deleting the second duplicate paragraph). When omitted, original must be unique."
+                },
                 "edits": {
                     "type": "array",
                     "description": "Multiple unique replacements to apply to the same note in one pending diff. Each original must match exactly once in the current note; next may be empty to delete that fragment.",
@@ -1695,11 +1700,16 @@ pub(crate) fn execute_propose_file_change(
         .and_then(Value::as_str)
         .filter(|value| matches!(*value, "append" | "replace" | "multi_replace"))
         .unwrap_or("replace");
-    let (original, next) =
-        match prepare_rewrite_content(&target.4, operation, args, target.7 == "markdown") {
-            Ok(prepared_change) => prepared_change,
-            Err(message) => return ToolExecutionResult::failed(&message),
-        };
+    let prepared = match prepare_rewrite_content(&target.4, operation, args, target.7 == "markdown")
+    {
+        Ok(prepared_change) => prepared_change,
+        Err(message) => return ToolExecutionResult::failed(&message),
+    };
+    let PreparedRewrite {
+        original,
+        next,
+        occurrence,
+    } = prepared;
 
     let change = ProposedChange {
         id: create_id("change"),
@@ -1720,6 +1730,7 @@ pub(crate) fn execute_propose_file_change(
         next,
         original_hash: target.5.clone(),
         status: "pending".to_owned(),
+        occurrence,
         review_comments: None,
         review_state: None,
         diff_stats: None,
@@ -1744,32 +1755,65 @@ pub(crate) fn execute_propose_file_change(
     }
 }
 
-/** 根据 operation 准备待审阅 diff 的原文和建议内容，不在日志或错误里回显正文。 */
+/** 根据 operation 准备待审阅 diff 的原文和建议内容，不在日志或错误里回显正文。
+ *
+ * 匹配前先把磁盘正文归一成 LF 并剥离 BOM，这样模型只需给 LF 片段即可命中 CRLF/BOM 文件；
+ * 生成的 original/next 都是归一形态，由写回层按文件原有形态还原。
+ */
 pub(crate) fn prepare_rewrite_content(
     content: &str,
     operation: &str,
     args: &Value,
     is_markdown: bool,
-) -> Result<(String, String), String> {
+) -> Result<PreparedRewrite, String> {
+    let normalized = TextFileShape::detect(content).normalize(content);
+
     match operation {
-        "append" => prepare_append_rewrite(content, args, is_markdown),
-        "multi_replace" => prepare_multi_replace_rewrite(content, args),
-        _ => prepare_single_replace_rewrite(content, args),
+        "append" => prepare_append_rewrite(&normalized, args, is_markdown),
+        "multi_replace" => prepare_multi_replace_rewrite(&normalized, args),
+        _ => prepare_single_replace_rewrite(&normalized, args),
     }
 }
 
-/** 准备单处替换，original 必须唯一命中，next 可以为空以支持删除。 */
+/** 把模型给的片段折成 LF，使 CRLF 片段也能命中已归一的正文。 */
+pub(crate) fn normalize_model_fragment(fragment: &str) -> String {
+    fragment.replace("\r\n", "\n")
+}
+
+/** 工具层准备好的待确认改写：original/next 均为 LF 归一形态，occurrence 供写回时定位重复片段。 */
+pub(crate) struct PreparedRewrite {
+    pub(crate) original: String,
+    pub(crate) next: String,
+    pub(crate) occurrence: Option<usize>,
+}
+
+/** 从参数读取 1-based occurrence，兼容 matchIndex/match_index 别名。 */
+pub(crate) fn parse_occurrence(source: &Value) -> Option<usize> {
+    source
+        .get("occurrence")
+        .or_else(|| source.get("matchIndex"))
+        .or_else(|| source.get("match_index"))
+        .and_then(Value::as_u64)
+        .and_then(|value| usize::try_from(value).ok())
+        .filter(|value| *value > 0)
+}
+
+/** 准备单处替换，original 必须唯一命中（或按 occurrence 定位），next 可以为空以支持删除。 */
 pub(crate) fn prepare_single_replace_rewrite(
     content: &str,
     args: &Value,
-) -> Result<(String, String), String> {
+) -> Result<PreparedRewrite, String> {
     let original = args
         .get("original")
         .and_then(Value::as_str)
         .filter(|value| !value.trim().is_empty())
-        .map(str::to_owned)
+        .map(normalize_model_fragment)
         .unwrap_or_else(|| first_body_paragraph(content));
-    let Some(next) = args.get("next").and_then(Value::as_str).map(str::to_owned) else {
+    let Some(next) = args
+        .get("next")
+        .and_then(Value::as_str)
+        .map(normalize_model_fragment)
+    else {
         return Err("改写工具缺少 next 内容；如需删除，请显式传入空字符串。".to_owned());
     };
 
@@ -1784,41 +1828,66 @@ pub(crate) fn prepare_single_replace_rewrite(
         );
     }
 
-    validate_unique_original(content, &original).map_err(single_rewrite_validation_message)?;
+    let occurrence = parse_occurrence(args);
+    if let Some(occurrence) = occurrence {
+        // 指定 occurrence 时按第 N 次命中定位，允许 original 重复。
+        replace_occurrence(content, &original, &next, occurrence)
+            .map_err(|error| occurrence_rewrite_validation_message(1, error))?;
+    } else {
+        validate_unique_original(content, &original).map_err(single_rewrite_validation_message)?;
+    }
 
-    Ok((original, next))
+    Ok(PreparedRewrite {
+        original,
+        next,
+        occurrence,
+    })
 }
 
-/** 准备文末追加，工具层合成整篇 diff，避免模型把整篇正文塞进局部替换。 */
+/** 准备文末追加，工具层合成整篇 diff，避免模型把整篇正文塞进局部替换。
+ *
+ * Markdown 会 trim 增量首尾并注入一个空行作为块级分隔；
+ * TXT 保持纯文本语义，原样拼接增量（同样 trim 首尾，避免模型多带空行改变文件尾部）。
+ */
 pub(crate) fn prepare_append_rewrite(
     content: &str,
     args: &Value,
     is_markdown: bool,
-) -> Result<(String, String), String> {
+) -> Result<PreparedRewrite, String> {
     let addition = args
         .get("next")
         .and_then(Value::as_str)
-        .unwrap_or_default()
-        .to_owned();
+        .map(normalize_model_fragment)
+        .unwrap_or_default();
 
     if addition.trim().is_empty() {
         return Err("文末追加工具缺少增量内容。".to_owned());
     }
 
-    // TXT 不修剪或注入 Markdown 分隔空行，确保 Agent 纯文本写入保持原始语义。
     let next = if is_markdown {
         append_note_content(content, &addition)
     } else {
-        format!("{content}{addition}")
+        // TXT 不注入 Markdown 分隔空行，但仍按 trim 后的增量拼接，保持与 Markdown 一致的边界语义。
+        let trimmed_addition = addition.trim();
+        if content.is_empty() {
+            trimmed_addition.to_owned()
+        } else {
+            format!("{}{}", content.trim_end(), trimmed_addition)
+        }
     };
-    Ok((content.to_owned(), next))
+
+    Ok(PreparedRewrite {
+        original: content.to_owned(),
+        next,
+        occurrence: None,
+    })
 }
 
 /** 准备同一文件内多处替换，先按唯一片段顺序应用到内存，再生成整篇待确认 diff。 */
 pub(crate) fn prepare_multi_replace_rewrite(
     content: &str,
     args: &Value,
-) -> Result<(String, String), String> {
+) -> Result<PreparedRewrite, String> {
     let edits = parse_text_edits(args)?;
     let next = apply_multi_text_edits(content, &edits)?;
 
@@ -1826,7 +1895,11 @@ pub(crate) fn prepare_multi_replace_rewrite(
         return Err("多处编辑没有产生内容变化，已拒绝生成空 diff。".to_owned());
     }
 
-    Ok((content.to_owned(), next))
+    Ok(PreparedRewrite {
+        original: content.to_owned(),
+        next,
+        occurrence: None,
+    })
 }
 
 /** 从工具参数读取 edits/replacements，正文只保存在 pending diff，不进入日志。 */
@@ -1854,21 +1927,15 @@ pub(crate) fn parse_text_edits(args: &Value) -> Result<Vec<ProposedTextEdit>, St
             .get("original")
             .and_then(Value::as_str)
             .filter(|value| !value.trim().is_empty())
-            .map(str::to_owned)
+            .map(normalize_model_fragment)
             .ok_or_else(|| format!("多处编辑第 {} 处缺少 original。", index + 1))?;
         let next = raw_edit
             .get("next")
             .or_else(|| raw_edit.get("replacement"))
             .and_then(Value::as_str)
-            .map(str::to_owned)
+            .map(normalize_model_fragment)
             .ok_or_else(|| format!("多处编辑第 {} 处缺少 next。", index + 1))?;
-        let occurrence = raw_edit
-            .get("occurrence")
-            .or_else(|| raw_edit.get("matchIndex"))
-            .or_else(|| raw_edit.get("match_index"))
-            .and_then(Value::as_u64)
-            .and_then(|value| usize::try_from(value).ok())
-            .filter(|value| *value > 0);
+        let occurrence = parse_occurrence(raw_edit);
 
         edits.push(ProposedTextEdit {
             original,
@@ -2093,6 +2160,7 @@ pub(crate) fn execute_create_file_draft(
         next: content,
         original_hash: hash_content(""),
         status: "pending".to_owned(),
+        occurrence: None,
         review_comments: None,
         review_state: None,
         diff_stats: None,

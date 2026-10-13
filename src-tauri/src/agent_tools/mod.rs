@@ -1305,6 +1305,85 @@ mod tests {
         assert_eq!(change.next, "开头\n重复段落\n中间\n结尾");
     }
 
+    /** 单处 replace 也支持 occurrence，用于精准改写重复片段中的某一次。 */
+    #[test]
+    fn propose_note_change_replace_accepts_occurrence() {
+        let registry = ToolRegistry::default();
+        let mut snapshot = tool_test_snapshot("开头\n重复段落\n中间\n重复段落\n结尾".to_owned());
+        let request = tool_test_request("rewrite", "把后面的重复段落改成新内容");
+        let mut context = tool_test_context(&mut snapshot, &request);
+        let outcome = registry.execute_named(
+            &mut context,
+            "propose_note_change",
+            json!({
+                "noteId": "note-a",
+                "operation": "replace",
+                "original": "重复段落",
+                "next": "已改写",
+                "occurrence": 2
+            }),
+        );
+        let change = context.snapshot.sessions[0]
+            .pending_change
+            .as_ref()
+            .unwrap();
+
+        assert_eq!(outcome.call.status, "completed");
+        assert_eq!(change.operation.as_deref(), Some("replace"));
+        assert_eq!(change.occurrence, Some(2));
+        assert_eq!(change.original, "重复段落");
+        assert_eq!(change.next, "已改写");
+    }
+
+    /** 未指定 occurrence 时，重复片段仍必须唯一，避免一次确认误改多处。 */
+    #[test]
+    fn propose_note_change_replace_without_occurrence_rejects_duplicates() {
+        let registry = ToolRegistry::default();
+        let mut snapshot = tool_test_snapshot("开头\n重复段落\n重复段落\n结尾".to_owned());
+        let request = tool_test_request("rewrite", "删除重复段落");
+        let mut context = tool_test_context(&mut snapshot, &request);
+        let outcome = registry.execute_named(
+            &mut context,
+            "propose_note_change",
+            json!({
+                "noteId": "note-a",
+                "operation": "replace",
+                "original": "重复段落",
+                "next": ""
+            }),
+        );
+
+        assert_eq!(outcome.call.status, "failed");
+        assert!(context.snapshot.sessions[0].pending_change.is_none());
+    }
+
+    /** CRLF 笔记可用 LF 片段改写，生成的 diff 为归一形态。 */
+    #[test]
+    fn propose_note_change_matches_lf_fragment_on_crlf_note() {
+        let registry = ToolRegistry::default();
+        let mut snapshot = tool_test_snapshot("第一行\r\n旧内容\r\n第三行\r\n".to_owned());
+        let request = tool_test_request("rewrite", "改写第二行");
+        let mut context = tool_test_context(&mut snapshot, &request);
+        let outcome = registry.execute_named(
+            &mut context,
+            "propose_note_change",
+            json!({
+                "noteId": "note-a",
+                "operation": "replace",
+                "original": "旧内容",
+                "next": "新内容"
+            }),
+        );
+        let change = context.snapshot.sessions[0]
+            .pending_change
+            .as_ref()
+            .unwrap();
+
+        assert_eq!(outcome.call.status, "completed");
+        assert_eq!(change.original, "旧内容");
+        assert_eq!(change.next, "新内容");
+    }
+
     /** propose_note_change 必须拒绝 scope 外笔记。 */
     #[test]
     fn propose_note_change_rejects_note_outside_scope() {

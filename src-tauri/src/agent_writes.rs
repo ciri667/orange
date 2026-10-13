@@ -4,7 +4,10 @@ use crate::domain::{
 };
 use crate::logging::{self, AppEventBuilder, AppLogCategory, AppLogLevel};
 use crate::storage;
-use crate::text_edit::{replace_unique, UniqueReplacementError};
+use crate::text_edit::{
+    replace_occurrence, replace_unique, OccurrenceReplacementError, TextFileShape,
+    UniqueReplacementError,
+};
 use serde_json::json;
 use std::collections::HashMap;
 use std::fs;
@@ -183,7 +186,11 @@ pub fn apply_pending_change(
     })
 }
 
-/** 在落盘前执行 hash 冲突检测和唯一片段替换，确保一次确认只改一处。 */
+/** 在落盘前执行 hash 冲突检测和唯一片段替换，确保一次确认只改一处。
+ *
+ * change.original/change.next 是工具层归一后的 LF 形态；这里先把磁盘正文按同一形态归一，
+ * 再做等值/唯一命中判定，最后按文件原有 CRLF/BOM 还原，保证换行风格不被改写。
+ */
 pub fn apply_rewrite_change(
     current_content: &str,
     current_hash: &str,
@@ -195,11 +202,14 @@ pub fn apply_rewrite_change(
         return Err(STALE_FILE_WRITE_ERROR.to_owned());
     }
 
+    let shape = TextFileShape::detect(current_content);
+    let normalized_current = shape.normalize(current_content);
+
     if matches!(
         change.operation.as_deref(),
         Some("append" | "multi_replace")
     ) {
-        if current_content != change.original {
+        if normalized_current != change.original {
             let action_label = if change.operation.as_deref() == Some("multi_replace") {
                 "多处编辑写入"
             } else {
@@ -211,10 +221,23 @@ pub fn apply_rewrite_change(
             ));
         }
 
-        return Ok(change.next.clone());
+        return Ok(shape.restore(&change.next));
     }
 
-    replace_unique(current_content, &change.original, &change.next)
+    if let Some(occurrence) = change.occurrence {
+        // 单处替换指定了第 N 次命中：按 occurrence 定位，允许 original 在文件中重复。
+        return replace_occurrence(
+            &normalized_current,
+            &change.original,
+            &change.next,
+            occurrence,
+        )
+        .map(|next| shape.restore(&next))
+        .map_err(rewrite_occurrence_apply_error_message);
+    }
+
+    replace_unique(&normalized_current, &change.original, &change.next)
+        .map(|next| shape.restore(&next))
         .map_err(rewrite_apply_error_message)
 }
 
@@ -484,6 +507,18 @@ fn rewrite_apply_error_message(error: UniqueReplacementError) -> String {
     }
 }
 
+/** 指定 occurrence 的改写定位失败时返回可操作提示。 */
+fn rewrite_occurrence_apply_error_message(error: OccurrenceReplacementError) -> String {
+    match error {
+        OccurrenceReplacementError::EmptyOriginal => {
+            "待写入 diff 缺少原文片段，已阻止写入。请重新生成 diff。".to_owned()
+        }
+        OccurrenceReplacementError::OccurrenceOutOfRange { requested, count } => format!(
+            "待写入 diff 指定第 {requested} 次命中，但当前文件只命中 {count} 次，已阻止写入。请重新读取后再写。"
+        ),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -521,6 +556,7 @@ mod tests {
                 next: "新".to_owned(),
                 original_hash: "hash".to_owned(),
                 status: "pending".to_owned(),
+                occurrence: None,
                 review_comments: None,
                 review_state: None,
                 diff_stats: None,
@@ -574,5 +610,117 @@ mod tests {
             &session_with("autonomous", false, true),
             &settings
         ));
+    }
+
+    /** 构造可直接喂给 apply_rewrite_change 的待确认改写。
+     *
+     * original/next 是工具层归一后的 LF 形态；original_hash 必须按磁盘原文计算，
+     * 因为扫描层 note.content_hash 取的就是原始字节的 hash（含 CRLF/BOM）。
+     */
+    fn rewrite_change_for_disk(
+        disk: &str,
+        original: &str,
+        next: &str,
+        operation: &str,
+    ) -> ProposedChange {
+        ProposedChange {
+            id: "change".to_owned(),
+            knowledge_base_id: "kb-a".to_owned(),
+            note_id: Some("note-a".to_owned()),
+            target_id: Some("note-a".to_owned()),
+            target_kind: Some("note".to_owned()),
+            file_type: Some("markdown".to_owned()),
+            r#type: "rewrite".to_owned(),
+            operation: Some(operation.to_owned()),
+            title: "改写".to_owned(),
+            target_path: "note.md".to_owned(),
+            original: original.to_owned(),
+            next: next.to_owned(),
+            original_hash: storage::hash_content(disk),
+            status: "pending".to_owned(),
+            occurrence: None,
+            review_comments: None,
+            review_state: None,
+            diff_stats: None,
+        }
+    }
+
+    /** CRLF 文件用 LF 片段改写后，写回结果仍保持 CRLF。 */
+    #[test]
+    fn apply_rewrite_change_preserves_crlf() {
+        let disk = "第一行\r\n旧内容\r\n第三行\r\n";
+        let change = rewrite_change_for_disk(disk, "旧内容", "新内容", "replace");
+
+        let next = apply_rewrite_change(disk, &storage::hash_content(disk), "stale", &change)
+            .expect("CRLF 改写应成功");
+
+        assert_eq!(next, "第一行\r\n新内容\r\n第三行\r\n");
+    }
+
+    /** 带 BOM 的文件改写后，BOM 保留在文件开头。 */
+    #[test]
+    fn apply_rewrite_change_preserves_bom() {
+        let disk = "\u{feff}# 标题\n旧内容\n";
+        let change = rewrite_change_for_disk(disk, "旧内容", "新内容", "replace");
+
+        let next = apply_rewrite_change(disk, &storage::hash_content(disk), "stale", &change)
+            .expect("BOM 改写应成功");
+
+        assert_eq!(next, "\u{feff}# 标题\n新内容\n");
+    }
+
+    /** BOM 与 CRLF 同时存在时，两种形态都要还原。 */
+    #[test]
+    fn apply_rewrite_change_preserves_bom_and_crlf() {
+        let disk = "\u{feff}第一行\r\n旧内容\r\n";
+        let change = rewrite_change_for_disk(disk, "旧内容", "新内容", "replace");
+
+        let next = apply_rewrite_change(disk, &storage::hash_content(disk), "stale", &change)
+            .expect("BOM+CRLF 改写应成功");
+
+        assert_eq!(next, "\u{feff}第一行\r\n新内容\r\n");
+    }
+
+    /** occurrence 改写端到端生效：只替换第 N 次命中，其余重复片段不动。 */
+    #[test]
+    fn apply_rewrite_change_replaces_only_requested_occurrence() {
+        let disk = "开头\n重复\n中间\n重复\n结尾";
+        let mut change = rewrite_change_for_disk(disk, "重复", "已改", "replace");
+        change.occurrence = Some(2);
+
+        let next = apply_rewrite_change(disk, &storage::hash_content(disk), "stale", &change)
+            .expect("occurrence 改写应成功");
+
+        assert_eq!(next, "开头\n重复\n中间\n已改\n结尾");
+    }
+
+    /** occurrence 超出命中次数时必须阻止写入，而不是静默改写第一次。 */
+    #[test]
+    fn apply_rewrite_change_rejects_out_of_range_occurrence() {
+        let disk = "重复\n重复";
+        let mut change = rewrite_change_for_disk(disk, "重复", "已改", "replace");
+        change.occurrence = Some(5);
+
+        let error = apply_rewrite_change(disk, &storage::hash_content(disk), "stale", &change)
+            .expect_err("越界 occurrence 必须被拒绝");
+
+        assert!(error.contains("只命中 2 次"), "实际错误：{error}");
+    }
+
+    /** multi_replace 在 CRLF 文件上按整篇等值校验后写回，仍保持 CRLF。 */
+    #[test]
+    fn apply_rewrite_change_multi_replace_preserves_crlf() {
+        let disk = "标题\r\n重复段落\r\n结尾\r\n";
+        let change = rewrite_change_for_disk(
+            disk,
+            "标题\n重复段落\n结尾\n",
+            "标题\n结尾\n",
+            "multi_replace",
+        );
+
+        let next = apply_rewrite_change(disk, &storage::hash_content(disk), "stale", &change)
+            .expect("CRLF 多处编辑应成功");
+
+        assert_eq!(next, "标题\r\n结尾\r\n");
     }
 }

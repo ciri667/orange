@@ -179,6 +179,9 @@ pub struct ProposedChange {
     pub next: String,
     pub original_hash: String,
     pub status: String,
+    /** 单处替换时用于定位重复片段中的第 N 次命中（1-based）；None 表示要求 original 唯一。 */
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub occurrence: Option<usize>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub review_comments: Option<Vec<ReviewComment>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
