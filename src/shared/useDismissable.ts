@@ -1,5 +1,15 @@
 import { useEffect, useRef, type RefObject } from "react";
 
+/** 收起态图标栏悬浮预览的根标记；它渲染的是旁路副本，不参与浮层的内外判定。 */
+const REGION_PREVIEW_SELECTOR = "[data-region-preview]";
+
+/** 判断事件目标是否落在收起态悬浮预览里。 */
+function isInsideRegionPreview(target: Node) {
+  const element = target instanceof Element ? target : target.parentElement;
+
+  return Boolean(element?.closest(REGION_PREVIEW_SELECTOR));
+}
+
 /** 无遮罩浮层（popover / 下拉菜单）通用的关闭控制配置。 */
 export interface DismissableOptions {
   /** 触发点击外部关闭的事件，默认 mousedown，与现有遮罩弹窗保持一致。 */
@@ -52,6 +62,12 @@ export function useDismissable<TElement extends HTMLElement = HTMLElement>(
       }
 
       const eventTarget = event.target;
+
+      // 收起态图标栏的悬浮预览是只读的旁路渲染，不应关闭展开态面板的浮层。
+      if (isInsideRegionPreview(eventTarget)) {
+        return;
+      }
+
       const isInPortaledInsideArea = (options.insideRefs ?? []).some((insideRef) =>
         insideRef.current?.contains(eventTarget),
       );

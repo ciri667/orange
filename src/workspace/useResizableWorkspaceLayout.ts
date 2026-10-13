@@ -1,15 +1,30 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { KeyboardEvent as ReactKeyboardEvent, PointerEvent as ReactPointerEvent } from "react";
+import { COLLAPSIBLE_REGIONS, REGION_ORDER, REGION_RAIL_SIZE } from "./collapsibleRegions";
+import type { RegionId, RegionItemId } from "./collapsibleRegions";
 
 /** 可调整的主工作台侧栏类型，用于区分左侧知识库和右侧 Agent 面板。 */
 type ResizablePane = "sidebar" | "agent";
 
-/** 主工作台可持久化的布局：两侧栏宽度、Agent 停靠显隐；中间编辑器使用剩余空间。 */
+/** 每个区域收起态的显隐；中间编辑区始终占剩余空间，不参与收起。 */
+export type RegionOpenState = Record<RegionId, boolean>;
+
+/** 各区域在收起态图标栏上当前激活的条目，用于决定浮层预览哪一块内容。 */
+export type RegionActiveItems = Partial<Record<RegionId, RegionItemId>>;
+
+/** 主工作台可持久化的布局：两侧栏宽度、四个区域的显隐、各区域激活条目。 */
 interface WorkspaceLayoutSizes {
   sidebarWidth: number;
   agentWidth: number;
   agentOpen: boolean;
+  regions: RegionOpenState;
+  activeItems: RegionActiveItems;
 }
+
+/** 顶栏展开高度，与 TopBar 的 h-11 保持一致，收起后压到图标栏厚度。 */
+const TOP_BAR_EXPANDED_HEIGHT = 44;
+/** 顶栏收起高度；横向栏比竖向栏矮一档，避免占据过多正文高度。 */
+const TOP_BAR_COLLAPSED_HEIGHT = 32;
 
 /** 指针拖拽过程中的起始状态，用于把鼠标位移稳定换算成目标栏宽。 */
 interface ResizeDragState {
@@ -19,17 +34,35 @@ interface ResizeDragState {
 }
 
 /** 本机 UI 偏好存储键，版本后缀用于未来布局模型变化时安全回退。 */
-const WORKSPACE_LAYOUT_STORAGE_KEY = "orange.workspace-layout.v1";
-/** 旧版本品牌命名遗留的存储键，用于一次性迁移到新键，迁移后旧的保留作回滚保险。 */
-const LEGACY_WORKSPACE_LAYOUT_STORAGE_KEY = "cici-note.workspace-layout.v1";
+const WORKSPACE_LAYOUT_STORAGE_KEY = "orange.workspace-layout.v2";
+/** 上一版布局存储键，读取一次迁移到 v2；迁移后旧的保留作回滚保险。 */
+const LEGACY_WORKSPACE_LAYOUT_STORAGE_KEY = "orange.workspace-layout.v1";
+/** 旧版本品牌命名遗留的存储键，用于一次性迁移到新键。 */
+const LEGACY_BRAND_LAYOUT_STORAGE_KEY = "cici-note.workspace-layout.v1";
 /** 浮窗时期的几何存储，只读取宽度和开关，用于迁回停靠工作台。 */
 const AGENT_FLOAT_STORAGE_KEY = "orange.agent-float.v1";
+
+/** 四个区域的默认显隐；默认全部展开，保持与升级前一致的观感。 */
+const DEFAULT_REGION_OPEN_STATE: RegionOpenState = {
+  top: true,
+  sidebar: true,
+  agent: true,
+};
+
+/** 各区域默认激活的条目，决定收起态图标栏初始高亮和浮层内容。 */
+const DEFAULT_REGION_ACTIVE_ITEMS: RegionActiveItems = {
+  top: "main",
+  sidebar: "sessions",
+  agent: "main",
+};
 
 /** 默认布局沿用三栏宽度；Agent 默认展开，让协作区成为一等停靠栏。 */
 const DEFAULT_WORKSPACE_LAYOUT: WorkspaceLayoutSizes = {
   sidebarWidth: 285,
   agentWidth: 380,
   agentOpen: true,
+  regions: DEFAULT_REGION_OPEN_STATE,
+  activeItems: DEFAULT_REGION_ACTIVE_ITEMS,
 };
 
 /** 知识库侧栏宽度边界，保证目录树可读且不会挤压编辑器。 */
@@ -77,20 +110,40 @@ function clampNumber(value: number, min: number, max: number) {
   return Math.min(Math.max(value, min), safeMax);
 }
 
-/** 按当前容器和 Agent 显隐计算编辑器最小宽度，优先保住目录树和 Agent 下限。 */
-function getEditorMinWidth(containerWidth: number, agentOpen: boolean) {
-  const reserved = agentOpen
-    ? SIDEBAR_WIDTH_LIMIT.min + AGENT_WIDTH_LIMIT.min + RESIZER_TRACK_WIDTH * 2
-    : SIDEBAR_WIDTH_LIMIT.min + RESIZER_TRACK_WIDTH;
+/**
+ * 计算当前参与布局的轨道占位。
+ *
+ * 左栏收起时只占图标栏厚度，不再保留 resizer；编辑区收起时完全退出中间列。
+ * 结果同时用于编辑器最小宽度、可用侧栏宽度和 grid 列定义，保证三者坐标系一致。
+ */
+function resolveTrackMetrics(regions: RegionOpenState) {
+  const sidebarReserved = regions.sidebar
+    ? { width: SIDEBAR_WIDTH_LIMIT.min, resizer: RESIZER_TRACK_WIDTH }
+    : { width: REGION_RAIL_SIZE, resizer: 0 };
+  const agentReserved = regions.agent
+    ? { width: AGENT_WIDTH_LIMIT.min, resizer: RESIZER_TRACK_WIDTH }
+    : { width: REGION_RAIL_SIZE, resizer: 0 };
+
+  return {
+    sidebarReserved,
+    agentReserved,
+    resizerCount: (sidebarReserved.resizer ? 1 : 0) + (agentReserved.resizer ? 1 : 0),
+  };
+}
+
+/** 按当前容器和各区域显隐计算编辑器最小宽度，优先保住目录树和 Agent 下限。 */
+function getEditorMinWidth(containerWidth: number, regions: RegionOpenState) {
+  const { sidebarReserved, agentReserved, resizerCount } = resolveTrackMetrics(regions);
+  const reserved = sidebarReserved.width + agentReserved.width + RESIZER_TRACK_WIDTH * resizerCount;
   const leftover = containerWidth - reserved;
 
   return clampNumber(leftover, 280, EDITOR_MIN_WIDTH);
 }
 
 /** 计算固定栏在当前容器中最多能占用的总宽度。 */
-function getAvailableSidePanelWidth(containerWidth: number, agentOpen: boolean) {
-  const editorMin = getEditorMinWidth(containerWidth, agentOpen);
-  const resizerCount = agentOpen ? 2 : 1;
+function getAvailableSidePanelWidth(containerWidth: number, regions: RegionOpenState) {
+  const editorMin = getEditorMinWidth(containerWidth, regions);
+  const { resizerCount } = resolveTrackMetrics(regions);
 
   return Math.max(0, containerWidth - RESIZER_TRACK_WIDTH * resizerCount - editorMin);
 }
@@ -134,19 +187,68 @@ function readStoredWorkspaceLayout(): WorkspaceLayoutSizes {
   try {
     const rawLayout = window.localStorage.getItem(WORKSPACE_LAYOUT_STORAGE_KEY);
 
-    if (!rawLayout) {
-      const legacyLayout = window.localStorage.getItem(LEGACY_WORKSPACE_LAYOUT_STORAGE_KEY);
-      if (legacyLayout) {
-        window.localStorage.setItem(WORKSPACE_LAYOUT_STORAGE_KEY, legacyLayout);
-        return parseStoredWorkspaceLayout(legacyLayout);
-      }
-      return parseStoredWorkspaceLayout("{}");
+    if (rawLayout) {
+      return parseStoredWorkspaceLayout(rawLayout);
     }
 
-    return parseStoredWorkspaceLayout(rawLayout);
+    // v2 缺失时按 v1 → 品牌遗留键的顺序读一次旧数据，旧键保留不删，便于回滚。
+    const legacyLayout =
+      window.localStorage.getItem(LEGACY_WORKSPACE_LAYOUT_STORAGE_KEY) ??
+      window.localStorage.getItem(LEGACY_BRAND_LAYOUT_STORAGE_KEY);
+
+    if (legacyLayout) {
+      window.localStorage.setItem(WORKSPACE_LAYOUT_STORAGE_KEY, legacyLayout);
+      return parseStoredWorkspaceLayout(legacyLayout);
+    }
+
+    return parseStoredWorkspaceLayout("{}");
   } catch {
     return DEFAULT_WORKSPACE_LAYOUT;
   }
+}
+
+/** 解析区域显隐；缺字段回退默认，Agent 的旧布尔值由调用方单独兼容。 */
+function parseRegionOpenState(parsed: Partial<WorkspaceLayoutSizes>, legacyAgentOpen?: boolean) {
+  const nextState: RegionOpenState = { ...DEFAULT_REGION_OPEN_STATE };
+  const rawRegions = parsed.regions;
+
+  if (rawRegions && typeof rawRegions === "object") {
+    for (const regionId of REGION_ORDER) {
+      const value = (rawRegions as Partial<RegionOpenState>)[regionId];
+
+      if (typeof value === "boolean") {
+        nextState[regionId] = value;
+      }
+    }
+  }
+
+  // v1 只有 agentOpen 一个显隐字段，迁移时把它接到 agent 区域上。
+  if (typeof legacyAgentOpen === "boolean") {
+    nextState.agent = legacyAgentOpen;
+  }
+
+  return nextState;
+}
+
+/** 解析各区域激活条目；只接受该区域声明里存在的 id，避免脏数据点亮不存在的图标。 */
+function parseActiveItems(parsed: Partial<WorkspaceLayoutSizes>): RegionActiveItems {
+  const nextItems: RegionActiveItems = { ...DEFAULT_REGION_ACTIVE_ITEMS };
+  const rawItems = parsed.activeItems;
+
+  if (!rawItems || typeof rawItems !== "object") {
+    return nextItems;
+  }
+
+  for (const regionId of REGION_ORDER) {
+    const itemId = (rawItems as RegionActiveItems)[regionId];
+    const region = COLLAPSIBLE_REGIONS[regionId];
+
+    if (typeof itemId === "string" && region.items.some((item) => item.id === itemId)) {
+      nextItems[regionId] = itemId;
+    }
+  }
+
+  return nextItems;
 }
 
 /** 解析已读取的布局 JSON；缺字段时从浮窗存储补齐，再回退默认值。 */
@@ -161,17 +263,26 @@ function parseStoredWorkspaceLayout(rawLayout: string): WorkspaceLayoutSizes {
     const agentWidth = isFiniteNumber(parsedLayout.agentWidth)
       ? clampNumber(parsedLayout.agentWidth, AGENT_WIDTH_LIMIT.min, AGENT_WIDTH_LIMIT.max)
       : (floatMigration.agentWidth ?? DEFAULT_WORKSPACE_LAYOUT.agentWidth);
-    const agentOpen =
-      typeof parsedLayout.agentOpen === "boolean"
-        ? parsedLayout.agentOpen
-        : (floatMigration.agentOpen ?? DEFAULT_WORKSPACE_LAYOUT.agentOpen);
+    const legacyAgentOpen =
+      typeof parsedLayout.agentOpen === "boolean" ? parsedLayout.agentOpen : floatMigration.agentOpen;
+    const regions = parseRegionOpenState(parsedLayout, legacyAgentOpen);
 
-    return { sidebarWidth, agentWidth, agentOpen };
+    return {
+      sidebarWidth,
+      agentWidth,
+      // agentOpen 保留为派生字段，供既有调用点继续读取。
+      agentOpen: regions.agent,
+      regions,
+      activeItems: parseActiveItems(parsedLayout),
+    };
   } catch {
+    const regions = parseRegionOpenState({}, floatMigration.agentOpen);
+
     return {
       ...DEFAULT_WORKSPACE_LAYOUT,
       agentWidth: floatMigration.agentWidth ?? DEFAULT_WORKSPACE_LAYOUT.agentWidth,
-      agentOpen: floatMigration.agentOpen ?? DEFAULT_WORKSPACE_LAYOUT.agentOpen,
+      agentOpen: regions.agent,
+      regions,
     };
   }
 }
@@ -195,38 +306,40 @@ function clampWorkspaceLayoutSizes(
   containerWidth: number,
   activePane?: ResizablePane,
 ): WorkspaceLayoutSizes {
-  const availableSidePanelWidth = getAvailableSidePanelWidth(containerWidth, nextSizes.agentOpen);
+  const availableSidePanelWidth = getAvailableSidePanelWidth(containerWidth, nextSizes.regions);
   let sidebarWidth = clampNumber(nextSizes.sidebarWidth, SIDEBAR_WIDTH_LIMIT.min, SIDEBAR_WIDTH_LIMIT.max);
   let agentWidth = clampNumber(nextSizes.agentWidth, AGENT_WIDTH_LIMIT.min, AGENT_WIDTH_LIMIT.max);
+  const regions = nextSizes.regions;
+  // 宽度只在对应区域展开时才有意义；收起时保持原值，便于再次展开时沿用。
+  const sidebarWidthInUse = regions.sidebar;
+  const agentWidthInUse = regions.agent;
 
-  if (!nextSizes.agentOpen) {
+  if (!sidebarWidthInUse && !agentWidthInUse) {
+    return { ...nextSizes, sidebarWidth, agentWidth };
+  }
+
+  if (!sidebarWidthInUse) {
+    const maxAgentWidth = Math.min(AGENT_WIDTH_LIMIT.max, availableSidePanelWidth);
+
+    return { ...nextSizes, sidebarWidth, agentWidth: clampNumber(agentWidth, AGENT_WIDTH_LIMIT.min, maxAgentWidth) };
+  }
+
+  if (!agentWidthInUse) {
     const maxSidebarWidth = Math.min(SIDEBAR_WIDTH_LIMIT.max, availableSidePanelWidth);
 
-    return {
-      sidebarWidth: clampNumber(sidebarWidth, SIDEBAR_WIDTH_LIMIT.min, maxSidebarWidth),
-      agentWidth,
-      agentOpen: false,
-    };
+    return { ...nextSizes, sidebarWidth: clampNumber(sidebarWidth, SIDEBAR_WIDTH_LIMIT.min, maxSidebarWidth), agentWidth };
   }
 
   if (activePane === "sidebar") {
     const maxSidebarWidth = Math.min(SIDEBAR_WIDTH_LIMIT.max, availableSidePanelWidth - agentWidth);
 
-    return {
-      sidebarWidth: clampNumber(sidebarWidth, SIDEBAR_WIDTH_LIMIT.min, maxSidebarWidth),
-      agentWidth,
-      agentOpen: true,
-    };
+    return { ...nextSizes, sidebarWidth: clampNumber(sidebarWidth, SIDEBAR_WIDTH_LIMIT.min, maxSidebarWidth), agentWidth };
   }
 
   if (activePane === "agent") {
     const maxAgentWidth = Math.min(AGENT_WIDTH_LIMIT.max, availableSidePanelWidth - sidebarWidth);
 
-    return {
-      sidebarWidth,
-      agentWidth: clampNumber(agentWidth, AGENT_WIDTH_LIMIT.min, maxAgentWidth),
-      agentOpen: true,
-    };
+    return { ...nextSizes, sidebarWidth, agentWidth: clampNumber(agentWidth, AGENT_WIDTH_LIMIT.min, maxAgentWidth) };
   }
 
   if (sidebarWidth + agentWidth > availableSidePanelWidth) {
@@ -238,21 +351,45 @@ function clampWorkspaceLayoutSizes(
     sidebarWidth = clampNumber(availableSidePanelWidth - agentWidth, SIDEBAR_WIDTH_LIMIT.min, SIDEBAR_WIDTH_LIMIT.max);
   }
 
-  return { sidebarWidth, agentWidth, agentOpen: true };
+  return { ...nextSizes, sidebarWidth, agentWidth };
 }
 
-/** 计算某个分隔条当前可表达的 aria 最小值和最大值。 */
-function getPaneBounds(pane: ResizablePane, sizes: WorkspaceLayoutSizes, containerWidth: number) {
-  const availableSidePanelWidth = getAvailableSidePanelWidth(containerWidth, sizes.agentOpen);
+/** 切换单个区域显隐并重新夹取尺寸；agent 区域同步派生字段，兼容既有调用点。 */
+function setRegionOpenState(
+  currentSizes: WorkspaceLayoutSizes,
+  regionId: RegionId,
+  open: boolean,
+  containerWidth: number,
+): WorkspaceLayoutSizes {
+  const regions = { ...currentSizes.regions, [regionId]: open };
+  const nextSizes = { ...currentSizes, regions, agentOpen: regions.agent };
+
+  return clampWorkspaceLayoutSizes(
+    nextSizes,
+    containerWidth,
+    regionId === "sidebar" || regionId === "agent" ? regionId : undefined,
+  );
+}
+
+/** 计算某个分隔条当前可表达的 aria 最小值和最大值；对应区域收起时返回 null，表示没有可用把手。 */function getPaneBounds(pane: ResizablePane, sizes: WorkspaceLayoutSizes, containerWidth: number) {
+  const availableSidePanelWidth = getAvailableSidePanelWidth(containerWidth, sizes.regions);
 
   if (pane === "sidebar") {
-    const reserved = sizes.agentOpen ? sizes.agentWidth : 0;
+    if (!sizes.regions.sidebar) {
+      return null;
+    }
+
+    const reserved = sizes.regions.agent ? sizes.agentWidth : 0;
     const dynamicMax = Math.min(SIDEBAR_WIDTH_LIMIT.max, availableSidePanelWidth - reserved);
 
     return {
       min: SIDEBAR_WIDTH_LIMIT.min,
       max: Math.max(SIDEBAR_WIDTH_LIMIT.min, dynamicMax),
     };
+  }
+
+  if (!sizes.regions.agent) {
+    return null;
   }
 
   const dynamicMax = Math.min(AGENT_WIDTH_LIMIT.max, availableSidePanelWidth - sizes.sidebarWidth);
@@ -403,10 +540,14 @@ export function useResizableWorkspaceLayout() {
     [],
   );
 
-  /** 通过键盘调整分隔条，满足无鼠标场景下的基础可访问性。 */
+  /** 键盘调整分隔条前先确认该区域展开，收起态没有可拖拽的把手。 */
   const handleSeparatorKeyDown = useCallback(
     (pane: ResizablePane, event: ReactKeyboardEvent<HTMLDivElement>) => {
       const paneBounds = getPaneBounds(pane, sizesRef.current, getWorkspaceWidth());
+
+      if (!paneBounds) {
+        return;
+      }
       const currentValue = pane === "sidebar" ? sizesRef.current.sidebarWidth : sizesRef.current.agentWidth;
       const step = event.shiftKey ? KEYBOARD_RESIZE_STEP * 3 : KEYBOARD_RESIZE_STEP;
       let nextValue: number | null = null;
@@ -450,23 +591,65 @@ export function useResizableWorkspaceLayout() {
     });
   }, [getWorkspaceWidth]);
 
-  /** 切换右侧 Agent 停靠栏；再次打开时沿用上次宽度。 */
-  const setAgentOpen = useCallback((open: boolean) => {
-    setSizes((currentSizes) =>
-      clampWorkspaceLayoutSizes({ ...currentSizes, agentOpen: open }, getWorkspaceWidth()),
-    );
+  /** 切换某个可收起区域的显隐；再次展开时沿用上次宽度或默认宽度。 */
+  const setRegionOpen = useCallback((regionId: RegionId, open: boolean) => {
+    setSizes((currentSizes) => setRegionOpenState(currentSizes, regionId, open, getWorkspaceWidth()));
   }, [getWorkspaceWidth]);
 
-  /** 主 grid 的列定义由 hook 统一生成；Agent 收起时把剩余空间全部交给编辑区。 */
-  const gridTemplateColumns = useMemo(() => {
-    const editorMin = getEditorMinWidth(workspaceWidth, sizes.agentOpen);
+  /** 既有调用点仍按布尔值开关 Agent 区域，这里保持旧签名。 */
+  const setAgentOpen = useCallback((open: boolean) => {
+    setRegionOpen("agent", open);
+  }, [setRegionOpen]);
 
-    if (!sizes.agentOpen) {
-      return `${sizes.sidebarWidth}px ${RESIZER_TRACK_WIDTH}px minmax(${editorMin}px, 1fr)`;
+  /** 在收起按钮、顶栏图标和区域内的收起入口之间复用同一个开关。 */
+  const toggleRegion = useCallback((regionId: RegionId) => {
+    setSizes((currentSizes) => setRegionOpenState(currentSizes, regionId, !currentSizes.regions[regionId], getWorkspaceWidth()));
+  }, [getWorkspaceWidth]);
+
+  /** 记录某个区域图标栏上当前激活的条目，决定悬浮浮层预览哪一块内容。 */
+  const setRegionActiveItem = useCallback((regionId: RegionId, itemId: RegionItemId) => {
+    setSizes((currentSizes) => {
+      if (currentSizes.activeItems[regionId] === itemId) {
+        return currentSizes;
+      }
+
+      return { ...currentSizes, activeItems: { ...currentSizes.activeItems, [regionId]: itemId } };
+    });
+  }, []);
+
+  /**
+   * 点击收起态图标：先激活该条目，再展开所属区域，
+   * 让「图标栏 → 展开真实内容」一步到位。
+   */
+  const openRegionItem = useCallback((regionId: RegionId, itemId: RegionItemId) => {
+    setSizes((currentSizes) => {
+      const activated = { ...currentSizes, activeItems: { ...currentSizes.activeItems, [regionId]: itemId } };
+
+      return setRegionOpenState(activated, regionId, true, getWorkspaceWidth());
+    });
+  }, [getWorkspaceWidth]);
+
+  /** 主 grid 的列定义由 hook 统一生成；收起区域退化为图标栏，中间编辑区始终占剩余空间。 */
+  const gridTemplateColumns = useMemo(() => {
+    const editorMin = getEditorMinWidth(workspaceWidth, sizes.regions);
+    const tracks: string[] = [];
+
+    if (sizes.regions.sidebar) {
+      tracks.push(`${sizes.sidebarWidth}px`, `${RESIZER_TRACK_WIDTH}px`);
+    } else {
+      tracks.push(`${REGION_RAIL_SIZE}px`);
     }
 
-    return `${sizes.sidebarWidth}px ${RESIZER_TRACK_WIDTH}px minmax(${editorMin}px, 1fr) ${RESIZER_TRACK_WIDTH}px ${sizes.agentWidth}px`;
-  }, [sizes.agentOpen, sizes.agentWidth, sizes.sidebarWidth, workspaceWidth]);
+    tracks.push(`minmax(${editorMin}px, 1fr)`);
+
+    if (sizes.regions.agent) {
+      tracks.push(`${RESIZER_TRACK_WIDTH}px`, `${sizes.agentWidth}px`);
+    } else {
+      tracks.push(`${REGION_RAIL_SIZE}px`);
+    }
+
+    return tracks.join(" ");
+  }, [sizes.agentWidth, sizes.regions, sizes.sidebarWidth, workspaceWidth]);
 
   /** 生成分隔条需要的交互和 aria 属性，保持两个把手行为一致。 */
   const getSeparatorProps = useCallback(
@@ -479,8 +662,8 @@ export function useResizableWorkspaceLayout() {
         tabIndex: 0,
         "aria-label": pane === "sidebar" ? "调整知识库侧栏宽度" : "调整 Agent 侧栏宽度",
         "aria-orientation": "vertical" as const,
-        "aria-valuemin": paneBounds.min,
-        "aria-valuemax": paneBounds.max,
+        "aria-valuemin": paneBounds?.min ?? 0,
+        "aria-valuemax": paneBounds?.max ?? 0,
         "aria-valuenow": Math.round(currentValue),
         onDoubleClick: () => handleSeparatorDoubleClick(pane),
         onKeyDown: (event: ReactKeyboardEvent<HTMLDivElement>) => handleSeparatorKeyDown(pane, event),
@@ -501,7 +684,20 @@ export function useResizableWorkspaceLayout() {
     gridTemplateColumns,
     resizingPane,
     getSeparatorProps,
-    agentOpen: sizes.agentOpen,
+    regionOpen: sizes.regions,
+    activeItems: sizes.activeItems,
+    /** 各区域展开态宽度，供收起态浮层按真实宽度渲染预览。 */
+    regionPreviewWidth: {
+      sidebar: sizes.sidebarWidth,
+      agent: sizes.agentWidth,
+    },
+    setRegionOpen,
+    toggleRegion,
+    setRegionActiveItem,
+    openRegionItem,
+    /** 顶栏高度由 hook 统一给出，收起时压到横向图标栏厚度。 */
+    topBarHeight: sizes.regions.top ? TOP_BAR_EXPANDED_HEIGHT : TOP_BAR_COLLAPSED_HEIGHT,
+    agentOpen: sizes.regions.agent,
     setAgentOpen,
   };
 }

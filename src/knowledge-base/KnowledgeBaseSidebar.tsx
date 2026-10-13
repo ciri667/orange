@@ -1,5 +1,5 @@
-import { useEffect, useState } from "react";
-import { AlertCircle, Clock, Database, MessageSquarePlus, Plus, RefreshCw, Search, Settings } from "lucide-react";
+import { useEffect, useRef, useState } from "react";
+import { AlertCircle, Clock, Database, MessageSquarePlus, PanelLeftClose, Plus, RefreshCw, Search, Settings } from "lucide-react";
 import { SessionList } from "../agent/SessionList";
 import { FileTree } from "./FileTree";
 import { Button } from "../shared/Button";
@@ -19,7 +19,7 @@ function getKnowledgeBaseFileSummary(knowledgeBase: KnowledgeBase) {
 }
 
 /** 侧栏下半区一次只展开一块，避免会话列表和文件树抢高度。 */
-type SidebarPane = "sessions" | "files";
+export type SidebarPane = "sessions" | "files";
 
 /** 左侧导航：会话和文件分栏切换，同一时间只展开一块。 */
 export function KnowledgeBaseSidebar({
@@ -64,6 +64,10 @@ export function KnowledgeBaseSidebar({
   onTogglePinSession,
   onToggleArchiveSession,
   sessionPaneRequest = 0,
+  activePane,
+  onActivePaneChange,
+  onCollapse,
+  compactPreview = false,
 }: {
   knowledgeBases: KnowledgeBase[];
   activeKnowledgeBase: KnowledgeBase;
@@ -107,21 +111,52 @@ export function KnowledgeBaseSidebar({
   onToggleArchiveSession: (sessionId: string) => void;
   /** 外部递增时把侧栏切回会话列表，文件树保持原样。 */
   sessionPaneRequest?: number;
+  /** 收起态图标栏选中的条目；由布局 hook 持有，展开后侧栏直接落在同一块内容上。 */
+  activePane?: SidebarPane;
+  /** 侧栏内切换条目时回写布局 hook，保证收起后再悬浮看到的是同一块内容。 */
+  onActivePaneChange?: (pane: SidebarPane) => void;
+  /** 侧栏自己的收起入口。 */
+  onCollapse?: () => void;
+  /**
+   * 收起态悬浮浮层里的渲染模式：去掉收起按钮、浮层内控件不可交互，
+   * 避免浮层里出现一个能把自己收起来的按钮。
+   */
+  compactPreview?: boolean;
 }) {
-  const [sidebarPane, setSidebarPane] = useState<SidebarPane>("sessions");
+  const [internalPane, setInternalPane] = useState<SidebarPane>("sessions");
+  const sidebarPane = activePane ?? internalPane;
+  const setSidebarPane = onActivePaneChange ?? setInternalPane;
   const runningSessionCount = inFlightSessionIds.length;
 
+  /**
+   * 外部要求切回会话列表时才重置。
+   *
+   * 跳过首次渲染：这个 effect 以前一挂载就把分块写回 sessions，
+   * 当分块是外部受控状态时（收起态浮层和展开态共用它），
+   * 浮层里那份实例的挂载会把共享状态抹回 sessions，导致点「文件」立刻被打回。
+   */
+  const lastSessionPaneRequestRef = useRef(sessionPaneRequest);
   useEffect(() => {
+    if (lastSessionPaneRequestRef.current === sessionPaneRequest) {
+      return;
+    }
+
+    lastSessionPaneRequestRef.current = sessionPaneRequest;
     setSidebarPane("sessions");
-  }, [sessionPaneRequest]);
+  }, [sessionPaneRequest, setSidebarPane]);
 
   return (
-    <aside className="sidebar" aria-label="知识库导航">
+    <aside className={cn("sidebar", compactPreview && "is-preview")} aria-label="知识库导航">
       <div className="flex shrink-0 items-center gap-2 px-2 py-1">
         <div className="grid size-7 place-items-center overflow-hidden rounded-md">
           <img className="block size-full object-contain" src="/orange-logo.svg" alt="" />
         </div>
-        <strong className="text-[15px] font-semibold text-ink-strong">橘记</strong>
+        <strong className="min-w-0 flex-1 truncate text-[15px] font-semibold text-ink-strong">橘记</strong>
+        {onCollapse ? (
+          <Button variant="icon" title="收起知识库栏" aria-label="收起知识库栏" onClick={onCollapse}>
+            <PanelLeftClose size={16} />
+          </Button>
+        ) : null}
       </div>
 
       <Button variant="ghost" className="w-full shrink-0 justify-start gap-2 px-2.5 text-[13px]" onClick={onCreateSession}>

@@ -54,7 +54,13 @@
   --z-settings: 320;
   --z-modal: 420;
   --z-confirm: 520;
+  /** 收起态悬浮浮层压过所有面板内容，但低于设置抽屉和模态，避免浮层盖住真弹窗。 */
+  --z-region-preview: 260;
   --control-height: 36px;
+  /** 收起后图标栏的厚度，需与 collapsibleRegions.ts 的 REGION_RAIL_SIZE 保持一致。 */
+  --region-rail-size: 44px;
+  /** 区域展开/收起时列宽和行高的过渡时长。 */
+  --region-transition: 180ms;
   --paper-rgb: 243, 244, 246;
   --paper-strong-rgb: 229, 231, 235;
   --surface-rgb: 255, 255, 255;
@@ -246,6 +252,294 @@ select:focus-visible {
   overflow: hidden;
   padding: 0;
   background: var(--surface);
+  /*
+   * 区域收起靠收窄轨道而不是卸载 DOM，这样才有展开/收起动画。
+   * 拖拽分隔条时会临时关掉过渡，否则宽度会追着指针拖着走。
+   */
+  transition: grid-template-columns var(--region-transition) ease;
+}
+
+.workspace-grid.is-resizing {
+  transition: none;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .workspace-grid {
+    transition: none;
+  }
+}
+
+/* 顶栏参与 app-shell 的纵向 flex，高度由布局 hook 给出。 */
+.top-bar {
+  display: flex;
+  flex: none;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  border-bottom: 1px solid var(--border);
+  padding: 0 12px;
+  background: var(--surface);
+  transition: height var(--region-transition) ease;
+}
+
+.top-bar.is-collapsed {
+  justify-content: flex-start;
+  padding: 0;
+}
+
+/* 收起态顶栏本身就是一条横向图标栏，不再额外加内边距和边框。 */
+.top-bar.is-collapsed .region-rail-top {
+  width: 100%;
+  border-bottom: 0;
+  padding: 0 6px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .top-bar {
+    transition: none;
+  }
+}
+
+/* ---------------------------------------------------------------- 收起态图标栏 */
+
+.region-rail {
+  display: flex;
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+  background: var(--app-bg);
+}
+
+/* 竖栏在 grid 列里要撑满整列高度，否则图标会挤在顶部一小条里。 */
+.region-rail-left,
+.region-rail-right {
+  flex-direction: column;
+  align-items: center;
+  align-self: stretch;
+  justify-content: flex-start;
+  gap: 2px;
+  padding: 6px 0;
+}
+
+.region-rail-left {
+  border-right: 1px solid var(--border);
+}
+
+.region-rail-right {
+  border-left: 1px solid var(--border);
+}
+
+.region-rail-top,
+.region-rail-bottom {
+  flex-direction: row;
+  align-items: center;
+  justify-content: flex-start;
+  gap: 2px;
+  padding: 0 6px;
+}
+
+.region-rail-top {
+  border-bottom: 1px solid var(--border);
+}
+
+.region-rail-bottom {
+  border-top: 1px solid var(--border);
+}
+
+.region-rail-list {
+  display: flex;
+  flex-direction: inherit;
+  gap: 2px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.region-rail-item {
+  position: relative;
+  display: grid;
+  width: 32px;
+  height: 32px;
+  place-items: center;
+  border: 0;
+  border-radius: var(--radius-control);
+  padding: 0;
+  background: transparent;
+  color: var(--text-muted);
+  transition:
+    background 120ms ease,
+    color 120ms ease;
+}
+
+.region-rail-item:hover {
+  background: var(--surface-hover);
+  color: var(--text);
+}
+
+.region-rail-item.is-active {
+  background: var(--surface);
+  color: var(--accent);
+}
+
+/* 竖向图标栏用左侧竖条标记当前条目，横向栏改用下划线。 */
+.region-rail-left .region-rail-item.is-active::before,
+.region-rail-right .region-rail-item.is-active::before {
+  position: absolute;
+  top: 6px;
+  bottom: 6px;
+  width: 2px;
+  border-radius: 999px;
+  background: var(--accent);
+  content: "";
+}
+
+.region-rail-left .region-rail-item.is-active::before {
+  left: -6px;
+}
+
+.region-rail-right .region-rail-item.is-active::before {
+  right: -6px;
+}
+
+.region-rail-top .region-rail-item.is-active::before,
+.region-rail-bottom .region-rail-item.is-active::before {
+  position: absolute;
+  right: 6px;
+  left: 6px;
+  height: 2px;
+  border-radius: 999px;
+  background: var(--accent);
+  content: "";
+}
+
+.region-rail-top .region-rail-item.is-active::before {
+  bottom: -2px;
+}
+
+.region-rail-bottom .region-rail-item.is-active::before {
+  top: -2px;
+}
+
+/* --------------------------------------------------- 收起态悬浮浮层（真内容预览） */
+
+/*
+ * 浮层用 fixed 定位挂在 body 上，尺寸按「展开态面板宽度」给定，
+ * 因此内部 UI 的换行、栅格和展开时一致，看到的就是真实界面。
+ */
+.region-preview {
+  position: fixed;
+  z-index: var(--z-region-preview);
+  display: flex;
+  max-width: min(560px, calc(100vw - 32px));
+  max-height: min(760px, calc(100vh - 32px));
+  flex-direction: column;
+  overflow: hidden;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-panel);
+  background: var(--surface);
+  box-shadow: 0 18px 44px rgba(16, 24, 32, 0.16);
+}
+
+.region-preview-left,
+.region-preview-right {
+  width: var(--region-preview-width, 380px);
+}
+
+.region-preview-left {
+  /* 浮层贴在左栏图标右侧；右栏同理镜像到左侧。 */
+  height: min(640px, calc(100vh - 40px));
+}
+
+.region-preview-right {
+  height: min(640px, calc(100vh - 40px));
+  transform: translateX(-100%);
+}
+
+.region-preview-top {
+  width: min(520px, calc(100vw - 32px));
+  height: var(--region-preview-height, 320px);
+}
+
+.region-preview-body {
+  display: grid;
+  min-width: 0;
+  min-height: 0;
+  flex: 1;
+  grid-template-rows: minmax(0, 1fr);
+  overflow: hidden;
+}
+
+/*
+ * 预览里的面板要撑满幽灵容器，而不是按自身内容收缩。
+ * .sidebar / .agent-panel 是 flex column，.editor-workbench 是 grid，
+ * 两种都要显式给高度，否则内部滚动区拿不到确定的可用高度，内容会在中途被截断。
+ */
+.region-preview-body > .sidebar,
+.region-preview-body > .agent-panel,
+.region-preview-body > .editor-workbench {
+  width: 100%;
+  height: 100%;
+  max-height: 100%;
+}
+
+/* 预览里的左栏不需要重复外层阴影和圆角，跟着浮层走。 */
+.region-preview-body .sidebar.is-preview {
+  background: var(--app-bg);
+}
+
+.region-preview-footer {
+  display: flex;
+  flex: none;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  border-top: 1px solid var(--border);
+  padding: 6px 10px;
+  background: var(--surface-warm);
+}
+
+.region-preview-hint {
+  color: var(--text-muted);
+  font-size: 12px;
+}
+
+.region-preview-expand {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  border: 0;
+  border-radius: var(--radius-small);
+  padding: 4px 8px;
+  background: transparent;
+  color: var(--accent);
+  font-size: 12px;
+}
+
+.region-preview-expand:hover {
+  background: var(--accent-soft);
+}
+
+.region-preview-note {
+  display: grid;
+  align-content: center;
+  justify-items: center;
+  gap: 8px;
+  height: 100%;
+  padding: 24px;
+  color: var(--text-muted);
+  text-align: center;
+}
+
+.region-preview-note-title {
+  color: var(--text-strong);
+  font-size: 15px;
+}
+
+.region-preview-note-description {
+  max-width: 320px;
+  margin: 0;
+  font-size: 13px;
+  line-height: 1.55;
 }
 
 .sidebar,

@@ -29,6 +29,10 @@ import type {
   WorkspaceSnapshot,
 } from "../shared/types";
 import { DocumentHistoryDialog } from "./DocumentHistoryDialog";
+import { getRegion } from "./collapsibleRegions";
+import type { RegionItemId } from "./collapsibleRegions";
+import { RegionPreviewNote } from "./RegionPreviewNote";
+import { RegionRail } from "./RegionRail";
 import { TopBar } from "./TopBar";
 import {
   getCreateDialogAriaLabel,
@@ -127,6 +131,14 @@ export function WorkspaceShell() {
     gridTemplateColumns,
     resizingPane,
     getSeparatorProps,
+    regionOpen,
+    activeItems,
+    regionPreviewWidth,
+    toggleRegion,
+    setRegionOpen,
+    setRegionActiveItem,
+    openRegionItem,
+    topBarHeight,
     agentOpen,
     setAgentOpen,
   } = useResizableWorkspaceLayout();
@@ -495,6 +507,8 @@ export function WorkspaceShell() {
 
   /** 已加载的工作台快照，供事件闭包使用，避免 nullable state 进入业务逻辑。 */
   const currentSnapshot = snapshot;
+  /** 已加载的用户设置，同上；收起态预览会跨函数读取，需要一份非空引用。 */
+  const currentSettings = userSettings;
 
   if (!currentSnapshot.knowledgeBases.length) {
     return (
@@ -642,7 +656,279 @@ export function WorkspaceShell() {
   /** 打开设置抽屉时刷新非阻塞诊断信息，避免展示过旧的日志列表。 */
   function handleOpenSettings() {
     setIsSettingsOpen(true);
+    // 设置抽屉不是一个可内嵌进左栏的分块，收起态下用图标高亮标出它已被打开。
+    setRegionActiveItem("sidebar", "settings");
     void loadInitialDiagnosticLogs();
+  }
+
+  /**
+   * 收起态图标栏点击左栏条目：先激活条目，再展开左栏。
+   * 「设置」和「定时任务」不是左栏内的分块，而是直接切到对应界面。
+   */
+  /**
+   * 收起态图标栏点击左栏条目：先激活条目，再展开左栏。
+   * 「设置」和「定时任务」不是左栏内的分块，只切界面，不改左栏的「会话 / 文件」分块。
+   */
+  function handleOpenSidebarItem(itemId: RegionItemId) {
+    if (itemId === "settings") {
+      handleOpenSettings();
+      return;
+    }
+
+    if (itemId === "schedules") {
+      setIsSchedulesOpen(true);
+      return;
+    }
+
+    setIsSchedulesOpen(false);
+    openRegionItem("sidebar", itemId);
+  }
+
+  /**
+   * 悬浮浮层里的左栏内容。
+   *
+   * 会话和文件是一对互斥分块，读共享的 activeItems.sidebar 而不是悬浮的那个图标 id：
+   * 在浮层内点「文件」会写共享状态，浮层就地换成文件树，和展开后的行为一致。
+   * 定时任务和设置不内嵌在左栏里，各自给出对应内容。
+   */
+  function renderSidebarPreview(itemId: RegionItemId) {
+    if (itemId === "schedules") {
+      return (
+        <SchedulesView
+          knowledgeBases={currentSnapshot.knowledgeBases}
+          activeKnowledgeBaseId={activeKnowledgeBase.id}
+          isBusy={isBusy}
+          onBusy={async (label, task) => {
+            beginBusy(label);
+            try {
+              await task();
+            } catch (error) {
+              setNotice(formatErrorMessage(error));
+            } finally {
+              endBusy();
+            }
+          }}
+          onNotice={setNotice}
+          onOpenSession={(sessionId) => {
+            setIsSchedulesOpen(true);
+            setRegionOpen("sidebar", true);
+            void handleSelectSession(sessionId);
+          }}
+        />
+      );
+    }
+
+    if (itemId === "settings") {
+      return (
+        <RegionPreviewNote
+          title="设置"
+          description="模型与密钥、知识库、IM 接入、技能、日志和写入确认策略。点击「展开」打开设置面板。"
+        />
+      );
+    }
+
+    // 会话 / 文件 共用展开态侧栏组件，这里只把 pane 定到共享状态上。
+    return (
+      <KnowledgeBaseSidebar
+        compactPreview
+        knowledgeBases={currentSnapshot.knowledgeBases}
+        activeKnowledgeBase={activeKnowledgeBase}
+        fileTree={fileTree}
+        activeNoteId={activeNote?.id ?? ""}
+        activeDocumentId={activeDocument?.id ?? ""}
+        collapsedFolderPaths={collapsedFolderPaths}
+        searchTerm={searchTerm}
+        isBusy={isBusy}
+        busyLabel={busyLabel}
+        notice={notice}
+        activePane={activeItems.sidebar === "files" ? "files" : "sessions"}
+        // 写回同一份布局状态：在浮层里点「文件」会切到文件树，浮层内容就地跟着变。
+        onActivePaneChange={(nextPane) => setRegionActiveItem("sidebar", nextPane)}
+        onSearchChange={setSearchTerm}
+        onSelectKnowledgeBase={handleSelectKnowledgeBase}
+        onAddKnowledgeBase={handleAddKnowledgeBase}
+        onToggleFolder={handleToggleFolder}
+        onSelectNote={handleSelectNote}
+        onSelectDocument={handleSelectDocument}
+        onRenameNote={openRenameDialog}
+        onDeleteNote={handleDeleteNote}
+        onOpenNoteHistory={openNoteHistory}
+        onRenameDocument={openRenameDocumentDialog}
+        onDeleteDocument={handleDeleteDocument}
+        onOpenDocumentHistory={openDocumentHistory}
+        onCreateMarkdown={(parentPath) => openCreateDialog("markdown", parentPath)}
+        onCreateText={(parentPath) => openCreateDialog("text", parentPath)}
+        onCreateFolder={(parentPath) => openCreateDialog("folder", parentPath)}
+        onCreateProjectInstruction={() => handleCreateOrOpenProjectInstruction()}
+        onRefreshKnowledgeBase={handleRescanKnowledgeBase}
+        onCreateSession={handleCreateSession}
+        onOpenSettings={handleOpenSettings}
+        sessions={currentSnapshot.sessions}
+        activeSessionId={activeSession.id}
+        inFlightSessionIds={inFlightSessionIds}
+        queuedSessionIds={queuedSessionIds}
+        onSelectSession={handleSelectSession}
+        onDeleteSession={handleDeleteSession}
+        onRenameSession={handleRenameSession}
+        onTogglePinSession={handleTogglePinSession}
+        onToggleArchiveSession={handleToggleArchiveSession}
+        sessionPaneRequest={sessionPaneRequest}
+      />
+    );
+  }
+
+  /**
+   * 悬浮浮层里的 Agent 协作区：复用展开态面板的同一组 props 渲染一份可操作的实例。
+   * 浮层宽度取用户上次的停靠宽度，因此内部 UI 的换行与展开态一致。
+   */
+  function renderAgentPreview() {
+    // 浮层里不传 onCollapsePanel：这里已经在收起态，不该再出现收起自己的按钮。
+    return renderAgentPanel({ preview: true });
+  }
+
+  /** 展开态和收起态浮层共用同一个面板元素，避免两处 props 漂移。 */
+  function renderAgentPanel({ preview = false }: { preview?: boolean } = {}) {
+    return (
+      <AgentPanel
+        sessions={currentSnapshot.sessions}
+        activeSession={activeSession}
+        activeKnowledgeBase={activeKnowledgeBase}
+        knowledgeBases={currentSnapshot.knowledgeBases}
+        notes={currentSnapshot.notes}
+        documents={currentSnapshot.documents}
+        prompt={agentPrompt}
+        skills={agentSkills}
+        selectedSkillIds={explicitSkillIds}
+        mentionedFiles={mentionableFiles}
+        selectedMentionedFileIds={mentionedFileIds}
+        draftImages={draftImages}
+        modelConfig={currentSettings.modelConfig}
+        agentSecurity={currentSettings.agentSecurity}
+        turnModelSelection={turnModelSelection}
+        isComposerBusy={isCurrentSessionBusy}
+        inFlightSessionIds={inFlightSessionIds}
+        queuedSessionIds={queuedSessionIds}
+        liveTurn={liveTurn}
+        queuedFollowUp={queuedFollowUp}
+        queuedFollowUpInList={queuedFollowUpInList}
+        isSessionListOpen={isSessionListOpen}
+        isSessionContextOpen={isSessionContextOpen}
+        isScopeSelectorOpen={isScopeSelectorOpen}
+        onToggleSessionList={handleToggleSessionList}
+        onToggleSessionContext={handleToggleSessionContext}
+        onToggleScopeSelector={handleToggleScopeSelector}
+        onCollapsePanel={preview ? undefined : handleToggleAgentPanel}
+        onCreateSession={handleCreateSession}
+        onSelectSession={handleSelectSession}
+        onDeleteSession={handleDeleteSession}
+        onRenameSession={handleRenameSession}
+        onTogglePinSession={handleTogglePinSession}
+        onToggleArchiveSession={handleToggleArchiveSession}
+        onShowSessionList={() => setSessionPaneRequest((current) => current + 1)}
+        onToggleScopeKnowledgeBase={handleToggleScopeKnowledgeBase}
+        onPromptChange={setAgentPrompt}
+        onSelectedSkillIdsChange={setExplicitSkillIds}
+        onSelectedMentionedFileIdsChange={setMentionedFileIds}
+        onDraftImagesChange={setDraftImages}
+        onNotice={setNotice}
+        onSubmitPrompt={() => handleSubmitPrompt("ask")}
+        onEditUserMessage={(messageId, prompt) => void handleEditUserMessageAndRerun(messageId, prompt)}
+        onAbortTurn={() => void handleAbortTurn()}
+        onClearQueuedFollowUp={handleClearQueuedFollowUp}
+        onTurnModelSelectionChange={setTurnModelSelection}
+        onSetSessionModelSelection={handleSetSessionModelSelection}
+        onCompactAgentContext={handleCompactAgentContext}
+        onOpenProjectInstruction={handleSelectNote}
+        onApproveExecution={handleApproveSkillExecution}
+        onRejectExecution={handleRejectSkillExecution}
+        onApplyChangeSet={handleApplySkillChangeSet}
+        onRejectChangeSet={handleRejectSkillChangeSet}
+        onSecurityLevelChange={handleSessionSecurityLevelChange}
+        onPlanModeChange={handleSessionPlanModeChange}
+        onExecutePlan={() =>
+          // 批准计划是宿主流程：先持久化关闭规划模式，再用最新快照自动发起执行回合。
+          void handleSessionPlanModeChange(false, (savedSnapshot) => {
+            void handleSubmitPrompt("ask", PLAN_EXECUTION_PROMPT, savedSnapshot);
+          })
+        }
+        onToggleChangeOperation={handleToggleSkillChangeOperation}
+      />
+    );
+  }
+
+  /** 展开态和收起态浮层共用同一个文档面板元素，避免两处 props 漂移。 */
+  function renderDocumentPane() {
+    if (!activeDocument) {
+      return null;
+    }
+
+    return (
+      <DocumentPane
+        document={activeDocument}
+        knowledgeBase={activeKnowledgeBase}
+        preview={documentPreview ?? undefined}
+        previewError={documentPreviewError}
+        isPreviewLoading={isDocumentPreviewLoading}
+        isBusy={isBusy}
+        isDirty={isActiveDocumentDirty}
+        onSaveDocument={handleSaveActiveDocument}
+        onContentChange={handleDocumentContentChange}
+        onExportFile={handleExportActiveFile}
+        onOpenHistory={() => openDocumentHistory()}
+        onRenameDocument={() => openRenameDocumentDialog()}
+        onDeleteDocument={() => handleDeleteDocument()}
+        onNotice={setNotice}
+        sessions={currentSnapshot.sessions}
+        onSelectSession={(sessionId) => {
+          setIsSchedulesOpen(false);
+          if (!agentOpen) {
+            setAgentOpen(true);
+          }
+          void handleSelectSession(sessionId);
+        }}
+      />
+    );
+  }
+
+  /** 展开态和收起态浮层共用同一个 Markdown 编辑器元素。 */
+  function renderEditorPane() {
+    return (
+      <EditorPane
+        note={activeNote}
+        knowledgeBase={activeKnowledgeBase}
+        availableTags={currentSnapshot.notes
+          .filter((item) => item.knowledgeBaseId === activeKnowledgeBase.id)
+          .flatMap((item) => item.tags)}
+        proposedChange={activeSession.pendingChange?.status === "pending" ? activeSession.pendingChange : undefined}
+        isBusy={isBusy}
+        isReviewBusy={isCurrentSessionBusy}
+        isDirty={isActiveNoteDirty}
+        viewMode={markdownViewMode}
+        onViewModeChange={setMarkdownViewMode}
+        onSaveNote={handleSaveActiveNote}
+        onContentChange={handleContentChange}
+        onPasteImages={handlePasteImages}
+        onExportFile={handleExportActiveFile}
+        onOpenHistory={() => openNoteHistory()}
+        onRenameNote={() => openRenameDialog()}
+        onDeleteNote={() => handleDeleteNote()}
+        onAcceptChange={handleAcceptChange}
+        onRejectChange={handleRejectChange}
+        onAddReviewComment={handleAddReviewComment}
+        onSubmitReviewComments={handleSubmitReviewComments}
+        onCreateMarkdown={(parentPath) => openCreateDialog("markdown", parentPath)}
+        onCreateText={(parentPath) => openCreateDialog("text", parentPath)}
+        onNotice={setNotice}
+        sessions={currentSnapshot.sessions}
+        onSelectSession={(sessionId) => {
+          setIsSchedulesOpen(false);
+          if (!agentOpen) {
+            setAgentOpen(true);
+          }
+          void handleSelectSession(sessionId);
+        }}
+      />
+    );
   }
 
   return (
@@ -651,6 +937,9 @@ export function WorkspaceShell() {
         onOpenSettings={handleOpenSettings}
         agentOpen={agentOpen}
         onToggleAgent={handleToggleAgentPanel}
+        height={topBarHeight}
+        collapsed={!regionOpen.top}
+        onToggleCollapsed={() => toggleRegion("top")}
         onCreateSession={() => {
           setIsSchedulesOpen(false);
           if (!agentOpen) {
@@ -664,6 +953,7 @@ export function WorkspaceShell() {
         ref={workspaceRef}
         style={{ gridTemplateColumns }}
       >
+        {regionOpen.sidebar ? (
         <KnowledgeBaseSidebar
           knowledgeBases={currentSnapshot.knowledgeBases}
           activeKnowledgeBase={activeKnowledgeBase}
@@ -675,6 +965,9 @@ export function WorkspaceShell() {
           isBusy={isBusy}
           busyLabel={busyLabel}
           notice={notice}
+          activePane={activeItems.sidebar === "files" ? "files" : "sessions"}
+          onActivePaneChange={(pane) => setRegionActiveItem("sidebar", pane)}
+          onCollapse={() => toggleRegion("sidebar")}
           onSearchChange={setSearchTerm}
           onSelectKnowledgeBase={(knowledgeBaseId) => {
             setIsSchedulesOpen(false);
@@ -728,10 +1021,30 @@ export function WorkspaceShell() {
           onToggleArchiveSession={handleToggleArchiveSession}
           sessionPaneRequest={sessionPaneRequest}
         />
-        <div
-          className={`workspace-resizer workspace-resizer-sidebar ${resizingPane === "sidebar" ? "active" : ""}`}
-          {...getSeparatorProps("sidebar")}
-        />
+        ) : (
+          <RegionRail
+            edge="left"
+            label={getRegion("sidebar").label}
+            items={getRegion("sidebar").items}
+            activeItemId={activeItems.sidebar}
+            onActivateItem={(itemId) => handleOpenSidebarItem(itemId)}
+            // 会话/文件共享同一份分块状态；悬浮哪个图标就把分块同步过去，
+            // 这样悬浮看到的内容和图标一致，而不是停在用户上次点过的分块上。
+            onHoverItem={(itemId) => {
+              if (itemId === "sessions" || itemId === "files") {
+                setRegionActiveItem("sidebar", itemId);
+              }
+            }}
+            renderPreview={(itemId) => renderSidebarPreview(itemId)}
+            previewWidth={regionPreviewWidth.sidebar}
+          />
+        )}
+        {regionOpen.sidebar && (
+          <div
+            className={`workspace-resizer workspace-resizer-sidebar ${resizingPane === "sidebar" ? "active" : ""}`}
+            {...getSeparatorProps("sidebar")}
+          />
+        )}
         <div className={`editor-workbench${isSchedulesOpen ? " is-schedules" : ""}`}>
           {isSchedulesOpen ? (
             <SchedulesView
@@ -778,142 +1091,28 @@ export function WorkspaceShell() {
             onToggleAgent={handleToggleAgentPanel}
           />
           <div className="editor-file-panel" id="editor-file-panel" role="tabpanel" aria-label="当前文件内容">
-            {activeDocument ? (
-              <DocumentPane
-            document={activeDocument}
-            knowledgeBase={activeKnowledgeBase}
-            preview={documentPreview ?? undefined}
-            previewError={documentPreviewError}
-            isPreviewLoading={isDocumentPreviewLoading}
-            isBusy={isBusy}
-            isDirty={isActiveDocumentDirty}
-            onSaveDocument={handleSaveActiveDocument}
-            onContentChange={handleDocumentContentChange}
-            onExportFile={handleExportActiveFile}
-            onOpenHistory={() => openDocumentHistory()}
-            onRenameDocument={() => openRenameDocumentDialog()}
-            onDeleteDocument={() => handleDeleteDocument()}
-            onNotice={setNotice}
-            sessions={currentSnapshot.sessions}
-            onSelectSession={(sessionId) => {
-              setIsSchedulesOpen(false);
-              if (!agentOpen) {
-                setAgentOpen(true);
-              }
-              void handleSelectSession(sessionId);
-            }}
-              />
-            ) : (
-              <EditorPane
-            note={activeNote}
-            knowledgeBase={activeKnowledgeBase}
-            availableTags={currentSnapshot.notes
-              .filter((item) => item.knowledgeBaseId === activeKnowledgeBase.id)
-              .flatMap((item) => item.tags)}
-            proposedChange={activeSession.pendingChange?.status === "pending" ? activeSession.pendingChange : undefined}
-            isBusy={isBusy}
-            isReviewBusy={isCurrentSessionBusy}
-            isDirty={isActiveNoteDirty}
-            viewMode={markdownViewMode}
-            onViewModeChange={setMarkdownViewMode}
-            onSaveNote={handleSaveActiveNote}
-            onContentChange={handleContentChange}
-            onPasteImages={handlePasteImages}
-            onExportFile={handleExportActiveFile}
-            onOpenHistory={() => openNoteHistory()}
-            onRenameNote={() => openRenameDialog()}
-            onDeleteNote={() => handleDeleteNote()}
-            onAcceptChange={handleAcceptChange}
-            onRejectChange={handleRejectChange}
-            onAddReviewComment={handleAddReviewComment}
-            onSubmitReviewComments={handleSubmitReviewComments}
-            onCreateMarkdown={(parentPath) => openCreateDialog("markdown", parentPath)}
-            onCreateText={(parentPath) => openCreateDialog("text", parentPath)}
-            onNotice={setNotice}
-            sessions={currentSnapshot.sessions}
-            onSelectSession={(sessionId) => {
-              setIsSchedulesOpen(false);
-              if (!agentOpen) {
-                setAgentOpen(true);
-              }
-              void handleSelectSession(sessionId);
-            }}
-              />
-            )}
+            {activeDocument ? renderDocumentPane() : renderEditorPane()}
           </div>
             </>
           )}
         </div>
-        {agentOpen && (
+        {regionOpen.agent && (
           <div
             className={`workspace-resizer workspace-resizer-agent ${resizingPane === "agent" ? "active" : ""}`}
             {...getSeparatorProps("agent")}
           />
         )}
-        {agentOpen && (
-          <AgentPanel
-            sessions={currentSnapshot.sessions}
-            activeSession={activeSession}
-            activeKnowledgeBase={activeKnowledgeBase}
-            knowledgeBases={currentSnapshot.knowledgeBases}
-            notes={currentSnapshot.notes}
-            documents={currentSnapshot.documents}
-            prompt={agentPrompt}
-            skills={agentSkills}
-            selectedSkillIds={explicitSkillIds}
-            mentionedFiles={mentionableFiles}
-            selectedMentionedFileIds={mentionedFileIds}
-            draftImages={draftImages}
-            modelConfig={userSettings.modelConfig}
-            agentSecurity={userSettings.agentSecurity}
-            turnModelSelection={turnModelSelection}
-            isComposerBusy={isCurrentSessionBusy}
-            inFlightSessionIds={inFlightSessionIds}
-            queuedSessionIds={queuedSessionIds}
-            liveTurn={liveTurn}
-            queuedFollowUp={queuedFollowUp}
-            queuedFollowUpInList={queuedFollowUpInList}
-            isSessionListOpen={isSessionListOpen}
-            isSessionContextOpen={isSessionContextOpen}
-            isScopeSelectorOpen={isScopeSelectorOpen}
-            onToggleSessionList={handleToggleSessionList}
-            onToggleSessionContext={handleToggleSessionContext}
-            onToggleScopeSelector={handleToggleScopeSelector}
-            onCollapsePanel={handleToggleAgentPanel}
-            onCreateSession={handleCreateSession}
-            onSelectSession={handleSelectSession}
-            onDeleteSession={handleDeleteSession}
-            onRenameSession={handleRenameSession}
-            onTogglePinSession={handleTogglePinSession}
-            onToggleArchiveSession={handleToggleArchiveSession}
-            onShowSessionList={() => setSessionPaneRequest((current) => current + 1)}
-            onToggleScopeKnowledgeBase={handleToggleScopeKnowledgeBase}
-            onPromptChange={setAgentPrompt}
-            onSelectedSkillIdsChange={setExplicitSkillIds}
-            onSelectedMentionedFileIdsChange={setMentionedFileIds}
-            onDraftImagesChange={setDraftImages}
-            onNotice={setNotice}
-            onSubmitPrompt={() => handleSubmitPrompt("ask")}
-            onEditUserMessage={(messageId, prompt) => void handleEditUserMessageAndRerun(messageId, prompt)}
-            onAbortTurn={() => void handleAbortTurn()}
-            onClearQueuedFollowUp={handleClearQueuedFollowUp}
-            onTurnModelSelectionChange={setTurnModelSelection}
-            onSetSessionModelSelection={handleSetSessionModelSelection}
-            onCompactAgentContext={handleCompactAgentContext}
-            onOpenProjectInstruction={handleSelectNote}
-            onApproveExecution={handleApproveSkillExecution}
-            onRejectExecution={handleRejectSkillExecution}
-            onApplyChangeSet={handleApplySkillChangeSet}
-            onRejectChangeSet={handleRejectSkillChangeSet}
-            onSecurityLevelChange={handleSessionSecurityLevelChange}
-            onPlanModeChange={handleSessionPlanModeChange}
-            onExecutePlan={() =>
-              // 批准计划是宿主流程：先持久化关闭规划模式，再用最新快照自动发起执行回合。
-              void handleSessionPlanModeChange(false, (savedSnapshot) => {
-                void handleSubmitPrompt("ask", PLAN_EXECUTION_PROMPT, savedSnapshot);
-              })
-            }
-            onToggleChangeOperation={handleToggleSkillChangeOperation}
+        {regionOpen.agent ? (
+          renderAgentPanel()
+        ) : (
+          <RegionRail
+            edge="right"
+            label={getRegion("agent").label}
+            items={getRegion("agent").items}
+            activeItemId={activeItems.agent}
+            onActivateItem={(itemId) => openRegionItem("agent", itemId)}
+            renderPreview={renderAgentPreview}
+            previewWidth={regionPreviewWidth.agent}
           />
         )}
       </main>
