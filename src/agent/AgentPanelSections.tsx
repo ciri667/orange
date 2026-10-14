@@ -710,7 +710,7 @@ export function AgentMessageList({
       {activeSession.messages.length === 0 && !showLiveTurn && !queuedFollowUp && (
         <div className="grid min-h-full place-content-center justify-items-center gap-1 px-6 py-10 text-center text-ink-muted">
           <p className="m-0 text-sm text-ink-muted">从下面开始提问</p>
-          <span className="text-xs leading-[1.45] text-ink-soft">@ 引用文件，/ 选择 Skill</span>
+          <span className="text-xs leading-[1.45] text-ink-soft">@ 引用文件，/ 选择指令或 Skill</span>
         </div>
       )}
       {activeSession.messages.map((message, index) => (

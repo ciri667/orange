@@ -103,6 +103,35 @@ export type SkillInstallSourceType = "url" | "localFolder" | "localArchive";
 /** Skill 安装同名冲突策略，fail 保守失败，replace 由用户明确替换。 */
 export type SkillInstallConflictStrategy = "fail" | "replace";
 
+/** 内置斜杠指令的可用入口；同一条指令可以同时服务桌面端与 IM。 */
+export type BuiltinCommandScope = "desktop" | "im";
+
+/**
+ * 内置斜杠指令描述符，由后端注册表统一下发。
+ * 与 `AgentSkill` 不同：指令是本地动作，执行时绝不进入模型上下文。
+ */
+export interface BuiltinCommandDescriptor {
+  /** 稳定 ID，用于执行与埋点，不随文案调整变化。 */
+  id: string;
+  /** 主命令名，不含前导斜杠。 */
+  name: string;
+  /** 兼容别名，解析时与主名等价，弹窗中不重复展示。 */
+  aliases: string[];
+  description: string;
+  /** 参数占位提示，空串表示不接受参数。 */
+  argumentHint: string;
+  scopes: BuiltinCommandScope[];
+  /** 是否必须有活跃的持久化会话。 */
+  requiresActiveSession: boolean;
+}
+
+/** 内置指令执行结果；snapshot 仅在指令改动了工作台时回传。 */
+export interface BuiltinCommandRunResult {
+  commandId: string;
+  notice: string;
+  snapshot?: WorkspaceSnapshot;
+}
+
 /** Agent skill 是可启停、可由 Agent 自主决定是否使用的指令型工作流。 */
 export interface AgentSkill {
   id: string;

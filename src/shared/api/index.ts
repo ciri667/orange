@@ -1,6 +1,7 @@
 export { isTauriRuntime } from "./runtime";
 export * from "./workspace";
 export * from "./sessions";
+export * from "./builtinCommands";
 export * from "./settings";
 export * from "./im";
 export * from "./skills";
