@@ -6,6 +6,26 @@ use super::settings::UserSettings;
 use super::skills::AgentSkill;
 use serde::{Deserialize, Serialize};
 
+/** 执行桌面端内置指令的入参；args 为命令名之后的原文，由各指令自行解释。 */
+#[derive(Clone, Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RunBuiltinCommandPayload {
+    pub snapshot: WorkspaceSnapshot,
+    pub command_id: String,
+    #[serde(default)]
+    pub args: String,
+}
+
+/** 内置指令执行结果；notice 供前端提示，snapshot 仅在需要刷新工作台时回传。 */
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BuiltinCommandRunResult {
+    pub command_id: String,
+    pub notice: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub snapshot: Option<WorkspaceSnapshot>,
+}
+
 /** 扫描知识库命令入参。 */
 #[derive(Clone, Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
