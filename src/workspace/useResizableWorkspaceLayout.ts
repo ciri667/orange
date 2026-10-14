@@ -611,18 +611,6 @@ export function useResizableWorkspaceLayout() {
     });
   }, []);
 
-  /**
-   * 点击收起态图标：先激活该条目，再展开所属区域，
-   * 让「图标栏 → 展开真实内容」一步到位。
-   */
-  const openRegionItem = useCallback((regionId: RegionId, itemId: RegionItemId) => {
-    setSizes((currentSizes) => {
-      const activated = { ...currentSizes, activeItems: { ...currentSizes.activeItems, [regionId]: itemId } };
-
-      return setRegionOpenState(activated, regionId, true, getWorkspaceWidth());
-    });
-  }, [getWorkspaceWidth]);
-
   /** 主 grid 的列定义由 hook 统一生成；收起区域退化为图标栏，中间编辑区始终占剩余空间。 */
   const gridTemplateColumns = useMemo(() => {
     const editorMin = getEditorMinWidth(workspaceWidth, sizes.regions);
@@ -688,7 +676,6 @@ export function useResizableWorkspaceLayout() {
     setRegionOpen,
     toggleRegion,
     setRegionActiveItem,
-    openRegionItem,
     agentOpen: sizes.regions.agent,
     setAgentOpen,
   };

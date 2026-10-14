@@ -1,6 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
-import { Maximize2 } from "lucide-react";
 import { cn } from "../shared/cn";
 import type { CSSProperties, ReactNode } from "react";
 import type { RegionEdge, RegionItem, RegionItemId } from "./collapsibleRegions";
@@ -45,7 +44,13 @@ export interface RegionRailProps {
   activeItemId?: RegionItemId;
   /** 区域无障碍名称，如「知识库栏」。 */
   label: string;
-  onActivateItem: (itemId: RegionItemId) => void;
+  /**
+   * 点击图标时切换到的条目。
+   *
+   * 只切板块，不展开区域：展开区域是顶栏收展按钮的职责，
+   * 图标栏点击应该停留在「收起态 + 浮层」这套交互里。
+   */
+  onSelectItem: (itemId: RegionItemId) => void;
   /**
    * 浮层即将打开时通知调用方悬浮的是哪个条目。
    *
@@ -72,7 +77,7 @@ export function RegionRail({
   items,
   activeItemId,
   label,
-  onActivateItem,
+  onSelectItem,
   onHoverItem,
   renderPreview,
   previewWidth,
@@ -260,23 +265,15 @@ export function RegionRail({
     };
   }, [hoveredItemId, updatePreviewPosition]);
 
-  /**
-   * 浮层实际展示的条目。
-   *
-   * 正常情况下就是悬浮的那个图标；但会话和文件共享同一个分块状态，
-   * 用户可以在浮层内部切到另一个条目。这时要用共享的 activeItemId，
-   * 否则标题、页脚和「展开」会停留在打开时悬浮的图标上，
-   * 点「展开」还会把用户在浮层里的选择打回。
-   */
+  /** 当前悬浮图标对应的条目；为空表示浮层还没打开。 */
   const hoveredItem = hoveredItemId ? items.find((item) => item.id === hoveredItemId) : undefined;
 
   /**
    * 浮层实际展示的条目。
    *
    * 正常情况下就是悬浮的那个图标；但会话和文件共享同一个分块状态，
-   * 用户可以在浮层内部切到另一个条目。这时要用共享的 activeItemId，
-   * 否则标题、页脚和「展开」会停留在打开时悬浮的图标上，
-   * 点「展开」还会把用户在浮层里的选择打回。
+   * 用户可以在浮层内部或图标上切到另一个条目。这时要用共享的 activeItemId，
+   * 否则标题和页脚会停留在打开时悬浮的图标上，和浮层里的内容对不上。
    */
   const displayedItem =
     hoveredItem && activeItemId && items.some((item) => item.id === activeItemId)
@@ -310,11 +307,11 @@ export function RegionRail({
                   className={cn("region-rail-item", isActive && "is-active")}
                   aria-label={
                     // 单一内容的区域（顶栏/编辑区/Agent）不重复读区域名。
-                    items.length > 1 ? `展开${label}：${item.label}` : `展开${label}`
+                    items.length > 1 ? `切换到${item.label}` : `浏览${label}`
                   }
                   aria-current={isActive ? "true" : undefined}
                   title={items.length > 1 ? item.label : label}
-                  onClick={() => onActivateItem(item.id)}
+                  onClick={() => onSelectItem(item.id)}
                   onMouseEnter={() => scheduleOpen(item.id)}
                   onMouseLeave={scheduleClose}
                   onFocus={() => scheduleOpen(item.id)}
@@ -359,16 +356,12 @@ export function RegionRail({
               它和展开态共用上层状态，所以在浮层里点会话、切分块、往输入框打字都会就地生效。
             */}
             <div className="region-preview-body">{renderPreview(displayedItem.id)}</div>
+            {/*
+              浮层没有「展开」入口：收起/展开只走顶栏按钮，
+              这里只做悬停预览 + 就地操作，指针离开就收回。
+            */}
             <div className="region-preview-footer">
               <span className="region-preview-hint">{items.length > 1 ? displayedItem.label : label}</span>
-              <button
-                type="button"
-                className="region-preview-expand"
-                onClick={() => onActivateItem(displayedItem.id)}
-              >
-                <Maximize2 size={13} aria-hidden />
-                展开
-              </button>
             </div>
           </div>,
           document.body,

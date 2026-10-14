@@ -427,22 +427,6 @@ select:focus-visible {
   font-size: 12px;
 }
 
-.region-preview-expand {
-  display: inline-flex;
-  align-items: center;
-  gap: 4px;
-  border: 0;
-  border-radius: var(--radius-small);
-  padding: 4px 8px;
-  background: transparent;
-  color: var(--accent);
-  font-size: 12px;
-}
-
-.region-preview-expand:hover {
-  background: var(--accent-soft);
-}
-
 .region-preview-note {
   display: grid;
   align-content: center;

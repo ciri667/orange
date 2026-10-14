@@ -137,7 +137,6 @@ export function WorkspaceShell() {
     toggleRegion,
     setRegionOpen,
     setRegionActiveItem,
-    openRegionItem,
     agentOpen,
     setAgentOpen,
   } = useResizableWorkspaceLayout();
@@ -661,14 +660,13 @@ export function WorkspaceShell() {
   }
 
   /**
-   * 收起态图标栏点击左栏条目：先激活条目，再展开左栏。
-   * 「设置」和「定时任务」不是左栏内的分块，而是直接切到对应界面。
-   */
-  /**
-   * 收起态图标栏点击左栏条目：先激活条目，再展开左栏。
+   * 收起态图标栏点击左栏条目：只切板块，不展开左栏。
+   *
+   * 展开左栏是顶栏收展按钮的职责：图标栏点击后停留在「收起态 + 悬浮浮层」里，
+   * 浮层里可以就地操作，指针离开就收回。
    * 「设置」和「定时任务」不是左栏内的分块，只切界面，不改左栏的「会话 / 文件」分块。
    */
-  function handleOpenSidebarItem(itemId: RegionItemId) {
+  function handleSelectSidebarItem(itemId: RegionItemId) {
     if (itemId === "settings") {
       handleOpenSettings();
       return;
@@ -680,7 +678,7 @@ export function WorkspaceShell() {
     }
 
     setIsSchedulesOpen(false);
-    openRegionItem("sidebar", itemId);
+    setRegionActiveItem("sidebar", itemId);
   }
 
   /**
@@ -1018,7 +1016,7 @@ export function WorkspaceShell() {
             label={getRegion("sidebar").label}
             items={getRegion("sidebar").items}
             activeItemId={activeItems.sidebar}
-            onActivateItem={(itemId) => handleOpenSidebarItem(itemId)}
+            onSelectItem={(itemId) => handleSelectSidebarItem(itemId)}
             // 会话/文件共享同一份分块状态；悬浮哪个图标就把分块同步过去，
             // 这样悬浮看到的内容和图标一致，而不是停在用户上次点过的分块上。
             onHoverItem={(itemId) => {
@@ -1101,7 +1099,7 @@ export function WorkspaceShell() {
             label={getRegion("agent").label}
             items={getRegion("agent").items}
             activeItemId={activeItems.agent}
-            onActivateItem={(itemId) => openRegionItem("agent", itemId)}
+            onSelectItem={(itemId) => setRegionActiveItem("agent", itemId)}
             renderPreview={renderAgentPreview}
             previewWidth={regionPreviewWidth.agent}
           />
