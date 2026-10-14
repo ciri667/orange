@@ -1,4 +1,4 @@
-import { History, Book, PanelRightClose, Play, Plus, ShieldAlert, X } from "lucide-react";
+import { History, Book, Play, Plus, ShieldAlert, X } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import { Button } from "../shared/Button";
 import { Checkbox } from "../shared/Checkbox";
@@ -54,7 +54,6 @@ export function AgentPanel({
   onToggleSessionList,
   onToggleSessionContext,
   onToggleScopeSelector,
-  onCollapsePanel,
   onCreateSession,
   onSelectSession,
   onDeleteSession,
@@ -123,8 +122,6 @@ export function AgentPanel({
   onToggleSessionList: () => void;
   onToggleSessionContext: () => void;
   onToggleScopeSelector: () => void;
-  /** 收起整个 Agent 区域；收起态悬浮浮层里不传，浮层内不出现收起自己的按钮。 */
-  onCollapsePanel?: () => void;
   onCreateSession: () => void;
   onSelectSession: (sessionId: string) => void;
   onDeleteSession: (sessionId: string) => void;
@@ -213,15 +210,6 @@ export function AgentPanel({
           <Button variant="icon" title="新建会话" onClick={onCreateSession}>
             <Plus size={16} />
           </Button>
-          {/*
-            收起按钮只在 Agent 区域真正停靠时出现。
-            它收起的是整个区域，浮层是附着在收起态之上的，让浮层里出现这个按钮会自相矛盾。
-          */}
-          {onCollapsePanel ? (
-            <Button variant="icon" title="收起 Agent 协作区" onClick={onCollapsePanel}>
-              <PanelRightClose size={16} />
-            </Button>
-          ) : null}
         </div>
       </header>
 

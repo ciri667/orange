@@ -779,12 +779,11 @@ export function WorkspaceShell() {
    * 浮层宽度取用户上次的停靠宽度，因此内部 UI 的换行与展开态一致。
    */
   function renderAgentPreview() {
-    // 浮层里不传 onCollapsePanel：这里已经在收起态，不该再出现收起自己的按钮。
-    return renderAgentPanel({ preview: true });
+    return renderAgentPanel();
   }
 
   /** 展开态和收起态浮层共用同一个面板元素，避免两处 props 漂移。 */
-  function renderAgentPanel({ preview = false }: { preview?: boolean } = {}) {
+  function renderAgentPanel() {
     return (
       <AgentPanel
         sessions={currentSnapshot.sessions}
@@ -814,7 +813,6 @@ export function WorkspaceShell() {
         onToggleSessionList={handleToggleSessionList}
         onToggleSessionContext={handleToggleSessionContext}
         onToggleScopeSelector={handleToggleScopeSelector}
-        onCollapsePanel={preview ? undefined : handleToggleAgentPanel}
         onCreateSession={handleCreateSession}
         onSelectSession={handleSelectSession}
         onDeleteSession={handleDeleteSession}
