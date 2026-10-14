@@ -4,6 +4,7 @@ mod agent_eval;
 mod agent_tools;
 mod agent_trace;
 mod agent_writes;
+mod builtin_commands;
 mod commands;
 mod domain;
 mod export;
@@ -263,6 +264,8 @@ pub fn run() {
             _ => {}
         })
         .invoke_handler(tauri::generate_handler![
+            commands::builtin_commands::list_builtin_commands,
+            commands::builtin_commands::run_builtin_command,
             commands::workspace::load_workspace_state,
             commands::workspace::save_workspace_editor_state,
             commands::knowledge::select_knowledge_base,
