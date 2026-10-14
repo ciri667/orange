@@ -220,11 +220,12 @@ pub(crate) async fn dispatch_authorized_text_event(
     card_sent: bool,
     image_auth: ImageFetchAuth,
 ) -> String {
-    if event.text.trim() == "/status" {
-        return build_status_reply(app, provider_id, settings);
-    }
+    // 指令统一走注册表解析；`/status` 也从注册表命中，不再单独硬编码特判。
+    if let Some((command, args)) = super::parse_builtin_command(&event.text) {
+        if command.id == "status" && args.is_empty() {
+            return build_status_reply(app, provider_id, settings);
+        }
 
-    if let Some(command) = super::parse_builtin_command(&event.text) {
         let conversation_kind = if is_group_chat_event(event) {
             "group"
         } else {

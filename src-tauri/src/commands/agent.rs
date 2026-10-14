@@ -479,7 +479,7 @@ pub(crate) async fn run_agent_turn_from_im(
 pub(crate) async fn handle_im_builtin_command(
     app: AppHandle,
     provider_id: &str,
-    command: crate::im::ImBuiltinCommand,
+    command: &crate::builtin_commands::BuiltinCommandDescriptor,
     channel_key: &str,
     knowledge_base_ids: Vec<String>,
     im_identity: crate::domain::ImSessionIdentity,
@@ -489,20 +489,16 @@ pub(crate) async fn handle_im_builtin_command(
         .chars()
         .take(16)
         .collect::<String>();
-    let command_name = match command {
-        crate::im::ImBuiltinCommand::Help => "help",
-        crate::im::ImBuiltinCommand::New => "new",
-        crate::im::ImBuiltinCommand::Compact => "compact",
-    };
+    let command_name = command.id;
 
-    let result = match command {
-        crate::im::ImBuiltinCommand::Help => Ok(ImBuiltinCommandResult {
-            reply: crate::im::builtin_command_help_text().to_owned(),
+    let result = match command.id {
+        "help" => Ok(ImBuiltinCommandResult {
+            reply: crate::im::im_builtin_command_help_text(),
             session_id: None,
             message_count: None,
             summary_chars: None,
         }),
-        crate::im::ImBuiltinCommand::New => {
+        "new" => {
             create_im_session_from_command(
                 &app,
                 provider_id,
@@ -512,9 +508,14 @@ pub(crate) async fn handle_im_builtin_command(
             )
             .await
         }
-        crate::im::ImBuiltinCommand::Compact => {
-            compact_im_session_from_command(&app, provider_id, channel_key).await
-        }
+        "compact" => compact_im_session_from_command(&app, provider_id, channel_key).await,
+        // status 由各 provider 在门禁后自行构造回复，不会走到这里；其余指令桌面端专属。
+        _ => Ok(ImBuiltinCommandResult {
+            reply: "该指令在当前入口不可用。".to_owned(),
+            session_id: None,
+            message_count: None,
+            summary_chars: None,
+        }),
     };
 
     let (status, reply, session_id, message_count, summary_chars) = match result {

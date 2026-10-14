@@ -574,11 +574,12 @@ async fn dispatch_authorized_text_event(
     settings: &FeishuIntegrationSettings,
     channel_key: &str,
 ) -> String {
-    if event.text.trim() == "/status" {
-        return build_status_reply(app, settings);
-    }
+    // 指令统一走注册表解析；`/status` 也从注册表命中，不再单独硬编码特判。
+    if let Some((command, args)) = super::parse_builtin_command(&event.text) {
+        if command.id == "status" && args.is_empty() {
+            return build_status_reply(app, settings);
+        }
 
-    if let Some(command) = super::parse_builtin_command(&event.text) {
         let conversation_kind = if is_group_chat_event(event) {
             "group"
         } else {
@@ -1801,18 +1802,18 @@ mod tests {
         assert_eq!(block.reason, "飞书发送人不在允许名单中。");
     }
 
-    /** 飞书通过通用解析器精确识别内置指令，未知斜杠文本仍交由 Agent。 */
+    /** 飞书通过通用注册表解析内置指令，未知斜杠文本仍交由 Agent。 */
     #[test]
-    fn builtin_commands_use_common_exact_parser() {
-        assert_eq!(
-            super::super::parse_builtin_command(" /new "),
-            Some(super::super::ImBuiltinCommand::New)
-        );
-        assert_eq!(
-            super::super::parse_builtin_command("/reset"),
-            Some(super::super::ImBuiltinCommand::New)
-        );
-        assert_eq!(super::super::parse_builtin_command("/compact now"), None);
-        assert_eq!(super::super::parse_builtin_command("/unknown"), None);
+    fn builtin_commands_use_common_parser_with_args() {
+        let parsed = |text: &str| {
+            super::super::parse_builtin_command(text).map(|(command, args)| (command.id, args))
+        };
+
+        assert_eq!(parsed(" /new "), Some(("new", String::new())));
+        assert_eq!(parsed("/reset"), Some(("new", String::new())));
+        assert_eq!(parsed("/status"), Some(("status", String::new())));
+        // 带参数时仍命中指令，参数原样返回，交由调用方决定是否接受。
+        assert_eq!(parsed("/compact now"), Some(("compact", "now".to_owned())));
+        assert_eq!(parsed("/unknown"), None);
     }
 }

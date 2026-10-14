@@ -1,3 +1,4 @@
+use crate::builtin_commands::{builtin_command_help_text, CommandScope};
 use crate::domain::{
     AgentMessage, AgentSession, AgentTurnRequest, ConversationImageAttachment, ImGatewayStatus,
     ImLoginStatus, ImSessionIdentity, IM_PROVIDER_FEISHU, IM_PROVIDER_QQ, IM_PROVIDER_WECOM,
@@ -21,27 +22,15 @@ pub mod weixin;
 /** 会话摘要最大字符数，兼顾历史列表扫描效率和本地消息内容最小暴露。 */
 const IM_MESSAGE_PREVIEW_MAX_CHARS: usize = 28;
 
-/** IM 内置指令；provider 在完成鉴权、去重和群聊门禁后据此分派，不会把命令发送给模型。 */
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum ImBuiltinCommand {
-    Help,
-    New,
-    Compact,
-}
+/**
+ * 分派 IM 内置指令；指令名单来自 `crate::builtin_commands` 注册表，
+ * provider 在完成鉴权、去重和群聊门禁后据此分派，不会把命令发送给模型。
+ */
+pub(crate) use crate::builtin_commands::parse_builtin_command;
 
-/** 精确识别首版 IM 内置指令；仅允许首尾空白，未知斜杠文本仍作为普通 Agent 提问。 */
-pub(crate) fn parse_builtin_command(text: &str) -> Option<ImBuiltinCommand> {
-    match text.trim() {
-        "/help" => Some(ImBuiltinCommand::Help),
-        "/new" | "/reset" => Some(ImBuiltinCommand::New),
-        "/compact" => Some(ImBuiltinCommand::Compact),
-        _ => None,
-    }
-}
-
-/** 返回内置指令说明；审批指令同时列出，降低移动端发现成本。 */
-pub(crate) fn builtin_command_help_text() -> &'static str {
-    "内置指令：\n/help：查看指令说明\n/new：开启新的 Agent 会话（/reset 仍可用）\n/compact：整理当前会话上下文\n/status：查看连接状态\n\n待确认变更：发送“详情 <编号>”、“确认 <编号>”或“取消 <编号>”。"
+/** 返回 IM 侧内置指令说明；由注册表动态生成，保证与解析表一致。 */
+pub(crate) fn im_builtin_command_help_text() -> String {
+    builtin_command_help_text(CommandScope::Im)
 }
 
 /** 生成新 IM 会话的固定身份摘要，避免把 `/new` 或旧消息误作为会话主题。 */
@@ -378,7 +367,7 @@ pub(crate) fn build_im_turn_request(
 mod tests {
     use super::{
         build_im_message_preview, build_im_new_session_identity, build_im_session_identity,
-        format_im_session_title, parse_builtin_command, ImBuiltinCommand,
+        format_im_session_title, im_builtin_command_help_text, parse_builtin_command,
     };
 
     /** 标题摘要需折叠空白、剔除机器人占位提及，并按字符而不是字节截断。 */
@@ -432,21 +421,29 @@ mod tests {
         assert_eq!(identity.channel_hash.len(), 16);
     }
 
-    /** 指令必须精确匹配，旧 `/reset` 兼容新会话语义。 */
+    /** IM 指令必须精确匹配主名与别名，未知斜杠文本仍作为普通 Agent 提问。 */
     #[test]
     fn parses_builtin_commands_without_capturing_normal_prompts() {
-        assert_eq!(
-            parse_builtin_command(" /help "),
-            Some(ImBuiltinCommand::Help)
-        );
-        assert_eq!(parse_builtin_command("/new"), Some(ImBuiltinCommand::New));
-        assert_eq!(parse_builtin_command("/reset"), Some(ImBuiltinCommand::New));
-        assert_eq!(
-            parse_builtin_command("/compact"),
-            Some(ImBuiltinCommand::Compact)
-        );
-        assert_eq!(parse_builtin_command("/help more"), None);
-        assert_eq!(parse_builtin_command("/unknown"), None);
+        let command_id = |text: &str| parse_builtin_command(text).map(|(command, _)| command.id);
+
+        assert_eq!(command_id(" /help "), Some("help"));
+        assert_eq!(command_id("/new"), Some("new"));
+        assert_eq!(command_id("/reset"), Some("new"));
+        assert_eq!(command_id("/compact"), Some("compact"));
+        assert_eq!(command_id("/status"), Some("status"));
+        assert_eq!(command_id("/unknown"), None);
+    }
+
+    /** `/help` 文案由注册表生成，必须覆盖 IM 侧全部指令，且不泄露桌面端专属指令。 */
+    #[test]
+    fn im_help_text_covers_registry_without_desktop_only_commands() {
+        let help = im_builtin_command_help_text();
+
+        for name in ["/help", "/new", "/compact", "/status"] {
+            assert!(help.contains(name), "IM 帮助文案缺少 {name}");
+        }
+        assert!(!help.contains("/rename"));
+        assert!(help.contains("待确认变更"));
     }
 
     /** 新会话的标题不得泄露命令文本或继承上一轮主题。 */
