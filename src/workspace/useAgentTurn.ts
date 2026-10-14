@@ -10,6 +10,7 @@ import {
   clearAgentTurnPlaceholder,
   listenAgentTurnProgress,
   listActiveAgentSessionIds,
+  listBuiltinCommands,
   loadAppEventLogs,
   loadRequestAuditLogs,
   rejectAgentChangeSet,
@@ -18,6 +19,7 @@ import {
   loadSessions,
   rewindAgentSession,
   runAgentTurn,
+  runBuiltinCommand,
   saveConversationImageAttachments,
   saveSession,
 } from "../shared/tauriApi";
@@ -29,6 +31,7 @@ import type {
   AgentSession,
   AgentTurnProgressEvent,
   AppEventLog,
+  BuiltinCommandDescriptor,
   ConversationImageAttachment,
   RequestAuditLog,
   WorkspaceSnapshot,
@@ -69,6 +72,31 @@ interface AgentTurnOptions extends WorkspaceChrome {
   dirtyDocumentIds: Set<string>;
 }
 
+/**
+ * 解析行首 `/name` 形式的输入。只用第一行判断，且命令名不能含空白，
+ * 避免把普通正文里的斜杠（例如 `/usr/local`）误判成指令。
+ */
+function parseSlashInput(value: string): { name: string; args: string } | null {
+  const trimmed = value.trimStart();
+  if (!trimmed.startsWith("/")) {
+    return null;
+  }
+
+  const body = trimmed.slice(1);
+  const nameEnd = body.search(/\s/);
+  const name = (nameEnd < 0 ? body : body.slice(0, nameEnd)).toLowerCase();
+  if (!name) {
+    return null;
+  }
+
+  return { name, args: (nameEnd < 0 ? "" : body.slice(nameEnd)).trim() };
+}
+
+/** 判断某个 token 是否命中指令主名或别名，保持与后端注册表相同的匹配口径。 */
+function commandMatchesName(command: BuiltinCommandDescriptor, name: string): boolean {
+  return command.name === name || command.aliases.includes(name);
+}
+
 /** 绑定到某个会话的排队指令；跨会话发送时会先乐观落库，同会话 follow-up 仍只留在界面。 */
 interface QueuedFollowUp {
   sessionId: string;
@@ -106,6 +134,15 @@ export function useAgentTurn(options: AgentTurnOptions) {
     dirtyDocumentIds,
   } = options;
   const [liveTurns, setLiveTurns] = useState<Record<string, AgentTurnProgressEvent>>({});
+  /** 后端注册表下发的内置指令；用于提交前判断输入是否为指令。 */
+  const [builtinCommandList, setBuiltinCommandList] = useState<BuiltinCommandDescriptor[]>([]);
+  /**
+   * 内置指令的结果回执。
+   *
+   * 不复用工作台全局 notice：那个提示只渲染在左侧边栏，在右侧输入框里执行指令时看不到，
+   * 且 beginBusy 会把它清空。指令回执需要贴近输入框，因此单独维护一份。
+   */
+  const [builtinCommandNotice, setBuiltinCommandNotice] = useState<{ text: string; tone: "info" | "error" } | null>(null);
   const inFlightSessionIdsRef = useRef(new Set<string>());
   const [inFlightSessionIds, setInFlightSessionIds] = useState<string[]>([]);
   const observedRunningSessionIdsRef = useRef(new Set<string>());
@@ -126,6 +163,30 @@ export function useAgentTurn(options: AgentTurnOptions) {
   snapshotRef.current = snapshot;
   dirtyNoteIdsRef.current = dirtyNoteIds;
   dirtyDocumentIdsRef.current = dirtyDocumentIds;
+
+  useEffect(() => {
+    let disposed = false;
+
+    void listBuiltinCommands()
+      .then((commands) => {
+        if (!disposed) {
+          setBuiltinCommandList(commands);
+        }
+      })
+      .catch((error) => {
+        // 指令列表不可用时输入框仍应能正常发送普通消息，因此只降级记录。
+        logInfo("读取内置指令失败，已降级为普通输入。", {
+          category: "frontend",
+          event: "builtin_command_list",
+          status: "failed",
+          metadata: { reason: error instanceof Error ? error.message : String(error) },
+        });
+      });
+
+    return () => {
+      disposed = true;
+    };
+  }, []);
 
   useEffect(() => {
     let disposed = false;
@@ -428,6 +489,65 @@ export function useAgentTurn(options: AgentTurnOptions) {
     await waitForSessionIdle(sessionId);
   }
 
+  /**
+   * 执行内置指令：命中时返回 true，调用方必须直接返回，不再进入模型回合。
+   *
+   * 指令是本地动作，因此这里不会落成用户消息，也不会调用 runAgentTurn。
+   * 未识别的 `/xxx` 返回 false，交给普通消息路径（例如用户本想写 `/usr/local`）。
+   */
+  async function dispatchBuiltinCommand(
+    prompt: string,
+    sourceSnapshot: WorkspaceSnapshot,
+  ): Promise<boolean> {
+    const parsed = parseSlashInput(prompt);
+    if (!parsed) {
+      return false;
+    }
+
+    const command = builtinCommandList.find((item) => commandMatchesName(item, parsed.name));
+    if (!command) {
+      return false;
+    }
+
+    try {
+      setBuiltinCommandNotice(null);
+      beginBusy("正在执行内置指令…");
+      const result = await runBuiltinCommand(sourceSnapshot, command.id, parsed.args);
+      setAgentPrompt("");
+      if (result.snapshot) {
+        commitSnapshot(result.snapshot);
+      }
+      // 指令回执贴近输入框展示，不写入左侧边栏的全局 notice。
+      setBuiltinCommandNotice({ text: result.notice, tone: "info" });
+      logInfo("内置指令执行完成。", {
+        category: "frontend",
+        event: "builtin_command_run",
+        status: "completed",
+        metadata: { command: command.id },
+      });
+    } catch (error) {
+      setBuiltinCommandNotice({
+        text: error instanceof Error ? error.message : String(error),
+        tone: "error",
+      });
+      logInfo("内置指令执行失败。", {
+        category: "frontend",
+        event: "builtin_command_run",
+        status: "failed",
+        metadata: { command: command.id },
+      });
+    } finally {
+      endBusy();
+    }
+
+    return true;
+  }
+
+  /** 关闭一句话即可读完的指令回执，避免长期占位。 */
+  function dismissBuiltinCommandNotice() {
+    setBuiltinCommandNotice(null);
+  }
+
   /** 提交 Agent 输入；对话线程始终绑定目标会话，不借用正在跑的其它会话。 */
   async function handleSubmitPrompt(
     action: AgentActionType = "ask",
@@ -452,6 +572,13 @@ export function useAgentTurn(options: AgentTurnOptions) {
 
     if (!prompt && !turnDraftImages.length && !replay?.images?.length) {
       return;
+    }
+
+    // 内置指令必须在排队判定与乐观落库之前拦截，确保指令不会变成对话消息。
+    if (!replay && !presetPrompt && !turnDraftImages.length && prompt.startsWith("/")) {
+      if (await dispatchBuiltinCommand(prompt, sourceSnapshot)) {
+        return;
+      }
     }
 
     let turnImages = replay?.images ?? [];
@@ -933,6 +1060,15 @@ export function useAgentTurn(options: AgentTurnOptions) {
     queuedFollowUp,
     queuedFollowUpInList,
     isCurrentSessionBusy,
+    builtinCommands: builtinCommandList,
+    /** 内置指令的结果回执，渲染在 Agent 输入框上方。 */
+    builtinCommandNotice,
+    dismissBuiltinCommandNotice,
+    /** 供 `/` 弹窗直接执行选中的指令，复用与手输指令相同分派路径。 */
+    runBuiltinCommand: (command: BuiltinCommandDescriptor, args: string) => {
+      const line = args ? `/${command.name} ${args}` : `/${command.name}`;
+      return dispatchBuiltinCommand(line, currentSnapshot);
+    },
     inFlightSessionIds: runningSessionIds,
     queuedSessionIds: Object.keys(queuedBySession),
     enqueueFollowUp: (prompt: string) => {

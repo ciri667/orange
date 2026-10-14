@@ -1,6 +1,7 @@
 import { ArrowRight, BrainCircuit, FileText, Image, ImagePlus, Sparkles, Square } from "lucide-react";
 import { VoiceDictationButton } from "../shared/VoiceDictationButton";
 import {
+  useEffect,
   useMemo,
   useRef,
   useState,
@@ -17,7 +18,13 @@ import { logDebug } from "../shared/logger";
 import { getProviderModelSelectionLabel } from "../shared/modelSelection";
 import { ModelCascadeSelector } from "../shared/ModelCascadeSelector";
 import { OverflowTooltipText } from "../shared/OverflowTooltipText";
-import type { AgentSecuritySettings, AgentSession, AgentSkill, ModelConfig } from "../shared/types";
+import type {
+  AgentSecuritySettings,
+  AgentSession,
+  AgentSkill,
+  BuiltinCommandDescriptor,
+  ModelConfig,
+} from "../shared/types";
 import {
   fileToConversationImageDraft,
   collectImageFilesFromDataTransfer,
@@ -117,6 +124,19 @@ function getSkillPickerSearchText(skill: AgentSkill) {
   return [skill.displayName, skill.name, skill.description, ...skill.tags].join(" ").toLowerCase();
 }
 
+/** 指令候选的匹配文本；别名也参与匹配，方便用旧名或简写命中。 */
+function getCommandPickerSearchText(command: BuiltinCommandDescriptor) {
+  return [command.name, ...command.aliases, command.description].join(" ").toLowerCase();
+}
+
+/**
+ * `/` 弹窗的统一候选：内置指令与 Skill 混排在同一个列表里。
+ * 指令在前、Skill 在后，键盘高亮索引在两者之间连续移动。
+ */
+type SlashPickerItem =
+  | { kind: "command"; key: string; command: BuiltinCommandDescriptor }
+  | { kind: "skill"; key: string; skill: AgentSkill };
+
 /** 候选搜索只使用已授权文件的公开元数据，禁止将内容写入前端日志。 */
 function getMentionFileSearchText(file: AgentMentionFile) {
   return [file.displayName, file.relativePath, file.kind].filter(Boolean).join(" ").toLowerCase();
@@ -134,6 +154,9 @@ export function AgentInput({
   modelConfig,
   agentSecurity,
   turnModelSelection,
+  builtinCommands = [],
+  builtinCommandNotice,
+  onDismissBuiltinCommandNotice,
   isBusy,
   queuedFollowUp,
   onPromptChange,
@@ -142,6 +165,7 @@ export function AgentInput({
   onDraftImagesChange,
   onNotice,
   onSubmitPrompt,
+  onRunBuiltinCommand,
   onAbortTurn,
   onClearQueuedFollowUp,
   onTurnModelSelectionChange,
@@ -163,6 +187,8 @@ export function AgentInput({
   agentSecurity?: AgentSecuritySettings;
   /** 本轮显式选择的 provider/model，空字符串表示跟随会话/全局默认。 */
   turnModelSelection: string;
+  /** 后端注册表下发、当前端可用的内置指令；与 Skill 一起进入 `/` 弹窗。 */
+  builtinCommands?: BuiltinCommandDescriptor[];
   isBusy: boolean;
   /** 当前回合结束后才会发给模型的下一条用户指令。 */
   queuedFollowUp?: string | null;
@@ -172,6 +198,12 @@ export function AgentInput({
   onDraftImagesChange?: (images: ConversationImageDraft[]) => void;
   onNotice?: (message: string) => void;
   onSubmitPrompt: () => void;
+  /** 在 `/` 弹窗中选中指令并回车时调用；由工作台负责分派到本地指令执行。 */
+  onRunBuiltinCommand?: (command: BuiltinCommandDescriptor) => void;
+  /** 上一条内置指令的结果回执；贴近输入框展示。 */
+  builtinCommandNotice?: { text: string; tone: "info" | "error" } | null;
+  /** 关闭指令回执。 */
+  onDismissBuiltinCommandNotice?: () => void;
   /** 中断当前正在跑的 Agent 回合。 */
   onAbortTurn?: () => void;
   /** 取消尚未进入模型的排队指令。 */
@@ -203,6 +235,8 @@ export function AgentInput({
   const isPromptComposingRef = useRef(false);
   /** Agent textarea 引用，用于读取光标位置并在选择 skill 后恢复焦点。 */
   const promptTextareaRef = useRef<HTMLTextAreaElement | null>(null);
+  /** `/` 候选列表容器，用于把键盘高亮项滚动进可视区域。 */
+  const skillPickerListRef = useRef<HTMLDivElement | null>(null);
   const imageFileInputRef = useRef<HTMLInputElement | null>(null);
   /** 最近一次输入法组词结束时间，用于过滤 compositionend 后紧邻的候选确认 Enter。 */
   const lastPromptCompositionEndAtRef = useRef(0);
@@ -249,10 +283,38 @@ export function AgentInput({
     return skills
       .filter((skill) => skill.enabled && !selectedSkillIdSet.has(skill.id))
       .filter((skill) => !query || getSkillPickerSearchText(skill).includes(query))
-      .slice(0, 8);
+      .slice(0, MAX_EXPLICIT_SKILLS * 2);
   }, [selectedSkillIds, skills, slashSkillQuery?.query]);
+  /** 过滤后的内置指令候选；指令优先于 Skill 展示，因此单独截断份数。 */
+  const selectableCommands = useMemo(() => {
+    const query = slashSkillQuery?.query.trim().toLowerCase() ?? "";
+
+    return builtinCommands.filter((command) => !query || getCommandPickerSearchText(command).includes(query));
+  }, [builtinCommands, slashSkillQuery?.query]);
+  /**
+   * `/` 弹窗的统一候选列表：指令在前、Skill 在后。
+   * 键盘只有一套高亮索引，跨两个分组连续移动，避免新增第二套导航状态。
+   */
+  const slashPickerItems = useMemo<SlashPickerItem[]>(
+    () => [
+      ...selectableCommands.map<SlashPickerItem>((command) => ({ kind: "command", key: `command:${command.id}`, command })),
+      ...selectableSkills.map<SlashPickerItem>((skill) => ({ kind: "skill", key: `skill:${skill.id}`, skill })),
+    ],
+    [selectableCommands, selectableSkills],
+  );
   /** picker 最终展示条件，达到上限或当前行不再是 slash 查询时立即隐藏。 */
   const shouldShowSkillPicker = isSkillPickerOpen && selectedSkillIds.length < MAX_EXPLICIT_SKILLS && Boolean(slashSkillQuery);
+  /** 候选列表可滚动，键盘移动高亮后必须把它带进可视区域，否则看不到当前选中项。 */
+  useEffect(() => {
+    if (!shouldShowSkillPicker) {
+      return;
+    }
+
+    const container = skillPickerListRef.current;
+    const activeItem = container?.querySelector<HTMLElement>(`[data-picker-index="${activeSkillPickerIndex}"]`);
+
+    activeItem?.scrollIntoView({ block: "nearest" });
+  }, [activeSkillPickerIndex, shouldShowSkillPicker]);
   /** 当前 @ token 的检索词。 */
   const mentionFileQuery = resolveMentionFileQuery(prompt, promptTextareaRef.current?.selectionStart ?? prompt.length);
   /** @ 候选仅过滤父组件提供的已授权文件，不在输入组件扩大会话 scope。 */
@@ -273,11 +335,15 @@ export function AgentInput({
     Boolean(mentionFileQuery) &&
     !shouldShowSkillPicker;
 
+  /** 记录高亮已为其重置的查询文本，避免方向键触发的 caret 同步把高亮打回第一项。 */
+  const lastSkillPickerQueryRef = useRef<string | null>(null);
+
   /** 打开或关闭 slash picker，并记录不含 prompt/instructions 的可观测日志。 */
-  function updateSkillPickerOpen(nextOpen: boolean, source: string, matchCount = selectableSkills.length) {
+  function updateSkillPickerOpen(nextOpen: boolean, source: string, matchCount = slashPickerItems.length) {
     setIsSkillPickerOpen(nextOpen);
     setActiveSkillPickerIndex(0);
-    logDebug("切换显式 Skill picker。", {
+    lastSkillPickerQueryRef.current = null;
+    logDebug("切换 slash picker。", {
       category: "frontend",
       event: "explicit_skill_picker_toggle",
       status: nextOpen ? "opened" : "closed",
@@ -285,6 +351,7 @@ export function AgentInput({
         source,
         enabledSkillCount,
         selectedSkillCount: selectedSkillIds.length,
+        commandCount: selectableCommands.length,
         matchCount,
       },
     });
@@ -297,6 +364,7 @@ export function AgentInput({
 
     if (canOpen && !isSkillPickerOpen) {
       updateSkillPickerOpen(true, source);
+      lastSkillPickerQueryRef.current = nextQuery?.query ?? "";
       return;
     }
 
@@ -306,7 +374,13 @@ export function AgentInput({
     }
 
     if (canOpen) {
-      setActiveSkillPickerIndex(0);
+      // 只有查询文本真的变了才重置高亮；方向键只移动光标，不应把选中项弹回第一项。
+      const nextQueryText = nextQuery?.query ?? "";
+
+      if (lastSkillPickerQueryRef.current !== nextQueryText) {
+        lastSkillPickerQueryRef.current = nextQueryText;
+        setActiveSkillPickerIndex(0);
+      }
     }
   }
 
@@ -314,6 +388,7 @@ export function AgentInput({
   function updateMentionFilePickerOpen(nextOpen: boolean, source: string, matchCount = selectableMentionFiles.length) {
     setIsMentionFilePickerOpen(nextOpen);
     setActiveMentionFilePickerIndex(0);
+    lastMentionFileQueryRef.current = null;
     logDebug("切换 @ 文件 picker。", {
       category: "frontend",
       event: "agent_mentioned_file_picker_toggle",
@@ -321,6 +396,9 @@ export function AgentInput({
       metadata: { source, selectedFileCount: selectedMentionedFileIds.length, matchCount },
     });
   }
+
+  /** 记录高亮已为其重置的 @ 查询文本，避免方向键触发的 caret 同步把高亮打回第一项。 */
+  const lastMentionFileQueryRef = useRef<string | null>(null);
 
   /** 随输入与光标同步 @ picker；slash Skill 和 @ 文件只能有一个处于打开状态。 */
   function syncMentionFilePickerFromPrompt(value: string, cursorIndex: number, source: string) {
@@ -330,6 +408,7 @@ export function AgentInput({
     if (canOpen && !isMentionFilePickerOpen) {
       setIsSkillPickerOpen(false);
       updateMentionFilePickerOpen(true, source);
+      lastMentionFileQueryRef.current = nextQuery?.query ?? "";
       return;
     }
 
@@ -339,7 +418,13 @@ export function AgentInput({
     }
 
     if (canOpen) {
-      setActiveMentionFilePickerIndex(0);
+      // 只有查询文本真的变了才重置高亮；方向键只移动光标，不应把选中项弹回第一项。
+      const nextQueryText = nextQuery?.query ?? "";
+
+      if (lastMentionFileQueryRef.current !== nextQueryText) {
+        lastMentionFileQueryRef.current = nextQueryText;
+        setActiveMentionFilePickerIndex(0);
+      }
     }
   }
 
@@ -387,6 +472,40 @@ export function AgentInput({
         instructionChars: skill.instructions.length,
       },
     });
+  }
+
+  /**
+   * 在 `/` 弹窗中选中内置指令：清空输入框并把整条命令行交给父组件执行。
+   *
+   * 仍以文本形式回传完整命令，使「弹窗选中」与「手输指令」走同一条分派路径。
+   */
+  function handleRunBuiltinCommand(command: BuiltinCommandDescriptor) {
+    const queryState = resolveSlashSkillQuery(prompt, promptTextareaRef.current?.selectionStart ?? prompt.length);
+    const line = `/${command.name}${command.argumentHint ? " " : ""}`;
+
+    if (queryState) {
+      const beforeSlash = prompt.slice(0, queryState.lineStart);
+      const afterSlash = prompt.slice(queryState.cursorIndex);
+      onPromptChange(`${beforeSlash}${line}${afterSlash}`);
+    }
+
+    updateSkillPickerOpen(false, "select_command", selectableCommands.length);
+    onRunBuiltinCommand?.(command);
+    logDebug("选择内置指令。", {
+      category: "frontend",
+      event: "builtin_command_select",
+      status: "dispatched",
+      metadata: { command: command.id },
+    });
+  }
+
+  /** 把统一候选列表当前高亮项交给对应的选择逻辑。 */
+  function selectSlashPickerItem(item: SlashPickerItem) {
+    if (item.kind === "command") {
+      handleRunBuiltinCommand(item.command);
+    } else {
+      handleSelectExplicitSkill(item.skill);
+    }
   }
 
   /** 移除已选显式 Skill chip；只记录数量和来源，不记录 Skill 正文。 */
@@ -497,14 +616,14 @@ export function AgentInput({
 
     if (shouldShowSkillPicker && event.key === "ArrowDown") {
       event.preventDefault();
-      setActiveSkillPickerIndex((currentIndex) => (selectableSkills.length ? (currentIndex + 1) % selectableSkills.length : 0));
+      setActiveSkillPickerIndex((currentIndex) => (slashPickerItems.length ? (currentIndex + 1) % slashPickerItems.length : 0));
       return;
     }
 
     if (shouldShowSkillPicker && event.key === "ArrowUp") {
       event.preventDefault();
       setActiveSkillPickerIndex((currentIndex) =>
-        selectableSkills.length ? (currentIndex - 1 + selectableSkills.length) % selectableSkills.length : 0,
+        slashPickerItems.length ? (currentIndex - 1 + slashPickerItems.length) % slashPickerItems.length : 0,
       );
       return;
     }
@@ -558,8 +677,8 @@ export function AgentInput({
     if (shouldShowSkillPicker) {
       event.preventDefault();
 
-      if (selectableSkills.length) {
-        handleSelectExplicitSkill(selectableSkills[Math.min(activeSkillPickerIndex, selectableSkills.length - 1)]);
+      if (slashPickerItems.length) {
+        selectSlashPickerItem(slashPickerItems[Math.min(activeSkillPickerIndex, slashPickerItems.length - 1)]);
       } else {
         updateSkillPickerOpen(false, "empty_enter", 0);
       }
@@ -668,7 +787,7 @@ export function AgentInput({
     ? "已有一条排队指令，当前回合结束后发送"
     : isBusy
       ? "Enter 排队到当前回合之后；Esc 停止生成"
-      : "问橘记，或 @ 文件、/ Skill";
+      : "问橘记，或 @ 文件、/ 指令";
   const sendTitle = queuedFollowUp ? "已有一条排队指令" : isBusy ? "排队到当前回合之后发送" : "发送";
   const showStopButton = isBusy;
   /** 规划模式开启、且最后一条回复确实是「执行计划」形状时才出横幅；问候、通用问答与澄清追问不满足形状，不打扰。 */
@@ -683,6 +802,26 @@ export function AgentInput({
     >
       {showPlanReadyBanner ? (
         <PlanReadyBanner onExecutePlan={onExecutePlan} onRefinePlan={() => promptTextareaRef.current?.focus()} />
+      ) : null}
+      {builtinCommandNotice ? (
+        <div className="flex min-w-0 items-start gap-2 px-0.5 pt-0.5" role="status" aria-label="内置指令回执">
+          <div
+            className={cn(
+              "min-w-0 flex-1 whitespace-pre-wrap rounded-control border border-border bg-surface-muted px-2.5 py-1.5 text-xs leading-[1.5] text-ink-muted",
+              builtinCommandNotice.tone === "error" && "border-[rgba(var(--danger-rgb),0.26)] bg-danger-soft text-danger",
+            )}
+          >
+            {builtinCommandNotice.text}
+          </div>
+          <button
+            className="shrink-0 cursor-pointer border-0 bg-transparent px-1 text-xs text-ink-muted hover:text-ink"
+            type="button"
+            onClick={onDismissBuiltinCommandNotice}
+            aria-label="关闭指令回执"
+          >
+            关闭
+          </button>
+        </div>
       ) : null}
       {queuedFollowUp ? (
         <div className="flex min-w-0 items-center gap-2 px-0.5 pt-0.5" role="status" aria-label="输入区的排队指令">
@@ -784,31 +923,55 @@ export function AgentInput({
           <div
             className="absolute right-0 bottom-[calc(100%+8px)] left-0 z-[6] grid max-h-[252px] gap-1 overflow-auto rounded-xl border border-border bg-surface p-1.5 shadow-app"
             role="listbox"
-            aria-label="选择本轮显式 Skill"
+            aria-label="选择内置指令或本轮显式 Skill"
+            ref={skillPickerListRef}
           >
-            {selectableSkills.length ? (
-              selectableSkills.map((skill, index) => (
+            {slashPickerItems.length ? (
+              slashPickerItems.map((item, index) => (
                 <button
                   className={cn(
                     "flex min-w-0 cursor-pointer items-center justify-between gap-2.5 rounded-md border border-transparent bg-transparent p-2 text-left text-ink",
                     index === activeSkillPickerIndex && "bg-surface-muted",
                   )}
-                  key={skill.id}
+                  data-picker-index={index}
+                  key={item.key}
                   type="button"
                   role="option"
                   aria-selected={index === activeSkillPickerIndex}
                   onMouseDown={(event) => event.preventDefault()}
-                  onClick={() => handleSelectExplicitSkill(skill)}
+                  onClick={() => selectSlashPickerItem(item)}
                 >
-                  <span className="grid min-w-0 gap-0.5">
-                    <OverflowTooltipText as="strong" className="min-w-0 truncate" text={skill.displayName} logArea="agent_skill_picker_name" />
-                    <OverflowTooltipText as="small" className="min-w-0 truncate text-xs text-ink-muted" text={skill.name} logArea="agent_skill_picker_id" />
-                  </span>
-                  <em className="shrink-0 text-xs not-italic font-bold text-ink-muted">{skill.source === "built-in" ? "内置" : "自定义"}</em>
+                  {item.kind === "command" ? (
+                    <>
+                      <span className="grid min-w-0 gap-0.5">
+                        <OverflowTooltipText
+                          as="strong"
+                          className="min-w-0 truncate"
+                          text={`/${item.command.name}${item.command.argumentHint ? ` ${item.command.argumentHint}` : ""}`}
+                          logArea="agent_command_picker_name"
+                        />
+                        <OverflowTooltipText
+                          as="small"
+                          className="min-w-0 truncate text-xs text-ink-muted"
+                          text={item.command.description}
+                          logArea="agent_command_picker_description"
+                        />
+                      </span>
+                      <em className="shrink-0 text-xs not-italic font-bold text-ink-muted">指令</em>
+                    </>
+                  ) : (
+                    <>
+                      <span className="grid min-w-0 gap-0.5">
+                        <OverflowTooltipText as="strong" className="min-w-0 truncate" text={item.skill.displayName} logArea="agent_skill_picker_name" />
+                        <OverflowTooltipText as="small" className="min-w-0 truncate text-xs text-ink-muted" text={item.skill.name} logArea="agent_skill_picker_id" />
+                      </span>
+                      <em className="shrink-0 text-xs not-italic font-bold text-ink-muted">{item.skill.source === "built-in" ? "内置" : "自定义"}</em>
+                    </>
+                  )}
                 </button>
               ))
             ) : (
-              <div className="p-2.5 text-center text-xs text-ink-muted">没有匹配的已启用 Skill</div>
+              <div className="p-2.5 text-center text-xs text-ink-muted">没有匹配的指令或 Skill</div>
             )}
           </div>
         )}

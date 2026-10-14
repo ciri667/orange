@@ -392,6 +392,10 @@ export function WorkspaceShell() {
     queuedFollowUp,
     queuedFollowUpInList,
     isCurrentSessionBusy,
+    builtinCommands,
+    builtinCommandNotice,
+    dismissBuiltinCommandNotice,
+    runBuiltinCommand,
     inFlightSessionIds,
     queuedSessionIds,
     handleClearQueuedFollowUp,
@@ -795,6 +799,8 @@ export function WorkspaceShell() {
         prompt={agentPrompt}
         skills={agentSkills}
         selectedSkillIds={explicitSkillIds}
+        builtinCommands={builtinCommands}
+        builtinCommandNotice={builtinCommandNotice}
         mentionedFiles={mentionableFiles}
         selectedMentionedFileIds={mentionedFileIds}
         draftImages={draftImages}
@@ -827,6 +833,8 @@ export function WorkspaceShell() {
         onDraftImagesChange={setDraftImages}
         onNotice={setNotice}
         onSubmitPrompt={() => handleSubmitPrompt("ask")}
+        onRunBuiltinCommand={(command) => void runBuiltinCommand?.(command, "")}
+        onDismissBuiltinCommandNotice={dismissBuiltinCommandNotice}
         onEditUserMessage={(messageId, prompt) => void handleEditUserMessageAndRerun(messageId, prompt)}
         onAbortTurn={() => void handleAbortTurn()}
         onClearQueuedFollowUp={handleClearQueuedFollowUp}

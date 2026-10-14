@@ -10,6 +10,7 @@ import type {
   AgentSession,
   AgentSkill,
   AgentTurnProgressEvent,
+  BuiltinCommandDescriptor,
   KnowledgeBase,
   ModelConfig,
   Note,
@@ -36,6 +37,8 @@ export function AgentPanel({
   prompt,
   skills,
   selectedSkillIds,
+  builtinCommands,
+  builtinCommandNotice,
   mentionedFiles,
   selectedMentionedFileIds,
   draftImages,
@@ -68,6 +71,8 @@ export function AgentPanel({
   onDraftImagesChange,
   onNotice,
   onSubmitPrompt,
+  onRunBuiltinCommand,
+  onDismissBuiltinCommandNotice,
   onEditUserMessage,
   onAbortTurn,
   onClearQueuedFollowUp,
@@ -95,6 +100,10 @@ export function AgentPanel({
   skills: AgentSkill[];
   /** 本轮 slash picker 显式选择的 Skill ID，只作用于下一次用户提交。 */
   selectedSkillIds: string[];
+  /** 后端注册表下发、当前端可用的内置指令，与 Skill 一起进入 `/` 弹窗。 */
+  builtinCommands?: BuiltinCommandDescriptor[];
+  /** 上一条内置指令的结果回执，渲染在输入框上方。 */
+  builtinCommandNotice?: { text: string; tone: "info" | "error" } | null;
   /** 当前会话 scope 内可显式 @ 的公开文件元数据。 */
   mentionedFiles: AgentMentionFile[];
   /** 本轮临时选择的 @ 文件 ID。 */
@@ -137,6 +146,10 @@ export function AgentPanel({
   onDraftImagesChange?: (images: ConversationImageDraft[]) => void;
   onNotice?: (message: string) => void;
   onSubmitPrompt: () => void;
+  /** 在 `/` 弹窗中选中内置指令并回车时调用。 */
+  onRunBuiltinCommand?: (command: BuiltinCommandDescriptor) => void;
+  /** 关闭内置指令回执。 */
+  onDismissBuiltinCommandNotice?: () => void;
   /** 编辑已发送的用户消息并截断其后历史重跑。 */
   onEditUserMessage?: (messageId: string, prompt: string) => void;
   /** 中断当前正在跑的 Agent 回合。 */
@@ -336,6 +349,8 @@ export function AgentPanel({
         prompt={prompt}
         skills={skills}
         selectedSkillIds={selectedSkillIds}
+        builtinCommands={builtinCommands}
+        builtinCommandNotice={builtinCommandNotice}
         mentionedFiles={mentionedFiles}
         selectedMentionedFileIds={selectedMentionedFileIds}
         draftImages={draftImages}
@@ -350,6 +365,8 @@ export function AgentPanel({
         onDraftImagesChange={onDraftImagesChange}
         onNotice={onNotice}
         onSubmitPrompt={onSubmitPrompt}
+        onRunBuiltinCommand={onRunBuiltinCommand}
+        onDismissBuiltinCommandNotice={onDismissBuiltinCommandNotice}
         onAbortTurn={onAbortTurn}
         onClearQueuedFollowUp={onClearQueuedFollowUp}
         onTurnModelSelectionChange={onTurnModelSelectionChange}
