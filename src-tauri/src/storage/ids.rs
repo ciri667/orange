@@ -19,6 +19,15 @@ pub fn create_id(prefix: &str) -> String {
     format!("{prefix}-{}", Uuid::new_v4())
 }
 
+/**
+ * 新建会话的占位标题。
+ *
+ * 这是一个哨兵值而不是普通文案：`agent.rs` 与 `runtime/mod.rs` 会在会话还没有用户消息时，
+ * 用它判断「标题仍可被首条输入替换」。任何新建会话都必须使用该值，
+ * 否则标题永远无法由首条输入补齐，只能一直空着。
+ */
+pub const DEFAULT_SESSION_TITLE: &str = "新会话";
+
 /** 生成本地可读日期时间，用于长期展示的会话和审计记录时间。 */
 pub(crate) fn format_local_datetime() -> String {
     Local::now().format("%Y/%m/%d %H:%M").to_string()

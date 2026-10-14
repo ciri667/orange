@@ -182,7 +182,7 @@ fn apply_first_prompt_title(session: &mut crate::domain::AgentSession, prompt: &
         .iter()
         .any(|message| message.role == "user");
 
-    if !has_user_message && session.title.trim() == "新会话" {
+    if !has_user_message && session.title.trim() == crate::storage::DEFAULT_SESSION_TITLE {
         let next_title = prompt.trim();
 
         if !next_title.is_empty() {
