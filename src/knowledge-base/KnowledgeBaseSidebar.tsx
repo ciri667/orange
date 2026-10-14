@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { AlertCircle, Clock, Database, MessageSquarePlus, PanelLeftClose, Plus, RefreshCw, Search, Settings } from "lucide-react";
+import { AlertCircle, Clock, Database, MessageSquarePlus, Plus, RefreshCw, Search, Settings } from "lucide-react";
 import { SessionList } from "../agent/SessionList";
 import { FileTree } from "./FileTree";
 import { Button } from "../shared/Button";
@@ -66,7 +66,6 @@ export function KnowledgeBaseSidebar({
   sessionPaneRequest = 0,
   activePane,
   onActivePaneChange,
-  onCollapse,
   compactPreview = false,
 }: {
   knowledgeBases: KnowledgeBase[];
@@ -115,11 +114,9 @@ export function KnowledgeBaseSidebar({
   activePane?: SidebarPane;
   /** 侧栏内切换条目时回写布局 hook，保证收起后再悬浮看到的是同一块内容。 */
   onActivePaneChange?: (pane: SidebarPane) => void;
-  /** 侧栏自己的收起入口。 */
-  onCollapse?: () => void;
   /**
-   * 收起态悬浮浮层里的渲染模式：去掉收起按钮、浮层内控件不可交互，
-   * 避免浮层里出现一个能把自己收起来的按钮。
+   * 收起态悬浮浮层里的渲染模式：只调整背景，去掉与浮层重复的圆角和阴影。
+   * 浮层内容是可交互的（和展开态共用同一份状态），所以这里不屏蔽任何控件。
    */
   compactPreview?: boolean;
 }) {
@@ -147,18 +144,10 @@ export function KnowledgeBaseSidebar({
 
   return (
     <aside className={cn("sidebar", compactPreview && "is-preview")} aria-label="知识库导航">
-      <div className="flex shrink-0 items-center gap-2 px-2 py-1">
-        <div className="grid size-7 place-items-center overflow-hidden rounded-md">
-          <img className="block size-full object-contain" src="/orange-logo.svg" alt="" />
-        </div>
-        <strong className="min-w-0 flex-1 truncate text-[15px] font-semibold text-ink-strong">橘记</strong>
-        {onCollapse ? (
-          <Button variant="icon" title="收起知识库栏" aria-label="收起知识库栏" onClick={onCollapse}>
-            <PanelLeftClose size={16} />
-          </Button>
-        ) : null}
-      </div>
-
+      {/*
+        品牌和收起按钮都已在工作台顶栏，这里不再放重复入口：
+        收起/展开只走顶栏那一个按钮，避免同一操作出现两处。
+      */}
       <Button variant="ghost" className="w-full shrink-0 justify-start gap-2 px-2.5 text-[13px]" onClick={onCreateSession}>
         <MessageSquarePlus size={16} />
         新对话

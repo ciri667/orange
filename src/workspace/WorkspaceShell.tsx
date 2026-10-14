@@ -33,6 +33,7 @@ import { getRegion } from "./collapsibleRegions";
 import type { RegionItemId } from "./collapsibleRegions";
 import { RegionPreviewNote } from "./RegionPreviewNote";
 import { RegionRail } from "./RegionRail";
+import { WorkspaceTopBar } from "./WorkspaceTopBar";
 import {
   getCreateDialogAriaLabel,
   getCreateDialogTitle,
@@ -931,6 +932,14 @@ export function WorkspaceShell() {
 
   return (
     <div className="app-shell">
+      {/*
+        顶栏常驻在内容区上方：左栏收起后仍有专门的收展按钮，
+        不必再靠悬浮收起态图标栏、从浮层里点「展开」。
+      */}
+      <WorkspaceTopBar
+        sidebarOpen={regionOpen.sidebar}
+        onToggleSidebar={() => toggleRegion("sidebar")}
+      />
       <main
         className={`workspace-grid${resizingPane ? " is-resizing" : ""}${agentOpen ? " agent-open" : ""}`}
         ref={workspaceRef}
@@ -950,7 +959,6 @@ export function WorkspaceShell() {
           notice={notice}
           activePane={activeItems.sidebar === "files" ? "files" : "sessions"}
           onActivePaneChange={(pane) => setRegionActiveItem("sidebar", pane)}
-          onCollapse={() => toggleRegion("sidebar")}
           onSearchChange={setSearchTerm}
           onSelectKnowledgeBase={(knowledgeBaseId) => {
             setIsSchedulesOpen(false);
