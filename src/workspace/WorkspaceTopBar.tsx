@@ -1,16 +1,13 @@
-import { Fragment, useState } from "react";
-import { PanelLeftClose } from "lucide-react";
+import { useEffect, useState } from "react";
+import { getCurrentWindow } from "@tauri-apps/api/window";
+import { Minus, PanelLeftClose, Square, X } from "lucide-react";
 import { Button } from "../shared/Button";
 import { MenuItem, MenuPanel } from "../shared/Menu";
 import { cn } from "../shared/cn";
 import { useDismissable } from "../shared/useDismissable";
+import { isTauriRuntime } from "../shared/api/runtime";
 
-/**
- * 顶栏一个下拉菜单的声明。
- *
- * 菜单项目前只做占位（`disabled`），等具体操作项定下来后再逐条接真实动作；
- * 这里先固定菜单骨架，避免后续接动作时再调整顶栏结构。
- */
+/** 顶栏一个下拉菜单的声明。 */
 export interface TopBarMenuItem {
   id: string;
   label: string;
@@ -85,7 +82,7 @@ function TopBarMenu({ menu }: { menu: (typeof TOP_BAR_MENUS)[number] }) {
   const containerRef = useDismissable<HTMLDivElement>(open, close);
 
   return (
-    <div ref={containerRef} className="relative inline-flex">
+    <div ref={containerRef} className="relative inline-flex" data-no-drag>
       <button
         type="button"
         className={cn(
@@ -116,33 +113,64 @@ function TopBarMenu({ menu }: { menu: (typeof TOP_BAR_MENUS)[number] }) {
 }
 
 /**
- * 工作台顶栏。
+ * 桌面端平台标识。
  *
- * 收起/展开知识库栏的唯一入口：面板内不再有就地收起按钮，
- * 收起后也只需点这一个图标，不用再悬浮图标栏、从浮层里找「展开」。
+ * 初始为 null 可以避免浏览器环境误显示窗口控制；Tauri 运行时挂载后再按平台切换。
+ */
+type DesktopPlatform = "windows" | "macos" | "other";
+
+/**
+ * 工作台顶栏，同时也是桌面端集成标题栏。
  *
- * 菜单目前是占位骨架（条目禁用），具体操作项后续再逐条接入。
+ * Windows 关闭系统装饰后，这里负责拖拽和窗口控制；macOS 用 Overlay 把系统红绿灯
+ * 叠进同一行，因此不需要自绘窗口控制。
  */
 export function WorkspaceTopBar({ sidebarOpen, onToggleSidebar }: WorkspaceTopBarProps) {
+  const [platform, setPlatform] = useState<DesktopPlatform | null>(null);
+
+  useEffect(() => {
+    if (!isTauriRuntime()) {
+      return;
+    }
+
+    // WebView UA 在 Windows/macOS 上足够稳定；这里只区分标题栏形态，不做能力判断。
+    const userAgent = navigator.userAgent.toLowerCase();
+    setPlatform(userAgent.includes("windows") ? "windows" : userAgent.includes("mac os") ? "macos" : "other");
+  }, []);
+
+  /** 标题栏空白区域拖拽；控件和菜单通过 data-no-drag 排除。 */
+  const handleDragStart = (event: React.PointerEvent<HTMLElement>) => {
+    if (!isTauriRuntime() || event.button !== 0 || (event.target as HTMLElement).closest("[data-no-drag]")) {
+      return;
+    }
+    void getCurrentWindow().startDragging();
+  };
+
   return (
     <header
-      className="flex min-h-11 shrink-0 items-center gap-2 border-b border-border bg-surface px-2"
-      aria-label="工作台顶栏"
+      className={cn(
+        "flex min-h-11 shrink-0 select-none items-center gap-2 border-b border-border bg-surface px-2",
+        platform === "macos" && "pl-[76px]",
+      )}
+      aria-label="工作台标题栏"
+      onPointerDown={handleDragStart}
+      onDoubleClick={() => {
+        if (isTauriRuntime()) {
+          void getCurrentWindow().toggleMaximize();
+        }
+      }}
     >
-      <div className="flex shrink-0 items-center gap-2 pl-1">
+      <div className="flex shrink-0 items-center gap-2 pl-1" data-no-drag>
         <div className="grid size-6 place-items-center overflow-hidden rounded-md">
           <img className="block size-full object-contain" src="/orange-logo.svg" alt="" />
         </div>
         <strong className="text-[14px] font-semibold text-ink-strong">橘记</strong>
       </div>
 
-      {/*
-        收展按钮紧跟品牌之后：窄窗口（≤760px）下样式会把侧栏整体 display:none，
-        这里跟着一起隐藏，避免出现点了没反应的开关。
-      */}
       <Button
         variant="icon"
         className="max-[760px]:hidden"
+        data-no-drag
         title={sidebarOpen ? "收起知识库栏" : "展开知识库栏"}
         aria-label={sidebarOpen ? "收起知识库栏" : "展开知识库栏"}
         aria-pressed={sidebarOpen}
@@ -153,11 +181,38 @@ export function WorkspaceTopBar({ sidebarOpen, onToggleSidebar }: WorkspaceTopBa
 
       <nav className="flex min-w-0 items-center gap-0.5" aria-label="主菜单">
         {TOP_BAR_MENUS.map((menu) => (
-          <Fragment key={menu.id}>
-            <TopBarMenu menu={menu} />
-          </Fragment>
+          <TopBarMenu key={menu.id} menu={menu} />
         ))}
       </nav>
+
+      {platform === "windows" && (
+        <div className="ml-auto flex h-full items-stretch" data-no-drag>
+          <button
+            type="button"
+            className="grid w-11 place-items-center border-0 bg-transparent text-ink-muted hover:bg-surface-hover hover:text-ink"
+            aria-label="最小化"
+            onClick={() => void getCurrentWindow().minimize()}
+          >
+            <Minus size={16} />
+          </button>
+          <button
+            type="button"
+            className="grid w-11 place-items-center border-0 bg-transparent text-ink-muted hover:bg-surface-hover hover:text-ink"
+            aria-label="最大化 / 还原"
+            onClick={() => void getCurrentWindow().toggleMaximize()}
+          >
+            <Square size={14} />
+          </button>
+          <button
+            type="button"
+            className="grid w-11 place-items-center border-0 bg-transparent text-ink-muted hover:bg-danger hover:text-white"
+            aria-label="关闭"
+            onClick={() => void getCurrentWindow().close()}
+          >
+            <X size={16} />
+          </button>
+        </div>
+      )}
     </header>
   );
 }

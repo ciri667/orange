@@ -104,6 +104,13 @@ pub fn run() {
         .setup(|app| {
             app.manage(AppQuitState::new());
 
+            // Windows 没有可叠加的系统控制按钮，关闭原生边框后由前端顶栏负责拖拽与窗口控制；
+            // macOS 继续保留系统装饰，用 Overlay 把红绿灯融进前端顶栏。
+            #[cfg(target_os = "windows")]
+            if let Some(window) = app.get_webview_window("main") {
+                window.set_decorations(false)?;
+            }
+
             let show_item = tauri::menu::MenuItem::with_id(
                 app,
                 TRAY_MENU_SHOW,

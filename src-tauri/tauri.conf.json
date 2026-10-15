@@ -13,6 +13,8 @@
     "windows": [
       {
         "title": "橘记",
+        "titleBarStyle": "Overlay",
+        "hiddenTitle": true,
         "width": 1440,
         "height": 920,
         "minWidth": 1180,
