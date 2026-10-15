@@ -114,6 +114,8 @@ pub struct UserSettings {
     pub agent_security: AgentSecuritySettings,
     #[serde(default)]
     pub web_search: WebSearchSettings,
+    #[serde(default)]
+    pub semantic_search: super::semantic::SemanticSearchSettings,
 }
 
 /** 模型密钥保存状态，只暴露是否可读取，不返回明文密钥。 */

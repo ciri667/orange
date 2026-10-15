@@ -31,6 +31,7 @@ pub fn default_user_settings() -> UserSettings {
         write_confirmation_required: true,
         agent_security: Default::default(),
         web_search: Default::default(),
+        semantic_search: Default::default(),
     }
 }
 

@@ -677,6 +677,7 @@ fn migrate_legacy_user_settings(legacy: LegacyUserSettings, now: &str) -> UserSe
         write_confirmation_required: legacy.write_confirmation_required,
         agent_security: Default::default(),
         web_search: Default::default(),
+        semantic_search: Default::default(),
     }
 }
 
@@ -769,6 +770,7 @@ mod tests {
             write_confirmation_required: true,
             agent_security: Default::default(),
             web_search: Default::default(),
+            semantic_search: Default::default(),
         })
         .unwrap();
 
@@ -793,6 +795,7 @@ mod tests {
             write_confirmation_required: true,
             agent_security: Default::default(),
             web_search: Default::default(),
+            semantic_search: Default::default(),
         };
 
         let serialized = serde_json::to_value(settings).unwrap();
@@ -1332,6 +1335,7 @@ mod tests {
             write_confirmation_required: true,
             agent_security: Default::default(),
             web_search: Default::default(),
+            semantic_search: Default::default(),
         })
         .unwrap();
 
