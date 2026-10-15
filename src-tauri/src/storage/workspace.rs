@@ -99,6 +99,12 @@ pub(crate) fn apply_index_to_transaction(
             .execute("DELETE FROM note_fts", [])
             .map_err(|error| format!("无法清理 FTS 索引：{error}"))?;
         transaction
+            .execute("DELETE FROM note_chunk_fts", [])
+            .map_err(|error| format!("无法清理 chunk FTS 索引：{error}"))?;
+        transaction
+            .execute("DELETE FROM note_chunks", [])
+            .map_err(|error| format!("无法清理 chunk 索引：{error}"))?;
+        transaction
             .execute("DELETE FROM notes", [])
             .map_err(|error| format!("无法清理笔记索引：{error}"))?;
         transaction
@@ -189,6 +195,18 @@ pub(crate) fn remove_note_ids_from_transaction(
             .execute("DELETE FROM note_fts WHERE note_id = ?1", params![note_id])
             .map_err(|error| format!("无法删除 FTS 索引：{error}"))?;
         transaction
+            .execute(
+                "DELETE FROM note_chunk_fts WHERE note_id = ?1",
+                params![note_id],
+            )
+            .map_err(|error| format!("无法删除 chunk FTS 索引：{error}"))?;
+        transaction
+            .execute(
+                "DELETE FROM note_chunks WHERE note_id = ?1",
+                params![note_id],
+            )
+            .map_err(|error| format!("无法删除 chunk 索引：{error}"))?;
+        transaction
             .execute("DELETE FROM notes WHERE id = ?1", params![note_id])
             .map_err(|error| format!("无法删除笔记索引：{error}"))?;
     }
@@ -205,6 +223,18 @@ pub(crate) fn remove_knowledge_base_from_transaction(
             params![knowledge_base_id],
         )
         .map_err(|error| format!("无法删除知识库 FTS 索引：{error}"))?;
+    transaction
+        .execute(
+            "DELETE FROM note_chunk_fts WHERE knowledge_base_id = ?1",
+            params![knowledge_base_id],
+        )
+        .map_err(|error| format!("无法删除知识库 chunk FTS 索引：{error}"))?;
+    transaction
+        .execute(
+            "DELETE FROM note_chunks WHERE knowledge_base_id = ?1",
+            params![knowledge_base_id],
+        )
+        .map_err(|error| format!("无法删除知识库 chunk 索引：{error}"))?;
     transaction
         .execute(
             "DELETE FROM notes WHERE knowledge_base_id = ?1",
@@ -260,6 +290,18 @@ fn upsert_note_index(transaction: &rusqlite::Transaction<'_>, note: &Note) -> Re
         .map_err(|error| format!("无法更新 FTS 索引：{error}"))?;
     transaction
         .execute(
+            "DELETE FROM note_chunk_fts WHERE note_id = ?1",
+            params![&note.id],
+        )
+        .map_err(|error| format!("无法更新 chunk FTS 索引：{error}"))?;
+    transaction
+        .execute(
+            "DELETE FROM note_chunks WHERE note_id = ?1",
+            params![&note.id],
+        )
+        .map_err(|error| format!("无法更新 chunk 索引：{error}"))?;
+    transaction
+        .execute(
             "INSERT OR REPLACE INTO notes (id, knowledge_base_id, title, path, content_hash, updated_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
             params![&note.id, &note.knowledge_base_id, &note.title, &note.path, &note.content_hash, &note.updated_at],
         )
@@ -270,6 +312,45 @@ fn upsert_note_index(transaction: &rusqlite::Transaction<'_>, note: &Note) -> Re
             params![&note.id, &note.knowledge_base_id, &note.title, &note.path, &note.content],
         )
         .map_err(|error| format!("无法写入 FTS 索引：{error}"))?;
+
+    for chunk in crate::storage::chunk_markdown(&note.content, &note.tags) {
+        let chunk_id = format!("{}:{}", note.id, chunk.chunk_index);
+        let heading_tokens = crate::storage::build_fts_tokens(&chunk.heading_path);
+        let body_tokens =
+            crate::storage::build_fts_tokens(&format!("{} {}", note.tags.join(" "), chunk.content));
+
+        transaction
+            .execute(
+                "INSERT OR REPLACE INTO note_chunks (chunk_id, note_id, knowledge_base_id, chunk_index, heading_path, content, line_start, line_end, content_hash) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+                params![
+                    &chunk_id,
+                    &note.id,
+                    &note.knowledge_base_id,
+                    chunk.chunk_index as i64,
+                    &chunk.heading_path,
+                    &chunk.content,
+                    chunk.line_start as i64,
+                    chunk.line_end as i64,
+                    &note.content_hash,
+                ],
+            )
+            .map_err(|error| format!("无法写入 chunk 索引：{error}"))?;
+        transaction
+            .execute(
+                "INSERT INTO note_chunk_fts (chunk_id, note_id, knowledge_base_id, title_tokens, path_tokens, heading_tokens, body_tokens) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                params![
+                    &chunk_id,
+                    &note.id,
+                    &note.knowledge_base_id,
+                    crate::storage::build_fts_tokens(&note.title),
+                    crate::storage::build_fts_tokens(&note.path),
+                    heading_tokens,
+                    body_tokens,
+                ],
+            )
+            .map_err(|error| format!("无法写入 chunk FTS 索引：{error}"))?;
+    }
+
     Ok(())
 }
 
@@ -548,12 +629,30 @@ pub fn search_notes(
         return Ok(Vec::new());
     }
 
-    let mut citations = search_note_fts(app, snapshot, &selected_ids, prompt)?;
-    let fallback_citations = search_snapshot_notes(snapshot, &selected_ids, prompt);
+    let query_tokens = crate::storage::tokenize_text(prompt);
+    let mut citations = Vec::new();
+
+    if !query_tokens.is_empty() {
+        citations = search_note_chunk_fts(app, snapshot, &selected_ids, &query_tokens, None)?;
+
+        // 长句 OR 查询失败时，用最高权重的前三个 token 做一次更短查询。
+        if citations.is_empty() {
+            citations =
+                search_note_chunk_fts(app, snapshot, &selected_ids, &query_tokens, Some(3))?;
+        }
+    }
+
     let mut seen_note_ids: HashSet<String> = citations
         .iter()
         .map(|citation| citation.note_id.clone())
         .collect();
+
+    // 快照兜底只在 FTS 两轮都失败后启用，避免低质量子串结果挤掉索引命中。
+    let fallback_citations = if citations.is_empty() {
+        search_snapshot_notes(snapshot, &selected_ids, prompt)
+    } else {
+        Vec::new()
+    };
 
     // FTS5 对中文长句可能命中较少，补充快照子串检索保证首版中文体验可用。
     for citation in fallback_citations {
@@ -572,51 +671,83 @@ pub fn search_notes(
     Ok(citations)
 }
 
-/** 执行 FTS5 查询，并把索引结果转换成 Agent 可展示的引用来源。 */
-pub(crate) fn search_note_fts(
+/** 执行 chunk FTS 查询，每个笔记只保留排名最高的 chunk。 */
+pub(crate) fn search_note_chunk_fts(
     app: &AppHandle,
     snapshot: &WorkspaceSnapshot,
     selected_ids: &HashSet<&str>,
-    prompt: &str,
+    query_tokens: &[String],
+    token_limit: Option<usize>,
 ) -> Result<Vec<crate::domain::Citation>, String> {
-    let fts_terms = build_fts_terms(prompt);
-
-    if fts_terms.is_empty() {
+    if query_tokens.is_empty() {
         return Ok(Vec::new());
     }
 
+    let bounded_tokens: Vec<String> = match token_limit {
+        Some(limit) => query_tokens.iter().take(limit).cloned().collect(),
+        None => query_tokens.to_vec(),
+    };
     let connection = open_database(app)?;
-    let fts_query = fts_terms
+    let fts_query = bounded_tokens
         .iter()
         .map(|term| format!("\"{}\"", term.replace('"', "\"\"")))
         .collect::<Vec<_>>()
         .join(" OR ");
+    let knowledge_base_placeholders = selected_ids
+        .iter()
+        .map(|_| "?")
+        .collect::<Vec<_>>()
+        .join(", ");
+    let sql = format!(
+        "SELECT
+               c.chunk_id, c.note_id, c.knowledge_base_id, n.title, n.path,
+               c.heading_path, c.content, c.line_start, c.line_end,
+               bm25(note_chunk_fts, 8.0, 4.0, 6.0, 1.0)
+             FROM note_chunk_fts
+             JOIN note_chunks c ON c.chunk_id = note_chunk_fts.chunk_id
+             JOIN notes n ON n.id = c.note_id
+             WHERE note_chunk_fts MATCH ?1
+               AND note_chunk_fts.knowledge_base_id IN ({knowledge_base_placeholders})
+             ORDER BY bm25(note_chunk_fts, 8.0, 4.0, 6.0, 1.0)
+             LIMIT 128"
+    );
+    let mut bind_values: Vec<&str> = vec![fts_query.as_str()];
+    bind_values.extend(selected_ids.iter().copied());
     let mut statement = connection
-        .prepare(
-            "SELECT note_id, knowledge_base_id, title, path, snippet(note_fts, 4, '', '', '...', 32), bm25(note_fts)
-             FROM note_fts
-             WHERE note_fts MATCH ?1
-             ORDER BY bm25(note_fts)
-             LIMIT 16",
-        )
+        .prepare(&sql)
         .map_err(|error| format!("无法准备 FTS 检索：{error}"))?;
     let rows = statement
-        .query_map(params![fts_query], |row| {
+        .query_map(rusqlite::params_from_iter(bind_values), |row| {
             Ok((
                 row.get::<_, String>(0)?,
                 row.get::<_, String>(1)?,
                 row.get::<_, String>(2)?,
                 row.get::<_, String>(3)?,
                 row.get::<_, String>(4)?,
-                row.get::<_, f64>(5)?,
+                row.get::<_, String>(5)?,
+                row.get::<_, String>(6)?,
+                row.get::<_, i64>(7)?,
+                row.get::<_, i64>(8)?,
+                row.get::<_, f64>(9)?,
             ))
         })
         .map_err(|error| format!("无法执行 FTS 检索：{error}"))?;
     let mut citations = Vec::new();
+    let mut seen_note_ids: HashSet<String> = HashSet::new();
 
     for row in rows {
-        let (note_id, knowledge_base_id, title, path, snippet, rank) =
-            row.map_err(|error| format!("无法读取 FTS 命中结果：{error}"))?;
+        let (
+            _chunk_id,
+            note_id,
+            knowledge_base_id,
+            title,
+            path,
+            heading_path,
+            chunk_content,
+            line_start,
+            line_end,
+            rank,
+        ) = row.map_err(|error| format!("无法读取 FTS 命中结果：{error}"))?;
 
         // 会话 scope 是工具权限边界，FTS 命中后仍要按本轮允许知识库过滤。
         if !selected_ids.contains(knowledge_base_id.as_str()) {
@@ -631,15 +762,24 @@ pub(crate) fn search_note_fts(
             .iter()
             .find(|item| item.id == knowledge_base_id)
         {
+            // FTS 按相关度返回；同一笔记的后续 chunk 分数更低，直接去重避免长笔记霸榜。
+            if !seen_note_ids.insert(note_id.clone()) {
+                continue;
+            }
+
             citations.push(crate::domain::Citation {
                 knowledge_base_id,
                 knowledge_base_name: knowledge_base.name.clone(),
                 note_id,
                 title,
                 path,
-                snippet,
+                snippet: extract_chunk_snippet(&chunk_content, &bounded_tokens),
                 score: 1.0 / (1.0 + rank.abs()),
-                location: None,
+                location: Some(format_citation_location(
+                    &heading_path,
+                    line_start,
+                    line_end,
+                )),
                 kind: None,
                 url: None,
                 published_at: None,
@@ -650,19 +790,51 @@ pub(crate) fn search_note_fts(
     Ok(citations)
 }
 
-/** 将用户输入拆成 FTS5 查询词，避免把标点和空白带进 MATCH 语法。 */
-pub(crate) fn build_fts_terms(prompt: &str) -> Vec<String> {
-    prompt
-        .split(|character: char| {
-            character.is_whitespace()
-                || character.is_ascii_punctuation()
-                || "，。！？；：、（）《》「」".contains(character)
-        })
-        .map(str::trim)
-        .filter(|term| term.chars().count() > 1)
-        .take(8)
-        .map(str::to_owned)
-        .collect()
+/** 把 chunk 定位转成用户可读引用位置。 */
+fn format_citation_location(heading_path: &str, line_start: i64, line_end: i64) -> String {
+    let display_heading = if heading_path.is_empty() {
+        "开头"
+    } else {
+        heading_path
+    };
+    format!("{display_heading} · L{line_start}-L{line_end}")
+}
+
+/** 从 chunk 原文提取命中词附近片段，保证引用不是 FTS token 拼接结果。 */
+pub(crate) fn extract_chunk_snippet(content: &str, terms: &[String]) -> String {
+    if content.trim().is_empty() {
+        return "命中笔记元数据，暂无可展示片段。".to_owned();
+    }
+
+    let lower_content = content.to_lowercase();
+    let hit_byte = terms
+        .iter()
+        .filter_map(|term| lower_content.find(term.as_str()))
+        .min();
+    let Some(hit_byte) = hit_byte else {
+        return content
+            .lines()
+            .map(str::trim)
+            .find(|line| !line.is_empty())
+            .unwrap_or("命中该笔记，但暂无可展示片段。")
+            .chars()
+            .take(240)
+            .collect();
+    };
+
+    let hit_char = lower_content[..hit_byte].chars().count();
+    let start_char = hit_char.saturating_sub(40);
+    let chars: Vec<char> = content.chars().collect();
+    let end_char = (start_char + 240).min(chars.len());
+    let mut snippet = String::new();
+    if start_char > 0 {
+        snippet.push('…');
+    }
+    snippet.extend(chars[start_char..end_char].iter());
+    if end_char < chars.len() {
+        snippet.push('…');
+    }
+    snippet
 }
 
 /** 快照级子串检索，作为 FTS5 无命中或中文分词不足时的本地降级方案。 */
@@ -671,24 +843,31 @@ pub(crate) fn search_snapshot_notes(
     selected_ids: &HashSet<&str>,
     prompt: &str,
 ) -> Vec<crate::domain::Citation> {
-    let prompt_terms: Vec<String> = prompt
-        .split_whitespace()
-        .map(str::trim)
-        .filter(|term| !term.is_empty())
-        .map(str::to_lowercase)
-        .collect();
-    let mut citations: Vec<crate::domain::Citation> = snapshot
+    let prompt_terms = crate::storage::tokenize_text(prompt);
+    let mut citations: Vec<crate::domain::Citation> = Vec::new();
+    for note in snapshot
         .notes
         .iter()
         .filter(|note| selected_ids.contains(note.knowledge_base_id.as_str()))
         .filter(|note| !crate::storage::is_root_project_instruction_path(&note.path))
-        .filter_map(|note| {
+    {
+        let knowledge_base = match snapshot
+            .knowledge_bases
+            .iter()
+            .find(|item| item.id == note.knowledge_base_id)
+        {
+            Some(knowledge_base) => knowledge_base,
+            None => continue,
+        };
+
+        for chunk in crate::storage::chunk_markdown(&note.content, &note.tags) {
             let searchable_text = format!(
-                "{} {} {} {}",
+                "{} {} {} {} {}",
                 note.title,
                 note.path,
                 note.tags.join(" "),
-                note.content
+                chunk.heading_path,
+                chunk.content
             )
             .to_lowercase();
             let term_score = prompt_terms
@@ -702,55 +881,34 @@ pub(crate) fn search_snapshot_notes(
             let score = term_score * 2.0 + fallback_score;
 
             if score <= 0.0 {
-                return None;
+                continue;
             }
 
-            let knowledge_base = snapshot
-                .knowledge_bases
-                .iter()
-                .find(|item| item.id == note.knowledge_base_id)?;
-
-            Some(crate::domain::Citation {
+            citations.push(crate::domain::Citation {
                 knowledge_base_id: note.knowledge_base_id.clone(),
                 knowledge_base_name: knowledge_base.name.clone(),
                 note_id: note.id.clone(),
                 title: note.title.clone(),
                 path: note.path.clone(),
-                snippet: extract_snippet(&note.content, prompt),
+                snippet: extract_chunk_snippet(&chunk.content, &prompt_terms),
                 score,
-                location: None,
+                location: Some(format_citation_location(
+                    &chunk.heading_path,
+                    chunk.line_start as i64,
+                    chunk.line_end as i64,
+                )),
                 kind: None,
                 url: None,
                 published_at: None,
-            })
-        })
-        .collect();
+            });
+        }
+    }
 
     citations.sort_by(|left, right| right.score.total_cmp(&left.score));
+    let mut seen_note_ids: HashSet<String> = HashSet::new();
+    citations.retain(|citation| seen_note_ids.insert(citation.note_id.clone()));
     citations.truncate(4);
     citations
-}
-
-/** 从 Markdown 内容中提取引用片段。 */
-pub(crate) fn extract_snippet(content: &str, prompt: &str) -> String {
-    let prompt_terms: Vec<&str> = prompt
-        .split_whitespace()
-        .filter(|term| !term.is_empty())
-        .collect();
-
-    content
-        .lines()
-        .map(str::trim)
-        .filter(|line| !line.is_empty() && !line.starts_with('#'))
-        .find(|line| prompt_terms.iter().any(|term| line.contains(term)))
-        .or_else(|| {
-            content
-                .lines()
-                .map(str::trim)
-                .find(|line| !line.is_empty() && !line.starts_with('#'))
-        })
-        .unwrap_or("命中该笔记，但暂无可展示片段。")
-        .to_owned()
 }
 
 #[cfg(test)]
@@ -918,5 +1076,123 @@ mod tests {
             .unwrap();
         transaction.commit().unwrap();
         assert_eq!(note_ids(&connection), vec!["note-a2", "note-b"]);
+    }
+
+    /** chunk 索引必须和 notes/note_fts 同步维护，中文无空格词能直接命中对应章节。 */
+    #[test]
+    fn chunk_index_roundtrip_matches_chinese_heading_content() {
+        let dir = tempdir().unwrap();
+        let database_path = dir.path().join("chunk-roundtrip.sqlite3");
+        let mut connection = Connection::open(&database_path).unwrap();
+        ensure_database_schema(&connection, &database_path).unwrap();
+
+        let content = "# 技术方案\n\n## 数据同步\n\n本地写入必须先做冲突处理。\n";
+        let snapshot = test_snapshot(vec![test_note("note-a", content)]);
+        let transaction = connection.transaction().unwrap();
+        apply_index_to_transaction(&transaction, &snapshot, IndexMode::ReplaceAll).unwrap();
+        transaction.commit().unwrap();
+
+        let chunk_count: i64 = connection
+            .query_row("SELECT count(*) FROM note_chunks", [], |row| row.get(0))
+            .unwrap();
+        let fts_count: i64 = connection
+            .query_row("SELECT count(*) FROM note_chunk_fts", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(chunk_count, 2);
+        assert_eq!(fts_count, 2);
+
+        let heading: String = connection
+            .query_row(
+                "SELECT c.heading_path
+                 FROM note_chunk_fts f
+                 JOIN note_chunks c ON c.chunk_id = f.chunk_id
+                 WHERE note_chunk_fts MATCH '\"冲突\"'
+                 LIMIT 1",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(heading, "技术方案 / 数据同步");
+    }
+
+    /** chunk upsert 必须覆盖旧章节，不能让同一笔记留下重复索引。 */
+    #[test]
+    fn upsert_note_index_replaces_old_chunks() {
+        let dir = tempdir().unwrap();
+        let database_path = dir.path().join("chunk-upsert.sqlite3");
+        let mut connection = Connection::open(&database_path).unwrap();
+        ensure_database_schema(&connection, &database_path).unwrap();
+
+        let first = test_note("note-a", "# 旧标题\n\n旧内容\n");
+        let transaction = connection.transaction().unwrap();
+        apply_index_to_transaction(&transaction, &test_snapshot(vec![first]), IndexMode::Upsert)
+            .unwrap();
+        transaction.commit().unwrap();
+
+        let next = test_note("note-a", "# 新标题\n\n新内容\n");
+        let transaction = connection.transaction().unwrap();
+        apply_index_to_transaction(&transaction, &test_snapshot(vec![next]), IndexMode::Upsert)
+            .unwrap();
+        transaction.commit().unwrap();
+
+        let old_hits: i64 = connection
+            .query_row(
+                "SELECT count(*) FROM note_chunk_fts WHERE body_tokens MATCH '\"旧\"'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let new_hits: i64 = connection
+            .query_row(
+                "SELECT count(*) FROM note_chunk_fts WHERE body_tokens MATCH '\"新\"'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(old_hits, 0);
+        assert_eq!(new_hits, 1);
+    }
+
+    /** FTS miss 时快照兜底仍应返回 chunk 定位，而不是退回整篇笔记。 */
+    #[test]
+    fn snapshot_fallback_returns_chunk_location() {
+        let snapshot = test_snapshot(vec![test_note(
+            "note-a",
+            "# 研究方法\n\n用户访谈覆盖了本地检索体验。\n",
+        )]);
+        let selected_ids: std::collections::HashSet<&str> = ["kb-a"].into_iter().collect();
+
+        let citations = super::search_snapshot_notes(&snapshot, &selected_ids, "访谈 检索");
+
+        assert_eq!(citations.len(), 1);
+        assert_eq!(citations[0].location.as_deref(), Some("研究方法 · L1-L3"));
+        assert!(citations[0].snippet.contains("用户访谈"));
+    }
+
+    /** 删除单篇笔记时，chunk 和 chunk FTS 必须一起清理。 */
+    #[test]
+    fn remove_note_ids_cleans_chunk_index() {
+        let dir = tempdir().unwrap();
+        let database_path = dir.path().join("chunk-remove.sqlite3");
+        let mut connection = Connection::open(&database_path).unwrap();
+        ensure_database_schema(&connection, &database_path).unwrap();
+
+        let snapshot = test_snapshot(vec![test_note("note-a", "# 标题\n\n内容\n")]);
+        let transaction = connection.transaction().unwrap();
+        apply_index_to_transaction(&transaction, &snapshot, IndexMode::ReplaceAll).unwrap();
+        transaction.commit().unwrap();
+
+        let transaction = connection.transaction().unwrap();
+        super::remove_note_ids_from_transaction(&transaction, &["note-a".to_owned()]).unwrap();
+        transaction.commit().unwrap();
+
+        let chunk_count: i64 = connection
+            .query_row("SELECT count(*) FROM note_chunks", [], |row| row.get(0))
+            .unwrap();
+        let fts_count: i64 = connection
+            .query_row("SELECT count(*) FROM note_chunk_fts", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(chunk_count, 0);
+        assert_eq!(fts_count, 0);
     }
 }
