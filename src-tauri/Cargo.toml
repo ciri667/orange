@@ -30,6 +30,7 @@ base64 = "0.22"
 cbc = { version = "0.1", features = ["alloc"] }
 chrono = { version = "0.4", features = ["serde"] }
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "webp"] }
+jieba-rs = "0.11"
 genpdf = "0.2"
 keyring = { version = "3", features = ["apple-native", "windows-native", "linux-native-sync-persistent"] }
 # 与 rmcp 3.5.1 对齐到 reqwest 0.13，避免依赖图中出现两个 reqwest 大版本导致类型不匹配。

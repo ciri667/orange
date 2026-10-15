@@ -94,6 +94,35 @@ pub(crate) fn ensure_database_schema(
               body
             );
 
+            CREATE TABLE IF NOT EXISTS note_chunks (
+              chunk_id TEXT PRIMARY KEY,
+              note_id TEXT NOT NULL,
+              knowledge_base_id TEXT NOT NULL,
+              chunk_index INTEGER NOT NULL,
+              heading_path TEXT NOT NULL,
+              content TEXT NOT NULL,
+              line_start INTEGER NOT NULL,
+              line_end INTEGER NOT NULL,
+              content_hash TEXT NOT NULL,
+              UNIQUE(note_id, chunk_index)
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_note_chunks_note
+              ON note_chunks(note_id, chunk_index);
+
+            CREATE INDEX IF NOT EXISTS idx_note_chunks_kb
+              ON note_chunks(knowledge_base_id);
+
+            CREATE VIRTUAL TABLE IF NOT EXISTS note_chunk_fts USING fts5(
+              chunk_id UNINDEXED,
+              note_id UNINDEXED,
+              knowledge_base_id UNINDEXED,
+              title_tokens,
+              path_tokens,
+              heading_tokens,
+              body_tokens
+            );
+
             CREATE TABLE IF NOT EXISTS agent_sessions (
               id TEXT PRIMARY KEY,
               type TEXT NOT NULL,
