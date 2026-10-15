@@ -1,3 +1,4 @@
+import { defaultSemanticSearchSettings } from "./semantic";
 import { createContentHash, createLocalId, formatLocalDateTime } from "../id";
 import { logDebug, logInfo } from "../logger";
 import type {
@@ -79,6 +80,7 @@ export const defaultBrowserUserSettings: UserSettings = {
     trustedSkillGrants: [],
     allowedNetworkDomains: [],
   },
+  semanticSearch: { ...defaultSemanticSearchSettings },
   webSearch: {
     enabled: false,
     provider: "tavily",
@@ -746,6 +748,7 @@ export function cloneUserSettings(settings: UserSettings): UserSettings {
       allowedNetworkDomains: [...settings.agentSecurity.allowedNetworkDomains],
     },
     webSearch: { ...settings.webSearch },
+    semanticSearch: { ...defaultSemanticSearchSettings, ...settings.semanticSearch },
     modelConfig: {
       ...settings.modelConfig,
       providers: settings.modelConfig.providers.map((provider) => ({

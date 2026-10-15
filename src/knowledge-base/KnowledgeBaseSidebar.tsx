@@ -311,7 +311,7 @@ function getKnowledgeBaseStatusLabel(knowledgeBase: KnowledgeBase) {
     return "扫描中";
   }
 
-  return knowledgeBase.semanticIndexEnabled ? "语义索引" : "FTS 索引";
+  return "本地块级索引";
 }
 
 /** 展示最近一次扫描结果，覆盖空目录、坏文件和跳过目录反馈。 */

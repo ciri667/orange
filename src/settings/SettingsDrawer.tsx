@@ -1,3 +1,4 @@
+import { SemanticSearchSettingsSection } from "./sections/SemanticSearchSettingsSection";
 import {
   BookOpen,
   Brain,
@@ -68,7 +69,7 @@ import {
 } from "./SettingsSections";
 
 /** 设置页左侧导航的可选分区，和右侧主内容一一对应。 */
-type SettingsSectionId = "knowledge" | "model" | "voice" | "webSearch" | "agentSecurity" | "im" | "skills" | "mcp" | "agentMemory" | "eventLogs" | "auditLogs";
+type SettingsSectionId = "semanticSearch" | "knowledge" | "model" | "voice" | "webSearch" | "agentSecurity" | "im" | "skills" | "mcp" | "agentMemory" | "eventLogs" | "auditLogs";
 
 /** 设置页导航分组，帮助用户区分可配置项和只读诊断项。 */
 type SettingsSectionGroup = "配置" | "诊断";
@@ -267,6 +268,7 @@ export function SettingsDrawer({
         icon: Mic,
         tone: "neutral",
       },
+      { id: "semanticSearch", group: "配置", label: "语义检索", description: "本地或云端 embedding 与混合检索", meta: settingsDraft.semanticSearch.enabled ? "已开启" : "已关闭", icon: Brain, tone: settingsDraft.semanticSearch.enabled ? "success" : "neutral" },
       {
         id: "webSearch",
         group: "配置",
@@ -356,6 +358,7 @@ export function SettingsDrawer({
       knowledgeBases,
       settingsDraft.modelConfig.enabled,
       settingsDraft.webSearch.enabled,
+      settingsDraft.semanticSearch.enabled,
       settingsDraft.agentSecurity.defaultLevel,
       skills.length,
     ],
@@ -1108,6 +1111,7 @@ export function SettingsDrawer({
     if (activeSection === "knowledge") {
       return (
         <KnowledgeSettingsSection
+          semanticSettings={settings.semanticSearch}
           knowledgeBases={knowledgeBases}
           notes={notes}
           activeKnowledgeBaseId={activeKnowledgeBaseId}
@@ -1178,6 +1182,10 @@ export function SettingsDrawer({
 
     if (activeSection === "mcp") {
       return <McpSettingsSection isBusy={isBusy} />;
+    }
+
+    if (activeSection === "semanticSearch") {
+      return <SemanticSearchSettingsSection knowledgeBases={knowledgeBases} settingsDraft={settingsDraft} isBusy={isBusy} onSettingsChange={setSettingsDraft} onSaved={async (saved) => { setSettingsDraft(saved); await onSaveSettings(saved); }} />;
     }
 
     if (activeSection === "webSearch") {

@@ -1,3 +1,5 @@
+import { useSemanticIndexActions } from "../../workspace/useSemanticIndexActions";
+import { KnowledgeSemanticIndexControl, SEMANTIC_STATUS_LABEL } from "./KnowledgeSemanticIndexControl";
 import { FilePenLine, Plus, RotateCw, Trash2 } from "lucide-react";
 import { Button } from "../../shared/Button";
 import { cn } from "../../shared/cn";
@@ -5,10 +7,11 @@ import { OverflowTooltipText } from "../../shared/OverflowTooltipText";
 import { findProjectInstructionNote } from "../../shared/projectInstructions";
 import { settingsCardClassName, settingsSectionClassName } from "../../shared/ui";
 import { SettingsSectionHeader } from "../SettingsChrome";
-import type { KnowledgeBase, Note } from "../../shared/types";
+import type { KnowledgeBase, Note, SemanticSearchSettings } from "../../shared/types";
 
 /** 知识库设置分区，管理目录授权、激活和重新扫描。 */
 export function KnowledgeSettingsSection({
+  semanticSettings,
   knowledgeBases,
   notes,
   activeKnowledgeBaseId,
@@ -19,6 +22,7 @@ export function KnowledgeSettingsSection({
   onRemoveKnowledgeBase,
   onCreateOrOpenProjectInstruction,
 }: {
+  semanticSettings: SemanticSearchSettings;
   knowledgeBases: KnowledgeBase[];
   notes: Note[];
   activeKnowledgeBaseId: string;
@@ -29,6 +33,7 @@ export function KnowledgeSettingsSection({
   onRemoveKnowledgeBase: (knowledgeBaseId: string) => void;
   onCreateOrOpenProjectInstruction: (knowledgeBaseId: string) => void;
 }) {
+  const semantic = useSemanticIndexActions(knowledgeBases);
   return (
     <section className={settingsSectionClassName} aria-labelledby="knowledge-settings-title">
       <SettingsSectionHeader
@@ -43,6 +48,7 @@ export function KnowledgeSettingsSection({
           </Button>
         }
       />
+      {semantic.error && <p role="alert" className="text-sm text-danger">{semantic.error}</p>}
       <div className="grid gap-2.5">
         {knowledgeBases.length ? (
           knowledgeBases.map((knowledgeBase) => (
@@ -51,7 +57,7 @@ export function KnowledgeSettingsSection({
                 <div className="flex flex-wrap items-center gap-1.5">
                   <OverflowTooltipText as="strong" text={knowledgeBase.name} logArea="settings_kb_name" />
                   <span className="rounded-full border border-border bg-surface px-2 py-1 text-xs text-ink-muted">
-                    {knowledgeBase.status === "error" ? "目录失效" : knowledgeBase.semanticIndexEnabled ? "本地向量" : "FTS5"}
+                    {knowledgeBase.status === "error" ? "目录失效" : SEMANTIC_STATUS_LABEL[semantic.statuses.find((s) => s.knowledgeBaseId === knowledgeBase.id)?.status ?? "disabled"]}
                   </span>
                   {knowledgeBase.id === activeKnowledgeBaseId && (
                     <span className="rounded-full border border-border bg-surface px-2 py-1 text-xs text-ink-muted">当前激活</span>
@@ -61,6 +67,7 @@ export function KnowledgeSettingsSection({
                 <OverflowTooltipText as="code" className="mt-2 block min-w-0 [overflow-wrap:anywhere] text-ink-muted [word-break:break-word]" text={knowledgeBase.path} logArea="settings_kb_path" />
                 <ProjectInstructionStatus knowledgeBaseId={knowledgeBase.id} notes={notes} />
                 <ScanReportDetails knowledgeBase={knowledgeBase} />
+                <KnowledgeSemanticIndexControl id={knowledgeBase.id} name={knowledgeBase.name} config={semanticSettings} status={semantic.statuses.find((s) => s.knowledgeBaseId === knowledgeBase.id)} busy={isBusy || semantic.busyId !== ""} act={semantic.act} />
               </div>
               <div className="flex flex-wrap items-center gap-2">
                 <Button variant="ghost" size="compact" onClick={() => onSelectKnowledgeBase(knowledgeBase.id)} disabled={isBusy}>

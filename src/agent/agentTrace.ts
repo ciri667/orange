@@ -264,6 +264,8 @@ const TRACE_FIELD_LABELS: Record<string, string> = {
   fileType: "类型",
   query: "检索",
   mode: "检索方式",
+  indexCoverage: "索引覆盖率",
+  fallbackReason: "降级原因",
   operation: "操作",
   type: "动作",
   status: "状态",
@@ -378,6 +380,8 @@ const META_FIELD_ORDER = [
   "title",
   "query",
   "mode",
+  "indexCoverage",
+  "fallbackReason",
   "targetPath",
   "path",
   "fileName",
@@ -793,9 +797,10 @@ function formatTraceFieldValue(key: string, value: unknown): { text: string; tru
     text = ({ pending: "待确认", completed: "已完成", failed: "失败", running: "进行中" } as Record<string, string>)[text] ?? text;
   }
 
-  if (key === "mode" && text === "chunk") {
-    text = "块级";
+  if (key === "mode") {
+    text = ({ chunk: "块级", keyword: "关键词", hybrid: "混合", keyword_fallback: "关键词降级" } as Record<string,string>)[text] ?? text;
   }
+  if (key === "indexCoverage" && Number.isFinite(Number(text))) text = `${Math.round(Number(text) * 100)}%`;
 
   return { text, truncated: stripped.truncated };
 }

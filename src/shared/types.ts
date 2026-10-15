@@ -762,7 +762,34 @@ export interface UserSettings {
   writeConfirmationRequired: boolean;
   agentSecurity: AgentSecuritySettings;
   webSearch: WebSearchSettings;
+  semanticSearch: SemanticSearchSettings;
 }
+
+/** Embedding 独立设置；密钥由系统 keyring 保存。 */
+export interface SemanticSearchSettings {
+  enabled: boolean;
+  provider: "ollama" | "lm-studio" | "openai-compatible";
+  apiBase: string;
+  model: string;
+  requiresApiKey: boolean;
+  minSimilarity: number;
+  cloudConsentFingerprint?: string | null;
+}
+
+export interface SemanticIndexStatus {
+  knowledgeBaseId: string;
+  enabled: boolean;
+  paused: boolean;
+  status: "disabled" | "pending" | "indexing" | "ready" | "paused" | "partial_failure" | "error" | "stale";
+  indexedChunks: number;
+  pendingChunks: number;
+  failedChunks: number;
+  totalChunks: number;
+  dimensions?: number | null;
+  message: string;
+}
+
+export type SemanticIndexAction = "enable" | "disable" | "pause" | "resume" | "rebuild";
 
 /** 当前内置 IM provider；新增 provider 时继续使用稳定小写 ID。 */
 export type ImProviderId = "feishu" | "qq" | "weixin" | "wecom";
