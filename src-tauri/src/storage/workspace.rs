@@ -131,6 +131,7 @@ pub fn upsert_notes_index(app: &AppHandle, notes: &[Note]) -> Result<(), String>
     for note in notes {
         upsert_note_index(&transaction, note)?;
     }
+    cleanup_semantic(&transaction)?;
     transaction
         .commit()
         .map_err(|error| format!("无法提交索引事务：{error}"))?;
@@ -168,6 +169,7 @@ fn index_snapshot_with_mode(
 
     if should_rebuild_index {
         apply_index_to_transaction(&transaction, snapshot, mode)?;
+        cleanup_semantic(&transaction)?;
     }
 
     transaction
@@ -216,9 +218,14 @@ pub(crate) fn apply_index_to_transaction(
     }
 
     for knowledge_base in &snapshot.knowledge_bases {
+        ensure_semantic_knowledge_base(
+            transaction,
+            &knowledge_base.id,
+            knowledge_base.semantic_index_enabled,
+        )?;
         transaction
             .execute(
-                "INSERT OR REPLACE INTO knowledge_bases (id, name, path, semantic_index_enabled, updated_at) VALUES (?1, ?2, ?3, ?4, ?5)",
+                "INSERT OR REPLACE INTO knowledge_bases (id, name, path, semantic_index_enabled, updated_at) VALUES (?1, ?2, ?3, COALESCE((SELECT enabled FROM semantic_index_state WHERE knowledge_base_id=?1),?4), ?5)",
                 params![
                     &knowledge_base.id,
                     &knowledge_base.name,
@@ -248,6 +255,7 @@ pub fn remove_note_ids_from_index(app: &AppHandle, note_ids: &[String]) -> Resul
         .transaction_with_behavior(TransactionBehavior::Immediate)
         .map_err(|error| format!("无法启动索引事务：{error}"))?;
     remove_note_ids_from_transaction(&transaction, note_ids)?;
+    cleanup_semantic(&transaction)?;
     transaction
         .commit()
         .map_err(|error| format!("无法提交索引事务：{error}"))?;
@@ -266,6 +274,7 @@ pub fn reindex_knowledge_base_notes(
         .transaction_with_behavior(TransactionBehavior::Immediate)
         .map_err(|error| format!("无法启动索引事务：{error}"))?;
     reindex_knowledge_base_notes_in_transaction(&transaction, snapshot, knowledge_base_id)?;
+    cleanup_semantic(&transaction)?;
     transaction
         .commit()
         .map_err(|error| format!("无法提交索引事务：{error}"))?;
@@ -283,6 +292,7 @@ pub fn remove_knowledge_base_from_index(
         .transaction_with_behavior(TransactionBehavior::Immediate)
         .map_err(|error| format!("无法启动索引事务：{error}"))?;
     remove_knowledge_base_from_transaction(&transaction, knowledge_base_id)?;
+    cleanup_semantic(&transaction)?;
     transaction
         .commit()
         .map_err(|error| format!("无法提交索引事务：{error}"))?;
@@ -375,7 +385,7 @@ pub(crate) fn reindex_knowledge_base_notes_in_transaction(
     {
         transaction
             .execute(
-                "INSERT OR REPLACE INTO knowledge_bases (id, name, path, semantic_index_enabled, updated_at) VALUES (?1, ?2, ?3, ?4, ?5)",
+                "INSERT OR REPLACE INTO knowledge_bases (id, name, path, semantic_index_enabled, updated_at) VALUES (?1, ?2, ?3, COALESCE((SELECT enabled FROM semantic_index_state WHERE knowledge_base_id=?1),?4), ?5)",
                 params![
                     &knowledge_base.id,
                     &knowledge_base.name,
@@ -397,6 +407,42 @@ pub(crate) fn reindex_knowledge_base_notes_in_transaction(
 }
 
 fn upsert_note_index(transaction: &rusqlite::Transaction<'_>, note: &Note) -> Result<(), String> {
+    let signature = hash_content(
+        &serde_json::to_string(&(
+            &note.title,
+            &note.path,
+            &note.tags,
+            &note.content_hash,
+            &note.updated_at,
+        ))
+        .map_err(|_| "无法计算笔记索引签名。")?,
+    );
+    let previous: Option<String> = transaction
+        .query_row(
+            "SELECT signature FROM semantic_note_signatures WHERE note_id=?1",
+            [&note.id],
+            |r| r.get(0),
+        )
+        .optional()
+        .map_err(|_| "无法读取笔记索引签名。")?;
+    if previous.as_deref() == Some(signature.as_str())
+        && transaction
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM note_chunks WHERE note_id=?1)",
+                [&note.id],
+                |r| r.get::<_, bool>(0),
+            )
+            .unwrap_or(false)
+    {
+        return Ok(());
+    }
+    transaction
+        .execute(
+            "INSERT OR REPLACE INTO semantic_note_signatures(note_id,signature) VALUES (?1,?2)",
+            params![note.id, signature],
+        )
+        .map_err(|_| "无法保存笔记索引签名。")?;
+
     transaction
         .execute("DELETE FROM note_fts WHERE note_id = ?1", params![&note.id])
         .map_err(|error| format!("无法更新 FTS 索引：{error}"))?;
@@ -449,6 +495,7 @@ fn upsert_note_index(transaction: &rusqlite::Transaction<'_>, note: &Note) -> Re
         .map_err(|error| format!("无法写入 FTS 索引：{error}"))?;
 
     for chunk in crate::storage::chunk_markdown(&note.content, &note.tags) {
+        index_semantic_input(transaction, note, &chunk)?;
         let chunk_id = format!("{}:{}", note.id, chunk.chunk_index);
         let heading_tokens = crate::storage::build_fts_tokens(&chunk.heading_path);
         let body_tokens =
