@@ -299,7 +299,7 @@ fn build_system_prompt(
         parts.push(PLAN_MODE_POLICY.to_owned());
     } else {
         parts.push(format!(
-            "search 只检索 Markdown；read 和 edit 可作用于当前 scope 内的 Markdown/TXT，并且都必须提供 fileId，不能省略；TXT 必须原样按纯文本处理；read 也可只读 DOCX/PDF 并返回可信的页码或结构块引用。{write_policy}write 新建文件必须带完整正文 content（也接受 next）；fileType 为 markdown 或 txt（大小写不敏感，缺省时由 .md/.txt 推断），路径用 targetPath（也接受 path），扩展名必须匹配。局部替换使用 operation=replace，文末追加使用 operation=append 且 next 只含增量；同一文件多处编辑使用 operation=multi_replace 和 edits。必须使用服务端标准 tool_calls 字段调用工具，不要在普通回复中输出 DSML、XML 或伪工具调用标签。引用只允许来自已执行工具结果。{skill_policy}\n{autonomous_tool_policy}\n{security_level_policy}"
+        "search 对 Markdown 做标题级 chunk 检索，支持中文分词，引用包含标题路径和行号；read 和 edit 可作用于当前 scope 内的 Markdown/TXT，并且都必须提供 fileId，不能省略；TXT 必须原样按纯文本处理；read 也可只读 DOCX/PDF 并返回可信的页码或结构块引用。search 为空时先用更短关键词重试一次，再用 list/read 核实，不要直接断言内容不存在。{write_policy}write 新建文件必须带完整正文 content（也接受 next）；fileType 为 markdown 或 txt（大小写不敏感，缺省时由 .md/.txt 推断），路径用 targetPath（也接受 path），扩展名必须匹配。局部替换使用 operation=replace，文末追加使用 operation=append 且 next 只含增量；同一文件多处编辑使用 operation=multi_replace 和 edits。必须使用服务端标准 tool_calls 字段调用工具，不要在普通回复中输出 DSML、XML 或伪工具调用标签。引用只允许来自已执行工具结果。{skill_policy}\n{autonomous_tool_policy}\n{security_level_policy}"
         ));
     }
 
