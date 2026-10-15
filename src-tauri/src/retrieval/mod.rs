@@ -1,5 +1,7 @@
 //! Markdown 混合检索与后台向量生成。FTS、结构化过滤和引用仍复用本地 chunk。
 pub(crate) mod provider;
+pub(crate) mod search;
+pub(crate) use search::search;
 
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
