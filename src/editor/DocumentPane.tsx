@@ -100,14 +100,33 @@ export function DocumentPane({
   const textAreaRef = useRef<HTMLTextAreaElement | null>(null);
 
   if (!document) {
+    // 与 Markdown 面板保持一致：区分「知识库没有文档」和「没打开任何文档」，
+    // 后者不能断言知识库里没有内容。
+    const hasDocuments = knowledgeBase.documentCount > 0;
+
     return (
       <section className="editor-pane" aria-label="文档预览">
-        <EditorEmptyHeader pathLabel={knowledgeBase.name} pathLogArea="document_empty_knowledge_base" title="暂无文档" />
+        <EditorEmptyHeader
+          pathLabel={knowledgeBase.name}
+          pathLogArea="document_empty_knowledge_base"
+          title={hasDocuments ? "未打开文件" : "暂无文档"}
+        />
         <div className="grid min-h-0 place-content-center justify-items-center gap-2.5 rounded-panel border border-dashed border-border-strong bg-surface p-6 text-center text-ink-muted">
-          <strong className="text-base text-ink">当前知识库还没有支持文档。</strong>
-          <span className="max-w-[420px] text-[13px] leading-[1.55]">
-            请在左侧目录树中新建 Markdown 或 TXT，或在本地目录中添加支持文件后重新扫描。
-          </span>
+          {hasDocuments ? (
+            <>
+              <strong className="text-base text-ink">编辑区没有打开任何文件。</strong>
+              <span className="max-w-[420px] text-[13px] leading-[1.55]">
+                从左侧目录树中选择文件即可打开预览。
+              </span>
+            </>
+          ) : (
+            <>
+              <strong className="text-base text-ink">当前知识库还没有支持文档。</strong>
+              <span className="max-w-[420px] text-[13px] leading-[1.55]">
+                请在左侧目录树中新建 Markdown 或 TXT，或在本地目录中添加支持文件后重新扫描。
+              </span>
+            </>
+          )}
         </div>
       </section>
     );

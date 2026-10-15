@@ -112,6 +112,8 @@ export function WorkspaceShell() {
   const [openFileTabs, setOpenFileTabs] = useState<EditorFileTab[]>([]);
   /** 启动恢复完成后才允许写回，避免首帧空标签覆盖已持久化的编辑器会话。 */
   const [isEditorSessionInitialized, setIsEditorSessionInitialized] = useState(false);
+  /** 启动回退只执行一次；避免用户在运行期关闭最后一个标签后被立刻重新打开。 */
+  const isStartupFallbackDoneRef = useRef(false);
   /** 当前打开的文档历史弹窗目标；只允许 Markdown 和 TXT。 */
   const [historyDialog, setHistoryDialog] = useState<{ targetKind: DocumentHistoryTargetKind; targetId: string } | null>(null);
   /** 文件重命名弹窗草稿，同时支持 Markdown 和可编辑 TXT。 */
@@ -268,6 +270,38 @@ export function WorkspaceShell() {
       setOpenFileTabs([initialTab]);
     }
   }, [snapshot, openFileTabs.length]);
+
+  useEffect(() => {
+    if (!snapshot || !isEditorSessionInitialized || isStartupFallbackDoneRef.current) {
+      return;
+    }
+
+    isStartupFallbackDoneRef.current = true;
+
+    // 恢复的编辑器会话没有标签时（例如上次关闭了全部标签），启动后回退打开当前知识库的首个文件。
+    // 该回退只在启动时执行一次，避免用户在运行期关闭最后一个标签后被立刻重新打开。
+    if (openFileTabs.length) {
+      return;
+    }
+
+    const knowledgeBaseNotes = snapshot.notes.filter((note) => note.knowledgeBaseId === snapshot.activeKnowledgeBaseId);
+    const knowledgeBaseDocuments = snapshot.documents.filter((document) => document.knowledgeBaseId === snapshot.activeKnowledgeBaseId);
+    const fallbackNote = knowledgeBaseNotes[0];
+    const fallbackDocument = fallbackNote ? undefined : knowledgeBaseDocuments[0];
+
+    if (!fallbackNote && !fallbackDocument) {
+      return;
+    }
+
+    // 编辑区正文只读快照焦点，这里必须同时提交快照，否则标签栏有内容而右侧仍是空态。
+    // commitSnapshot 会把 openFileTabs 过滤成新快照里仍存在的文件，因此先加入标签再提交。
+    setOpenFileTabs([fallbackNote ? { kind: "note", id: fallbackNote.id } : { kind: "document", id: fallbackDocument!.id }]);
+    commitSnapshot({
+      ...snapshot,
+      activeNoteId: fallbackNote?.id ?? "",
+      activeDocumentId: fallbackNote ? "" : fallbackDocument!.id,
+    });
+  }, [snapshot, isEditorSessionInitialized, openFileTabs.length]);
 
   /** 设置动作 hook 统一处理保存、凭证、Skills 和诊断日志刷新，复用原有 Tauri API。 */
   const {

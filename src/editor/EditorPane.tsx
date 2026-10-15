@@ -140,14 +140,35 @@ export function EditorPane({
   }, [note?.id]);
 
   if (!note) {
+    // 编辑区为空既可能是「知识库确实没有文件」，也可能只是「没打开任何文件」。
+    // 用户关闭最后一个标签后两个焦点都会清空，此时不能断言知识库里没有内容。
+    const hasMarkdownFiles = knowledgeBase.noteCount > 0;
+
     return (
       <section className="editor-pane" aria-label="Markdown 编辑器">
-        <EditorEmptyHeader pathLabel={knowledgeBase.name} pathLogArea="editor_empty_knowledge_base" title="暂无 Markdown 笔记" />
+        <EditorEmptyHeader
+          pathLabel={knowledgeBase.name}
+          pathLogArea="editor_empty_knowledge_base"
+          title={hasMarkdownFiles ? "未打开文件" : "暂无 Markdown 笔记"}
+        />
         <div className="grid min-h-0 place-content-center justify-items-center gap-2.5 rounded-xl border border-dashed border-border bg-surface p-6 text-center text-ink-muted">
           {knowledgeBase.status === "error" ? (
             <>
               <strong className="text-base text-ink">当前知识库目录暂不可访问。</strong>
               <span className="max-w-[420px] text-[13px] leading-[1.55]">{knowledgeBase.description}</span>
+            </>
+          ) : hasMarkdownFiles ? (
+            <>
+              <strong className="text-base text-ink">编辑区没有打开任何文件。</strong>
+              <span className="max-w-[420px] text-[13px] leading-[1.55]">
+                从左侧目录树中选择文件即可开始编辑，也可以直接新建一篇 Markdown。
+              </span>
+              <div className="mt-1.5 flex flex-wrap justify-center gap-2">
+                <Button variant="primary" size="compact" onClick={() => onCreateMarkdown("")}>
+                  <FileText size={14} />
+                  新建 Markdown
+                </Button>
+              </div>
             </>
           ) : (
             <>
