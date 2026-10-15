@@ -9,6 +9,7 @@ pub mod logs;
 pub mod mcp;
 pub mod notes;
 pub mod schedules;
+pub mod semantic;
 pub mod sessions;
 pub mod settings;
 pub mod skills;

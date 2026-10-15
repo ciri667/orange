@@ -273,6 +273,12 @@ pub fn run() {
             _ => {}
         })
         .invoke_handler(tauri::generate_handler![
+            commands::semantic::save_semantic_search_settings,
+            commands::semantic::load_semantic_index_statuses,
+            commands::semantic::control_semantic_index,
+            commands::semantic::save_semantic_api_key,
+            commands::semantic::load_semantic_credential_status,
+            commands::semantic::probe_semantic_search,
             commands::builtin_commands::list_builtin_commands,
             commands::builtin_commands::run_builtin_command,
             commands::workspace::load_workspace_state,
