@@ -263,6 +263,7 @@ const TRACE_FIELD_LABELS: Record<string, string> = {
   fileName: "文件名",
   fileType: "类型",
   query: "检索",
+  mode: "检索方式",
   operation: "操作",
   type: "动作",
   status: "状态",
@@ -376,6 +377,7 @@ const EXTRACTABLE_JSON_KEYS = [
 const META_FIELD_ORDER = [
   "title",
   "query",
+  "mode",
   "targetPath",
   "path",
   "fileName",
@@ -791,6 +793,10 @@ function formatTraceFieldValue(key: string, value: unknown): { text: string; tru
     text = ({ pending: "待确认", completed: "已完成", failed: "失败", running: "进行中" } as Record<string, string>)[text] ?? text;
   }
 
+  if (key === "mode" && text === "chunk") {
+    text = "块级";
+  }
+
   return { text, truncated: stripped.truncated };
 }
 
@@ -844,6 +850,12 @@ function listItemLabel(item: unknown): string | undefined {
   }
 
   const record = item as Record<string, unknown>;
+  const title = typeof record.title === "string" ? stripTraceTruncation(record.title).text.trim() : "";
+  const location = typeof record.location === "string" ? stripTraceTruncation(record.location).text.trim() : "";
+  if (title) {
+    return location ? `${title} · ${location}` : title;
+  }
+
   for (const key of ["title", "path", "name", "query", "summary", "targetPath", "fileName"]) {
     const value = record[key];
     if (typeof value === "string" && value.trim()) {

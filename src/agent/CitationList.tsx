@@ -26,11 +26,19 @@ export function CitationList({ citations }: { citations?: Citation[] }) {
       <span className="text-[11px] text-ink-soft">{summary}</span>
       {noteCitations.map((citation) => (
         <span
-          className="inline-flex max-w-[220px] items-center rounded-full border border-border bg-surface px-2 py-0.5 text-[11px] text-ink-muted"
+          className="inline-flex max-w-[280px] flex-col items-start rounded-full border border-border bg-surface px-2 py-1 text-[11px] text-ink-muted"
           key={`note-${citation.noteId}-${citation.path}`}
           title={`${citation.knowledgeBaseName} · ${citation.path}${citation.location ? ` · ${citation.location}` : ""}\n${citation.snippet}`}
         >
           <OverflowTooltipText text={citation.title} logArea="agent_citation_title" />
+          {citation.location ? (
+            <span
+              className="block truncate text-[11px] text-ink-soft"
+              title={citation.location}
+            >
+              {citation.location}
+            </span>
+          ) : null}
         </span>
       ))}
       {webCitations.map((citation) => (
