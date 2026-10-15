@@ -8,6 +8,106 @@ pub(crate) struct StoredKnowledgeBase {
     updated_at: String,
 }
 
+/** Agent search 的结构化过滤条件；空集合和空字符串表示不过滤。 */
+#[derive(Clone, Debug, Default)]
+pub(crate) struct NoteSearchFilters {
+    pub(crate) path_prefix: String,
+    pub(crate) tags: Vec<String>,
+    pub(crate) file_types: Vec<String>,
+    pub(crate) updated_after_unix: Option<i64>,
+    pub(crate) updated_before_unix: Option<i64>,
+}
+
+/** 规范化工具标签：去空值、去前导 #、去重复，避免模型传参格式影响精确匹配。 */
+pub(crate) fn normalize_filter_tags(tags: &[String]) -> Vec<String> {
+    let mut normalized: Vec<String> = tags
+        .iter()
+        .map(|tag| tag.trim().trim_start_matches('#').trim().to_owned())
+        .filter(|tag| !tag.is_empty())
+        .collect();
+    normalized.sort();
+    normalized.dedup();
+    normalized
+}
+
+/** 归一化路径前缀为 / 分隔的目录或文件路径；根目录和空值表示不过滤。 */
+pub(crate) fn normalize_path_prefix(prefix: &str) -> String {
+    prefix
+        .replace('\\', "/")
+        .split('/')
+        .filter(|segment| !segment.is_empty())
+        .collect::<Vec<_>>()
+        .join("/")
+}
+
+/** 解析 search 时间过滤；日期按本地时区展开为自然日边界，ISO 时间直接使用其 offset。 */
+pub(crate) fn parse_note_search_datetime(
+    value: &str,
+    is_before_bound: bool,
+) -> Result<Option<i64>, String> {
+    if value.trim().is_empty() {
+        return Ok(None);
+    }
+
+    if let Ok(date) = chrono::NaiveDate::parse_from_str(value.trim(), "%Y-%m-%d") {
+        let time = if is_before_bound {
+            date.and_hms_opt(23, 59, 59)
+        } else {
+            date.and_hms_opt(0, 0, 0)
+        };
+        return Ok(time
+            .and_then(|datetime| Local.from_local_datetime(&datetime).single())
+            .map(|datetime| datetime.timestamp()));
+    }
+
+    if let Ok(datetime) = chrono::DateTime::parse_from_rfc3339(value.trim()) {
+        return Ok(Some(datetime.timestamp()));
+    }
+
+    Err("时间过滤必须是 YYYY-MM-DD 或 ISO 8601 时间。".to_owned())
+}
+
+/** 判断笔记是否满足结构化过滤；时间字段缺失时，时间过滤会排除该笔记。 */
+fn note_matches_filters(note: &Note, filters: &NoteSearchFilters) -> bool {
+    if !filters.file_types.is_empty()
+        && !filters
+            .file_types
+            .iter()
+            .any(|file_type| file_type == "markdown")
+    {
+        return false;
+    }
+
+    if !filters.path_prefix.is_empty() {
+        let prefix = format!("{}/", filters.path_prefix);
+        if note.path != filters.path_prefix && !note.path.starts_with(&prefix) {
+            return false;
+        }
+    }
+
+    if !filters.tags.is_empty()
+        && !filters
+            .tags
+            .iter()
+            .any(|tag| note.tags.iter().any(|note_tag| note_tag == tag))
+    {
+        return false;
+    }
+
+    let updated_at_unix = crate::storage::parse_index_datetime(&note.updated_at);
+    if filters
+        .updated_after_unix
+        .is_some_and(|after| updated_at_unix.is_none_or(|time| time < after))
+        || filters
+            .updated_before_unix
+            .is_some_and(|before| updated_at_unix.is_none_or(|time| time > before))
+    {
+        return false;
+    }
+
+    true
+}
+
 /** 全量重建 FTS，供知识库扫描和启动索引使用。 */
 pub fn index_snapshot(app: &AppHandle, snapshot: &WorkspaceSnapshot) -> Result<(), String> {
     index_snapshot_with_mode(app, snapshot, IndexMode::ReplaceAll)
@@ -107,6 +207,9 @@ pub(crate) fn apply_index_to_transaction(
         transaction
             .execute("DELETE FROM notes", [])
             .map_err(|error| format!("无法清理笔记索引：{error}"))?;
+        transaction
+            .execute("DELETE FROM note_tags", [])
+            .map_err(|error| format!("无法清理笔记标签索引：{error}"))?;
         transaction
             .execute("DELETE FROM knowledge_bases", [])
             .map_err(|error| format!("无法清理知识库索引：{error}"))?;
@@ -209,6 +312,9 @@ pub(crate) fn remove_note_ids_from_transaction(
         transaction
             .execute("DELETE FROM notes WHERE id = ?1", params![note_id])
             .map_err(|error| format!("无法删除笔记索引：{error}"))?;
+        transaction
+            .execute("DELETE FROM note_tags WHERE note_id = ?1", params![note_id])
+            .map_err(|error| format!("无法删除笔记标签索引：{error}"))?;
     }
     Ok(())
 }
@@ -241,6 +347,12 @@ pub(crate) fn remove_knowledge_base_from_transaction(
             params![knowledge_base_id],
         )
         .map_err(|error| format!("无法删除知识库笔记索引：{error}"))?;
+    transaction
+        .execute(
+            "DELETE FROM note_tags WHERE knowledge_base_id = ?1",
+            params![knowledge_base_id],
+        )
+        .map_err(|error| format!("无法删除知识库标签索引：{error}"))?;
     transaction
         .execute(
             "DELETE FROM knowledge_bases WHERE id = ?1",
@@ -302,10 +414,33 @@ fn upsert_note_index(transaction: &rusqlite::Transaction<'_>, note: &Note) -> Re
         .map_err(|error| format!("无法更新 chunk 索引：{error}"))?;
     transaction
         .execute(
-            "INSERT OR REPLACE INTO notes (id, knowledge_base_id, title, path, content_hash, updated_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-            params![&note.id, &note.knowledge_base_id, &note.title, &note.path, &note.content_hash, &note.updated_at],
+            "INSERT OR REPLACE INTO notes (id, knowledge_base_id, title, path, file_type, updated_at_unix, content_hash, updated_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            params![
+                &note.id,
+                &note.knowledge_base_id,
+                &note.title,
+                &note.path,
+                "markdown",
+                crate::storage::parse_index_datetime(&note.updated_at),
+                &note.content_hash,
+                &note.updated_at
+            ],
         )
         .map_err(|error| format!("无法写入笔记索引：{error}"))?;
+    transaction
+        .execute(
+            "DELETE FROM note_tags WHERE note_id = ?1",
+            params![&note.id],
+        )
+        .map_err(|error| format!("无法更新笔记标签索引：{error}"))?;
+    for tag in &note.tags {
+        transaction
+            .execute(
+                "INSERT OR IGNORE INTO note_tags (note_id, knowledge_base_id, tag) VALUES (?1, ?2, ?3)",
+                params![&note.id, &note.knowledge_base_id, tag],
+            )
+            .map_err(|error| format!("无法写入笔记标签索引：{error}"))?;
+    }
     transaction
         .execute(
             "INSERT INTO note_fts (note_id, knowledge_base_id, title, path, body) VALUES (?1, ?2, ?3, ?4, ?5)",
@@ -621,6 +756,7 @@ pub fn search_notes(
     knowledge_base_ids: &[String],
     prompt: &str,
     limit: usize,
+    filters: &NoteSearchFilters,
 ) -> Result<Vec<crate::domain::Citation>, String> {
     let limit = limit.max(1);
     let selected_ids: HashSet<&str> = knowledge_base_ids.iter().map(String::as_str).collect();
@@ -633,12 +769,19 @@ pub fn search_notes(
     let mut citations = Vec::new();
 
     if !query_tokens.is_empty() {
-        citations = search_note_chunk_fts(app, snapshot, &selected_ids, &query_tokens, None)?;
+        citations =
+            search_note_chunk_fts(app, snapshot, &selected_ids, &query_tokens, None, filters)?;
 
         // 长句 OR 查询失败时，用最高权重的前三个 token 做一次更短查询。
         if citations.is_empty() {
-            citations =
-                search_note_chunk_fts(app, snapshot, &selected_ids, &query_tokens, Some(3))?;
+            citations = search_note_chunk_fts(
+                app,
+                snapshot,
+                &selected_ids,
+                &query_tokens,
+                Some(3),
+                filters,
+            )?;
         }
     }
 
@@ -649,7 +792,7 @@ pub fn search_notes(
 
     // 快照兜底只在 FTS 两轮都失败后启用，避免低质量子串结果挤掉索引命中。
     let fallback_citations = if citations.is_empty() {
-        search_snapshot_notes(snapshot, &selected_ids, prompt)
+        search_snapshot_notes(snapshot, &selected_ids, prompt, filters)
     } else {
         Vec::new()
     };
@@ -678,120 +821,49 @@ pub(crate) fn search_note_chunk_fts(
     selected_ids: &HashSet<&str>,
     query_tokens: &[String],
     token_limit: Option<usize>,
+    filters: &NoteSearchFilters,
 ) -> Result<Vec<crate::domain::Citation>, String> {
-    if query_tokens.is_empty() {
-        return Ok(Vec::new());
-    }
-
-    let bounded_tokens: Vec<String> = match token_limit {
-        Some(limit) => query_tokens.iter().take(limit).cloned().collect(),
-        None => query_tokens.to_vec(),
-    };
     let connection = open_database(app)?;
-    let fts_query = bounded_tokens
-        .iter()
-        .map(|term| format!("\"{}\"", term.replace('"', "\"\"")))
-        .collect::<Vec<_>>()
-        .join(" OR ");
-    let knowledge_base_placeholders = selected_ids
-        .iter()
-        .map(|_| "?")
-        .collect::<Vec<_>>()
-        .join(", ");
-    let sql = format!(
-        "SELECT
-               c.chunk_id, c.note_id, c.knowledge_base_id, n.title, n.path,
-               c.heading_path, c.content, c.line_start, c.line_end,
-               bm25(note_chunk_fts, 8.0, 4.0, 6.0, 1.0)
-             FROM note_chunk_fts
-             JOIN note_chunks c ON c.chunk_id = note_chunk_fts.chunk_id
-             JOIN notes n ON n.id = c.note_id
-             WHERE note_chunk_fts MATCH ?1
-               AND note_chunk_fts.knowledge_base_id IN ({knowledge_base_placeholders})
-             ORDER BY bm25(note_chunk_fts, 8.0, 4.0, 6.0, 1.0)
-             LIMIT 128"
-    );
-    let mut bind_values: Vec<&str> = vec![fts_query.as_str()];
-    bind_values.extend(selected_ids.iter().copied());
-    let mut statement = connection
-        .prepare(&sql)
-        .map_err(|error| format!("无法准备 FTS 检索：{error}"))?;
-    let rows = statement
-        .query_map(rusqlite::params_from_iter(bind_values), |row| {
-            Ok((
-                row.get::<_, String>(0)?,
-                row.get::<_, String>(1)?,
-                row.get::<_, String>(2)?,
-                row.get::<_, String>(3)?,
-                row.get::<_, String>(4)?,
-                row.get::<_, String>(5)?,
-                row.get::<_, String>(6)?,
-                row.get::<_, i64>(7)?,
-                row.get::<_, i64>(8)?,
-                row.get::<_, f64>(9)?,
-            ))
-        })
-        .map_err(|error| format!("无法执行 FTS 检索：{error}"))?;
-    let mut citations = Vec::new();
-    let mut seen_note_ids: HashSet<String> = HashSet::new();
+    search_note_chunk_fts_with_connection(
+        &connection,
+        snapshot,
+        selected_ids,
+        query_tokens,
+        token_limit,
+        filters,
+    )
+}
 
-    for row in rows {
-        let (
-            _chunk_id,
-            note_id,
-            knowledge_base_id,
-            title,
-            path,
-            heading_path,
-            chunk_content,
-            line_start,
-            line_end,
-            rank,
-        ) = row.map_err(|error| format!("无法读取 FTS 命中结果：{error}"))?;
-
-        // 会话 scope 是工具权限边界，FTS 命中后仍要按本轮允许知识库过滤。
-        if !selected_ids.contains(knowledge_base_id.as_str()) {
-            continue;
-        }
-        if crate::storage::is_root_project_instruction_path(&path) {
-            continue;
-        }
-
-        if let Some(knowledge_base) = snapshot
-            .knowledge_bases
-            .iter()
-            .find(|item| item.id == knowledge_base_id)
-        {
-            // FTS 按相关度返回；同一笔记的后续 chunk 分数更低，直接去重避免长笔记霸榜。
-            if !seen_note_ids.insert(note_id.clone()) {
-                continue;
-            }
-
-            citations.push(crate::domain::Citation {
-                knowledge_base_id,
-                knowledge_base_name: knowledge_base.name.clone(),
-                note_id,
-                title,
-                path,
-                snippet: extract_chunk_snippet(&chunk_content, &bounded_tokens),
-                score: 1.0 / (1.0 + rank.abs()),
-                location: Some(format_citation_location(
-                    &heading_path,
-                    line_start,
-                    line_end,
-                )),
-                kind: None,
-                url: None,
-                published_at: None,
-            });
-        }
-    }
-
-    Ok(citations)
+/** 在调用方提供的事务/连接上执行 chunk FTS，便于复用和测试 SQL 过滤。 */
+pub(crate) fn search_note_chunk_fts_with_connection(
+    connection: &rusqlite::Connection,
+    snapshot: &WorkspaceSnapshot,
+    selected_ids: &HashSet<&str>,
+    query_tokens: &[String],
+    token_limit: Option<usize>,
+    filters: &NoteSearchFilters,
+) -> Result<Vec<crate::domain::Citation>, String> {
+    let mut seen = HashSet::new();
+    Ok(search_note_chunk_candidates(
+        connection,
+        snapshot,
+        selected_ids,
+        query_tokens,
+        token_limit,
+        filters,
+    )?
+    .into_iter()
+    .filter(|item| seen.insert(item.citation.note_id.clone()))
+    .map(|item| item.citation)
+    .collect())
 }
 
 /** 把 chunk 定位转成用户可读引用位置。 */
-fn format_citation_location(heading_path: &str, line_start: i64, line_end: i64) -> String {
+pub(crate) fn format_citation_location(
+    heading_path: &str,
+    line_start: i64,
+    line_end: i64,
+) -> String {
     let display_heading = if heading_path.is_empty() {
         "开头"
     } else {
@@ -842,6 +914,7 @@ pub(crate) fn search_snapshot_notes(
     snapshot: &WorkspaceSnapshot,
     selected_ids: &HashSet<&str>,
     prompt: &str,
+    filters: &NoteSearchFilters,
 ) -> Vec<crate::domain::Citation> {
     let prompt_terms = crate::storage::tokenize_text(prompt);
     let mut citations: Vec<crate::domain::Citation> = Vec::new();
@@ -849,6 +922,7 @@ pub(crate) fn search_snapshot_notes(
         .notes
         .iter()
         .filter(|note| selected_ids.contains(note.knowledge_base_id.as_str()))
+        .filter(|note| note_matches_filters(note, filters))
         .filter(|note| !crate::storage::is_root_project_instruction_path(&note.path))
     {
         let knowledge_base = match snapshot
@@ -913,10 +987,14 @@ pub(crate) fn search_snapshot_notes(
 
 #[cfg(test)]
 mod tests {
-    use super::{apply_index_to_transaction, IndexMode};
+    use super::{
+        apply_index_to_transaction, search_note_chunk_fts_with_connection, IndexMode,
+        NoteSearchFilters,
+    };
     use crate::domain::{KnowledgeBase, Note, WorkspaceSnapshot};
     use crate::storage::{ensure_database_schema, hash_content};
     use rusqlite::Connection;
+    use std::collections::HashSet;
     use tempfile::tempdir;
 
     fn test_note(id: &str, content: &str) -> Note {
@@ -968,6 +1046,203 @@ mod tests {
             .unwrap()
             .map(|row| row.unwrap())
             .collect()
+    }
+
+    /** 构造带路径、标签和真实更新时间的笔记，便于覆盖结构化过滤。 */
+    fn filtered_note(id: &str, path: &str, tags: &[&str], updated_at: &str, content: &str) -> Note {
+        let mut note = test_note(id, content);
+        note.path = path.to_owned();
+        note.tags = tags.iter().map(|tag| (*tag).to_owned()).collect();
+        note.updated_at = updated_at.to_owned();
+        note
+    }
+
+    /** 旧库迁移必须补齐过滤列，并只回填可解析的真实时间。 */
+    #[test]
+    fn retrieval_filter_columns_migrate_legacy_notes_idempotently() {
+        let dir = tempdir().unwrap();
+        let connection = Connection::open(dir.path().join("legacy.sqlite3")).unwrap();
+        connection
+            .execute_batch(
+                r#"
+                CREATE TABLE notes (
+                  id TEXT PRIMARY KEY,
+                  knowledge_base_id TEXT NOT NULL,
+                  title TEXT NOT NULL,
+                  path TEXT NOT NULL,
+                  content_hash TEXT NOT NULL,
+                  updated_at TEXT NOT NULL
+                );
+                INSERT INTO notes VALUES ('note-old', 'kb-a', '旧', 'old.md', 'hash', '2026/01/02 10:00');
+                INSERT INTO notes VALUES ('note-placeholder', 'kb-a', '新', 'new.md', 'hash', '刚刚');
+                "#,
+            )
+            .unwrap();
+
+        crate::storage::ensure_retrieval_filter_columns(&connection).unwrap();
+        crate::storage::ensure_retrieval_filter_columns(&connection).unwrap();
+
+        let filed_time: Option<i64> = connection
+            .query_row(
+                "SELECT updated_at_unix FROM notes WHERE id = 'note-old'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let placeholder_time: Option<i64> = connection
+            .query_row(
+                "SELECT updated_at_unix FROM notes WHERE id = 'note-placeholder'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let file_type: String = connection
+            .query_row(
+                "SELECT file_type FROM notes WHERE id = 'note-old'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(filed_time.is_some());
+        assert_eq!(placeholder_time, None);
+        assert_eq!(file_type, "markdown");
+    }
+
+    /** 笔记 upsert 必须同步重建标签和时间索引，删除时也必须一起清理。 */
+    #[test]
+    fn note_index_maintains_tags_and_filter_metadata() {
+        let dir = tempdir().unwrap();
+        let database_path = dir.path().join("filters-index.sqlite3");
+        let mut connection = Connection::open(&database_path).unwrap();
+        ensure_database_schema(&connection, &database_path).unwrap();
+        let note = filtered_note(
+            "note-a",
+            "docs/architecture/sync.md",
+            &["sync", "产品"],
+            "2026/01/02 10:00",
+            "# 数据同步\n\n冲突处理\n",
+        );
+
+        let transaction = connection.transaction().unwrap();
+        apply_index_to_transaction(
+            &transaction,
+            &test_snapshot(vec![note.clone()]),
+            IndexMode::Upsert,
+        )
+        .unwrap();
+        transaction.commit().unwrap();
+
+        let tag_count: i64 = connection
+            .query_row(
+                "SELECT count(*) FROM note_tags WHERE note_id = 'note-a'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let (file_type, updated_at_unix): (String, Option<i64>) = connection
+            .query_row(
+                "SELECT file_type, updated_at_unix FROM notes WHERE id = 'note-a'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(tag_count, 2);
+        assert_eq!(file_type, "markdown");
+        assert!(updated_at_unix.is_some());
+
+        let transaction = connection.transaction().unwrap();
+        super::remove_note_ids_from_transaction(&transaction, &["note-a".to_owned()]).unwrap();
+        transaction.commit().unwrap();
+        let tag_count: i64 = connection
+            .query_row(
+                "SELECT count(*) FROM note_tags WHERE note_id = 'note-a'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(tag_count, 0);
+    }
+
+    /** 结构化过滤必须下推 SQL：只有同时满足关键词和元数据条件的笔记返回。 */
+    #[test]
+    fn chunk_fts_applies_structured_filters_in_sql() {
+        let dir = tempdir().unwrap();
+        let database_path = dir.path().join("filters-query.sqlite3");
+        let mut connection = Connection::open(&database_path).unwrap();
+        ensure_database_schema(&connection, &database_path).unwrap();
+        let matching = filtered_note(
+            "note-a",
+            "docs/architecture/sync.md",
+            &["sync"],
+            "2026/01/02 10:00",
+            "# 数据同步\n\n冲突处理\n",
+        );
+        let excluded = filtered_note(
+            "note-b",
+            "meeting.md",
+            &["meeting"],
+            "2025/01/01 10:00",
+            "# 数据同步\n\n会议细节\n",
+        );
+        let transaction = connection.transaction().unwrap();
+        apply_index_to_transaction(
+            &transaction,
+            &test_snapshot(vec![matching.clone(), excluded.clone()]),
+            IndexMode::ReplaceAll,
+        )
+        .unwrap();
+        transaction.commit().unwrap();
+
+        let selected_ids: HashSet<&str> = ["kb-a"].into_iter().collect();
+        let query_tokens = crate::storage::tokenize_text("数据同步");
+        let run = |filters: NoteSearchFilters| {
+            search_note_chunk_fts_with_connection(
+                &connection,
+                &test_snapshot(vec![matching.clone(), excluded.clone()]),
+                &selected_ids,
+                &query_tokens,
+                None,
+                &filters,
+            )
+            .unwrap()
+            .into_iter()
+            .map(|citation| citation.note_id)
+            .collect::<Vec<_>>()
+        };
+
+        let after = super::parse_note_search_datetime("2026-01-01", false)
+            .unwrap()
+            .unwrap();
+        let before = super::parse_note_search_datetime("2025-12-31", true)
+            .unwrap()
+            .unwrap();
+        let path_only = NoteSearchFilters {
+            path_prefix: "docs".to_owned(),
+            ..Default::default()
+        };
+        let tags_only = NoteSearchFilters {
+            tags: vec!["meeting".to_owned(), "sync".to_owned()],
+            ..Default::default()
+        };
+        let time_after = NoteSearchFilters {
+            updated_after_unix: Some(after),
+            ..Default::default()
+        };
+        let time_before = NoteSearchFilters {
+            updated_before_unix: Some(before),
+            ..Default::default()
+        };
+        let markdown_only = NoteSearchFilters {
+            file_types: vec!["markdown".to_owned()],
+            ..Default::default()
+        };
+
+        assert_eq!(run(NoteSearchFilters::default()).len(), 2);
+        assert_eq!(run(path_only), vec!["note-a".to_owned()]);
+        assert_eq!(run(tags_only).len(), 2);
+        assert_eq!(run(time_after), vec!["note-a".to_owned()]);
+        assert_eq!(run(time_before), vec!["note-b".to_owned()]);
+        assert_eq!(run(markdown_only).len(), 2);
     }
 
     /** 过期回合快照做 upsert 时不得删掉其它会话已经写入的笔记。 */
@@ -1162,11 +1437,51 @@ mod tests {
         )]);
         let selected_ids: std::collections::HashSet<&str> = ["kb-a"].into_iter().collect();
 
-        let citations = super::search_snapshot_notes(&snapshot, &selected_ids, "访谈 检索");
+        let citations = super::search_snapshot_notes(
+            &snapshot,
+            &selected_ids,
+            "访谈 检索",
+            &super::NoteSearchFilters::default(),
+        );
 
         assert_eq!(citations.len(), 1);
         assert_eq!(citations[0].location.as_deref(), Some("研究方法 · L1-L3"));
         assert!(citations[0].snippet.contains("用户访谈"));
+    }
+
+    /** FTS 空结果后的快照兜底也必须遵守结构化过滤，不能绕过元数据边界。 */
+    #[test]
+    fn snapshot_fallback_applies_structured_filters() {
+        let matching = filtered_note(
+            "note-a",
+            "docs/sync.md",
+            &["sync"],
+            "2026/01/02 10:00",
+            "# 数据同步\n\n冲突处理\n",
+        );
+        let excluded = filtered_note(
+            "note-b",
+            "meeting.md",
+            &["meeting"],
+            "2025/01/01 10:00",
+            "# 数据同步\n\n会议细节\n",
+        );
+        let selected_ids: HashSet<&str> = ["kb-a"].into_iter().collect();
+        let filters = NoteSearchFilters {
+            path_prefix: "docs".to_owned(),
+            tags: vec!["sync".to_owned()],
+            ..Default::default()
+        };
+
+        let citations = super::search_snapshot_notes(
+            &test_snapshot(vec![matching, excluded]),
+            &selected_ids,
+            "数据同步",
+            &filters,
+        );
+
+        assert_eq!(citations.len(), 1);
+        assert_eq!(citations[0].note_id, "note-a");
     }
 
     /** 删除单篇笔记时，chunk 和 chunk FTS 必须一起清理。 */

@@ -73,9 +73,21 @@ pub(crate) fn ensure_database_schema(
               knowledge_base_id TEXT NOT NULL,
               title TEXT NOT NULL,
               path TEXT NOT NULL,
+              file_type TEXT NOT NULL DEFAULT 'markdown',
+              updated_at_unix INTEGER,
               content_hash TEXT NOT NULL,
               updated_at TEXT NOT NULL
             );
+
+            CREATE TABLE IF NOT EXISTS note_tags (
+              note_id TEXT NOT NULL,
+              knowledge_base_id TEXT NOT NULL,
+              tag TEXT NOT NULL,
+              PRIMARY KEY (note_id, tag)
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_note_tags_kb_tag
+              ON note_tags(knowledge_base_id, tag);
 
             CREATE TABLE IF NOT EXISTS embeddings (
               note_id TEXT NOT NULL,
@@ -225,6 +237,7 @@ pub(crate) fn ensure_database_schema(
         .execute_batch(SCHEDULED_JOBS_SCHEMA)
         .map_err(|error| format!("无法初始化定时任务 schema：{error}"))?;
     ensure_audit_log_columns(&connection)?;
+    ensure_retrieval_filter_columns(&connection)?;
 
     let mut initialized_paths = initialized_paths
         .lock()
@@ -232,6 +245,93 @@ pub(crate) fn ensure_database_schema(
     initialized_paths.insert(database_path.to_path_buf());
 
     Ok(())
+}
+
+/** 为旧检索索引补齐结构化过滤字段，并把可解析的展示时间回填成 Unix 秒。 */
+pub(crate) fn ensure_retrieval_filter_columns(connection: &Connection) -> Result<(), String> {
+    let migration_columns = [
+        ("file_type", "TEXT NOT NULL DEFAULT 'markdown'"),
+        ("updated_at_unix", "INTEGER"),
+    ];
+
+    for (column_name, column_type) in migration_columns {
+        let sql = format!("ALTER TABLE notes ADD COLUMN {column_name} {column_type}");
+
+        if let Err(error) = connection.execute(&sql, []) {
+            let message = error.to_string();
+
+            if !message.contains("duplicate column name") {
+                return Err(format!("无法迁移笔记过滤索引：{error}"));
+            }
+        }
+    }
+
+    connection
+        .execute_batch(
+            r#"
+            CREATE TABLE IF NOT EXISTS note_tags (
+              note_id TEXT NOT NULL,
+              knowledge_base_id TEXT NOT NULL,
+              tag TEXT NOT NULL,
+              PRIMARY KEY (note_id, tag)
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_note_tags_kb_tag
+              ON note_tags(knowledge_base_id, tag);
+            "#,
+        )
+        .map_err(|error| format!("无法初始化笔记标签索引：{error}"))?;
+
+    let stale_note_ids: Vec<String> = {
+        let mut statement = connection
+            .prepare(
+                "SELECT id, updated_at FROM notes
+                 WHERE updated_at_unix IS NULL",
+            )
+            .map_err(|error| format!("无法准备笔记时间回填：{error}"))?;
+        let rows = statement
+            .query_map([], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })
+            .map_err(|error| format!("无法读取笔记时间回填：{error}"))?;
+        rows.collect::<Result<Vec<_>, _>>()
+            .map_err(|error| format!("无法读取笔记时间回填：{error}"))?
+            .into_iter()
+            .filter(|(_, updated_at)| parse_index_datetime(updated_at).is_some())
+            .map(|(note_id, _)| note_id)
+            .collect()
+    };
+
+    for note_id in stale_note_ids {
+        let updated_at: String = connection
+            .query_row(
+                "SELECT updated_at FROM notes WHERE id = ?1",
+                params![&note_id],
+                |row| row.get(0),
+            )
+            .map_err(|error| format!("无法读取笔记时间回填：{error}"))?;
+        let updated_at_unix = parse_index_datetime(&updated_at);
+
+        if let Some(updated_at_unix) = updated_at_unix {
+            connection
+                .execute(
+                    "UPDATE notes SET updated_at_unix = ?2 WHERE id = ?1",
+                    params![&note_id, updated_at_unix],
+                )
+                .map_err(|error| format!("无法回填笔记时间索引：{error}"))?;
+        }
+    }
+
+    Ok(())
+}
+
+/** 把索引中的本地展示时间转成 Unix 秒；占位值和无法解析的时间返回 None。 */
+pub(crate) fn parse_index_datetime(value: &str) -> Option<i64> {
+    let datetime = NaiveDateTime::parse_from_str(value, "%Y/%m/%d %H:%M").ok()?;
+    Local
+        .from_local_datetime(&datetime)
+        .single()
+        .map(|parsed| parsed.timestamp())
 }
 
 /** 获取 SQLite 写锁，避免同一 Tauri 进程内多个连接同时升级写事务导致 database is locked。 */

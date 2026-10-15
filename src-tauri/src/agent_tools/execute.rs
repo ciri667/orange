@@ -674,6 +674,7 @@ pub(crate) fn execute_search_notes(
         &context.snapshot.sessions[context.session_index].knowledge_base_ids,
         query,
         limit,
+        &crate::storage::NoteSearchFilters::default(),
     ) {
         Ok(citations) => {
             let truncated = citations.len() >= limit;

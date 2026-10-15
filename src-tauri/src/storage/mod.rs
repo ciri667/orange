@@ -130,6 +130,7 @@ mod ids;
 mod logs;
 mod memory;
 mod note_chunks;
+mod note_retrieval;
 mod note_tags;
 mod project_instructions;
 mod rewind;
@@ -146,12 +147,14 @@ pub use ids::*;
 pub use logs::*;
 pub use memory::*;
 pub(crate) use note_chunks::*;
+pub(crate) use note_retrieval::*;
 pub use note_tags::*;
 pub use project_instructions::*;
 pub use rewind::*;
 pub use schedules::*;
 pub use sessions::*;
 pub use workspace::*;
+
 
 #[cfg(test)]
 mod tests {
@@ -191,6 +194,7 @@ mod tests {
         WorkspaceEditorTab, WorkspaceSnapshot, IM_PROVIDER_FEISHU, MEMORY_CATEGORY_OTHER,
         MEMORY_SOURCE_USER,
     };
+    use crate::storage::NoteSearchFilters;
     use base64::Engine as _;
     use rusqlite::Connection;
     use serde_json::json;
@@ -1632,7 +1636,12 @@ mod tests {
             content_hash: String::new(),
         });
         let selected_ids: HashSet<&str> = ["kb-a"].into_iter().collect();
-        let citations = search_snapshot_notes(&snapshot, &selected_ids, "标签");
+        let citations = search_snapshot_notes(
+            &snapshot,
+            &selected_ids,
+            "标签",
+            &NoteSearchFilters::default(),
+        );
 
         assert!(citations.iter().any(|citation| citation.path == "note.md"));
         assert!(citations
