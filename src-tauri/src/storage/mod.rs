@@ -135,6 +135,7 @@ mod note_tags;
 mod project_instructions;
 mod rewind;
 mod schedules;
+mod semantic;
 mod sessions;
 mod workspace;
 
@@ -152,9 +153,12 @@ pub use note_tags::*;
 pub use project_instructions::*;
 pub use rewind::*;
 pub use schedules::*;
+pub(crate) use semantic::*;
 pub use sessions::*;
 pub use workspace::*;
 
+#[cfg(test)]
+mod semantic_tests;
 
 #[cfg(test)]
 mod tests {

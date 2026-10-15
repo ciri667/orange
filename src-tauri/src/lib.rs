@@ -14,6 +14,7 @@ mod logging;
 mod mcp;
 mod model_provider;
 mod provider_error;
+mod retrieval;
 mod runtime;
 mod scheduler;
 mod skills;
@@ -194,6 +195,7 @@ pub fn run() {
             }
 
             scheduler::start(handle.clone());
+            retrieval::start(handle.clone());
             let mcp_handle = handle.clone();
             tauri::async_runtime::spawn(async move {
                 if let Err(error) = mcp::install(&mcp_handle).await {

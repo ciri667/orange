@@ -162,11 +162,30 @@ pub fn save_user_settings(
         // 探测状态只由搜索和探测命令写入，普通设置保存不能把它改成已验证。
         normalized_settings.web_search.credential_status =
             persisted_settings.web_search.credential_status;
+        // 云端授权只能由专用语义设置入口产生；换地址/模型后必须重新确认。
+        normalized_settings
+            .semantic_search
+            .cloud_consent_fingerprint =
+            if crate::retrieval::provider::fingerprint(&normalized_settings.semantic_search)
+                == crate::retrieval::provider::fingerprint(&persisted_settings.semantic_search)
+            {
+                persisted_settings.semantic_search.cloud_consent_fingerprint
+            } else {
+                None
+            };
     }
 
     model_provider::normalize_model_config(&mut normalized_settings.model_config);
     normalize_agent_security_settings(&mut normalized_settings.agent_security);
     crate::web::normalize_web_search_settings(&mut normalized_settings.web_search);
+
+    if normalized_settings.semantic_search.enabled {
+        crate::retrieval::provider::validate(&normalized_settings.semantic_search)?;
+        // 用户切换到仅本地时允许保存隐私策略；保留云端配置但立即禁止所有请求。
+        if normalized_settings.privacy_policy != "local-only" {
+            semantic_allowed(&normalized_settings)?;
+        }
+    }
 
     persist_user_settings(app, &normalized_settings)?;
 
@@ -193,19 +212,47 @@ pub(crate) fn persist_user_settings(
     app: &AppHandle,
     settings: &UserSettings,
 ) -> Result<(), String> {
-    let connection = open_database(app)?;
+    let mut connection = open_database(app)?;
     let _write_guard = lock_database_writer()?;
+    let transaction = connection.transaction().map_err(|_| "无法启动设置事务。")?;
+    let previous: Option<String> = transaction
+        .query_row(
+            "SELECT payload_json FROM user_settings WHERE key=?1",
+            [USER_SETTINGS_KEY],
+            |r| r.get(0),
+        )
+        .optional()
+        .map_err(|_| "无法读取旧设置。")?;
+    let changed = previous
+        .and_then(|value| {
+            model_provider::parse_or_migrate_user_settings_json(&value, &format_local_datetime())
+                .ok()
+        })
+        .is_none_or(|old| {
+            old.semantic_search != settings.semantic_search
+                || old.privacy_policy != settings.privacy_policy
+        });
 
     let payload_json =
         serde_json::to_string(settings).map_err(|error| format!("无法序列化用户设置：{error}"))?;
 
-    connection
+    transaction
         .execute(
             "INSERT OR REPLACE INTO user_settings (key, payload_json, updated_at) VALUES (?1, ?2, ?3)",
             params![USER_SETTINGS_KEY, payload_json, "刚刚"],
         )
         .map_err(|error| format!("无法保存用户设置：{error}"))?;
 
+    if changed {
+        transaction
+            .execute(
+                "UPDATE semantic_index_state SET generation=generation+1,active=0",
+                [],
+            )
+            .map_err(|_| "无法更新语义任务版本。")?;
+        reconcile_semantic(&transaction, settings)?;
+    }
+    transaction.commit().map_err(|_| "无法提交用户设置。")?;
     Ok(())
 }
 

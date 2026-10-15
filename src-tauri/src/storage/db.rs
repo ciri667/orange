@@ -238,6 +238,7 @@ pub(crate) fn ensure_database_schema(
         .map_err(|error| format!("无法初始化定时任务 schema：{error}"))?;
     ensure_audit_log_columns(&connection)?;
     ensure_retrieval_filter_columns(&connection)?;
+    ensure_semantic_schema(connection)?;
 
     let mut initialized_paths = initialized_paths
         .lock()
