@@ -258,8 +258,9 @@ pub async fn save_web_search_api_key(
 ) -> Result<crate::web::WebSearchCredentialView, String> {
     let started_at = Instant::now();
     let settings_app = app.clone();
+    let provider_id = payload.provider_id.clone();
     let result = run_blocking("保存联网搜索密钥", move || {
-        crate::web::save_web_search_api_key(&settings_app, &payload.api_key)
+        crate::web::save_web_search_api_key(&settings_app, &payload.provider_id, &payload.api_key)
     })
     .await;
     match &result {
@@ -274,6 +275,7 @@ pub async fn save_web_search_api_key(
             )
             .duration(started_at.elapsed())
             .metadata(json!({
+                "providerId": provider_id,
                 "configured": status.configured,
                 "credentialStatus": status.credential_status,
             })),
@@ -297,22 +299,25 @@ pub async fn save_web_search_api_key(
 #[tauri::command]
 pub async fn load_web_search_credential_status(
     app: AppHandle,
+    payload: WebSearchProviderPayload,
 ) -> Result<crate::web::WebSearchCredentialView, String> {
     run_blocking("读取联网搜索密钥状态", move || {
-        crate::web::load_web_search_credential_view(&app)
+        crate::web::load_web_search_credential_view(&app, &payload.provider_id)
     })
     .await
 }
 
-/** 用一条短查询确认 Tavily 密钥。失败原因不包含响应体。 */
+/** 用一条短查询确认所选供应商密钥。失败原因不包含响应体。 */
 #[tauri::command]
 pub async fn probe_web_search(
     app: AppHandle,
+    payload: WebSearchProviderPayload,
 ) -> Result<crate::web::WebSearchCredentialView, String> {
     let started_at = Instant::now();
     let settings_app = app.clone();
+    let provider_id = payload.provider_id.clone();
     let result = run_blocking("探测联网搜索", move || {
-        crate::web::probe_web_search(&settings_app)
+        crate::web::probe_web_search(&settings_app, &payload.provider_id)
     })
     .await;
     match &result {
@@ -325,7 +330,8 @@ pub async fn probe_web_search(
                 "completed",
                 "联网搜索探测完成。",
             )
-            .duration(started_at.elapsed()),
+            .duration(started_at.elapsed())
+            .metadata(json!({ "providerId": provider_id })),
         ),
         Err(error) => logging::write_app_event_best_effort(
             &app,

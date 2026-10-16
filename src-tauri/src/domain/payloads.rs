@@ -380,7 +380,15 @@ pub struct SaveModelApiKeyPayload {
 #[derive(Clone, Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SaveWebSearchApiKeyPayload {
+    pub provider_id: String,
     pub api_key: String,
+}
+
+/** 读取或探测指定联网搜索供应商的命令入参；不包含明文密钥。 */
+#[derive(Clone, Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WebSearchProviderPayload {
+    pub provider_id: String,
 }
 
 /** 用户主动查看模型密钥的命令入参；只接受 providerId，不接受 keyReference。 */

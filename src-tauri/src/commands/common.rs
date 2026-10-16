@@ -24,8 +24,8 @@ pub(super) use crate::domain::{
     SaveKnowledgeBaseMemoryPayload, SaveModelApiKeyPayload, SaveNoteContentPayload,
     SaveNoteImageAttachmentsPayload, SaveSessionPayload, SaveUserSettingsPayload,
     SaveWebSearchApiKeyPayload, ScanKnowledgeBasePayload, ScanReport, SearchOnlineSkillsPayload,
-    ToggleAgentSkillPayload, UpdateSessionScopePayload, UserSettings, WorkspaceBootstrapState,
-    WorkspaceEditorState, WorkspaceSnapshot, IM_PROVIDER_FEISHU,
+    ToggleAgentSkillPayload, UpdateSessionScopePayload, UserSettings, WebSearchProviderPayload,
+    WorkspaceBootstrapState, WorkspaceEditorState, WorkspaceSnapshot, IM_PROVIDER_FEISHU,
 };
 pub(super) use crate::logging::{self, AppEventBuilder, AppLogCategory, AppLogLevel};
 pub(super) use crate::model_provider::{self, ProviderTemplate};
