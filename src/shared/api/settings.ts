@@ -16,6 +16,7 @@ import {
   RevealedModelApiKey,
   UserSettings,
   WebSearchCredentialStatus,
+  WebSearchSettings,
 } from "../types";
 
 /** 读取用户模型、隐私和写入设置；浏览器开发态返回内存默认值。 */
@@ -56,55 +57,66 @@ export async function revealModelApiKey(providerId: string): Promise<RevealedMod
   return invokeLogged<RevealedModelApiKey>("reveal_model_api_key", { payload: { providerId } });
 }
 
-/** 保存 Tavily 密钥。浏览器开发态只记一个已配置标记，不保留明文。 */
-export async function saveWebSearchApiKey(apiKey: string): Promise<WebSearchCredentialStatus> {
+/** 保存所选联网搜索供应商密钥。浏览器开发态只记一个已配置标记，不保留明文。 */
+export async function saveWebSearchApiKey(
+  providerId: WebSearchSettings["provider"],
+  apiKey: string,
+): Promise<WebSearchCredentialStatus> {
   if (!isTauriRuntime()) {
     browserMock.webSearchKeyConfigured = apiKey.trim().length > 0;
     browserMock.userSettings.webSearch.credentialStatus = browserMock.webSearchKeyConfigured
       ? "untested"
       : "not_configured";
-    return loadWebSearchCredentialStatus();
+    return loadWebSearchCredentialStatus(providerId);
   }
 
-  return invokeLogged<WebSearchCredentialStatus>("save_web_search_api_key", {
-    payload: { apiKey },
-  });
+    return invokeLogged<WebSearchCredentialStatus>("save_web_search_api_key", {
+      payload: { providerId, apiKey },
+    });
 }
 
 /** 读取联网搜索密钥是否已配置。 */
-export async function loadWebSearchCredentialStatus(): Promise<WebSearchCredentialStatus> {
+export async function loadWebSearchCredentialStatus(
+  providerId: WebSearchSettings["provider"],
+): Promise<WebSearchCredentialStatus> {
   if (!isTauriRuntime()) {
     return {
       configured: browserMock.webSearchKeyConfigured,
       credentialStatus: browserMock.webSearchKeyConfigured
         ? browserMock.userSettings.webSearch.credentialStatus
         : "not_configured",
-      message: browserMock.webSearchKeyConfigured ? "密钥已配置。" : "尚未配置 Tavily 密钥。",
+      message: browserMock.webSearchKeyConfigured ? "密钥已配置。" : "尚未配置所选供应商密钥。",
     };
   }
 
-  return invokeLogged<WebSearchCredentialStatus>("load_web_search_credential_status");
+  return invokeLogged<WebSearchCredentialStatus>("load_web_search_credential_status", {
+    payload: { providerId },
+  });
 }
 
-/** 探测 Tavily。浏览器开发态不访问外网，只根据是否已配置切换状态。 */
-export async function probeWebSearch(): Promise<WebSearchCredentialStatus> {
+/** 探测所选供应商。浏览器开发态不访问外网，只根据是否已配置切换状态。 */
+export async function probeWebSearch(
+  providerId: WebSearchSettings["provider"],
+): Promise<WebSearchCredentialStatus> {
   if (!isTauriRuntime()) {
     if (!browserMock.userSettings.webSearch.enabled) {
       throw new Error("请先打开联网搜索并保存设置。");
     }
     if (!browserMock.webSearchKeyConfigured) {
       browserMock.userSettings.webSearch.credentialStatus = "not_configured";
-      return loadWebSearchCredentialStatus();
+      return loadWebSearchCredentialStatus(providerId);
     }
     browserMock.userSettings.webSearch.credentialStatus = "valid";
     return {
       configured: true,
       credentialStatus: "valid",
-      message: "浏览器开发态未访问 Tavily，已标记为可展示的成功状态。",
+      message: "浏览器开发态未访问搜索服务，已标记为可展示的成功状态。",
     };
   }
 
-  return invokeLogged<WebSearchCredentialStatus>("probe_web_search");
+  return invokeLogged<WebSearchCredentialStatus>("probe_web_search", {
+    payload: { providerId },
+  });
 }
 
 /** 批量读取每个 provider 的 BYOK 模型密钥状态；不返回明文密钥。 */

@@ -351,7 +351,7 @@ export interface Citation {
 /** 联网搜索设置。密钥本身不在这里，只保留是否配过和最近一次探测状态。 */
 export interface WebSearchSettings {
   enabled: boolean;
-  provider: "tavily";
+  provider: "tavily" | "brave" | "exa" | "serper";
   keyReference: string;
   credentialStatus: "untested" | "valid" | "invalid_credentials" | "rate_limited" | "network_error" | "not_configured";
 }

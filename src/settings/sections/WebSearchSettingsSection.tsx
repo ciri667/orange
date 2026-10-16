@@ -8,7 +8,7 @@ import {
   saveWebSearchApiKey,
 } from "../../shared/api/settings";
 import { fieldControlClassName, fieldLabelClassName, settingsSectionClassName } from "../../shared/ui";
-import type { UserSettings, WebSearchCredentialStatus } from "../../shared/types";
+import type { UserSettings, WebSearchCredentialStatus, WebSearchSettings } from "../../shared/types";
 import { SettingsSectionHeader } from "../SettingsChrome";
 
 const STATUS_LABEL: Record<WebSearchCredentialStatus["credentialStatus"], string> = {
@@ -20,7 +20,14 @@ const STATUS_LABEL: Record<WebSearchCredentialStatus["credentialStatus"], string
   not_configured: "未配置密钥",
 };
 
-/** 联网搜索开关和 Tavily 密钥。密钥不进入设置草稿。 */
+const PROVIDER_OPTIONS: Array<{ id: WebSearchSettings["provider"]; label: string }> = [
+  { id: "tavily", label: "Tavily" },
+  { id: "brave", label: "Brave Search" },
+  { id: "exa", label: "Exa" },
+  { id: "serper", label: "Serper" },
+];
+
+/** 联网搜索开关、供应商选择和密钥。密钥不进入设置草稿。 */
 export function WebSearchSettingsSection({
   settingsDraft,
   isBusy,
@@ -40,7 +47,7 @@ export function WebSearchSettingsSection({
 
   useEffect(() => {
     let cancelled = false;
-    void loadWebSearchCredentialStatus()
+    void loadWebSearchCredentialStatus(webSearch.provider)
       .then((status) => {
         if (!cancelled) {
           setCredential(status);
@@ -54,13 +61,13 @@ export function WebSearchSettingsSection({
     return () => {
       cancelled = true;
     };
-  }, []);
+  }, [webSearch.provider]);
 
   async function handleSaveKey() {
     setBusy(true);
     setError("");
     try {
-      const status = await saveWebSearchApiKey(apiKeyDraft);
+      const status = await saveWebSearchApiKey(webSearch.provider, apiKeyDraft);
       setCredential(status);
       setApiKeyDraft("");
       onSettingsChange({
@@ -78,7 +85,7 @@ export function WebSearchSettingsSection({
     setBusy(true);
     setError("");
     try {
-      const status = await probeWebSearch();
+      const status = await probeWebSearch(webSearch.provider);
       setCredential(status);
       onSettingsChange({
         ...settingsDraft,
@@ -86,7 +93,7 @@ export function WebSearchSettingsSection({
       });
     } catch (probeError: unknown) {
       setError(probeError instanceof Error ? probeError.message : String(probeError));
-      const status = await loadWebSearchCredentialStatus().catch(() => null);
+      const status = await loadWebSearchCredentialStatus(webSearch.provider).catch(() => null);
       if (status) {
         setCredential(status);
       }
@@ -104,7 +111,7 @@ export function WebSearchSettingsSection({
         kicker="Web"
         title="联网搜索"
         titleId="web-search-settings-title"
-        description="用 Tavily 查公开网页。默认关闭。打开后，基础、进阶和完全级别都可以用。"
+        description="选择搜索供应商查公开网页。默认关闭。打开后，基础、进阶和完全级别都可以用。"
         actions={
           <Button variant="primary" size="compact" type="button" disabled={locked} onClick={() => void onSaveSettings()}>
             <Save size={14} />
@@ -125,12 +132,35 @@ export function WebSearchSettingsSection({
         />
         允许 Agent 联网搜索
       </label>
+      <label className={`${fieldLabelClassName} mt-4`}>
+        搜索供应商
+        <select
+          className={fieldControlClassName}
+          value={webSearch.provider}
+          disabled={locked}
+          onChange={(event) =>
+            onSettingsChange({
+              ...settingsDraft,
+              webSearch: {
+                ...webSearch,
+                provider: event.target.value as WebSearchSettings["provider"],
+              },
+            })
+          }
+        >
+          {PROVIDER_OPTIONS.map((provider) => (
+            <option key={provider.id} value={provider.id}>
+              {provider.label}
+            </option>
+          ))}
+        </select>
+      </label>
       <p className="mt-3 text-xs text-ink-soft">
-        后端固定为 Tavily。状态：{STATUS_LABEL[status]}
+        状态：{STATUS_LABEL[status]}
         {credential?.configured ? " · 密钥已配置" : " · 密钥未配置"}
       </p>
       <label className={`${fieldLabelClassName} mt-4`}>
-        Tavily API key
+        {PROVIDER_OPTIONS.find((provider) => provider.id === webSearch.provider)?.label} API key
         <input
           className={fieldControlClassName}
           type="password"
