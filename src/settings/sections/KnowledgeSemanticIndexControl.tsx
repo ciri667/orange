@@ -17,6 +17,10 @@ export function KnowledgeSemanticIndexControl({ id, name, status, config, busy, 
   const [pending, setPending] = useState<SemanticIndexAction | null>(null);
   const remote = isRemoteSemanticEndpoint(config);
   const enabled = status?.enabled ?? false;
+  // 已暂停、配置错误或有失败片段时，按钮方向是"继续／重试"；否则是"暂停"。
+  const resumable = Boolean(status?.paused || status?.status === "error" || status?.failedChunks);
+  // 全部片段已生成且没有失败时没有可暂停的任务，禁用按钮，避免误暂停后续更新的向量生成。
+  const nothingToPause = !resumable && (status?.pendingChunks ?? 0) === 0;
   function request(action: SemanticIndexAction) {
     if (action === "rebuild" || (action === "enable" && remote)) setPending(action);
     else void act(id, action);
@@ -29,8 +33,8 @@ export function KnowledgeSemanticIndexControl({ id, name, status, config, busy, 
     {enabled && status?.message && <p className="m-0 text-xs text-ink-muted">{status.message}</p>}
     <div className="flex flex-wrap gap-2">
       {!enabled ? <Button variant="ghost" size="compact" disabled={busy || !config.enabled || !status} onClick={() => request("enable")}>开启语义索引</Button> : <>
-        <Button variant="ghost" size="compact" disabled={busy || !config.enabled} onClick={() => request(status?.paused || status?.status === "error" || status?.failedChunks ? "resume" : "pause")}>
-          {status?.paused || status?.status === "error" || status?.failedChunks ? "继续／重试" : "暂停生成"}
+        <Button variant="ghost" size="compact" disabled={busy || !config.enabled || nothingToPause} onClick={() => request(resumable ? "resume" : "pause")}>
+          {resumable ? "继续／重试" : "暂停生成"}
         </Button>
         <Button variant="ghost" size="compact" disabled={busy || !config.enabled} onClick={() => request("rebuild")}>重建</Button>
         <Button variant="ghost" size="compact" disabled={busy} onClick={() => request("disable")}>关闭并清理向量</Button>
