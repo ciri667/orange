@@ -1,5 +1,6 @@
 pub mod agent;
 pub mod builtin_commands;
+pub mod browser;
 mod common;
 pub mod documents;
 pub mod history;

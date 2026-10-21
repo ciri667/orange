@@ -34,6 +34,14 @@ pub async fn save_user_settings(
     })
     .await;
 
+    if let Ok(settings) = &result {
+        // 通用保存设置也要通知浏览器运行态，关闭功能时及时释放 Chromium 进程。
+        if !settings.browser.enabled {
+            crate::browser::shutdown(&app).await;
+        } else {
+            crate::browser::publish_state_public(&app).await;
+        }
+    }
     match &result {
         Ok(_) => logging::write_app_event_best_effort(
             &app,

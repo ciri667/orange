@@ -32,6 +32,7 @@ pub fn default_user_settings() -> UserSettings {
         agent_security: Default::default(),
         web_search: Default::default(),
         semantic_search: Default::default(),
+        browser: Default::default(),
     }
 }
 

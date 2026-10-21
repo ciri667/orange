@@ -35,6 +35,10 @@ genpdf = "0.2"
 keyring = { version = "3", features = ["apple-native", "windows-native", "linux-native-sync-persistent"] }
 # 与 rmcp 3.5.1 对齐到 reqwest 0.13，避免依赖图中出现两个 reqwest 大版本导致类型不匹配。
 reqwest = { version = "0.13", default-features = false, features = ["json", "query", "rustls", "stream"] }
+# 浏览器 Agent 使用 CDP 控制独立 Chromium；fetcher 只在用户显式启用后下载固定版本。
+chromiumoxide = { version = "0.9.1", default-features = false }
+# URL 白名单校验（http/https only）直接依赖 url crate，与 chromiumoxide 内部版本一致。
+url = "2"
 scraper = "0.22"
 futures-util = "0.3"
 rusqlite = { version = "0.32", features = ["bundled"] }

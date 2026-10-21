@@ -103,7 +103,7 @@ impl Default for WebSearchSettings {
     }
 }
 
-/** 用户设置聚合模型、隐私、写入确认和联网搜索，供 Runtime 读取。 */
+/** 用户设置聚合模型、隐私、写入确认、联网搜索和浏览器，供 Runtime 读取。 */
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct UserSettings {
@@ -116,6 +116,8 @@ pub struct UserSettings {
     pub web_search: WebSearchSettings,
     #[serde(default)]
     pub semantic_search: super::semantic::SemanticSearchSettings,
+    #[serde(default)]
+    pub browser: super::super::browser::BrowserSettings,
 }
 
 /** 模型密钥保存状态，只暴露是否可读取，不返回明文密钥。 */

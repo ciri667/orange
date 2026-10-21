@@ -678,6 +678,7 @@ fn migrate_legacy_user_settings(legacy: LegacyUserSettings, now: &str) -> UserSe
         agent_security: Default::default(),
         web_search: Default::default(),
         semantic_search: Default::default(),
+        browser: Default::default(),
     }
 }
 
@@ -771,6 +772,7 @@ mod tests {
             agent_security: Default::default(),
             web_search: Default::default(),
             semantic_search: Default::default(),
+            browser: Default::default(),
         })
         .unwrap();
 
@@ -796,6 +798,7 @@ mod tests {
             agent_security: Default::default(),
             web_search: Default::default(),
             semantic_search: Default::default(),
+            browser: Default::default(),
         };
 
         let serialized = serde_json::to_value(settings).unwrap();
@@ -1336,6 +1339,7 @@ mod tests {
             agent_security: Default::default(),
             web_search: Default::default(),
             semantic_search: Default::default(),
+            browser: Default::default(),
         })
         .unwrap();
 

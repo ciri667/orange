@@ -4,6 +4,7 @@ mod agent_eval;
 mod agent_tools;
 mod agent_trace;
 mod agent_writes;
+mod browser;
 mod builtin_commands;
 mod commands;
 mod domain;
@@ -384,7 +385,21 @@ pub fn run() {
             commands::mcp::set_mcp_server_enabled,
             commands::mcp::reload_mcp_servers,
             commands::mcp::test_mcp_server,
-            commands::mcp::decide_mcp_tool_call
+            commands::mcp::decide_mcp_tool_call,
+            commands::browser::browser_status,
+            commands::browser::browser_start,
+            commands::browser::browser_create_tab,
+            commands::browser::browser_activate_tab,
+            commands::browser::browser_user_input,
+            commands::browser::set_browser_enabled,
+            commands::browser::download_browser_chromium,
+            commands::browser::browser_chromium_status,
+            commands::browser::browser_user_navigate,
+            commands::browser::browser_user_take_over,
+            commands::browser::browser_close_tab,
+            commands::browser::browser_clear_site_data,
+            commands::browser::browser_set_screencast,
+            commands::browser::decide_browser_operation_approval
         ])
         .build(tauri::generate_context!())
         .expect("failed to build Orange desktop app")
@@ -396,6 +411,8 @@ pub fn run() {
                 }
             }
             RunEvent::Exit => {
+                // 浏览器管理器是全局静态值，不会自动 Drop；退出前等待 Chromium 释放 profile。
+                tauri::async_runtime::block_on(browser::shutdown(app));
                 mcp::shutdown_processes();
                 im::stop_all_gateways(app);
             }

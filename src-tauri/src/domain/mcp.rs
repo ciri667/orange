@@ -96,3 +96,11 @@ pub struct McpApprovalDecision {
     pub approval_id: String,
     pub approved: bool,
 }
+
+/** 前端对浏览器操作确认弹窗的决定。 */
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BrowserApprovalDecision {
+    pub approval_id: String,
+    pub approved: bool,
+}
