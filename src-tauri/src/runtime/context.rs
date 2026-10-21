@@ -335,7 +335,7 @@ fn build_system_prompt(
     parts.join("\n\n")
 }
 
-/** 知识库根路径，作为 cwd 等价信息写入 system。 */
+/** 将知识库身份和实际路径分成 JSON 字段，防止模型把展示名称拼入路径参数。 */
 pub(super) fn build_cwd_summary(snapshot: &WorkspaceSnapshot, session: &AgentSession) -> String {
     let paths = session
         .knowledge_base_ids
@@ -345,13 +345,23 @@ pub(super) fn build_cwd_summary(snapshot: &WorkspaceSnapshot, session: &AgentSes
                 .knowledge_bases
                 .iter()
                 .find(|knowledge_base| knowledge_base.id == *id)
-                .map(|knowledge_base| format!("{} ({})", knowledge_base.path, knowledge_base.name))
+                .map(|knowledge_base| {
+                    json!({
+                        "knowledgeBaseId": knowledge_base.id,
+                        "name": knowledge_base.name,
+                        "path": knowledge_base.path,
+                    })
+                    .to_string()
+                })
         })
         .collect::<Vec<_>>();
     if paths.is_empty() {
         "cwd：未绑定知识库根目录".to_owned()
     } else {
-        format!("cwd / 知识库根路径：{}", paths.join(" / "))
+        format!(
+            "知识库根路径（path 字段是实际路径，name 不是路径的一部分；相对路径以所选知识库为基准，根目录可用 .）：\n{}",
+            paths.join("\n")
+        )
     }
 }
 

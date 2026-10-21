@@ -155,9 +155,14 @@ fn resolve_relative_inside_knowledge_base(
     let canonical_root = fs::canonicalize(&knowledge_base.path)
         .map_err(|error| format!("无法解析知识库根目录：{error}"))?;
     let target = join_without_escape(&canonical_root, relative)?;
-    let mut existing_ancestor = target
-        .parent()
-        .ok_or_else(|| "目标路径缺少父目录。".to_owned())?;
+    // `.` 解析后就是根目录，应校验根本身；校验其父目录会误报合法的根目录读取越界。
+    let mut existing_ancestor = if target == canonical_root {
+        target.as_path()
+    } else {
+        target
+            .parent()
+            .ok_or_else(|| "目标路径缺少父目录。".to_owned())?
+    };
     while !existing_ancestor.exists() {
         existing_ancestor = existing_ancestor
             .parent()
@@ -438,6 +443,44 @@ mod tests {
             false,
         );
         assert!(absolute.unwrap_err().contains("完全级别"));
+    }
+
+    #[test]
+    fn dot_resolves_to_authorized_kb_root_without_allowing_parent_escape() {
+        let root = tempfile::tempdir().expect("kb root");
+        let kb = knowledge_base("kb-a", root.path());
+        let session_ids = vec!["kb-a".to_owned()];
+        for level in ["advanced", "autonomous"] {
+            for relative in [".", "./", "./."] {
+                let resolved = resolve_agent_fs_target(
+                    &[kb.clone()],
+                    &session_ids,
+                    "kb-a",
+                    level,
+                    None,
+                    relative,
+                    true,
+                )
+                .expect("root must be readable");
+                assert_eq!(
+                    resolved.absolute_path,
+                    fs::canonicalize(root.path()).unwrap()
+                );
+                assert_eq!(resolved.knowledge_base_id, "kb-a");
+            }
+            for relative in ["..", "../sibling", "./../sibling"] {
+                assert!(resolve_agent_fs_target(
+                    &[kb.clone()],
+                    &session_ids,
+                    "kb-a",
+                    level,
+                    None,
+                    relative,
+                    false,
+                )
+                .is_err());
+            }
+        }
     }
 
     #[test]
