@@ -5,11 +5,15 @@ mod dsml;
 mod stream;
 mod subagent;
 mod subagent_personas;
+mod tool_budget;
+mod tool_results;
 use cancel::{is_user_abort_error, USER_ABORT_ERROR};
 use compaction::*;
 use context::*;
 use dsml::*;
 use stream::*;
+use tool_budget::{ModelLoopPhase, ToolRoundBudget};
+use tool_results::model_tool_result_text;
 
 pub use cancel::{
     clear_placeholder as clear_agent_cancel_placeholder, is_session_turn_active,
@@ -18,7 +22,9 @@ pub use cancel::{
 };
 
 use crate::agent;
-use crate::agent_tools::{model_tool_call_name, parse_tool_args, AgentToolContext, ToolRegistry};
+use crate::agent_tools::{
+    model_tool_call_name, parse_tool_args, AgentToolContext, ToolOutcome, ToolRegistry,
+};
 use crate::agent_trace::{running_tool_summary, AgentTurnTracer};
 use crate::domain::{
     AgentContextSummary, AgentContextTouchedNote, AgentContextUsage, AgentMessage, AgentSession,
@@ -57,8 +63,8 @@ pub(super) const AUTO_COMPACT_PROMPT_CHAR_THRESHOLD: usize = 48_000;
 /** 工具结果回填给模型时的最大 JSON 字符数。 */
 pub(super) const MAX_TOOL_RESULT_CHARS: usize = 9000;
 
-/** 内层工具续跑安全帽；有 tool call 就继续，error/abort/length 在循环内立刻停。 */
-pub(super) const MAX_INNER_TOOL_ROUNDS: usize = 12;
+/** 子 Agent 沿用普通任务上限；主循环由 ToolRoundBudget 按实际工具类型分配。 */
+pub(super) const MAX_INNER_TOOL_ROUNDS: usize = tool_budget::DEFAULT_TOOL_ROUND_LIMIT;
 
 /** 未派发工具的合成结果，保证 assistant(tool_calls) 都有对应 tool 消息。 */
 const ABORTED_BEFORE_DISPATCH_SUMMARY: &str = "工具调用在派发前被用户中断。";
@@ -405,6 +411,8 @@ pub async fn run_agent_turn(
     available_skills: Vec<AgentSkill>,
     cancel: AgentCancel,
 ) -> RuntimeTurnResult {
+    // 新消息开始新回合，清理上一轮接管封锁；当前回合结束时也会释放浏览器租约。
+    crate::browser::finish_agent_turn(&request.session_id).await;
     let explicit_skill_selection =
         match resolve_explicit_skills(&request.explicit_skill_ids, &available_skills) {
             Ok(selection) => selection,
@@ -576,7 +584,8 @@ pub async fn run_agent_turn(
         );
     }
 
-    match run_model_loop(
+    let browser_session_id = request.session_id.clone();
+    let result = match run_model_loop(
         app,
         snapshot.clone(),
         request.clone(),
@@ -616,7 +625,9 @@ pub async fn run_agent_turn(
                 Some(&tracer),
             )
         }
-    }
+    };
+    crate::browser::finish_agent_turn(&browser_session_id).await;
+    result
 }
 
 /** 如果本轮请求显式选择了 providerId/modelId（AgentPanel 的“本轮模型”选择器），把它记为会话默认，
@@ -784,7 +795,14 @@ async fn run_model_loop(
     );
 
     let mut model_round = 0u32;
-    for _ in 0..MAX_INNER_TOOL_ROUNDS {
+    let mut tool_budget = ToolRoundBudget::default();
+    loop {
+        if crate::browser::agent_turn_was_taken_over(&session_id).await {
+            tool_budget.stop_for_browser_takeover();
+        }
+        let Some(phase) = tool_budget.next_phase() else {
+            break;
+        };
         if cancel.is_aborted() {
             return Ok(finalize_aborted_turn(
                 app,
@@ -807,13 +825,18 @@ async fn run_model_loop(
         }
         audit_trail.record_model_request();
         model_round = model_round.saturating_add(1);
+        // 总结请求保留最后一步结果，但临时限制不进入持久化 transcript。
+        let finalizing = phase == ModelLoopPhase::Summary;
+        let mut summary_messages =
+            finalizing.then(|| tool_budget.summary_messages(&model_messages));
+        let request_messages = summary_messages.as_mut().unwrap_or(&mut model_messages);
         capture_model_prompt_dump(
             app,
             &session_id,
             &selected_model_id,
             model_context_length,
             model_round,
-            &model_messages,
+            request_messages,
         );
         let image_root = conversation_attachments_root(app).ok();
         let response = match send_chat_completion_with_policy(
@@ -822,8 +845,8 @@ async fn run_model_loop(
             &selected_model_id,
             &endpoint,
             &api_key,
-            &mut model_messages,
-            Some(&tool_schemas),
+            request_messages,
+            (!finalizing).then_some(&tool_schemas),
             None,
             image_root.as_deref(),
             cancel,
@@ -847,6 +870,15 @@ async fn run_model_loop(
                     tracer,
                     audit_trail,
                 ));
+            }
+            Err(error) if finalizing => {
+                // 总结失败不能丢掉已经执行的工具轨迹，走下方的持久化兜底。
+                log::warn!(
+                    target: "agent_runtime",
+                    "工具上限总结失败：{}",
+                    model_provider::redact_model_error_text(&error)
+                );
+                break;
             }
             Err(error) => {
                 let status = provider_error::parse_http_status_from_error(&error);
@@ -906,10 +938,24 @@ async fn run_model_loop(
             .and_then(Value::as_array)
             .and_then(|choices| choices.first())
             .and_then(|choice| choice.get("message"))
-            .cloned()
-            .ok_or_else(|| "模型响应缺少 message。".to_owned())?;
+            .cloned();
+        let Some(message) = message else {
+            if finalizing {
+                break;
+            }
+            return Err("模型响应缺少 message。".to_owned());
+        };
         let extracted_tool_calls = extract_tool_calls_from_message(&message);
         let model_tool_calls = extracted_tool_calls.tool_calls;
+        // 某些兼容服务仍可能输出 DSML/原生 tool_calls；总结阶段一律不派发。
+        if finalizing
+            && (!model_tool_calls.is_empty() || extracted_tool_calls.visible_content.is_empty())
+        {
+            break;
+        }
+        if !model_tool_calls.is_empty() {
+            tool_budget.record_tool_round();
+        }
         log::debug!(
             target: "agent_runtime",
             "模型返回工具调用：session={} tool_call_count={} dsml_visible_chars={} finish_reason={:?}",
@@ -1073,6 +1119,7 @@ async fn run_model_loop(
                     &mut tool_calls,
                     tracer,
                     Some(app),
+                    ABORTED_BEFORE_DISPATCH_SUMMARY,
                 );
                 return Ok(finalize_aborted_turn(
                     app,
@@ -1086,6 +1133,21 @@ async fn run_model_loop(
                     tracer,
                     audit_trail,
                 ));
+            }
+            // 先于普通工具和并行 task 分派检查；同批剩余调用只补协议回执，不实际执行。
+            if crate::browser::agent_turn_was_taken_over(&session_id).await {
+                tool_budget.stop_for_browser_takeover();
+            }
+            if let Some(reason) = tool_budget.stop_reason() {
+                settle_undispatched_tool_calls(
+                    remaining_tool_calls,
+                    &mut model_messages,
+                    &mut tool_calls,
+                    tracer,
+                    Some(app),
+                    reason,
+                );
+                break;
             }
             let peek_name = model_tool_call_name(&remaining_tool_calls[0]);
             if peek_name == "task" {
@@ -1169,6 +1231,31 @@ async fn run_model_loop(
                     cancel,
                 )
                 .await
+            } else if tool_name == "run"
+                && tool_args.get("kind").and_then(Value::as_str) == Some("browser")
+            {
+                // 浏览器操作是异步 CDP 调用，不能走同步 AgentTool::execute；
+                // 与 MCP 分支一样在 runtime 里预分派，结果统一回 ToolOutcome。
+                let outcome = crate::browser::execute_run_request(
+                    app,
+                    &snapshot.sessions[session_index],
+                    &tool_args,
+                    cancel,
+                )
+                .await;
+                let (success, summary, payload, citations, audit_fragment) = outcome.into_parts();
+                ToolOutcome {
+                    call: AgentToolCall {
+                        id: crate::storage::create_id("tool"),
+                        name: tool_name.clone(),
+                        status: if success { "completed" } else { "failed" }.to_owned(),
+                        summary,
+                        args: tool_args.clone(),
+                    },
+                    payload,
+                    citations,
+                    audit_fragment,
+                }
             } else if tool_name == "task" {
                 let live_id = tracer.live_message_id().to_owned();
                 let shared = Arc::new(Mutex::new(std::mem::replace(
@@ -1213,10 +1300,9 @@ async fn run_model_loop(
 
                 tool_registry.execute_model_tool_call(&mut tool_context, &model_tool_call)
             };
-            let mut tool_result_text = truncate_tool_result_for_model(
-                &tool_outcome.payload.to_string(),
-                MAX_TOOL_RESULT_CHARS,
-            );
+            tool_budget.observe_call(&tool_outcome.call, &tool_outcome.payload);
+            let mut tool_result_text =
+                model_tool_result_text(&tool_outcome.call, &tool_outcome.payload);
             if !cancel.is_aborted()
                 && tool_outcome.call.name == "run"
                 && tool_outcome.call.status == "completed"
@@ -1391,7 +1477,7 @@ async fn run_model_loop(
     }
 
     let content = reconcile_final_content_with_tool_status(
-        "已达到本轮工具步数上限。请根据已有结果继续，或再发一条指令。".to_owned(),
+        tool_budget.fallback_content(),
         last_failed_tool_summary.as_deref(),
     );
     tracer.finish(Some(&content), Some(app));
@@ -3196,6 +3282,7 @@ fn settle_undispatched_tool_calls(
     tool_calls: &mut Vec<AgentToolCall>,
     tracer: &mut AgentTurnTracer,
     app: Option<&AppHandle>,
+    reason: &str,
 ) {
     for model_tool_call in model_tool_calls {
         let tool_name = model_tool_call_name(&model_tool_call);
@@ -3204,24 +3291,23 @@ fn settle_undispatched_tool_calls(
             id: create_id("tool"),
             name: tool_name.clone(),
             status: "aborted".to_owned(),
-            summary: ABORTED_BEFORE_DISPATCH_SUMMARY.to_owned(),
+            summary: reason.to_owned(),
             args: tool_args.clone(),
         };
-        let trace_step_id =
-            tracer.begin_tool(&tool_name, ABORTED_BEFORE_DISPATCH_SUMMARY, tool_args, app);
+        let trace_step_id = tracer.begin_tool(&tool_name, reason, tool_args, app);
         tracer.finish_tool(
             trace_step_id.as_deref(),
             "aborted",
-            ABORTED_BEFORE_DISPATCH_SUMMARY,
+            reason,
             None,
-            Some(ABORTED_BEFORE_DISPATCH_SUMMARY),
+            Some(reason),
             app,
         );
         tool_calls.push(aborted_call);
         model_messages.push(json!({
             "role": "tool",
             "tool_call_id": model_tool_call.get("id").and_then(Value::as_str).unwrap_or("tool-call"),
-            "content": json!({ "success": false, "error": ABORTED_BEFORE_DISPATCH_SUMMARY }).to_string()
+            "content": json!({ "success": false, "error": reason }).to_string()
         }));
     }
 }
@@ -5389,6 +5475,7 @@ mod tests {
             &mut tool_calls,
             &mut tracer,
             None,
+            ABORTED_BEFORE_DISPATCH_SUMMARY,
         );
 
         assert_eq!(tool_calls.len(), 1);

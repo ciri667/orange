@@ -27,22 +27,45 @@ impl AgentTool for RunSkillTool {
     }
 
     fn description(&self) -> &'static str {
-        "Request execution of an enabled Skill entry script inside Orange's isolated workspace. The user may need to approve it before execution."
+        "Run an enabled Skill entry script (default) or control Orange's embedded browser with kind=\"browser\". Skill runs may need user approval; browser operations follow the session security level."
     }
 
     fn parameters(&self) -> Value {
         json!({
             "type": "object",
             "properties": {
-                "skillId": { "type": "string" },
+                "skillId": {
+                    "type": "string",
+                    "description": "Skill id to run. Required unless kind=\"browser\"."
+                },
                 "arguments": {
                     "type": "array",
                     "items": { "type": "string" },
                     "maxItems": 32,
-                    "description": "Non-secret arguments passed as separate process arguments."
-                }
+                    "description": "Non-secret arguments passed as separate process arguments (skill runs only)."
+                },
+                "kind": {
+                    "type": "string",
+                    "enum": ["browser"],
+                    "description": "Set to \"browser\" to control the embedded browser instead of running a skill."
+                },
+                "operation": {
+                    "type": "string",
+                    "enum": crate::browser::READ_OPERATIONS.iter().chain(crate::browser::MUTATE_OPERATIONS.iter()).copied().collect::<Vec<_>>(),
+                    "description": "Required when kind=\"browser\". Use browser.get_state to list tabs and their titles/URLs; browser.activate_tab with tabId switches tabs. Only the listed operations are supported."
+                },
+                "tabId": { "type": "string", "description": "Browser tab id; defaults to the active tab." },
+                "url": { "type": "string", "description": "Required for tab.navigate; optional initial URL for browser.create_tab (http/https only). Omit to create a blank tab." },
+                "query": { "type": "string", "description": "Search query for tab.search." },
+                "text": { "type": "string", "description": "Text for page.element.fill/type_text or page.wait_for." },
+                "key": { "type": "string", "description": "Key name for page.element.press_key, e.g. Enter." },
+                "value": { "type": "string", "description": "Option value for page.element.select_option." },
+                "checked": { "type": "boolean", "description": "Target state for page.element.set_checked." },
+                "reference": { "type": "string", "description": "Element reference from the latest page.elements.snapshot." },
+                "textOffset": { "type": "integer", "minimum": 0, "description": "Pass snapshot.nextTextOffset to continue page.text.snapshot." },
+                "elementOffset": { "type": "integer", "minimum": 0, "description": "Pass snapshot.nextElementOffset to continue page.elements.snapshot (20 elements per page)." }
             },
-            "required": ["skillId"]
+            "description": "Either { skillId, arguments? } to run a skill, or { kind: \"browser\", operation, ...params } to control the embedded browser. Start with browser.get_state to discover tabs. A clicked link may open a new tab: check browser.get_state and activate the new tab before continuing. page.text.snapshot returns body text; page.elements.snapshot returns paged interactive elements. Continue with textOffset=nextTextOffset or elementOffset=nextElementOffset when present. Take a page.elements.snapshot first and reuse element references for interactions; expired references return SNAPSHOT_EXPIRED and require a fresh snapshot. BROWSER_USER_TAKEOVER ends this turn's tools: summarize available results and wait for the user; do not retry or switch tools to bypass takeover."
         })
     }
 
@@ -59,6 +82,10 @@ pub(crate) fn execute_run_skill_request(
     let Some(app) = context.app else {
         return ToolExecutionResult::failed("当前环境不支持执行 Skill。");
     };
+    // 浏览器分支由 runtime 异步预分派；同步路径收到它说明分派条件失效，显式报错而不是误当 Skill。
+    if args.get("kind").and_then(Value::as_str) == Some("browser") {
+        return ToolExecutionResult::failed("浏览器操作必须经过 runtime 的浏览器分支执行。");
+    }
     let session = &context.snapshot.sessions[context.session_index];
     if session.im_identity.is_some() || session.security_level == "basic" {
         return ToolExecutionResult::failed("当前会话安全级别不允许执行 Skill。");
@@ -2879,6 +2906,23 @@ mod tests {
         resolve_search_knowledge_base_ids,
     };
     use serde_json::json;
+
+    #[test]
+    fn browser_schema_exposes_every_dispatchable_operation() {
+        use super::{AgentTool, RunSkillTool};
+        let schema = RunSkillTool.parameters();
+        let operations = schema["properties"]["operation"]["enum"]
+            .as_array()
+            .unwrap();
+        let expected: Vec<serde_json::Value> = crate::browser::READ_OPERATIONS
+            .iter()
+            .chain(crate::browser::MUTATE_OPERATIONS.iter())
+            .map(|operation| json!(operation))
+            .collect();
+        assert_eq!(operations, &expected);
+        assert!(operations.contains(&json!("browser.get_state")));
+        assert!(!operations.contains(&json!("browser.list_tabs")));
+    }
 
     /** search 过滤参数必须规范化，并把当前不支持的文件类型显式报告出来。 */
     #[test]
