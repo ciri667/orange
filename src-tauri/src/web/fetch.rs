@@ -135,7 +135,7 @@ pub(crate) fn fetch_document(
             continue;
         }
         if !(200..300).contains(&response.status) {
-            return Err(WebError::HttpStatus);
+            return Err(WebError::HttpStatus(response.status));
         }
         return decode_page(&current, response);
     }
@@ -387,6 +387,34 @@ mod tests {
             http.requested.lock().unwrap().as_slice(),
             ["https://public.example/start"]
         );
+    }
+
+    /** 错误状态必须可诊断，同时仍不向模型暴露服务器错误响应正文。 */
+    #[test]
+    fn reports_http_status_without_leaking_response_body() {
+        for status in [403, 404, 429, 500] {
+            let http = ScriptedHttp {
+                dns: public_dns(),
+                responses: Mutex::new(HashMap::from([(
+                    "https://public.example/missing".to_owned(),
+                    HttpResponse {
+                        status,
+                        location: None,
+                        content_type: Some("text/html".to_owned()),
+                        body: b"private-error-details".to_vec(),
+                        truncated_by_bytes: false,
+                    },
+                )])),
+                requested: Mutex::new(Vec::new()),
+            };
+            let error = fetch_document("https://public.example/missing", &http).unwrap_err();
+            assert!(matches!(error, WebError::HttpStatus(code) if code == status));
+            assert_eq!(
+                error.to_string(),
+                format!("页面返回 HTTP {status} 错误状态。")
+            );
+            assert_eq!(http.requested.lock().unwrap().len(), 1);
+        }
     }
 
     #[test]

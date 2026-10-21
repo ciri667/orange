@@ -136,8 +136,8 @@ pub(crate) enum WebError {
     TooManyRedirects,
     #[error("网页编码不受支持。")]
     UnsupportedCharset,
-    #[error("页面返回了错误状态。")]
-    HttpStatus,
+    #[error("页面返回 HTTP {0} 错误状态。")]
+    HttpStatus(u16),
 }
 
 impl WebError {
