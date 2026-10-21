@@ -1,5 +1,6 @@
 export {
   AgentMemorySettingsSection,
+  BrowserSettingsSection,
   WebSearchSettingsSection,
   AgentSecuritySettingsSection,
   AuditLogsSettingsSection,

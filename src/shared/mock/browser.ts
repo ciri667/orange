@@ -87,6 +87,7 @@ export const defaultBrowserUserSettings: UserSettings = {
     keyReference: "orange-web-search-tavily",
     credentialStatus: "not_configured",
   },
+  browser: { enabled: false },
 };
 
 /** 浏览器开发态默认飞书 provider；桌面端真实设置由 SQLite 和系统 keyring 保存。 */
@@ -749,6 +750,7 @@ export function cloneUserSettings(settings: UserSettings): UserSettings {
     },
     webSearch: { ...settings.webSearch },
     semanticSearch: { ...defaultSemanticSearchSettings, ...settings.semanticSearch },
+    browser: { ...settings.browser },
     modelConfig: {
       ...settings.modelConfig,
       providers: settings.modelConfig.providers.map((provider) => ({

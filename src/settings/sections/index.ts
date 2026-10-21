@@ -9,3 +9,4 @@ export { EventLogsSettingsSection } from "./EventLogsSettingsSection";
 export { AuditLogsSettingsSection } from "./AuditLogsSettingsSection";
 export { AgentMemorySettingsSection } from "./AgentMemorySettingsSection";
 export { WebSearchSettingsSection } from "./WebSearchSettingsSection";
+export { BrowserSettingsSection } from "./BrowserSettingsSection";

@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { getCurrentWindow } from "@tauri-apps/api/window";
-import { Minus, PanelLeftClose, Square, X } from "lucide-react";
+import { Globe, Minus, PanelLeftClose, Square, X } from "lucide-react";
 import { Button } from "../shared/Button";
 import { MenuItem, MenuPanel } from "../shared/Menu";
 import { cn } from "../shared/cn";
@@ -69,6 +69,9 @@ export interface WorkspaceTopBarProps {
   /** 左栏是否展开，决定收展按钮的图标和提示。 */
   sidebarOpen: boolean;
   onToggleSidebar: () => void;
+  browserEnabled?: boolean;
+  browserOpen?: boolean;
+  onToggleBrowser?: () => void;
 }
 
 /**
@@ -145,7 +148,7 @@ function runWindowCommand(command: string, action: () => Promise<void>) {
  * Windows 关闭系统装饰后，这里负责拖拽和窗口控制；macOS 用 Overlay 把系统红绿灯
  * 叠进同一行，因此不需要自绘窗口控制。
  */
-export function WorkspaceTopBar({ sidebarOpen, onToggleSidebar }: WorkspaceTopBarProps) {
+export function WorkspaceTopBar({ sidebarOpen, onToggleSidebar, browserEnabled, browserOpen, onToggleBrowser }: WorkspaceTopBarProps) {
   const [platform, setPlatform] = useState<DesktopPlatform | null>(null);
 
   useEffect(() => {
@@ -205,8 +208,10 @@ export function WorkspaceTopBar({ sidebarOpen, onToggleSidebar }: WorkspaceTopBa
         ))}
       </nav>
 
+      {browserEnabled && <Button variant="ghost" size="compact" className="ml-auto" data-no-drag aria-label={browserOpen ? "收起浏览器面板" : "打开浏览器面板"} aria-pressed={browserOpen} onClick={onToggleBrowser}><Globe size={14} />浏览器</Button>}
+
       {platform === "windows" && (
-        <div className="ml-auto flex h-full items-stretch" data-no-drag>
+        <div className={cn("flex h-full items-stretch", !browserEnabled && "ml-auto")} data-no-drag>
           <button
             type="button"
             className="grid w-11 place-items-center border-0 bg-transparent text-ink-muted hover:bg-surface-hover hover:text-ink"

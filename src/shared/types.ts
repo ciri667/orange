@@ -763,6 +763,7 @@ export interface UserSettings {
   agentSecurity: AgentSecuritySettings;
   webSearch: WebSearchSettings;
   semanticSearch: SemanticSearchSettings;
+  browser: BrowserFeatureSettings;
 }
 
 /** Embedding 独立设置；密钥由系统 keyring 保存。 */
@@ -1268,4 +1269,98 @@ export interface McpApprovalRequest {
 export interface McpApprovalDecision {
   approvalId: string;
   approved: boolean;
+}
+
+/** 浏览器功能设置；默认关闭，启用后需下载固定版本 Chromium。 */
+export interface BrowserFeatureSettings {
+  enabled: boolean;
+}
+
+/** 面板标签页视图。 */
+export interface BrowserTabView {
+  tabId: string;
+  url: string;
+  title: string;
+  active: boolean;
+  visible: boolean;
+}
+
+/** 控制租约状态：谁在操作浏览器。 */
+export interface BrowserControlState {
+  running: boolean;
+  sessionId?: string | null;
+  status: string;
+  revision: number;
+  elapsedMs: number;
+}
+
+/** 浏览器整体状态，`browser-state-changed` 事件与状态命令共用。 */
+export interface BrowserState {
+  available: boolean;
+  enabled: boolean;
+  chromiumInstalled: boolean;
+  launchError?: string | null;
+  tabs: BrowserTabView[];
+  activeTabId?: string | null;
+  visibleTabId?: string | null;
+  control: BrowserControlState;
+}
+
+/** 面板实时画面帧；data 是 JPEG 的 base64。 */
+export interface BrowserFrame {
+  tabId: string;
+  data: string;
+  width: number;
+  height: number;
+}
+
+/** 接管后的面板输入，坐标使用浏览器视口 CSS 像素。 */
+export type BrowserUserInput =
+  | { kind: "click"; x: number; y: number }
+  | { kind: "scroll"; x: number; y: number; deltaX: number; deltaY: number }
+  | { kind: "text"; text: string }
+  | { kind: "key"; key: string; modifiers: number };
+
+/** 面板活动提示：Agent 正在做什么。 */
+export interface BrowserActivity {
+  activity: string;
+  tabId?: string | null;
+}
+
+/** 操作凭证：动作前保存的目标区域快照，只发面板。 */
+export interface BrowserReceipt {
+  receiptId: string;
+  tabId: string;
+  operation: string;
+  x: number;
+  y: number;
+  url: string;
+  createdAt: number;
+}
+
+/** 进阶级别下等待用户确认的浏览器操作请求。 */
+export interface BrowserApprovalRequest {
+  approvalId: string;
+  sessionId: string;
+  operation: string;
+  tabId?: string | null;
+  url?: string | null;
+  elementSummary?: string | null;
+}
+
+/** 前端对浏览器操作确认弹窗的决定。 */
+export interface BrowserApprovalDecision {
+  approvalId: string;
+  approved: boolean;
+}
+
+/** Chromium 安装状态，供设置页展示。 */
+export interface ChromiumInstallStatus {
+  installed: boolean;
+  version?: string | null;
+  downloading: boolean;
+  phase: "idle" | "connecting" | "downloading" | "extracting" | "installed" | "failed";
+  downloaded: number;
+  total: number | null;
+  error: string | null;
 }

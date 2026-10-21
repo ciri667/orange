@@ -15,3 +15,4 @@ export * from "./schedules";
 export * from "./voice";
 export * from "./mcp";
 export * from "./semantic";
+export * from "./browser";

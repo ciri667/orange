@@ -243,6 +243,7 @@ select:focus-visible {
 }
 
 .workspace-grid {
+  position: relative;
   display: grid;
   min-width: 0;
   min-height: 0;
@@ -489,6 +490,252 @@ select:focus-visible {
 
 .workspace-grid > .agent-panel {
   height: 100%;
+}
+
+/* 内嵌浏览器面板：与 Agent 面板同构的停靠栏，默认隐藏，由浏览器开关控制。 */
+/* 浮动停靠形态：覆盖在内容区右侧，不改变三栏 grid 轨道，避免侵入布局系统。 */
+.browser-panel.browser-panel-floating {
+  position: absolute;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  z-index: var(--z-region-preview, 260);
+  width: min(480px, 42vw);
+  border-left: 1px solid var(--border);
+  box-shadow: -12px 0 32px rgb(0 0 0 / 0.12);
+}
+
+.browser-panel {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  gap: 0;
+  overflow: hidden;
+  padding: 0;
+  background: var(--surface);
+}
+
+.workspace-grid > .browser-panel {
+  height: 100%;
+  min-width: 0;
+}
+
+.browser-panel-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--border);
+}
+
+.browser-panel-title {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--ink-strong);
+}
+
+.browser-tab-strip {
+  display: flex;
+  gap: 4px;
+  overflow-x: auto;
+  padding: 6px 8px;
+  border-bottom: 1px solid var(--border);
+}
+
+.browser-tab {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  max-width: 160px;
+  padding: 3px 8px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: transparent;
+  color: var(--ink-muted);
+  font-size: 11px;
+  cursor: pointer;
+}
+
+.browser-tab.is-active {
+  border-color: var(--accent);
+  color: var(--ink-strong);
+  background: var(--accent-soft);
+}
+
+.browser-tab-title {
+  overflow: hidden;
+  max-width: 120px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.browser-tab-close {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 14px;
+  height: 14px;
+  border-radius: 3px;
+  color: var(--ink-soft);
+  border: 0;
+  background: transparent;
+  padding: 0;
+}
+
+.browser-tab-close:hover {
+  background: var(--surface-hover);
+  color: var(--danger);
+}
+
+.browser-address-bar {
+  padding: 6px 8px;
+  border-bottom: 1px solid var(--border);
+}
+
+.browser-address-bar input {
+  width: 100%;
+  padding: 5px 10px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface-muted);
+  color: var(--ink);
+  font-size: 12px;
+  outline: none;
+}
+
+.browser-address-bar input:focus {
+  border-color: var(--accent);
+}
+
+.browser-stage {
+  position: relative;
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--surface-muted);
+}
+
+.browser-stage-frame {
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+}
+
+/* 文字输入保持焦点并支持输入法，视觉画面由同一个 Chromium 页面提供。 */
+.browser-stage-input {
+  position: absolute;
+  left: 0;
+  bottom: 0;
+  width: 1px;
+  height: 1px;
+  opacity: 0;
+  padding: 0;
+  border: 0;
+  resize: none;
+}
+
+.browser-stage-placeholder {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+  color: var(--ink-soft);
+  font-size: 12px;
+}
+
+.browser-receipt-badge {
+  position: absolute;
+  top: 8px;
+  right: 8px;
+  padding: 2px 8px;
+  border-radius: 999px;
+  background: var(--warning-soft);
+  color: var(--ink-strong);
+  font-size: 11px;
+}
+
+.browser-panel-footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 8px 12px;
+  border-top: 1px solid var(--border);
+}
+
+.browser-status {
+  min-width: 0;
+  flex: 1;
+  font-size: 12px;
+  color: var(--ink-muted);
+}
+
+.browser-status-agent {
+  color: var(--accent-strong);
+}
+
+.browser-status-activity {
+  color: var(--ink-strong);
+}
+
+.browser-takeover-active {
+  border-color: var(--warning);
+}
+
+.browser-approval-backdrop {
+  position: absolute;
+  inset: 0;
+  z-index: 20;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgb(0 0 0 / 0.35);
+  padding: 16px;
+}
+
+.browser-approval-card {
+  width: 100%;
+  max-width: 320px;
+  padding: 16px;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: var(--surface);
+  box-shadow: var(--shadow-app);
+}
+
+.browser-approval-card h3 {
+  margin: 0 0 8px;
+  font-size: 13px;
+  color: var(--ink-strong);
+}
+
+.browser-approval-operation {
+  margin: 0 0 6px;
+  font-family: ui-monospace, monospace;
+  font-size: 12px;
+  color: var(--ink);
+}
+
+.browser-approval-detail {
+  margin: 0 0 4px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 11px;
+  color: var(--ink-soft);
+}
+
+.browser-approval-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 12px;
 }
 
 .workspace-resizer {

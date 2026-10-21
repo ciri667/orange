@@ -820,7 +820,16 @@ export function useAgentTurn(options: AgentTurnOptions) {
         latestSnapshot = sourceSnapshot;
         setAgentPrompt(promptBeforeSubmit);
       }
-      setNotice(error instanceof Error ? error.message : String(error));
+      const errorMessage = error instanceof Error ? error.message : String(error);
+      if (errorMessage.includes("BROWSER_USER_TAKEOVER") || errorMessage.includes("用户已接管浏览器")) {
+        // 接管是用户主动行为，用输入框旁的回执提示，而不是左侧栏的 notice。
+        setBuiltinCommandNotice({
+          text: "你已接管浏览器，Agent 本轮的后续浏览器操作已停止。",
+          tone: "info",
+        });
+      } else {
+        setNotice(errorMessage);
+      }
     } finally {
       if (startedTurn) {
         inFlightSessionIdsRef.current.delete(reservedSessionId ?? sessionForTurn.id);

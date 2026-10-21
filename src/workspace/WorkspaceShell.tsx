@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { AgentPanel } from "../agent/AgentPanel";
 import { McpApprovalDialog } from "../agent/McpApprovalDialog";
+import { BrowserPanel } from "../browser/BrowserPanel";
 import { DocumentPane } from "../editor/DocumentPane";
 import { EditorTabBar, type EditorTabBarItem } from "../editor/EditorTabBar";
 import { EditorPane } from "../editor/EditorPane";
@@ -179,6 +180,12 @@ export function WorkspaceShell() {
     },
     onNoticeChange: setNotice,
   });
+  /** 浏览器面板显隐：跟随设置里的浏览器功能开关，默认隐藏。 */
+  const [isBrowserPanelOpen, setIsBrowserPanelOpen] = useState(false);
+  const browserEnabled = userSettings?.browser?.enabled ?? false;
+  useEffect(() => {
+    setIsBrowserPanelOpen(browserEnabled);
+  }, [browserEnabled]);
   useEffect(() => {
     let unlisten: (() => void) | undefined;
     void listenScheduledJobUpdated((payload) => {
@@ -976,6 +983,9 @@ export function WorkspaceShell() {
       */}
       <WorkspaceTopBar
         sidebarOpen={regionOpen.sidebar}
+        browserEnabled={browserEnabled}
+        browserOpen={isBrowserPanelOpen}
+        onToggleBrowser={() => setIsBrowserPanelOpen((open) => !open)}
         onToggleSidebar={() => toggleRegion("sidebar")}
       />
       <main
@@ -1143,6 +1153,9 @@ export function WorkspaceShell() {
             renderPreview={renderAgentPreview}
             previewWidth={regionPreviewWidth.agent}
           />
+        )}
+        {isBrowserPanelOpen && (
+          <BrowserPanel className="browser-panel-floating" onClose={() => setIsBrowserPanelOpen(false)} />
         )}
       </main>
       {isSettingsOpen && (

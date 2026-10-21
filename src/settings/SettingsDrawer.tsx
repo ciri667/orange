@@ -57,6 +57,7 @@ import { SkillsModal } from "./SkillsModal";
 import {
   AgentMemorySettingsSection,
   AuditLogsSettingsSection,
+  BrowserSettingsSection,
   EventLogsSettingsSection,
   ImSettingsSection,
   KnowledgeSettingsSection,
@@ -69,7 +70,7 @@ import {
 } from "./SettingsSections";
 
 /** 设置页左侧导航的可选分区，和右侧主内容一一对应。 */
-type SettingsSectionId = "semanticSearch" | "knowledge" | "model" | "voice" | "webSearch" | "agentSecurity" | "im" | "skills" | "mcp" | "agentMemory" | "eventLogs" | "auditLogs";
+type SettingsSectionId = "browser" | "semanticSearch" | "knowledge" | "model" | "voice" | "webSearch" | "agentSecurity" | "im" | "skills" | "mcp" | "agentMemory" | "eventLogs" | "auditLogs";
 
 /** 设置页导航分组，帮助用户区分可配置项和只读诊断项。 */
 type SettingsSectionGroup = "配置" | "诊断";
@@ -277,6 +278,15 @@ export function SettingsDrawer({
         meta: settingsDraft.webSearch.enabled ? "已开启" : "已关闭",
         icon: Globe,
         tone: settingsDraft.webSearch.enabled ? "success" : "neutral",
+      },
+      {
+        id: "browser",
+        group: "配置",
+        label: "内嵌浏览器",
+        description: "Agent 受控 Chromium 会话",
+        meta: settingsDraft.browser?.enabled ? "已开启" : "已关闭",
+        icon: Globe,
+        tone: settingsDraft.browser?.enabled ? "success" : "neutral",
       },
       {
         id: "agentSecurity",
@@ -1191,6 +1201,17 @@ export function SettingsDrawer({
     if (activeSection === "webSearch") {
       return (
         <WebSearchSettingsSection
+          settingsDraft={settingsDraft}
+          isBusy={isBusy}
+          onSettingsChange={setSettingsDraft}
+          onSaveSettings={handleSaveSettings}
+        />
+      );
+    }
+
+    if (activeSection === "browser") {
+      return (
+        <BrowserSettingsSection
           settingsDraft={settingsDraft}
           isBusy={isBusy}
           onSettingsChange={setSettingsDraft}
