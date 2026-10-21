@@ -6,6 +6,7 @@ import { MenuItem, MenuPanel } from "../shared/Menu";
 import { cn } from "../shared/cn";
 import { useDismissable } from "../shared/useDismissable";
 import { isTauriRuntime } from "../shared/api/runtime";
+import { logError } from "../shared/logger";
 
 /** 顶栏一个下拉菜单的声明。 */
 export interface TopBarMenuItem {
@@ -119,6 +120,25 @@ function TopBarMenu({ menu }: { menu: (typeof TOP_BAR_MENUS)[number] }) {
  */
 type DesktopPlatform = "windows" | "macos" | "other";
 
+/** 标题栏交互控件不参与拖拽和双击最大化；Element 同时覆盖图标的 SVG 节点。 */
+function isTitleBarControl(target: EventTarget | null) {
+  return target instanceof Element && Boolean(
+    target.closest("[data-no-drag], button, a, input, textarea, select, [role='button'], [role='menuitem']"),
+  );
+}
+
+/** 捕获桌面窗口 IPC 的拒绝，保留诊断信息，避免冒泡为未处理的异步错误。 */
+function runWindowCommand(command: string, action: () => Promise<void>) {
+  void action().catch((error: unknown) => {
+    logError("窗口操作失败。", {
+      event: "window_command",
+      command,
+      status: "failed",
+      error,
+    });
+  });
+}
+
 /**
  * 工作台顶栏，同时也是桌面端集成标题栏。
  *
@@ -140,10 +160,10 @@ export function WorkspaceTopBar({ sidebarOpen, onToggleSidebar }: WorkspaceTopBa
 
   /** 标题栏空白区域拖拽；控件和菜单通过 data-no-drag 排除。 */
   const handleDragStart = (event: React.PointerEvent<HTMLElement>) => {
-    if (!isTauriRuntime() || event.button !== 0 || (event.target as HTMLElement).closest("[data-no-drag]")) {
+    if (!isTauriRuntime() || event.button !== 0 || isTitleBarControl(event.target)) {
       return;
     }
-    void getCurrentWindow().startDragging();
+    runWindowCommand("window.start_dragging", () => getCurrentWindow().startDragging());
   };
 
   return (
@@ -154,9 +174,9 @@ export function WorkspaceTopBar({ sidebarOpen, onToggleSidebar }: WorkspaceTopBa
       )}
       aria-label="工作台标题栏"
       onPointerDown={handleDragStart}
-      onDoubleClick={() => {
-        if (isTauriRuntime()) {
-          void getCurrentWindow().toggleMaximize();
+      onDoubleClick={(event) => {
+        if (isTauriRuntime() && !isTitleBarControl(event.target)) {
+          runWindowCommand("window.toggle_maximize", () => getCurrentWindow().toggleMaximize());
         }
       }}
     >
@@ -191,7 +211,7 @@ export function WorkspaceTopBar({ sidebarOpen, onToggleSidebar }: WorkspaceTopBa
             type="button"
             className="grid w-11 place-items-center border-0 bg-transparent text-ink-muted hover:bg-surface-hover hover:text-ink"
             aria-label="最小化"
-            onClick={() => void getCurrentWindow().minimize()}
+            onClick={() => runWindowCommand("window.minimize", () => getCurrentWindow().minimize())}
           >
             <Minus size={16} />
           </button>
@@ -199,7 +219,7 @@ export function WorkspaceTopBar({ sidebarOpen, onToggleSidebar }: WorkspaceTopBa
             type="button"
             className="grid w-11 place-items-center border-0 bg-transparent text-ink-muted hover:bg-surface-hover hover:text-ink"
             aria-label="最大化 / 还原"
-            onClick={() => void getCurrentWindow().toggleMaximize()}
+            onClick={() => runWindowCommand("window.toggle_maximize", () => getCurrentWindow().toggleMaximize())}
           >
             <Square size={14} />
           </button>
@@ -207,7 +227,7 @@ export function WorkspaceTopBar({ sidebarOpen, onToggleSidebar }: WorkspaceTopBa
             type="button"
             className="grid w-11 place-items-center border-0 bg-transparent text-ink-muted hover:bg-danger hover:text-white"
             aria-label="关闭"
-            onClick={() => void getCurrentWindow().close()}
+            onClick={() => runWindowCommand("window.close", () => getCurrentWindow().close())}
           >
             <X size={16} />
           </button>
