@@ -836,6 +836,26 @@ function AgentMessageItem({
   // 流式输出仍走普通 Markdown；落盘且形状符合执行计划后，才换成可折叠卡片。
   const showPlanCard = liveStatus == null && assistantReplyLooksLikePlan(message);
 
+  // 复制 / 编辑按钮独立于正文渲染：用户消息里放在气泡外面，助手消息跟在正文后面。
+  const actionButtons =
+    !isEditing && !showPlanCard && (message.content.trim() || message.images?.length || (canEdit && !queued)) ? (
+      <div className="mt-1.5 flex items-center gap-0.5">
+        <MessageCopyButton content={message.content} messageRole={message.role} />
+        {canEdit && !queued ? (
+          <Button
+            variant="icon"
+            size="compact"
+            className="text-ink-soft opacity-0 group-hover:opacity-100 focus-visible:opacity-100"
+            title="编辑并重新执行"
+            aria-label="编辑并重新执行"
+            onClick={() => setIsEditing(true)}
+          >
+            <Pencil size={13} />
+          </Button>
+        ) : null}
+      </div>
+    ) : null;
+
   const body = isEditing ? (
     <UserMessageEditor
       initialContent={message.content}
@@ -848,36 +868,18 @@ function AgentMessageItem({
     />
   ) : showPlanCard ? (
     <PlanMessageCard content={message.content} initiallyExpanded={planInitiallyExpanded} />
-  ) : (
-    <>
-      {message.content ? (
-        <MessageMarkdown content={message.content} streaming={liveStatus === "running"} />
-      ) : null}
-      {message.content.trim() || message.images?.length || (canEdit && !queued) ? (
-        <div className="mt-1.5 flex items-center gap-0.5">
-          <MessageCopyButton content={message.content} messageRole={message.role} />
-          {canEdit && !queued ? (
-            <Button
-              variant="icon"
-              size="compact"
-              className="text-ink-soft opacity-0 group-hover:opacity-100 focus-visible:opacity-100"
-              title="编辑并重新执行"
-              aria-label="编辑并重新执行"
-              onClick={() => setIsEditing(true)}
-            >
-              <Pencil size={13} />
-            </Button>
-          ) : null}
-        </div>
-      ) : null}
-    </>
-  );
+  ) : message.content ? (
+    <MessageMarkdown content={message.content} streaming={liveStatus === "running"} />
+  ) : null;
 
   if (message.role === "user") {
     return (
       <article
         aria-label={queued ? "排队中的下一条指令" : undefined}
-        className={cn("group flex min-w-0 justify-end select-text [&+&]:mt-4", queued && "opacity-80")}
+        className={cn(
+          "group flex min-w-0 flex-col items-end select-text [&+&]:mt-4",
+          queued && "opacity-80",
+        )}
       >
         <div className="max-w-[86%] rounded-[18px] bg-surface-muted px-3.5 py-2.5 text-[13px] leading-[1.62] text-ink">
           {statusChip ? <div className="mb-1">{statusChip}</div> : null}
@@ -885,6 +887,7 @@ function AgentMessageItem({
           {imageBlock}
           {body}
         </div>
+        {actionButtons}
       </article>
     );
   }
@@ -903,6 +906,7 @@ function AgentMessageItem({
         />
       ) : null}
       {body}
+      {actionButtons}
       {/* 2026-08-22 之前落盘的消息没有 trace / turnDurationMs，仍走扁平「运行信息」。
           旧会话不再需要兼容时，连同 ToolCallList 一起删除。 */}
       {!usesTurnTrace ? <ToolCallList toolCalls={message.toolCalls} /> : null}
