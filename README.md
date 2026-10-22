@@ -8,6 +8,16 @@
 
 > 桌面端支持 macOS 与 Windows 11。前端开发服务可单独运行于浏览器，但本地目录、索引和 Agent 文件操作需要通过桌面端体验。
 
+## 文档
+
+完整的使用文档与开发者文档：**<https://ciri667.github.io/orange/>**
+
+- [橘记是什么](https://ciri667.github.io/orange/guide/what-is-orange.html) · [快速上手](https://ciri667.github.io/orange/guide/quick-start.html)
+- [Agent 工具](https://ciri667.github.io/orange/features/agent-tools.html) · [写入确认机制](https://ciri667.github.io/orange/guide/write-safety.html)
+- [设置项总览](https://ciri667.github.io/orange/reference/settings.html) · [FAQ 与排错](https://ciri667.github.io/orange/reference/faq.html)
+
+文档源码在 [`docs-site/`](./docs-site)，基于 VitePress，推送到 `main` 后由 GitHub Actions 自动部署。
+
 ## 功能
 
 - 将本地文件夹连接为知识库，建立 Markdown 全文索引并浏览目录树。

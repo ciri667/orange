@@ -8,7 +8,8 @@
 - `src-tauri/src/` contains Tauri commands, local storage, agent runtime, domain types, and secure file operations.
 - `public/` stores static frontend assets such as the logo.
 - `docs/product/` and `docs/prototype/` hold product notes and archived prototype references.
-- Generated output belongs in `dist/` and `src-tauri/target/`; do not edit these by hand.
+- `docs-site/` is the public VitePress documentation site (deployed to GitHub Pages at `https://ciri667.github.io/orange/`). Keep it in sync with code: the built-in command table mirrors `src-tauri/src/builtin_commands.rs` and the tool docs mirror `src-tauri/src/agent_tools/execute.rs`. `base` must stay `"/orange/"`.
+- Generated output belongs in `dist/`, `src-tauri/target/`, and `docs-site/.vitepress/dist/`; do not edit these by hand.
 
 ## Module Boundaries
 
