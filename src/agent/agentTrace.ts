@@ -206,6 +206,33 @@ export function isNearScrollBottom(
   return scrollHeight - scrollTop - clientHeight <= thresholdPx;
 }
 
+/**
+ * 运行中计时锚点。
+ *
+ * 后端每条过程事件都带本轮绝对起点 `startedAtMs`，重挂载（切换会话）后仍能算出真实耗时。
+ * 旧事件缺这个字段时退回「当前时刻 - 已耗时」，此时最多丢一次事件间隔。
+ */
+export function resolveTurnStartedAt(
+  startedAtMs?: number,
+  durationMs?: number,
+  now: number = Date.now(),
+): number {
+  if (typeof startedAtMs === "number" && Number.isFinite(startedAtMs) && startedAtMs > 0) {
+    return startedAtMs;
+  }
+
+  return now - Math.max(0, durationMs ?? 0);
+}
+
+/** 过程区当前应显示的耗时：有绝对起点就按墙钟算，否则用后端最后一次上报的耗时。 */
+export function resolveTurnElapsedMs(
+  startedAtMs?: number,
+  durationMs?: number,
+  now: number = Date.now(),
+): number {
+  return Math.max(0, now - resolveTurnStartedAt(startedAtMs, durationMs, now));
+}
+
 /** 把毫秒格式化成 Codex 风格的 12s / 1m 5s / 1h 3m 50s。 */
 export function formatTurnDuration(durationMs: number): string {
   const totalSeconds = Math.max(0, Math.round(durationMs / 1000));

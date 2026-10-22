@@ -27,6 +27,8 @@ import {
   getToolTraceLabel,
   isTraceTextStep,
   nextTurnTraceExpanded,
+  resolveTurnElapsedMs,
+  resolveTurnStartedAt,
   shouldExpandToolStep,
   shouldShowThinkingCaret,
   type TraceDetailField,
@@ -43,11 +45,20 @@ const EXCERPT_COLLAPSE_LINES = 5;
 export function AgentTurnTrace({
   steps,
   durationMs,
+  startedAtMs,
   status,
   hasLiveAnswer = false,
 }: {
   steps: AgentTraceStep[];
   durationMs?: number;
+  /**
+   * 本轮开始的绝对时间（Unix 毫秒）。
+   *
+   * 运行中计时必须锚定它，而不是「最近一次进度事件」反推的起点：
+   * 切换会话会让过程区重新挂载，反推起点会丢掉最后一次事件到重挂载之间的时间，
+   * 表现为计时清零，直到下一次事件才跳回正确值。
+   */
+  startedAtMs?: number;
   status: AgentTurnTraceStatus;
   /** 回答区已经有终稿文本时，思考不再带光标，末尾完成工具也不再当「刚完成」摊开。 */
   hasLiveAnswer?: boolean;
@@ -67,7 +78,10 @@ export function AgentTurnTrace({
         ? "failed"
         : status;
   const [isExpanded, setIsExpanded] = useState(resolvedStatus !== "completed");
-  const [elapsedMs, setElapsedMs] = useState(durationMs ?? 0);
+  // 首次渲染就用绝对起点算耗时，避免切会话重挂载时先闪一帧旧值（甚至 0）。
+  const [elapsedMs, setElapsedMs] = useState(() =>
+    resolveTurnElapsedMs(startedAtMs, durationMs),
+  );
   const toolCount = useMemo(() => steps.filter((step) => step.type === "tool").length, [steps]);
   const previousStatusRef = useRef(resolvedStatus);
 
@@ -83,13 +97,14 @@ export function AgentTurnTrace({
       return;
     }
 
-    const startedAt = Date.now() - (durationMs ?? 0);
-    const tick = () => setElapsedMs(Date.now() - startedAt);
+    // 运行中每秒刷新；起点由 resolveTurnStartedAt 决定，重挂载后不会从零重算。
+    const anchor = resolveTurnStartedAt(startedAtMs, durationMs);
+    const tick = () => setElapsedMs(Math.max(0, Date.now() - anchor));
 
     tick();
     const timer = window.setInterval(tick, 1000);
     return () => window.clearInterval(timer);
-  }, [durationMs, resolvedStatus]);
+  }, [durationMs, startedAtMs, resolvedStatus]);
 
   if (!steps.length && resolvedStatus === "completed") {
     return null;

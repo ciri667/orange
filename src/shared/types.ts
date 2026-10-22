@@ -424,7 +424,10 @@ export interface AgentTurnProgressEvent {
   liveMessageId: string;
   status: "running" | "completed" | "failed" | "interrupted";
   steps: AgentTraceStep[];
+  /** 后端已耗时；仅反映事件发出那一刻，不能拿来反推起点。 */
   turnDurationMs: number;
+  /** 本轮开始的绝对时间（Unix 毫秒）；切换会话导致过程区重挂载时靠它继续计时。 */
+  startedAtMs: number;
   content?: string;
 }
 
