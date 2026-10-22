@@ -70,6 +70,8 @@ interface AgentTurnOptions extends WorkspaceChrome {
   setAppEventLogs: (logs: AppEventLog[]) => void;
   dirtyNoteIds: Set<string>;
   dirtyDocumentIds: Set<string>;
+  /** 记录最近一次手动整理上下文的回执，供上下文浮层就地展示。 */
+  setContextCompaction?: (report: import("../shared/types").AgentContextCompactionReport) => void;
 }
 
 /**
@@ -132,6 +134,7 @@ export function useAgentTurn(options: AgentTurnOptions) {
     setAppEventLogs,
     dirtyNoteIds,
     dirtyDocumentIds,
+    setContextCompaction,
   } = options;
   const [liveTurns, setLiveTurns] = useState<Record<string, AgentTurnProgressEvent>>({});
   /** 后端注册表下发的内置指令；用于提交前判断输入是否为指令。 */
@@ -144,6 +147,8 @@ export function useAgentTurn(options: AgentTurnOptions) {
    */
   const [builtinCommandNotice, setBuiltinCommandNotice] = useState<{ text: string; tone: "info" | "error" } | null>(null);
   const inFlightSessionIdsRef = useRef(new Set<string>());
+  /** 正在整理上下文的会话；挡住 `/compact` 连点造成的并发摘要请求。 */
+  const compactingSessionIdsRef = useRef(new Set<string>());
   const [inFlightSessionIds, setInFlightSessionIds] = useState<string[]>([]);
   const observedRunningSessionIdsRef = useRef(new Set<string>());
   const [observedRunningSessionIds, setObservedRunningSessionIds] = useState<string[]>([]);
@@ -509,6 +514,23 @@ export function useAgentTurn(options: AgentTurnOptions) {
       return false;
     }
 
+    // 整理上下文要跑一次几十秒的模型摘要；已有在途整理时直接回执，不叠加请求。
+    const targetSessionId = sourceSnapshot.activeSessionId;
+    if (command.id === "compact") {
+      if (compactingSessionIdsRef.current.has(targetSessionId)) {
+        setBuiltinCommandNotice({ text: "正在整理上下文，请稍候…", tone: "info" });
+        return true;
+      }
+      compactingSessionIdsRef.current.add(targetSessionId);
+      // 立即把浮层切成运行态，用户点完就能看到反馈。
+      setContextCompaction?.({
+        sessionId: targetSessionId,
+        notice: "正在整理上下文，请稍候…",
+        at: Date.now(),
+        status: "running",
+      });
+    }
+
     try {
       setBuiltinCommandNotice(null);
       beginBusy("正在执行内置指令…");
@@ -516,6 +538,15 @@ export function useAgentTurn(options: AgentTurnOptions) {
       setAgentPrompt("");
       if (result.snapshot) {
         commitSnapshot(result.snapshot);
+      }
+      // 整理上下文同时更新上下文浮层里的回执，让用户看到摘要来源和实际丢弃条数。
+      if (command.id === "compact") {
+        setContextCompaction?.({
+          sessionId: result.snapshot?.activeSessionId ?? targetSessionId,
+          notice: result.notice,
+          at: Date.now(),
+          status: "done",
+        });
       }
       // 指令回执贴近输入框展示，不写入左侧边栏的全局 notice。
       setBuiltinCommandNotice({ text: result.notice, tone: "info" });
@@ -526,10 +557,16 @@ export function useAgentTurn(options: AgentTurnOptions) {
         metadata: { command: command.id },
       });
     } catch (error) {
-      setBuiltinCommandNotice({
-        text: error instanceof Error ? error.message : String(error),
-        tone: "error",
-      });
+      const message = error instanceof Error ? error.message : String(error);
+      if (command.id === "compact") {
+        setContextCompaction?.({
+          sessionId: targetSessionId,
+          notice: message,
+          at: Date.now(),
+          status: "failed",
+        });
+      }
+      setBuiltinCommandNotice({ text: message, tone: "error" });
       logInfo("内置指令执行失败。", {
         category: "frontend",
         event: "builtin_command_run",
@@ -537,6 +574,9 @@ export function useAgentTurn(options: AgentTurnOptions) {
         metadata: { command: command.id },
       });
     } finally {
+      if (command.id === "compact") {
+        compactingSessionIdsRef.current.delete(targetSessionId);
+      }
       endBusy();
     }
 

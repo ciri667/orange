@@ -138,6 +138,20 @@ export interface CompactAgentContextResult {
   notice: string;
 }
 
+/**
+ * 最近一次手动整理上下文的回执，供上下文浮层就地展示。
+ *
+ * `at` 是毫秒时间戳而不是格式化时间：后端时间戳只精确到分钟，同一分钟内连续整理两次
+ * 时无法用它触发浮层刷新，这里必须用一个每次都变化的值。
+ */
+export interface AgentContextCompactionReport {
+  sessionId: string;
+  notice: string;
+  at: number;
+  /** running 表示整理仍在进行，此时 notice 是进度文案而不是结果。 */
+  status: "running" | "done" | "failed";
+}
+
 /** Agent skill 是可启停、可由 Agent 自主决定是否使用的指令型工作流。 */
 export interface AgentSkill {
   id: string;

@@ -23,6 +23,7 @@ import {
 import { listenScheduledJobUpdated, loadSessions, restoreSessionContext, saveWorkspaceEditorState } from "../shared/tauriApi";
 import { SchedulesView } from "../schedules/SchedulesView";
 import type {
+  AgentContextCompactionReport,
   DocumentHistoryTargetKind,
   EditorFileTab,
   MarkdownViewMode,
@@ -93,6 +94,8 @@ export function WorkspaceShell() {
   const [busyLabel, setBusyLabel] = useState("");
   /** 顶部/侧栏轻量通知，展示用户操作结果和可恢复错误。 */
   const [notice, setNotice] = useState("");
+  /** 最近一次手动整理上下文的回执；只在上下文浮层里就地展示，不占用全局 notice。 */
+  const [contextCompaction, setContextCompaction] = useState<AgentContextCompactionReport | null>(null);
   /** 编辑草稿 hook 维护 dirty 集合和保存基准 hash，文件写入仍由原有 Tauri API 执行。 */
   const {
     editingBaseHashes,
@@ -470,6 +473,7 @@ export function WorkspaceShell() {
     setAppEventLogs,
     dirtyNoteIds,
     dirtyDocumentIds,
+    setContextCompaction,
   });
   const {
     handleCreateSession,
@@ -506,6 +510,7 @@ export function WorkspaceShell() {
     agentOpen,
     setAgentOpen,
     setUserSettings,
+    setContextCompaction,
     prepareSessionForDelete: handlePrepareSessionForDelete,
   });
   const { handleAddReviewComment, handleSubmitReviewComments, handleAcceptChange, handleRejectChange } = useReviewActions({
@@ -882,6 +887,7 @@ export function WorkspaceShell() {
         onTurnModelSelectionChange={setTurnModelSelection}
         onSetSessionModelSelection={handleSetSessionModelSelection}
         onCompactAgentContext={handleCompactAgentContext}
+        contextCompaction={contextCompaction}
         onOpenProjectInstruction={handleSelectNote}
         onApproveExecution={handleApproveSkillExecution}
         onRejectExecution={handleRejectSkillExecution}

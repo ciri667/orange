@@ -26,6 +26,8 @@ interface SessionActionsOptions extends WorkspaceChrome {
   agentOpen: boolean;
   setAgentOpen: (value: boolean) => void;
   setUserSettings: (settings: import("../shared/types").UserSettings) => void;
+  /** 记录最近一次手动整理上下文的回执，供上下文浮层就地展示。 */
+  setContextCompaction?: (report: import("../shared/types").AgentContextCompactionReport) => void;
   /** 删除前停止该会话正在跑的回合并丢掉排队。 */
   prepareSessionForDelete?: (sessionId: string) => Promise<void>;
 }
@@ -54,10 +56,13 @@ export function useSessionActions(options: SessionActionsOptions) {
     agentOpen,
     setAgentOpen,
     setUserSettings,
+    setContextCompaction,
     prepareSessionForDelete,
   } = options;
   const snapshotRef = useRef(snapshot);
   snapshotRef.current = snapshot;
+  /** 正在整理上下文的会话；挡住连点造成的并发摘要请求。 */
+  const compactingSessionIdsRef = useRef(new Set<string>());
 
   if (!snapshot || !userSettings) {
     return {
@@ -251,13 +256,33 @@ export function useSessionActions(options: SessionActionsOptions) {
     }
   }
 
-  /** 手动整理当前会话工作记忆；日志只记录消息数量和摘要状态，不写入正文。 */
+  /**
+   * 手动整理当前会话工作记忆；日志只记录消息数量和摘要状态，不写入正文。
+   *
+   * 整理要发一次模型摘要请求，实测 30–100 秒。因此这里做三件事保证「跟手」：
+   * 1. 点击后**立刻**把浮层切成「正在整理」，不等后端返回；
+   * 2. 用 ref 挡住重复点击，避免并发跑多份摘要；
+   * 3. 失败时把错误写进浮层回执，而不是只在左侧栏的全局 notice 里闪一下。
+   */
   async function handleCompactAgentContext() {
     if (!isPersistedSession(currentSnapshot, activeSession)) {
       setNotice("请先新建或发送一条消息创建会话，再整理上下文。");
       return;
     }
 
+    // 同一会话已有在途整理时直接忽略，连点不会叠加请求。
+    if (compactingSessionIdsRef.current.has(activeSession.id)) {
+      return;
+    }
+    compactingSessionIdsRef.current.add(activeSession.id);
+
+    // 先给即时反馈：按钮在下一帧就会禁用，浮层显示进度文案。
+    setContextCompaction?.({
+      sessionId: activeSession.id,
+      notice: "正在整理上下文，请稍候…",
+      at: Date.now(),
+      status: "running",
+    });
     beginBusy("正在整理上下文...");
 
     try {
@@ -276,6 +301,12 @@ export function useSessionActions(options: SessionActionsOptions) {
       commitSnapshot(result.snapshot);
       // 后端回执说明摘要来源和实际丢弃的历史，避免「已整理」但看不出变化。
       setNotice(result.notice);
+      setContextCompaction?.({
+        sessionId: activeSession.id,
+        notice: result.notice,
+        at: Date.now(),
+        status: "done",
+      });
       logInfo("手动整理会话上下文完成。", {
         category: "frontend",
         event: "compact_agent_context",
@@ -287,7 +318,14 @@ export function useSessionActions(options: SessionActionsOptions) {
         },
       });
     } catch (error) {
-      setNotice(error instanceof Error ? error.message : String(error));
+      const message = error instanceof Error ? error.message : String(error);
+      setNotice(message);
+      setContextCompaction?.({
+        sessionId: activeSession.id,
+        notice: message,
+        at: Date.now(),
+        status: "failed",
+      });
       logWarn("手动整理会话上下文失败。", {
         category: "frontend",
         event: "compact_agent_context",
@@ -298,6 +336,7 @@ export function useSessionActions(options: SessionActionsOptions) {
         },
       });
     } finally {
+      compactingSessionIdsRef.current.delete(activeSession.id);
       endBusy();
     }
   }

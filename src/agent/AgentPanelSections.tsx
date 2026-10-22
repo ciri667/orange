@@ -45,6 +45,7 @@ import {
 } from "../shared/contextUsage";
 import { sessionHasPendingWriteConflict } from "../workspace/sessionUtils";
 import type {
+  AgentContextCompactionReport,
   AgentMessage,
   AgentPromptDump,
   AgentSecuritySettings,
@@ -338,6 +339,7 @@ export function AgentSessionContextPopover({
   onToggleSessionContext,
   onSetSessionModelSelection,
   onCompactAgentContext,
+  contextCompaction,
   onOpenProjectInstruction,
 }: {
   activeSession: AgentSession;
@@ -348,6 +350,8 @@ export function AgentSessionContextPopover({
   onToggleSessionContext: () => void;
   onSetSessionModelSelection: (selection: string) => void;
   onCompactAgentContext: () => void;
+  /** 最近一次手动整理上下文的回执；只在当前会话且刚整理过时展示。 */
+  contextCompaction?: AgentContextCompactionReport | null;
   onOpenProjectInstruction: (noteId: string) => void;
 }) {
   /** 已启用的 Provider 列表；未启用的 provider 不出现在选择器中。 */
@@ -375,6 +379,14 @@ export function AgentSessionContextPopover({
     : "未配置";
   const [promptDump, setPromptDump] = useState<AgentPromptDump | null>(null);
   const [promptDumpError, setPromptDumpError] = useState<string | null>(null);
+  /** 只展示当前会话的回执，避免切到别的会话后仍显示上一次整理结果。 */
+  const currentCompaction =
+    contextCompaction && contextCompaction.sessionId === activeSession.id
+      ? contextCompaction
+      : null;
+  /** 整理进行中：按钮必须立刻禁用，否则用户会以为没点上而反复点击。 */
+  const isCompacting = currentCompaction?.status === "running";
+  const compactionNotice = currentCompaction?.notice ?? null;
 
   useEffect(() => {
     let cancelled = false;
@@ -406,14 +418,34 @@ export function AgentSessionContextPopover({
           <h3 className="m-0 text-lg text-ink-strong">上下文</h3>
         </div>
         <div className="inline-flex items-center gap-2 text-xs text-ink-muted">
-          <Button variant="icon" title="整理上下文" onClick={onCompactAgentContext} disabled={isBusy}>
-            <Sparkles size={15} />
+          <Button
+            variant="ghost"
+            size="compact"
+            title="整理上下文：把较早的对话压成检查点，只保留最近一段"
+            onClick={onCompactAgentContext}
+            disabled={isBusy || isCompacting}
+          >
+            <Sparkles size={14} />
+            {isCompacting ? "整理中…" : "整理"}
           </Button>
           <Button variant="icon" title="关闭上下文" onClick={onToggleSessionContext}>
             <X size={15} />
           </Button>
         </div>
       </div>
+      {compactionNotice ? (
+        <div
+          className={cn(
+            "mt-2 whitespace-pre-wrap rounded-control border border-border-translucent bg-surface-muted px-2.5 py-1.5 text-xs leading-[1.5] text-ink-muted",
+            currentCompaction?.status === "failed" && "border-[rgba(var(--danger-rgb),0.26)] bg-danger-soft text-danger",
+          )}
+          role="status"
+          aria-live="polite"
+          aria-label="上下文整理结果"
+        >
+          {compactionNotice}
+        </div>
+      ) : null}
       <div className="overflow-auto pr-0.5">
         <div className="mt-3 grid grid-cols-2 gap-2">
           <div className="rounded-control border border-border-translucent bg-surface-translucent p-[9px]">

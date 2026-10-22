@@ -6,6 +6,7 @@ import { OverflowTooltipText } from "../shared/OverflowTooltipText";
 import { getImSessionSourceLabel } from "../shared/selectors";
 import { useDismissable } from "../shared/useDismissable";
 import type {
+  AgentContextCompactionReport,
   AgentSecuritySettings,
   AgentSession,
   AgentSkill,
@@ -79,6 +80,7 @@ export function AgentPanel({
   onTurnModelSelectionChange,
   onSetSessionModelSelection,
   onCompactAgentContext,
+  contextCompaction,
   onOpenProjectInstruction,
   onApproveExecution,
   onRejectExecution,
@@ -159,6 +161,8 @@ export function AgentPanel({
   onTurnModelSelectionChange: (selection: string) => void;
   onSetSessionModelSelection: (selection: string) => void;
   onCompactAgentContext: () => void;
+  /** 最近一次手动整理上下文的回执；只在上下文浮层里展示。 */
+  contextCompaction?: AgentContextCompactionReport | null;
   onOpenProjectInstruction: (noteId: string) => void;
   onApproveExecution: () => void;
   onRejectExecution: () => void;
@@ -269,6 +273,7 @@ export function AgentPanel({
           onToggleSessionContext={onToggleSessionContext}
           onSetSessionModelSelection={onSetSessionModelSelection}
           onCompactAgentContext={onCompactAgentContext}
+          contextCompaction={contextCompaction}
           onOpenProjectInstruction={onOpenProjectInstruction}
         />
       )}
