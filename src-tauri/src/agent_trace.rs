@@ -3,7 +3,7 @@ use crate::storage::{create_id, format_local_datetime};
 use serde::Serialize;
 use serde_json::Value;
 use std::collections::HashMap;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 /** 流式正文/思考推送的最短间隔，避免每个 token 都打满窗口事件。 */
 const STREAM_EMIT_INTERVAL: Duration = Duration::from_millis(50);
@@ -38,8 +38,24 @@ pub struct AgentTurnProgressPayload {
     pub status: String,
     pub steps: Vec<AgentTraceStep>,
     pub turn_duration_ms: u64,
+    /**
+     * 本轮开始的绝对时间（Unix 毫秒）。
+     *
+     * 前端过程区在切换会话时会重新挂载；只靠 `turn_duration_ms` 反推起点，
+     * 会把「最后一次事件到重新挂载之间」的时间丢掉（表现为计时清零）。
+     * 因此这里额外下发绝对起点，让运行中计时不受事件间隔影响。
+     */
+    pub started_at_ms: u64,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub content: Option<String>,
+}
+
+/** 当前 Unix 毫秒时间戳；系统时钟早于 epoch 时退化为 0。 */
+fn epoch_millis_now() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|elapsed| u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX))
+        .unwrap_or_default()
 }
 
 /** 一轮 Agent 的过程收集器：内存攒步骤，并尽力向窗口推送增量。 */
@@ -48,6 +64,8 @@ pub struct AgentTurnTracer {
     session_id: String,
     live_message_id: String,
     started_at: Instant,
+    /** 与 started_at 对应的墙钟起点，供前端在重挂载后仍能算出正确耗时。 */
+    started_at_ms: u64,
     steps: Vec<AgentTraceStep>,
     status: String,
     content: Option<String>,
@@ -62,6 +80,7 @@ impl AgentTurnTracer {
             session_id: session_id.into(),
             live_message_id: live_message_id.into(),
             started_at: Instant::now(),
+            started_at_ms: epoch_millis_now(),
             steps: Vec::new(),
             status: "running".to_owned(),
             content: None,
@@ -84,6 +103,11 @@ impl AgentTurnTracer {
 
     pub fn duration_ms(&self) -> u64 {
         u64::try_from(self.started_at.elapsed().as_millis()).unwrap_or(u64::MAX)
+    }
+
+    /** 本轮开始的墙钟时间（Unix 毫秒），供前端在过程区重新挂载后继续计时。 */
+    pub fn started_at_ms(&self) -> u64 {
+        self.started_at_ms
     }
 
     /** 回合开始时推一次空过程，让 UI 立刻展开「正在处理」。 */
@@ -451,6 +475,7 @@ impl AgentTurnTracer {
             status: self.status.clone(),
             steps: self.steps.clone(),
             turn_duration_ms: self.duration_ms(),
+            started_at_ms: self.started_at_ms,
             content: self.content.clone(),
         };
 
@@ -993,6 +1018,33 @@ mod tests {
         tracer.set_partial_content("橘记", None);
 
         assert_eq!(tracer.live_content(), Some("橘记"));
+    }
+
+    /**
+     * 本轮起点必须是绝对时间且整轮不变。
+     *
+     * 前端过程区在切换会话时会重新挂载，只有拿到绝对起点才能继续计时；
+     * 若起点随事件漂移，重挂载后的耗时就会从零重算。
+     */
+    #[test]
+    fn turn_start_timestamp_is_absolute_and_stable() {
+        let mut tracer = AgentTurnTracer::new("session-a", "assistant-a");
+        let started_at_ms = tracer.started_at_ms();
+
+        assert!(started_at_ms > 0, "起点必须是 Unix 毫秒时间戳");
+        assert!(
+            epoch_millis_now() >= started_at_ms,
+            "起点不能晚于当前时间"
+        );
+
+        tracer.update_thinking("先检索。", None);
+        std::thread::sleep(Duration::from_millis(5));
+        tracer.begin_tool("search", "搜索", json!({ "query": "q" }), None);
+
+        assert_eq!(tracer.started_at_ms(), started_at_ms);
+        assert!(tracer.duration_ms() >= 5);
+        // 克隆（task 分支把收集器移进互斥）也必须保留同一个起点。
+        assert_eq!(tracer.clone().started_at_ms(), started_at_ms);
     }
 
     /** 同一轮思考要更新最后一条 thinking，不能每来一个 token 就新建一步。 */
