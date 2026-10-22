@@ -3,6 +3,7 @@ import { useEffect, useRef, useState } from "react";
 import ReactMarkdown from "react-markdown";
 import rehypeSanitize from "rehype-sanitize";
 import { Button } from "../shared/Button";
+import { ImageLightbox } from "../shared/ImageLightbox";
 import { copyTextToClipboard } from "../shared/clipboard";
 import { assistantReplyLooksLikePlan } from "../shared/planMode";
 import { PlanMessageCard } from "./PlanMessageCard";
@@ -813,6 +814,8 @@ function AgentMessageItem({
   planInitiallyExpanded?: boolean;
 }) {
   const [isEditing, setIsEditing] = useState(false);
+  /** 点击消息里的图片后打开的大图。 */
+  const [previewImage, setPreviewImage] = useState<{ src: string; alt: string } | null>(null);
   const usesTurnTrace =
     liveStatus != null || message.turnDurationMs != null || Boolean(message.trace?.length);
   const showTurnTrace =
@@ -850,13 +853,18 @@ function AgentMessageItem({
     <div className="mb-2 flex flex-wrap gap-1.5" aria-label="本条消息的图片">
       {message.images.map((image) => {
         const src = conversationImageSrc(image);
+        const alt = image.name || "图片";
         return src ? (
-          <img
+          <button
             key={image.id}
-            src={src}
-            alt={image.name || "图片"}
-            className="h-20 max-w-[160px] rounded-md border border-border object-cover"
-          />
+            type="button"
+            className="inline-flex h-20 max-w-[160px] cursor-zoom-in overflow-hidden rounded-md border border-border bg-transparent p-0"
+            aria-label={`放大查看 ${alt}`}
+            title="点击放大查看"
+            onClick={() => setPreviewImage({ src, alt })}
+          >
+            <img src={src} alt="" className="h-20 max-w-[160px] object-cover" />
+          </button>
         ) : (
           <span
             key={image.id}
@@ -908,6 +916,10 @@ function AgentMessageItem({
     <MessageMarkdown content={message.content} streaming={liveStatus === "running"} />
   ) : null;
 
+  const lightbox = previewImage ? (
+    <ImageLightbox src={previewImage.src} alt={previewImage.alt} onClose={() => setPreviewImage(null)} />
+  ) : null;
+
   if (message.role === "user") {
     return (
       <article
@@ -924,6 +936,7 @@ function AgentMessageItem({
           {body}
         </div>
         {actionButtons}
+        {lightbox}
       </article>
     );
   }
@@ -948,6 +961,7 @@ function AgentMessageItem({
           旧会话不再需要兼容时，连同 ToolCallList 一起删除。 */}
       {!usesTurnTrace ? <ToolCallList toolCalls={message.toolCalls} /> : null}
       <CitationList citations={message.citations} />
+      {lightbox}
     </article>
   );
 }

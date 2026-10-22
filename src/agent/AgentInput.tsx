@@ -14,6 +14,7 @@ import {
 import { Button } from "../shared/Button";
 import { Chip } from "../shared/Chip";
 import { cn } from "../shared/cn";
+import { ImageLightbox } from "../shared/ImageLightbox";
 import { logDebug } from "../shared/logger";
 import { getProviderModelSelectionLabel } from "../shared/modelSelection";
 import { ModelCascadeSelector } from "../shared/ModelCascadeSelector";
@@ -259,6 +260,8 @@ export function AgentInput({
   const [isMentionFilePickerOpen, setIsMentionFilePickerOpen] = useState(false);
   /** @ 文件 picker 的键盘高亮项。 */
   const [activeMentionFilePickerIndex, setActiveMentionFilePickerIndex] = useState(0);
+  /** 点击待发送缩略图后打开的大图；草稿被移除后同步关掉。 */
+  const [previewImage, setPreviewImage] = useState<{ src: string; alt: string } | null>(null);
   /** 已选显式 skill 的 chip 数据；缺失项不隐藏，避免用户无法移除已经失效的选择。 */
   const selectedExplicitSkillChips = useMemo(
     () =>
@@ -770,6 +773,9 @@ export function AgentInput({
     const removed = draftImages.find((image) => image.localId === localId);
     if (removed) {
       revokeConversationImagePreview(removed);
+      if (previewImage?.src === removed.previewUrl) {
+        setPreviewImage(null);
+      }
     }
     onDraftImagesChange?.(draftImages.filter((image) => image.localId !== localId));
   }
@@ -896,8 +902,16 @@ export function AgentInput({
             {draftImages.length > 0 && (
               <div className="inline-flex min-w-0 max-w-full items-center gap-1.5 overflow-x-auto" aria-label="待发送图片">
                 {draftImages.map((image) => (
-                  <span key={image.localId} className="relative inline-flex h-12 w-12 shrink-0 overflow-hidden rounded-md border border-primary-border">
-                    <img src={image.previewUrl} alt={image.name || "图片"} className="h-full w-full object-cover" />
+                  <span key={image.localId} className="relative inline-flex h-12 w-12 shrink-0">
+                    <button
+                      type="button"
+                      className="inline-flex h-12 w-12 cursor-zoom-in overflow-hidden rounded-md border border-primary-border bg-transparent p-0"
+                      aria-label={`放大查看 ${image.name || "图片"}`}
+                      title="点击放大查看"
+                      onClick={() => setPreviewImage({ src: image.previewUrl, alt: image.name || "图片" })}
+                    >
+                      <img src={image.previewUrl} alt="" className="h-full w-full object-cover" />
+                    </button>
                     <button
                       type="button"
                       className="absolute top-0.5 right-0.5 inline-grid size-4 place-items-center rounded-full border-0 bg-ink/70 text-[10px] leading-none text-white"
@@ -1126,6 +1140,9 @@ export function AgentInput({
             )}
           </div>
         </div>
+      {previewImage ? (
+        <ImageLightbox src={previewImage.src} alt={previewImage.alt} onClose={() => setPreviewImage(null)} />
+      ) : null}
     </footer>
   );
 }
