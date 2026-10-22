@@ -137,6 +137,15 @@ type SlashPickerItem =
   | { kind: "command"; key: string; command: BuiltinCommandDescriptor }
   | { kind: "skill"; key: string; skill: AgentSkill };
 
+/** `/` 弹窗的展示分组；只用于渲染标题和切分列表，键盘仍走 slashPickerItems 的连续索引。 */
+interface SlashPickerSection {
+  kind: SlashPickerItem["kind"];
+  title: string;
+  /** 该分组第一项在 slashPickerItems 中的下标，用于把连续索引换算成组内索引。 */
+  startIndex: number;
+  items: SlashPickerItem[];
+}
+
 /** 候选搜索只使用已授权文件的公开元数据，禁止将内容写入前端日志。 */
 function getMentionFileSearchText(file: AgentMentionFile) {
   return [file.displayName, file.relativePath, file.kind].filter(Boolean).join(" ").toLowerCase();
@@ -302,6 +311,25 @@ export function AgentInput({
     ],
     [selectableCommands, selectableSkills],
   );
+  /** 把统一候选列表按“指令 / 技能”切成两个带标题的分组；空分组不渲染标题。 */
+  const slashPickerSections = useMemo<SlashPickerSection[]>(() => {
+    const sections: SlashPickerSection[] = [];
+
+    if (selectableCommands.length) {
+      sections.push({ kind: "command", title: "指令", startIndex: 0, items: slashPickerItems.slice(0, selectableCommands.length) });
+    }
+
+    if (selectableSkills.length) {
+      sections.push({
+        kind: "skill",
+        title: "技能",
+        startIndex: selectableCommands.length,
+        items: slashPickerItems.slice(selectableCommands.length),
+      });
+    }
+
+    return sections;
+  }, [selectableCommands.length, selectableSkills.length, slashPickerItems]);
   /** picker 最终展示条件，达到上限或当前行不再是 slash 查询时立即隐藏。 */
   const shouldShowSkillPicker = isSkillPickerOpen && selectedSkillIds.length < MAX_EXPLICIT_SKILLS && Boolean(slashSkillQuery);
   /** 候选列表可滚动，键盘移动高亮后必须把它带进可视区域，否则看不到当前选中项。 */
@@ -921,54 +949,76 @@ export function AgentInput({
         )}
         {shouldShowSkillPicker && (
           <div
-            className="absolute right-0 bottom-[calc(100%+8px)] left-0 z-[6] grid max-h-[252px] gap-1 overflow-auto rounded-xl border border-border bg-surface p-1.5 shadow-app"
+            className="absolute right-0 bottom-[calc(100%+8px)] left-0 z-[6] grid max-h-[252px] gap-1.5 overflow-auto rounded-xl border border-border bg-surface p-1.5 shadow-app"
             role="listbox"
             aria-label="选择内置指令或本轮显式 Skill"
             ref={skillPickerListRef}
           >
-            {slashPickerItems.length ? (
-              slashPickerItems.map((item, index) => (
-                <button
-                  className={cn(
-                    "flex min-w-0 cursor-pointer items-center justify-between gap-2.5 rounded-md border border-transparent bg-transparent p-2 text-left text-ink",
-                    index === activeSkillPickerIndex && "bg-surface-muted",
-                  )}
-                  data-picker-index={index}
-                  key={item.key}
-                  type="button"
-                  role="option"
-                  aria-selected={index === activeSkillPickerIndex}
-                  onMouseDown={(event) => event.preventDefault()}
-                  onClick={() => selectSlashPickerItem(item)}
-                >
-                  {item.kind === "command" ? (
-                    <>
-                      <span className="grid min-w-0 gap-0.5">
-                        <OverflowTooltipText
-                          as="strong"
-                          className="min-w-0 truncate"
-                          text={`/${item.command.name}${item.command.argumentHint ? ` ${item.command.argumentHint}` : ""}`}
-                          logArea="agent_command_picker_name"
-                        />
-                        <OverflowTooltipText
-                          as="small"
-                          className="min-w-0 truncate text-xs text-ink-muted"
-                          text={item.command.description}
-                          logArea="agent_command_picker_description"
-                        />
-                      </span>
-                      <em className="shrink-0 text-xs not-italic font-bold text-ink-muted">指令</em>
-                    </>
-                  ) : (
-                    <>
-                      <span className="grid min-w-0 gap-0.5">
-                        <OverflowTooltipText as="strong" className="min-w-0 truncate" text={item.skill.displayName} logArea="agent_skill_picker_name" />
-                        <OverflowTooltipText as="small" className="min-w-0 truncate text-xs text-ink-muted" text={item.skill.name} logArea="agent_skill_picker_id" />
-                      </span>
-                      <em className="shrink-0 text-xs not-italic font-bold text-ink-muted">{item.skill.source === "built-in" ? "内置" : "自定义"}</em>
-                    </>
-                  )}
-                </button>
+            {slashPickerSections.length ? (
+              slashPickerSections.map((section) => (
+                <div className="grid gap-0.5" key={section.kind} role="group" aria-label={section.title}>
+                  {/* 分组标题比操作名更小更浅，只做分区提示，不抢候选的视觉权重。 */}
+                  <div className="px-2 pt-1 pb-0.5 text-[11px] font-medium tracking-[0.02em] text-ink-soft">{section.title}</div>
+                  {section.items.map((item, itemIndex) => {
+                    const index = section.startIndex + itemIndex;
+
+                    return (
+                      <button
+                        className={cn(
+                          "flex min-w-0 cursor-pointer items-center justify-between gap-2.5 rounded-md border border-transparent bg-transparent px-2 py-1.5 text-left text-ink",
+                          index === activeSkillPickerIndex && "bg-surface-muted",
+                        )}
+                        data-picker-index={index}
+                        key={item.key}
+                        type="button"
+                        role="option"
+                        aria-selected={index === activeSkillPickerIndex}
+                        onMouseDown={(event) => event.preventDefault()}
+                        onClick={() => selectSlashPickerItem(item)}
+                      >
+                        {item.kind === "command" ? (
+                          <>
+                            <span className="grid min-w-0 gap-0.5">
+                              <OverflowTooltipText
+                                as="strong"
+                                className="min-w-0 truncate text-[13px] font-semibold"
+                                text={`/${item.command.name}${item.command.argumentHint ? ` ${item.command.argumentHint}` : ""}`}
+                                logArea="agent_command_picker_name"
+                              />
+                              <OverflowTooltipText
+                                as="small"
+                                className="min-w-0 truncate text-[11px] text-ink-muted"
+                                text={item.command.description}
+                                logArea="agent_command_picker_description"
+                              />
+                            </span>
+                            <em className="shrink-0 text-[11px] not-italic font-medium text-ink-soft">指令</em>
+                          </>
+                        ) : (
+                          <>
+                            <span className="grid min-w-0 gap-0.5">
+                              <OverflowTooltipText
+                                as="strong"
+                                className="min-w-0 truncate text-[13px] font-semibold"
+                                text={item.skill.displayName}
+                                logArea="agent_skill_picker_name"
+                              />
+                              <OverflowTooltipText
+                                as="small"
+                                className="min-w-0 truncate text-[11px] text-ink-muted"
+                                text={item.skill.name}
+                                logArea="agent_skill_picker_id"
+                              />
+                            </span>
+                            <em className="shrink-0 text-[11px] not-italic font-medium text-ink-soft">
+                              {item.skill.source === "built-in" ? "内置" : "自定义"}
+                            </em>
+                          </>
+                        )}
+                      </button>
+                    );
+                  })}
+                </div>
               ))
             ) : (
               <div className="p-2.5 text-center text-xs text-ink-muted">没有匹配的指令或 Skill</div>
