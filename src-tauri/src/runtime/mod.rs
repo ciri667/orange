@@ -51,6 +51,21 @@ use tauri::AppHandle;
 /** 手动和自动整理上下文时，最多把多少条未总结消息交给总结器。 */
 const MAX_RECENT_MESSAGES_FOR_SUMMARY: usize = 24;
 
+/**
+ * 交给总结器的单条消息字符上限。
+ *
+ * 不能复用历史层的 8000 字符：24 条 × 8000 ≈ 19 万字符（约 10 万 token），
+ * 一次摘要请求要跑 30–100 秒，用户点「整理」后长时间没有任何反馈。
+ * 摘要只需要要点，1500 字符足够，请求体积降到约 1/5。
+ */
+const MAX_SUMMARY_MESSAGE_CHARS: usize = 1_500;
+
+/** 工作记忆摘要请求的独立超时；超时立刻降级为本地规则摘要，不阻塞界面。 */
+const CONTEXT_SUMMARY_TIMEOUT_SECONDS: u64 = 45;
+
+/** 工作记忆摘要的输出上限；schema 只有十几个短字段，1200 token 足够，超出就是模型跑偏。 */
+const CONTEXT_SUMMARY_MAX_TOKENS: u32 = 1_200;
+
 /** 超过该消息数后自动触发模型整理；仅在 usage 缺失时作为后备。 */
 pub(super) const AUTO_COMPACT_MESSAGE_COUNT_THRESHOLD: usize = 48;
 
@@ -2049,6 +2064,8 @@ async fn send_chat_completion_logged(
     messages: &[Value],
     tool_schemas: Option<&Value>,
     response_format: Option<&Value>,
+    timeout: Option<Duration>,
+    max_tokens: Option<u32>,
 ) -> Result<Value, String> {
     let started_at = Instant::now();
     let result = send_chat_completion(
@@ -2059,6 +2076,8 @@ async fn send_chat_completion_logged(
         messages,
         tool_schemas,
         response_format,
+        timeout,
+        max_tokens,
     )
     .await;
 
@@ -2153,7 +2172,14 @@ fn build_chat_completion_payload(
     payload
 }
 
-/** 工作记忆请求使用 json_schema，减少模型把 JSON 包进 Markdown fence 的情况。 */
+/**
+ * 工作记忆请求使用 json_schema，减少模型把 JSON 包进 Markdown fence 的情况。
+ *
+ * 这里刻意不使用 `["string", "null"]` 联合类型：部分 OpenAI 兼容 provider（例如
+ * Minimax 系网关）会直接以 400 `Mismatch type string with value array` 拒绝整个请求，
+ * 导致模型摘要永远失败、只剩本地确定性兜底。可空字段统一用空字符串表示，
+ * `normalize_context_summary` 会把空串收敛回 None。
+ */
 fn context_summary_response_format() -> Value {
     json!({
         "type": "json_schema",
@@ -2166,7 +2192,7 @@ fn context_summary_response_format() -> Value {
                 "properties": {
                     "version": { "type": "integer" },
                     "updatedAt": { "type": "string" },
-                    "currentGoal": { "type": ["string", "null"] },
+                    "currentGoal": { "type": "string" },
                     "userConstraints": {
                         "type": "array",
                         "items": { "type": "string" }
@@ -2196,13 +2222,13 @@ fn context_summary_response_format() -> Value {
                             "required": ["id", "title", "reason"]
                         }
                     },
-                    "pendingChangeSummary": { "type": ["string", "null"] },
+                    "pendingChangeSummary": { "type": "string" },
                     "openQuestions": {
                         "type": "array",
                         "items": { "type": "string" }
                     },
-                    "lastSummarizedMessageId": { "type": ["string", "null"] },
-                    "lastCompactedMessageId": { "type": ["string", "null"] }
+                    "lastSummarizedMessageId": { "type": "string" },
+                    "lastCompactedMessageId": { "type": "string" }
                 },
                 "required": [
                     "version",
@@ -2232,11 +2258,23 @@ async fn send_chat_completion(
     messages: &[Value],
     tool_schemas: Option<&Value>,
     response_format: Option<&Value>,
+    timeout: Option<Duration>,
+    max_tokens: Option<u32>,
 ) -> Result<Value, String> {
-    let payload =
+    let mut payload =
         build_chat_completion_payload(model, messages, tool_schemas, response_format, false);
 
+    // 摘要请求限制输出长度：不设上限时部分模型会生成很长的 JSON，把一次整理拖到几十秒。
+    if let Some(max_tokens) = max_tokens {
+        payload["max_tokens"] = json!(max_tokens);
+    }
+
     let mut request_builder = client.post(endpoint).json(&payload);
+
+    // 摘要这类后台请求使用更短的自有超时，超时后立刻降级，不让用户对着按钮干等。
+    if let Some(timeout) = timeout {
+        request_builder = request_builder.timeout(timeout);
+    }
 
     if !api_key.trim().is_empty() {
         request_builder = request_builder.bearer_auth(api_key);
@@ -2360,19 +2398,15 @@ async fn update_agent_context_summary_best_effort(
     let session_id = snapshot.sessions[session_index].id.clone();
     let messages =
         build_context_summary_model_messages(&snapshot.sessions[session_index], failure_reason);
-    let response_format = context_summary_response_format();
-    let result = send_chat_completion_logged(
+    let result = request_context_summary(
         client,
         provider,
         selected_model_id,
         &endpoint,
         api_key,
         &messages,
-        None,
-        Some(&response_format),
     )
-    .await
-    .and_then(parse_context_summary_response);
+    .await;
 
     match result {
         Ok(summary) => {
@@ -2419,6 +2453,84 @@ async fn update_agent_context_summary_best_effort(
             ContextSummaryUpdate::DeterministicFallback(reason)
         }
     }
+}
+
+/**
+ * 请求一次工作记忆摘要。
+ *
+ * 先带 json_schema 结构化输出；部分 OpenAI 兼容 provider 不接受 `response_format`
+ * （例如直接 400 报 schema 类型不匹配），此时退回纯提示词再试一次。提示词已经要求
+ * 只输出 JSON 对象，`parse_context_summary_response` 也能从 fenced 文本里提取，
+ * 所以去掉 response_format 仍然可用，只是约束弱一点。
+ */
+async fn request_context_summary(
+    client: &Client,
+    provider: &LlmProviderConfig,
+    selected_model_id: &str,
+    endpoint: &str,
+    api_key: &str,
+    messages: &[Value],
+) -> Result<AgentContextSummary, String> {
+    let response_format = context_summary_response_format();
+    let timeout = Some(Duration::from_secs(CONTEXT_SUMMARY_TIMEOUT_SECONDS));
+    let max_tokens = Some(CONTEXT_SUMMARY_MAX_TOKENS);
+    let first = send_chat_completion_logged(
+        client,
+        provider,
+        selected_model_id,
+        endpoint,
+        api_key,
+        messages,
+        None,
+        Some(&response_format),
+        timeout,
+        max_tokens,
+    )
+    .await;
+
+    match first {
+        Ok(response) => parse_context_summary_response(response),
+        Err(error) if should_retry_summary_without_response_format(&error) => {
+            log::info!(
+                target: "agent_runtime",
+                "provider 不接受工作记忆 json_schema，去掉 response_format 后重试：provider_id={} model={}",
+                provider.id,
+                selected_model_id
+            );
+            let retry = send_chat_completion_logged(
+                client,
+                provider,
+                selected_model_id,
+                endpoint,
+                api_key,
+                messages,
+                None,
+                None,
+                timeout,
+                max_tokens,
+            )
+            .await?;
+            parse_context_summary_response(retry)
+        }
+        Err(error) => Err(error),
+    }
+}
+
+/** 判断模型错误是否由 response_format/json_schema 引起，只有这类错误才值得去掉结构化输出重试。 */
+fn should_retry_summary_without_response_format(error: &str) -> bool {
+    let lower = error.to_ascii_lowercase();
+
+    [
+        "response_format",
+        "json_schema",
+        "json schema",
+        "schema",
+        // 实测 Minimax 系网关的报错是「Mismatch type string with value array」，没有 "ed"。
+        "mismatch",
+        "invalid params",
+    ]
+    .iter()
+    .any(|needle| lower.contains(needle))
 }
 
 /** 根据 自动触发条件决定使用模型 compact 还是轻量确定性同步。 */
@@ -2545,7 +2657,7 @@ fn context_summary_recent_message_payload(session: &AgentSession) -> String {
                 "id": &message.id,
                 "role": &message.role,
                 "action": message.action.as_deref(),
-                "content": truncate_chars(&message.content, MAX_HISTORY_MESSAGE_CHARS),
+                "content": truncate_chars(&message.content, MAX_SUMMARY_MESSAGE_CHARS),
                 "tools": message.tool_calls.as_ref().map(|tool_calls| {
                     tool_calls.iter().map(|tool_call| {
                         json!({
@@ -2589,7 +2701,13 @@ fn parse_context_summary_response(response: Value) -> Result<AgentContextSummary
     serde_json::from_value(parsed).map_err(|error| format!("summary JSON 解析失败：{error}"))
 }
 
-/** 兼容部分 provider 把 json_schema integer 写成字符串，避免整份工作记忆被丢掉。 */
+/**
+ * 收敛模型常见的小偏差，避免整份工作记忆因为一个字段类型不符被丢掉。
+ *
+ * 实测 Minimax 系模型会把 `touchedNotes` 写成字符串数组（`["Web form"]`）而不是
+ * `[{id,title,reason}]`，`serde_json::from_value` 直接失败，于是每次整理都退回本地
+ * 规则摘要 —— 用户看到的就是「整理了几十秒，但内容没变」。
+ */
 fn coerce_context_summary_json(value: &mut Value) {
     let Some(object) = value.as_object_mut() else {
         return;
@@ -2597,6 +2715,41 @@ fn coerce_context_summary_json(value: &mut Value) {
     if let Some(text) = object.get("version").and_then(Value::as_str) {
         if let Ok(number) = text.trim().parse::<u32>() {
             object.insert("version".to_owned(), json!(number));
+        }
+    }
+
+    // 字符串数组字段被写成单个字符串时包成数组。
+    for field in [
+        "userConstraints",
+        "decisions",
+        "completedWork",
+        "pendingTasks",
+        "openQuestions",
+    ] {
+        if let Some(Value::String(text)) = object.get(field) {
+            object.insert(field.to_owned(), json!([text]));
+        }
+    }
+
+    // touchedNotes 的元素必须是对象；字符串元素按标题收敛，id 留空由 normalize 处理。
+    if let Some(Value::Array(items)) = object.get_mut("touchedNotes") {
+        for item in items.iter_mut() {
+            let Some(text) = item.as_str().map(str::to_owned) else {
+                continue;
+            };
+            *item = json!({ "id": "", "title": text, "reason": "" });
+        }
+    }
+
+    // 可空字段模型可能回成 null；schema 已改为 string，这里统一收敛成空串。
+    for field in [
+        "currentGoal",
+        "pendingChangeSummary",
+        "lastSummarizedMessageId",
+        "lastCompactedMessageId",
+    ] {
+        if object.get(field).is_some_and(Value::is_null) {
+            object.insert(field.to_owned(), json!(""));
         }
     }
 }
@@ -2746,6 +2899,11 @@ fn normalize_context_summary(
     if update_compacted_marker {
         summary.last_compacted_message_id =
             session.messages.last().map(|message| message.id.clone());
+    } else {
+        // schema 用空字符串表示「无」，这里收敛回 None，避免空串被当成有效切点。
+        summary.last_compacted_message_id = summary
+            .last_compacted_message_id
+            .filter(|id| !id.trim().is_empty());
     }
 
     summary
@@ -2791,13 +2949,20 @@ fn normalize_touched_notes(notes: Vec<AgentContextTouchedNote>) -> Vec<AgentCont
     let mut normalized = Vec::new();
 
     for note in notes {
-        if note.id.trim().is_empty() || !seen.insert(note.id.clone()) {
+        let id = note.id.trim();
+        let title = note.title.trim();
+        // 模型可能只给标题（见 coerce_context_summary_json），此时用标题去重。
+        if id.is_empty() && title.is_empty() {
+            continue;
+        }
+        let dedupe_key = if id.is_empty() { title } else { id };
+        if !seen.insert(dedupe_key.to_owned()) {
             continue;
         }
 
         normalized.push(AgentContextTouchedNote {
-            id: truncate_summary_item(&note.id),
-            title: truncate_summary_item(&note.title),
+            id: truncate_summary_item(id),
+            title: truncate_summary_item(title),
             reason: truncate_summary_item(&note.reason),
         });
 
@@ -4607,6 +4772,116 @@ mod tests {
             .iter()
             .any(|field| field == "currentGoal"));
         assert!(payload.get("tools").is_none());
+    }
+
+    /**
+     * 工作记忆 schema 不能出现 `["string", "null"]` 联合类型。
+     *
+     * Minimax 系 OpenAI 兼容网关会直接以 400 `Mismatch type string with value array`
+     * 拒绝整个请求，导致模型摘要永远失败、只剩本地确定性兜底（表现为「整理上下文」
+     * 看起来没生效）。可空字段统一用空字符串表示，由 normalize 收敛回 None。
+     */
+    #[test]
+    fn context_summary_schema_avoids_nullable_union_types() {
+        let schema = context_summary_response_format();
+        let properties = schema["json_schema"]["schema"]["properties"]
+            .as_object()
+            .expect("schema properties should be an object");
+
+        for (field, definition) in properties {
+            assert!(
+                definition["type"].is_string(),
+                "字段 {field} 的 type 必须是单个字符串，联合类型会被部分 provider 拒绝"
+            );
+        }
+
+        assert_eq!(properties["currentGoal"]["type"], "string");
+        assert_eq!(properties["pendingChangeSummary"]["type"], "string");
+        assert_eq!(properties["lastCompactedMessageId"]["type"], "string");
+    }
+
+    /** 只有 schema 相关错误才值得去掉 response_format 重试，其它错误直接失败更快。 */
+    #[test]
+    fn summary_retry_without_response_format_only_for_schema_errors() {
+        assert!(should_retry_summary_without_response_format(
+            "模型请求失败：HTTP 400 Bad Request {\"error\":{\"message\":\"Mismatch type string with value array\"}}"
+        ));
+        assert!(should_retry_summary_without_response_format(
+            "模型请求失败：HTTP 400 invalid params: response_format unsupported"
+        ));
+        assert!(!should_retry_summary_without_response_format(
+            "模型请求失败：HTTP 401 Unauthorized"
+        ));
+        assert!(!should_retry_summary_without_response_format(
+            "模型请求失败：HTTP 429 rate limit"
+        ));
+    }
+
+    /**
+     * `touchedNotes` 被模型写成字符串数组时必须能收敛，而不是整份摘要解析失败。
+     *
+     * 实测 Minimax 系模型返回 `["Web form"]`，`serde_json::from_value` 直接报
+     * `invalid type: string ..., expected struct AgentContextTouchedNote`，
+     * 于是每次整理都退回本地规则摘要 —— 用户看到的就是「等了几十秒，内容没变」。
+     */
+    #[test]
+    fn coerce_context_summary_accepts_touched_notes_as_strings() {
+        let mut value = json!({
+            "version": "1",
+            "updatedAt": "2026-10-22 19:50",
+            "currentGoal": null,
+            "userConstraints": "只读",
+            "decisions": [],
+            "completedWork": [],
+            "pendingTasks": [],
+            "touchedNotes": ["Web form", "Selenium 文档"],
+            "pendingChangeSummary": null,
+            "openQuestions": [],
+            "lastSummarizedMessageId": null,
+            "lastCompactedMessageId": null
+        });
+
+        coerce_context_summary_json(&mut value);
+
+        let summary: AgentContextSummary =
+            serde_json::from_value(value).expect("coerced summary should deserialize");
+        assert_eq!(summary.version, 1);
+        assert_eq!(summary.user_constraints, vec!["只读".to_owned()]);
+        assert_eq!(summary.touched_notes.len(), 2);
+        assert_eq!(summary.touched_notes[0].title, "Web form");
+        // null 被收敛成空串，再由 normalize 收敛回 None。
+        assert_eq!(summary.current_goal.as_deref(), Some(""));
+        assert_eq!(summary.last_compacted_message_id.as_deref(), Some(""));
+
+        let normalized = normalize_context_summary(summary, &runtime_test_snapshot(String::new()).sessions[0], false);
+        assert!(normalized.current_goal.is_none());
+        assert!(normalized.last_compacted_message_id.is_none());
+        assert_eq!(normalized.touched_notes.len(), 2);
+    }
+
+    /** 只给标题的 touchedNotes 不能因为 id 为空被丢掉，也不能渲染成空洞的 `-  |  |`。 */
+    #[test]
+    fn normalize_touched_notes_keeps_title_only_entries() {
+        let notes = normalize_touched_notes(vec![
+            AgentContextTouchedNote {
+                id: String::new(),
+                title: "Web form".to_owned(),
+                reason: String::new(),
+            },
+            AgentContextTouchedNote {
+                id: String::new(),
+                title: "Web form".to_owned(),
+                reason: String::new(),
+            },
+            AgentContextTouchedNote {
+                id: String::new(),
+                title: String::new(),
+                reason: String::new(),
+            },
+        ]);
+
+        assert_eq!(notes.len(), 1);
+        assert_eq!(notes[0].title, "Web form");
     }
 
     /** 没有新的未整理消息且 transcript 已是检查点时，重复整理必须直接跳过。 */

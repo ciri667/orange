@@ -564,7 +564,14 @@ pub(super) fn render_context_summary_body(summary: &AgentContextSummary) -> Opti
     if !summary.touched_notes.is_empty() {
         lines.push("touchedNotes:".to_owned());
         for note in summary.touched_notes.iter().take(MAX_CONTEXT_SUMMARY_ITEMS) {
-            lines.push(format!("- {} | {} | {}", note.id, note.title, note.reason));
+            // 模型可能只给标题（没有 id/reason），空段不要渲染成 `-  | 标题 | `。
+            let parts = [note.id.trim(), note.title.trim(), note.reason.trim()]
+                .into_iter()
+                .filter(|part| !part.is_empty())
+                .collect::<Vec<_>>();
+            if !parts.is_empty() {
+                lines.push(format!("- {}", parts.join(" | ")));
+            }
         }
     }
 
