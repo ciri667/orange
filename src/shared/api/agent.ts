@@ -20,6 +20,7 @@ import {
   KnowledgeBase,
   Note,
   ProposedChange,
+  CompactAgentContextResult,
   WorkspaceSnapshot,
 } from "../types";
 import { createContentHash } from "../id";
@@ -150,18 +151,33 @@ export async function listenAgentTurnProgress(
   });
 }
 
-/** 手动整理当前 Agent 会话工作记忆，桌面端由后端决定使用模型或本地降级。 */
-export async function compactAgentContext(snapshot: WorkspaceSnapshot, sessionId: string): Promise<WorkspaceSnapshot> {
+/**
+ * 手动整理当前 Agent 会话工作记忆。
+ *
+ * 桌面端由后端决定使用模型摘要还是本地确定性兜底，并在 notice 里如实说明摘要来源和
+ * 实际丢弃的历史条数；浏览器开发态只做本地模拟，因此明确提示不会真正压缩。
+ */
+export async function compactAgentContext(
+  snapshot: WorkspaceSnapshot,
+  sessionId: string,
+): Promise<CompactAgentContextResult> {
   if (!isTauriRuntime()) {
-    return normalizeMockSnapshotSessions({
+    const nextSnapshot = normalizeMockSnapshotSessions({
       ...snapshot,
       sessions: snapshot.sessions.map((session) =>
         session.id === sessionId ? { ...session, contextSummary: buildMockContextSummary(session) } : session,
       ),
     });
+
+    return {
+      snapshot: nextSnapshot,
+      notice: "已整理上下文：开发态使用本地模拟摘要，不会真正压缩模型上下文。",
+    };
   }
 
-  return invokeLogged<WorkspaceSnapshot>("compact_agent_context", { payload: { snapshot, sessionId } });
+  return invokeLogged<CompactAgentContextResult>("compact_agent_context", {
+    payload: { snapshot, sessionId },
+  });
 }
 
 /** 读取某会话最近一次发给模型的上下文预览；没有转储时返回 null。 */

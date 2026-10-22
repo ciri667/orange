@@ -72,7 +72,7 @@ pub fn builtin_commands() -> &'static [BuiltinCommandDescriptor] {
             id: "compact",
             name: "compact",
             aliases: &[],
-            description: "整理当前会话上下文",
+            description: "整理当前会话上下文，压缩模型上下文并更新工作记忆",
             argument_hint: "",
             scopes: &[CommandScope::Desktop, CommandScope::Im],
             requires_active_session: true,

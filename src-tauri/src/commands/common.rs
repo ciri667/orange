@@ -4,7 +4,8 @@ pub(super) use crate::builtin_commands::BuiltinCommandDescriptor;
 pub(super) use crate::domain::{
     AbortAgentTurnPayload, AgentSession, AgentSkill, AgentTurnPayload, AgentTurnResult,
     AppEventLog, BuiltinCommandRunResult, ChangePayload, ClearDocumentHistoryPayload,
-    CompactAgentContextPayload, ConversationImageAttachment, CreateDocumentPayload,
+    CompactAgentContextPayload, CompactAgentContextResult, ConversationImageAttachment,
+    CreateDocumentPayload,
     CreateFolderPayload, CreateNotePayload, CreateProjectInstructionPayload,
     DeleteAgentSkillPayload, DeleteDocumentPayload, DeleteKnowledgeBaseMemoryPayload,
     DeleteNotePayload, DeleteSessionPayload, DocumentHistoryEntry, DocumentHistoryEntryDetail,

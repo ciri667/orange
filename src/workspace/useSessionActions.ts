@@ -272,8 +272,10 @@ export function useSessionActions(options: SessionActionsOptions) {
           hasActivePendingChange: activeSession.pendingChange?.status === "pending",
         },
       });
-      commitSnapshot(await compactAgentContext(currentSnapshot, activeSession.id));
-      setNotice("已整理上下文。");
+      const result = await compactAgentContext(currentSnapshot, activeSession.id);
+      commitSnapshot(result.snapshot);
+      // 后端回执说明摘要来源和实际丢弃的历史，避免「已整理」但看不出变化。
+      setNotice(result.notice);
       logInfo("手动整理会话上下文完成。", {
         category: "frontend",
         event: "compact_agent_context",

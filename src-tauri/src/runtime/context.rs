@@ -174,7 +174,11 @@ pub(super) fn build_model_prompt(
         .filter(|messages| !messages.is_empty() && transcript_is_usable(messages, session))
     {
         let mut conversation = project_transcript(transcript, session.context_summary.as_ref());
-        if conversation_starts_with_checkpoint(&conversation) && checkpoint.is_none() {
+        // transcript 是权威上下文：它一旦以检查点开头，说明旧历史已经被物理丢弃，
+        // 检查点就是这些历史的唯一记录。此时即使当前窗口装得下，也不能把检查点剥掉，
+        // 否则手动/自动整理后模型会完全看不到被压缩的那段对话。
+        // 只有工作记忆已被清空（例如 rewind 后）时才剥掉，避免注入过期检查点。
+        if conversation_starts_with_checkpoint(&conversation) && !has_compaction_marker(session) {
             conversation = strip_existing_checkpoint(&conversation).to_vec();
         } else if !conversation_starts_with_checkpoint(&conversation) {
             if let Some(checkpoint) = checkpoint {
@@ -450,6 +454,15 @@ fn attach_turn_materials_to_current_user(
     }
 }
 
+/** 会话是否已经真正压缩过：工作记忆里存在非空的压缩切点。 */
+pub(super) fn has_compaction_marker(session: &AgentSession) -> bool {
+    session
+        .context_summary
+        .as_ref()
+        .and_then(|summary| summary.last_compacted_message_id.as_deref())
+        .is_some_and(|id| !id.trim().is_empty())
+}
+
 /** 只有 compact 切点存在、且全量历史已经超出窗口预算时，才把检查点塞进模型上下文。 */
 pub(super) fn should_inject_checkpoint(
     session: &AgentSession,
@@ -458,11 +471,7 @@ pub(super) fn should_inject_checkpoint(
     let Some(summary) = session.context_summary.as_ref() else {
         return false;
     };
-    if summary
-        .last_compacted_message_id
-        .as_deref()
-        .is_none_or(|id| id.trim().is_empty())
-    {
+    if !has_compaction_marker(session) {
         return false;
     }
     if render_context_summary_body(summary).is_none() {

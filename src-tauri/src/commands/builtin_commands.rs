@@ -249,7 +249,12 @@ async fn rename_session_from_command(
     })
 }
 
-/** 整理当前会话上下文；复用与 `compact_agent_context` 相同的 runtime 摘要能力。 */
+/**
+ * 整理当前会话上下文。
+ *
+ * 与桌面「整理上下文」按钮共用 `compact_session_context`：同一条 runtime 摘要 +
+ * transcript 改写路径，回执也使用同一套文案，避免两个入口给出不同结论。
+ */
 async fn compact_session_from_command(
     app: &AppHandle,
     snapshot: WorkspaceSnapshot,
@@ -269,24 +274,12 @@ async fn compact_session_from_command(
         return Err("当前会话没有可整理的对话消息。".to_owned());
     }
 
-    let settings_app = app.clone();
-    let settings = run_blocking("读取模型设置", move || {
-        storage::load_user_settings(&settings_app)
-    })
-    .await?;
-    let compacted =
-        runtime::compact_agent_context_summary(app, snapshot, &session_id, settings).await?;
-    let persist_app = app.clone();
-    let persist_snapshot = compacted.clone();
-    let persist_session_id = session_id.clone();
-    run_blocking("保存会话上下文", move || {
-        storage::save_snapshot_session(&persist_app, &persist_snapshot, &persist_session_id)
-    })
-    .await?;
+    let (compacted, notice) =
+        super::agent::compact_session_context(app, snapshot, &session_id).await?;
 
     Ok(BuiltinCommandRunResult {
         command_id: "compact".to_owned(),
-        notice: format!("已整理当前会话上下文（{message_count} 条消息）。"),
+        notice,
         snapshot: Some(compacted),
     })
 }
@@ -294,6 +287,7 @@ async fn compact_session_from_command(
 #[cfg(test)]
 mod tests {
     use super::build_new_command_session;
+    use crate::runtime::{ContextSummaryUpdate, ManualCompactionOutcome};
     use crate::storage::DEFAULT_SESSION_TITLE;
 
     /**
@@ -315,5 +309,90 @@ mod tests {
         assert_eq!(session.knowledge_base_ids, vec!["kb-a".to_owned()]);
         // 用户没自定义过标题，后续才允许被首条输入替换。
         assert!(!session.title_customized);
+    }
+
+    /** 整理回执必须说明摘要来源和实际丢弃条数，而不是只说「已整理」让人以为没生效。 */
+    #[test]
+    fn compaction_notice_reports_source_and_dropped_history() {
+        let outcome = ManualCompactionOutcome {
+            snapshot: crate::domain::WorkspaceSnapshot {
+                knowledge_bases: Vec::new(),
+                folders: Vec::new(),
+                notes: Vec::new(),
+                documents: Vec::new(),
+                sessions: Vec::new(),
+                active_knowledge_base_id: String::new(),
+                active_note_id: String::new(),
+                active_document_id: String::new(),
+                active_session_id: String::new(),
+            },
+            summary_update: ContextSummaryUpdate::Model,
+            retained_messages: 12,
+            dropped_messages: 40,
+        };
+
+        let notice = super::super::agent::format_compaction_notice(&outcome);
+
+        assert!(notice.contains("模型摘要"));
+        assert!(notice.contains("现有 12 条消息"));
+        assert!(notice.contains("丢弃 40 条"));
+        assert!(!notice.contains("模型摘要失败"));
+    }
+
+    /** 跳过重复整理时不能报「已整理」，否则用户会以为自己刚点的那下生效了。 */
+    #[test]
+    fn compaction_notice_reports_skipped_when_context_is_current() {
+        let outcome = ManualCompactionOutcome {
+            snapshot: crate::domain::WorkspaceSnapshot {
+                knowledge_bases: Vec::new(),
+                folders: Vec::new(),
+                notes: Vec::new(),
+                documents: Vec::new(),
+                sessions: Vec::new(),
+                active_knowledge_base_id: String::new(),
+                active_note_id: String::new(),
+                active_document_id: String::new(),
+                active_session_id: String::new(),
+            },
+            summary_update: ContextSummaryUpdate::AlreadyCurrent,
+            retained_messages: 98,
+            dropped_messages: 0,
+        };
+
+        let notice = super::super::agent::format_compaction_notice(&outcome);
+
+        assert!(notice.contains("已是最新"));
+        assert!(notice.contains("98 条消息"));
+        assert!(!notice.contains("已整理上下文"));
+    }
+
+    /** 模型摘要失败时必须如实告知降级原因，并截断过长的 provider 响应。 */
+    #[test]
+    fn compaction_notice_surfaces_fallback_reason_without_dumping_response() {
+        let outcome = ManualCompactionOutcome {
+            snapshot: crate::domain::WorkspaceSnapshot {
+                knowledge_bases: Vec::new(),
+                folders: Vec::new(),
+                notes: Vec::new(),
+                documents: Vec::new(),
+                sessions: Vec::new(),
+                active_knowledge_base_id: String::new(),
+                active_note_id: String::new(),
+                active_document_id: String::new(),
+                active_session_id: String::new(),
+            },
+            summary_update: ContextSummaryUpdate::DeterministicFallback(
+                format!("模型请求失败：HTTP 400 {}", "x".repeat(400)),
+            ),
+            retained_messages: 3,
+            dropped_messages: 0,
+        };
+
+        let notice = super::super::agent::format_compaction_notice(&outcome);
+
+        assert!(notice.contains("本地规则摘要"));
+        assert!(notice.contains("模型摘要失败"));
+        assert!(notice.contains("HTTP 400"));
+        assert!(notice.chars().count() < 400);
     }
 }

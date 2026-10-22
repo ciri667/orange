@@ -239,12 +239,89 @@ pub fn clear_agent_turn_placeholder(payload: AbortAgentTurnPayload) -> Result<()
     Ok(())
 }
 
-/** 手动整理当前 Agent 会话工作记忆，成功后持久化会话快照。 */
+/**
+ * 手动整理上下文共用流程：读取持久化会话 → runtime 摘要 + transcript 改写 → 落盘 → 生成回执。
+ *
+ * 桌面按钮和 `/compact` 必须走同一条路径：否则两条入口会漂移（例如一条会 hydrate
+ * 持久化会话、另一条只用前端旧快照），整理结果和回执文案也会不一致。
+ */
+pub(super) async fn compact_session_context(
+    app: &AppHandle,
+    snapshot: WorkspaceSnapshot,
+    session_id: &str,
+) -> Result<(WorkspaceSnapshot, String), String> {
+    let settings_app = app.clone();
+    let settings = run_blocking("读取模型设置", move || {
+        storage::load_user_settings(&settings_app)
+    })
+    .await?;
+    let snapshot = hydrate_persisted_sessions_for_turn(app, snapshot).await?;
+    let outcome =
+        runtime::compact_agent_context_summary(app, snapshot, session_id, settings).await?;
+    let snapshot = outcome.snapshot.clone();
+    // 只落盘被整理的会话，避免过期快照覆盖其它会话的模型或权限。
+    persist_turn_session(app, &snapshot, session_id).await?;
+
+    Ok((snapshot, format_compaction_notice(&outcome)))
+}
+
+/** 把整理结果转成用户可读回执：摘要来源 + 实际保留/丢弃的模型上下文规模。 */
+pub(super) fn format_compaction_notice(outcome: &runtime::ManualCompactionOutcome) -> String {
+    // 跳过时不要报「已整理」，否则用户会以为自己刚才那一下生效了。
+    if matches!(
+        outcome.summary_update,
+        runtime::ContextSummaryUpdate::AlreadyCurrent
+    ) {
+        return format!(
+            "上下文已是最新：模型上下文共 {} 条消息（含压缩检查点），没有新的未整理消息。",
+            outcome.retained_messages
+        );
+    }
+
+    let source = match &outcome.summary_update {
+        runtime::ContextSummaryUpdate::Model => "模型摘要",
+        runtime::ContextSummaryUpdate::DeterministicFallback(_) => "本地规则摘要",
+        runtime::ContextSummaryUpdate::AlreadyCurrent => unreachable!("已在上面提前返回"),
+    };
+    let mut notice = if outcome.retained_messages == 0 {
+        format!("已整理上下文：{source}；当前会话还没有可压缩的模型上下文记录。")
+    } else if outcome.dropped_messages == 0 {
+        format!(
+            "已整理上下文：{source}；模型上下文现有 {} 条消息（含压缩检查点），没有可丢弃的旧历史。",
+            outcome.retained_messages
+        )
+    } else {
+        format!(
+            "已整理上下文：{source}；模型上下文现有 {} 条消息（含压缩检查点），丢弃 {} 条旧历史。",
+            outcome.retained_messages, outcome.dropped_messages
+        )
+    };
+
+    if let Some(reason) = outcome.summary_update.fallback_reason() {
+        notice.push_str("\n模型摘要失败，已用本地规则兜底：");
+        notice.push_str(&truncate_notice_reason(reason));
+    }
+
+    notice
+}
+
+/** 回执里的失败原因只保留一段短文本，避免把整段 provider 响应塞进提示。 */
+fn truncate_notice_reason(reason: &str) -> String {
+    let collapsed = reason.split_whitespace().collect::<Vec<_>>().join(" ");
+
+    if collapsed.chars().count() <= 160 {
+        return collapsed;
+    }
+
+    format!("{}…", collapsed.chars().take(160).collect::<String>())
+}
+
+/** 手动整理当前 Agent 会话工作记忆，成功后持久化会话快照并返回可展示回执。 */
 #[tauri::command]
 pub async fn compact_agent_context(
     app: AppHandle,
     payload: CompactAgentContextPayload,
-) -> Result<WorkspaceSnapshot, String> {
+) -> Result<CompactAgentContextResult, String> {
     let started_at = Instant::now();
     let operation_id = storage::create_id("op");
     let session_id = payload.session_id.clone();
@@ -265,33 +342,27 @@ pub async fn compact_agent_context(
         .session_id(session_id.clone()),
     );
 
-    let settings_app = app.clone();
-    let settings = run_blocking("读取模型设置", move || {
-        storage::load_user_settings(&settings_app)
-    })
-    .await?;
-    let snapshot = hydrate_persisted_sessions_for_turn(&app, payload.snapshot).await?;
-    let snapshot =
-        runtime::compact_agent_context_summary(&app, snapshot, &session_id, settings).await?;
+    let (snapshot, notice) = match compact_session_context(&app, payload.snapshot, &session_id).await
+    {
+        Ok(result) => result,
+        Err(error) => {
+            logging::write_app_event_best_effort(
+                &app,
+                AppEventBuilder::new(
+                    AppLogLevel::Error,
+                    AppLogCategory::Agent,
+                    "compact_agent_context",
+                    "failed",
+                    error.clone(),
+                )
+                .operation_id(operation_id)
+                .session_id(session_id)
+                .duration(started_at.elapsed()),
+            );
 
-    if let Err(error) = upsert_snapshot_index_in_background(app.clone(), &snapshot).await {
-        logging::write_app_event_best_effort(
-            &app,
-            AppEventBuilder::new(
-                AppLogLevel::Error,
-                AppLogCategory::Agent,
-                "compact_agent_context",
-                "failed",
-                error.clone(),
-            )
-            .operation_id(operation_id)
-            .session_id(session_id)
-            .duration(started_at.elapsed()),
-        );
-
-        return Err(error);
-    }
-    persist_turn_session(&app, &snapshot, &session_id).await?;
+            return Err(error);
+        }
+    };
 
     logging::write_app_event_best_effort(
         &app,
@@ -307,7 +378,7 @@ pub async fn compact_agent_context(
         .duration(started_at.elapsed()),
     );
 
-    Ok(snapshot)
+    Ok(CompactAgentContextResult { snapshot, notice })
 }
 
 /** IM 后台入口复用 Agent runtime：创建或复用映射会话，持久化消息、审计和索引。 */
@@ -686,7 +757,7 @@ pub(super) async fn compact_im_session_from_command(
     )
     .await
     {
-        Ok(snapshot) => snapshot,
+        Ok(outcome) => outcome.snapshot,
         Err(error) => {
             log::warn!(target: "im", "IM 上下文压缩降级为确定性摘要：session={} reason={}", session_id, logging::sanitize_log_text(&error));
             runtime::update_agent_context_summary_deterministic(

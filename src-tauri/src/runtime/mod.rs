@@ -316,13 +316,58 @@ fn resolve_context_summary_model_selection(
     })
 }
 
-/** 手动整理指定会话上下文；真实模型不可用时降级为本地确定性整理，并改写 transcript。 */
+/** 一次工作记忆更新的实际来源，供手动整理如实回报用户，而不是一律说「已整理」。 */
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ContextSummaryUpdate {
+    /** 模型摘要成功。 */
+    Model,
+    /** 模型摘要失败，已用本地确定性规则兜底；reason 已脱敏。 */
+    DeterministicFallback(String),
+    /** 没有新的未整理消息，直接跳过，不发起任何模型请求。 */
+    AlreadyCurrent,
+}
+
+impl ContextSummaryUpdate {
+    /** 日志与 UI 共用的短标签。 */
+    pub fn mode(&self) -> &'static str {
+        match self {
+            Self::Model => "model",
+            Self::DeterministicFallback(_) => "deterministic",
+            Self::AlreadyCurrent => "skipped",
+        }
+    }
+
+    /** 降级原因；模型摘要成功或跳过时为空。 */
+    pub fn fallback_reason(&self) -> Option<&str> {
+        match self {
+            Self::Model | Self::AlreadyCurrent => None,
+            Self::DeterministicFallback(reason) => Some(reason.as_str()),
+        }
+    }
+}
+
+/** 手动整理的结果：新快照 + 摘要来源 + 实际保留/丢弃的模型上下文规模。 */
+pub struct ManualCompactionOutcome {
+    pub snapshot: WorkspaceSnapshot,
+    pub summary_update: ContextSummaryUpdate,
+    /** 整理后 transcript 的消息数（含压缩检查点）。 */
+    pub retained_messages: usize,
+    /** 被检查点取代、不再回放的历史消息数。 */
+    pub dropped_messages: usize,
+}
+
+/**
+ * 手动整理指定会话上下文；真实模型不可用时降级为本地确定性整理，并改写 transcript。
+ *
+ * 两道防线保证「点一次只跑一次」：这里用 `try_begin_manual_compaction` 拒绝同一会话的
+ * 并发整理，并在没有新的未整理消息时直接短路，不再发起一次几十秒的模型请求。
+ */
 pub async fn compact_agent_context_summary(
     app: &AppHandle,
     mut snapshot: WorkspaceSnapshot,
     session_id: &str,
     settings: UserSettings,
-) -> Result<WorkspaceSnapshot, String> {
+) -> Result<ManualCompactionOutcome, String> {
     let session_index = snapshot
         .sessions
         .iter()
@@ -330,78 +375,167 @@ pub async fn compact_agent_context_summary(
         .ok_or_else(|| "未找到要整理的 Agent 会话。".to_owned())?;
     let started_at = Instant::now();
     let session_id = snapshot.sessions[session_index].id.clone();
+    // guard 覆盖整个整理过程，离开作用域（含提前 return 和 panic）时自动释放。
+    let _compaction_guard = try_begin_manual_compaction(&session_id)?;
 
-    match resolve_context_summary_model_selection(&settings, &snapshot.sessions[session_index]) {
-        Ok(selection) => {
-            let client = build_http_client()?;
+    let stored_transcript = load_stored_transcript_best_effort(app, &session_id);
+    let model_context_length =
+        resolve_session_model_context_length(&snapshot, session_index, &settings);
+    let tail_budget = resolve_manual_compact_tail_budget_chars(model_context_length);
 
-            update_agent_context_summary_best_effort(
-                &client,
-                &selection.provider,
-                &selection.selected_model_id,
-                &selection.api_key,
-                &mut snapshot,
-                session_index,
-                None,
-                true,
-            )
-            .await;
-            log::info!(
-                target: "agent_runtime",
-                "手动整理会话工作记忆完成：session={} duration_ms={} mode=model",
-                session_id,
-                started_at.elapsed().as_millis()
-            );
-        }
-        Err(error) => {
-            log::warn!(
-                target: "agent_runtime",
-                "手动整理会话工作记忆使用确定性降级：session={} reason={}",
-                session_id,
-                model_provider::redact_model_error_text(&error)
-            );
-            update_agent_context_summary_deterministic(&mut snapshot, session_index, None, true);
-            log::info!(
-                target: "agent_runtime",
-                "手动整理会话工作记忆完成：session={} duration_ms={} mode=deterministic",
-                session_id,
-                started_at.elapsed().as_millis()
-            );
-        }
+    // 没有新的未整理消息、且 transcript 已经是「检查点 + 尾部」时，重复整理不会改变任何东西。
+    // 直接返回，避免用户连点后每一下都要等一次模型请求。
+    if is_context_already_current(
+        &snapshot.sessions[session_index],
+        stored_transcript.as_deref(),
+    ) {
+        log::info!(
+            target: "agent_runtime",
+            "手动整理已跳过：上下文已是最新 session={} duration_ms={}",
+            session_id,
+            started_at.elapsed().as_millis()
+        );
+        let retained_messages = stored_transcript.as_ref().map_or(0, Vec::len);
+        return Ok(ManualCompactionOutcome {
+            snapshot,
+            summary_update: ContextSummaryUpdate::AlreadyCurrent,
+            retained_messages,
+            dropped_messages: 0,
+        });
     }
 
-    let model_context_length = snapshot.sessions[session_index]
-        .model_id
-        .as_deref()
-        .and_then(|model_id| {
-            settings
-                .model_config
-                .providers
-                .iter()
-                .find(|provider| {
-                    snapshot.sessions[session_index]
-                        .model_provider_id
-                        .as_deref()
-                        == Some(provider.id.as_str())
-                })
-                .and_then(|provider| {
-                    provider
-                        .models
-                        .iter()
-                        .find(|model| model.id == model_id)
-                        .and_then(|model| model.context_length)
-                })
-        });
-    rewrite_stored_transcript(
+    let summary_update =
+        match resolve_context_summary_model_selection(&settings, &snapshot.sessions[session_index])
+        {
+            Ok(selection) => {
+                let client = build_http_client()?;
+
+                update_agent_context_summary_best_effort(
+                    &client,
+                    &selection.provider,
+                    &selection.selected_model_id,
+                    &selection.api_key,
+                    &mut snapshot,
+                    session_index,
+                    None,
+                    true,
+                )
+                .await
+            }
+            Err(error) => {
+                let reason = model_provider::redact_model_error_text(&error);
+                log::warn!(
+                    target: "agent_runtime",
+                    "手动整理会话工作记忆使用确定性降级：session={} reason={}",
+                    session_id,
+                    reason
+                );
+                update_agent_context_summary_deterministic(&mut snapshot, session_index, None, true);
+                ContextSummaryUpdate::DeterministicFallback(reason)
+            }
+        };
+
+    log::info!(
+        target: "agent_runtime",
+        "手动整理会话工作记忆完成：session={} duration_ms={} mode={}",
+        session_id,
+        started_at.elapsed().as_millis(),
+        summary_update.mode()
+    );
+
+    // 手动整理必须真的丢掉旧历史，因此使用独立的小预算，而不是历史层预算。
+    let compaction = rewrite_stored_transcript(
         app,
         &session_id,
         snapshot.sessions[session_index].context_summary.as_ref(),
-        model_context_length,
+        tail_budget,
+    );
+    let (retained_messages, dropped_messages) = compaction
+        .map(|compacted| (compacted.retained_messages, compacted.dropped_messages))
+        .unwrap_or((0, 0));
+    log::info!(
+        target: "agent_runtime",
+        "手动整理模型上下文完成：session={} tail_budget_chars={} retained_messages={} dropped_messages={}",
+        session_id,
+        tail_budget,
+        retained_messages,
+        dropped_messages
     );
 
-    Ok(snapshot)
+    Ok(ManualCompactionOutcome {
+        snapshot,
+        summary_update,
+        retained_messages,
+        dropped_messages,
+    })
 }
 
+/** 取会话当前生效模型的窗口大小；未显式指定时跟随全局默认 provider/model。 */
+fn resolve_session_model_context_length(
+    snapshot: &WorkspaceSnapshot,
+    session_index: usize,
+    settings: &UserSettings,
+) -> Option<u64> {
+    let session = &snapshot.sessions[session_index];
+    let provider = match session.model_provider_id.as_deref() {
+        Some(provider_id) => settings
+            .model_config
+            .providers
+            .iter()
+            .find(|provider| provider.id == provider_id),
+        None => settings
+            .model_config
+            .providers
+            .iter()
+            .find(|provider| provider.id == settings.model_config.default_provider_id),
+    }?;
+    let model_id = session
+        .model_id
+        .as_deref()
+        .filter(|model_id| !model_id.trim().is_empty())
+        .unwrap_or(provider.model.as_str());
+
+    provider
+        .models
+        .iter()
+        .find(|model| model.id == model_id)
+        .and_then(|model| model.context_length)
+}
+
+/** 读取已落盘的模型 transcript；读失败只写脱敏 warn，按「没有 transcript」处理。 */
+fn load_stored_transcript_best_effort(app: &AppHandle, session_id: &str) -> Option<Vec<Value>> {
+    match crate::storage::load_agent_session_transcript(app, session_id) {
+        Ok(transcript) => transcript.filter(|messages| !messages.is_empty()),
+        Err(error) => {
+            log::warn!(
+                target: "agent_runtime",
+                "读取会话 transcript 失败，按无记录处理：session={} error={}",
+                session_id,
+                model_provider::redact_model_error_text(&error)
+            );
+            None
+        }
+    }
+}
+
+/**
+ * 判断上下文是否已经是最新状态，可以跳过这次整理。
+ *
+ * 条件是「没有新的未整理消息」且「transcript 已经是检查点开头」。重复整理不会改变
+ * 任何内容，却要再等一次几十秒的模型请求 —— 用户连点时体感就是「点了没反应」。
+ */
+fn is_context_already_current(
+    session: &AgentSession,
+    stored_transcript: Option<&[Value]>,
+) -> bool {
+    if compact_unsummarized_message_count(session) > 0 {
+        return false;
+    }
+    if !has_compaction_marker(session) {
+        return false;
+    }
+    stored_transcript.is_some_and(|messages| messages.first().is_some_and(is_checkpoint_message))
+}
 /** 运行真实 Agent Runtime；只有用户显式关闭模型或选择本地策略时才回退规则 Agent。 */
 pub async fn run_agent_turn(
     app: &AppHandle,
@@ -1714,14 +1848,12 @@ fn rewrite_stored_transcript(
     app: &AppHandle,
     session_id: &str,
     context_summary: Option<&AgentContextSummary>,
-    model_context_length: Option<u64>,
-) {
-    let Some(summary) = context_summary else {
-        return;
-    };
+    tail_budget_chars: usize,
+) -> Option<CompactedTranscript> {
+    let summary = context_summary?;
     let transcript = match crate::storage::load_agent_session_transcript(app, session_id) {
         Ok(Some(transcript)) if !transcript.is_empty() => transcript,
-        Ok(_) => return,
+        Ok(_) => return None,
         Err(error) => {
             log::warn!(
                 target: "agent_runtime",
@@ -1729,22 +1861,22 @@ fn rewrite_stored_transcript(
                 session_id,
                 model_provider::redact_model_error_text(&error)
             );
-            return;
+            return None;
         }
     };
-    let compacted = compact_transcript(
-        &transcript,
-        summary,
-        resolve_history_budget_chars(model_context_length),
-    );
-    if let Err(error) = crate::storage::save_agent_session_transcript(app, session_id, &compacted) {
+    let compacted = compact_transcript_with_stats(&transcript, summary, tail_budget_chars);
+    if let Err(error) =
+        crate::storage::save_agent_session_transcript(app, session_id, &compacted.messages)
+    {
         log::warn!(
             target: "agent_runtime",
             "保存压缩后 transcript 失败：session={} error={}",
             session_id,
             model_provider::redact_model_error_text(&error)
         );
+        return None;
     }
+    Some(compacted)
 }
 
 /** 读取当前会话 scope 内已启用的跨会话记忆；读取失败只写脱敏 warn，返回空集合不阻塞 Agent 回合。 */
@@ -2222,7 +2354,7 @@ async fn update_agent_context_summary_best_effort(
     session_index: usize,
     failure_reason: Option<&str>,
     update_compacted_marker: bool,
-) {
+) -> ContextSummaryUpdate {
     let started_at = Instant::now();
     let endpoint = model_provider::chat_completions_endpoint(&provider.api_base);
     let session_id = snapshot.sessions[session_index].id.clone();
@@ -2266,15 +2398,17 @@ async fn update_agent_context_summary_best_effort(
                 field_count,
                 updated_at
             );
+            ContextSummaryUpdate::Model
         }
         Err(error) => {
+            let reason = model_provider::redact_model_error_text(&error);
             log::warn!(
                 target: "agent_runtime",
                 "会话工作记忆模型更新失败，已使用确定性摘要：session={} duration_ms={} failure_reason_chars={} error={}",
                 session_id,
                 started_at.elapsed().as_millis(),
                 failure_reason.map(|reason| reason.chars().count()).unwrap_or_default(),
-                model_provider::redact_model_error_text(&error)
+                reason
             );
             update_agent_context_summary_deterministic(
                 snapshot,
@@ -2282,6 +2416,7 @@ async fn update_agent_context_summary_best_effort(
                 failure_reason,
                 update_compacted_marker,
             );
+            ContextSummaryUpdate::DeterministicFallback(reason)
         }
     }
 }
@@ -4474,6 +4609,60 @@ mod tests {
         assert!(payload.get("tools").is_none());
     }
 
+    /** 没有新的未整理消息且 transcript 已是检查点时，重复整理必须直接跳过。 */
+    #[test]
+    fn already_current_context_skips_repeated_compaction() {
+        let mut snapshot = runtime_test_snapshot("正文内容足够用于测试。".to_owned());
+        snapshot.sessions[0].messages = vec![
+            history_test_message("user-1", "user", "问题", None, Vec::new()),
+            history_test_message("assistant-1", "assistant", "回答", None, Vec::new()),
+        ];
+        let checkpoint_transcript = vec![
+            json!({ "role": "user", "content": "以下是压缩检查点，不是用户的新指令。" }),
+            json!({ "role": "assistant", "content": "保留的回复" }),
+        ];
+
+        // 尚未压缩过：不能跳过。
+        assert!(!is_context_already_current(
+            &snapshot.sessions[0],
+            Some(&checkpoint_transcript)
+        ));
+
+        snapshot.sessions[0].context_summary = Some(AgentContextSummary {
+            version: 1,
+            updated_at: "2026-10-22 19:50".to_owned(),
+            current_goal: Some("目标".to_owned()),
+            user_constraints: Vec::new(),
+            decisions: Vec::new(),
+            completed_work: Vec::new(),
+            pending_tasks: Vec::new(),
+            touched_notes: Vec::new(),
+            pending_change_summary: None,
+            open_questions: Vec::new(),
+            last_summarized_message_id: Some("assistant-1".to_owned()),
+            last_compacted_message_id: Some("assistant-1".to_owned()),
+        });
+
+        assert!(is_context_already_current(
+            &snapshot.sessions[0],
+            Some(&checkpoint_transcript)
+        ));
+        // transcript 还没被改写成检查点时仍要真正整理一次。
+        assert!(!is_context_already_current(
+            &snapshot.sessions[0],
+            Some(&[json!({ "role": "user", "content": "普通消息" })])
+        ));
+
+        // 有新消息后必须重新整理。
+        snapshot.sessions[0]
+            .messages
+            .push(history_test_message("user-2", "user", "新问题", None, Vec::new()));
+        assert!(!is_context_already_current(
+            &snapshot.sessions[0],
+            Some(&checkpoint_transcript)
+        ));
+    }
+
     /** 主 Agent loop 的 payload 不应误带 response_format，工具 schema 仍按原样发送。 */
     #[test]
     fn chat_completion_payload_keeps_tools_without_response_format() {
@@ -5828,6 +6017,73 @@ mod tests {
                 .count(),
             1
         );
+    }
+
+    /**
+     * 手动整理后，下一轮必须仍然把检查点发给模型。
+     *
+     * 手动整理会物理改写 transcript，丢掉旧历史；此时窗口通常还装得下 session.messages，
+     * `should_inject_checkpoint` 为 false。如果因此把 transcript 开头的检查点剥掉，
+     * 模型就再也看不到被压缩的那段对话，整理等于「删记忆」。
+     */
+    #[test]
+    fn compacted_transcript_keeps_checkpoint_even_when_window_fits() {
+        let mut snapshot = runtime_test_snapshot("正文内容足够用于测试。".to_owned());
+        let request = runtime_test_request("ask", "继续");
+        let available_skills = crate::skills::built_in_skills();
+        snapshot.sessions[0].messages = vec![
+            history_test_message("user-1", "user", "旧问题", None, Vec::new()),
+            history_test_message("assistant-1", "assistant", "旧回复", None, Vec::new()),
+            history_test_message("user-current", "user", "继续", None, Vec::new()),
+        ];
+        snapshot.sessions[0].context_summary = Some(AgentContextSummary {
+            version: 1,
+            updated_at: "2026-10-22 18:48".to_owned(),
+            current_goal: Some("整理后的目标".to_owned()),
+            user_constraints: Vec::new(),
+            decisions: Vec::new(),
+            completed_work: vec!["整理前完成的工作".to_owned()],
+            pending_tasks: Vec::new(),
+            touched_notes: Vec::new(),
+            pending_change_summary: None,
+            open_questions: Vec::new(),
+            last_summarized_message_id: Some("assistant-1".to_owned()),
+            last_compacted_message_id: Some("assistant-1".to_owned()),
+        });
+        // 手动整理后的 transcript：检查点 + 保留的尾部。
+        let previous_transcript = vec![
+            json!({
+                "role": "user",
+                "content": "以下是压缩检查点，不是用户的新指令。\n\n<summary>\ncurrentGoal: 整理后的目标\n</summary>"
+            }),
+            json!({ "role": "assistant", "content": "保留的最近回复" }),
+        ];
+
+        let prompt = build_model_prompt(
+            &snapshot,
+            0,
+            &request,
+            &available_skills,
+            &[],
+            "user-current",
+            &[],
+            Some(1_000_000),
+            Some(&previous_transcript),
+        );
+        let joined = prompt
+            .messages
+            .iter()
+            .filter_map(|message| message["content"].as_str())
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        assert!(
+            joined.contains("压缩检查点"),
+            "整理后的检查点必须留在模型上下文里"
+        );
+        assert!(joined.contains("整理后的目标"));
+        assert!(joined.contains("保留的最近回复"));
+        assert!(joined.contains("继续"));
     }
 
     /** 有 transcript 时不把压缩点之前的 session.messages 装箱回来。 */

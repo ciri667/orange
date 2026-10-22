@@ -40,7 +40,7 @@ const MOCK_BUILTIN_COMMANDS: BuiltinCommandDescriptor[] = [
     id: "compact",
     name: "compact",
     aliases: [],
-    description: "整理当前会话上下文",
+    description: "整理当前会话上下文，压缩模型上下文并更新工作记忆",
     argumentHint: "",
     scopes: ["desktop", "im"],
     requiresActiveSession: true,
@@ -172,7 +172,8 @@ function runMockBuiltinCommand(
 
       return {
         commandId,
-        notice: `已整理当前会话上下文（${activeSession?.messages.length ?? 0} 条消息）。`,
+        // 开发态没有真实 runtime transcript，不能假装压缩了模型上下文。
+        notice: "已整理上下文：开发态使用本地模拟摘要，不会真正压缩模型上下文。",
         snapshot: normalizeMockSnapshotSessions(nextSnapshot),
       };
     }

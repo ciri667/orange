@@ -132,6 +132,12 @@ export interface BuiltinCommandRunResult {
   snapshot?: WorkspaceSnapshot;
 }
 
+/** 手动整理上下文的结果；notice 说明摘要来源和实际丢弃的历史。 */
+export interface CompactAgentContextResult {
+  snapshot: WorkspaceSnapshot;
+  notice: string;
+}
+
 /** Agent skill 是可启停、可由 Agent 自主决定是否使用的指令型工作流。 */
 export interface AgentSkill {
   id: string;

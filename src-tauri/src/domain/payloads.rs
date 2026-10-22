@@ -281,6 +281,14 @@ pub struct CompactAgentContextPayload {
     pub session_id: String,
 }
 
+/** 手动整理上下文的结果；notice 说明摘要来源和实际丢弃的历史，避免「点了没反应」的错觉。 */
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CompactAgentContextResult {
+    pub snapshot: WorkspaceSnapshot,
+    pub notice: String,
+}
+
 /** 读取某会话最近一次发给模型的上下文预览。 */
 #[derive(Clone, Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
