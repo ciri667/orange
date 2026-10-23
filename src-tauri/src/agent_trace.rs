@@ -105,7 +105,12 @@ impl AgentTurnTracer {
         u64::try_from(self.started_at.elapsed().as_millis()).unwrap_or(u64::MAX)
     }
 
-    /** 本轮开始的墙钟时间（Unix 毫秒），供前端在过程区重新挂载后继续计时。 */
+    /**
+     * 本轮开始的墙钟时间（Unix 毫秒）。
+     *
+     * 下发给前端的是序列化字段本身，这个读取口只服务于回归测试。
+     */
+    #[cfg(test)]
     pub fn started_at_ms(&self) -> u64 {
         self.started_at_ms
     }
