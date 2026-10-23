@@ -29,7 +29,9 @@ fn stage_sherpa_runtime_dlls() {
         return;
     };
     let Some(lib_dir) = find_sherpa_lib_dir(&target_dir.join("sherpa-onnx-prebuilt")) else {
-        println!("cargo:warning=还没有 sherpa-onnx 预编译库，跳过 DLL 拷贝");
+        // 这是一条诊断线索，不是构建问题：预编译库真的缺失时 sherpa-onnx 的构建脚本会先报错。
+        // 因此用普通输出，cargo 平时不显示，`cargo build -vv` 仍能看到。
+        println!("sherpa-onnx 预编译库尚未就绪，跳过 DLL 拷贝");
         return;
     };
 
@@ -49,8 +51,9 @@ fn stage_sherpa_runtime_dlls() {
             copied += 1;
         }
     }
+    // 拷贝成功只是正常的构建步骤，不该升级成告警；普通输出只在 `cargo build -vv` 时显示。
     println!(
-        "cargo:warning=已将 {copied} 个 sherpa-onnx DLL 复制到 {}",
+        "已将 {copied} 个 sherpa-onnx DLL 复制到 {}",
         profile_dir.display()
     );
 }

@@ -21,6 +21,11 @@ path = "src/main.rs"
 name = "orange-mcp-fixture"
 path = "src/mcp_fixture_bin.rs"
 
+# MSVC 链接器每次都会往 stdout 打印「正在创建库 … 和对象 …」这类信息行，rustc 默认把它当成
+# linker_messages 告警刷屏。这里只放行这一条 lint；真正的链接错误仍会让构建失败。
+[lints.rust]
+linker_messages = "allow"
+
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
 
