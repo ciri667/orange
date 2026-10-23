@@ -1,4 +1,7 @@
 import { SemanticSearchSettingsSection } from "./sections/SemanticSearchSettingsSection";
+import { SettingsSaveStatus } from "./SettingsSaveStatus";
+import { useSettingsAutosave } from "./useSettingsAutosave";
+import { SemanticCloudConsentDialog, useUserSettingsAutosave } from "./useUserSettingsAutosave";
 import {
   BookOpen,
   Brain,
@@ -173,8 +176,8 @@ export function SettingsDrawer({
   onRescanKnowledgeBase: (knowledgeBaseId: string) => void;
   onRemoveKnowledgeBase: (knowledgeBaseId: string) => void;
   onCreateOrOpenProjectInstruction: (knowledgeBaseId: string) => void;
-  onSaveSettings: (settings: UserSettings) => Promise<void> | void;
-  onSaveImSettings: (settings: ImIntegrationSettings) => Promise<void> | void;
+  onSaveSettings: (settings: UserSettings) => Promise<UserSettings>;
+  onSaveImSettings: (settings: ImIntegrationSettings) => Promise<ImIntegrationSettings>;
   onSaveKnowledgeBaseMemory: (memory: KnowledgeBaseMemory) => Promise<KnowledgeBaseMemory> | KnowledgeBaseMemory;
   onDeleteKnowledgeBaseMemory: (knowledgeBaseId: string) => Promise<void> | void;
   onSaveSkill: (skill: AgentSkill) => Promise<AgentSkill | void> | AgentSkill | void;
@@ -197,10 +200,11 @@ export function SettingsDrawer({
   onOpenAppLogFolder: () => Promise<void> | void;
   onClose: () => void;
 }) {
-  /** 模型设置表单草稿，用户保存前不影响正在运行的 Agent Runtime。 */
-  const [settingsDraft, setSettingsDraft] = useState<UserSettings>(settings);
-  /** 即时通讯设置草稿，保存前不影响正在运行的网关。 */
-  const [imSettingsDraft, setImSettingsDraft] = useState<ImIntegrationSettings>(imSettings);
+  /** 开关和确认操作立即保存，文字字段先编辑草稿，完成输入后提交。 */
+  const settingsAutosave = useUserSettingsAutosave(settings, onSaveSettings);
+  const { draft: settingsDraft, update: setSettingsDraft } = settingsAutosave;
+  const imAutosave = useSettingsAutosave(imSettings, handleSaveImSettings);
+  const { draft: imSettingsDraft, update: setImSettingsDraft } = imAutosave;
   /** IM 密钥草稿只存在输入框中，保存后立即清空。 */
   const [secretDraftByProvider, setSecretDraftByProvider] = useState<Partial<Record<ImProviderId, string>>>({});
   /** 每个 provider 的 API key 草稿只保留在输入框中，保存后由外层写入系统安全存储。 */
@@ -367,20 +371,13 @@ export function SettingsDrawer({
       settingsSummary.feishuStatus,
       knowledgeBases,
       settingsDraft.modelConfig.enabled,
+      settingsDraft.browser.enabled,
       settingsDraft.webSearch.enabled,
       settingsDraft.semanticSearch.enabled,
       settingsDraft.agentSecurity.defaultLevel,
       skills.length,
     ],
   );
-
-  useEffect(() => {
-    setSettingsDraft(settings);
-  }, [settings]);
-
-  useEffect(() => {
-    setImSettingsDraft(imSettings);
-  }, [imSettings]);
 
   useEffect(() => {
     const fallbackKnowledgeBaseId = activeKnowledgeBaseId || knowledgeBases[0]?.id;
@@ -392,8 +389,8 @@ export function SettingsDrawer({
 
     hasSeededDefaultImKnowledgeBaseRef.current = true;
 
-    // 默认范围只写入设置页草稿；仍由用户保存或启动时显式持久化，避免打开设置页就改配置。
-    setImSettingsDraft((currentSettings) => ({
+    // 默认范围只预填草稿；用户实际修改或启动时才持久化，打开设置页不会写配置。
+    imAutosave.replace((currentSettings) => ({
       ...currentSettings,
       providers: currentSettings.providers.map((provider) =>
         provider.defaultKnowledgeBaseIds.length > 0
@@ -408,47 +405,6 @@ export function SettingsDrawer({
       setSelectedTemplateId(providerTemplates[0].templateId);
     }
   }, [providerTemplates, selectedTemplateId]);
-
-  /** 保存模型、隐私和 skill 设置；日志只记录状态和耗时，不记录端点、模型名或密钥。 */
-  async function handleSaveSettings() {
-    const startedAt = performance.now();
-    const nextSettings = {
-      ...settingsDraft,
-      writeConfirmationRequired: true,
-    };
-
-    logInfo("设置页保存用户设置。", {
-      category: "settings",
-      event: "settings_save",
-      status: "started",
-      metadata: {
-        modelEnabled: nextSettings.modelConfig.enabled,
-        providerCount: nextSettings.modelConfig.providers.length,
-        defaultProviderId: nextSettings.modelConfig.defaultProviderId,
-        privacyPolicy: nextSettings.privacyPolicy,
-        enabledSkillCount,
-      },
-    });
-
-    try {
-      await onSaveSettings(nextSettings);
-      logInfo("设置页用户设置保存完成。", {
-        category: "settings",
-        event: "settings_save",
-        status: "completed",
-        durationMs: performance.now() - startedAt,
-      });
-    } catch (error) {
-      logError("设置页用户设置保存失败。", {
-        category: "settings",
-        event: "settings_save",
-        status: "failed",
-        durationMs: performance.now() - startedAt,
-        error,
-      });
-      throw error;
-    }
-  }
 
   /** 生成可持久化的即时通讯设置，统一裁剪空白和去重，避免保存/启动路径出现不一致。 */
   function buildNormalizedImSettings(settingsDraftForSave: ImIntegrationSettings = imSettingsDraft): ImIntegrationSettings {
@@ -481,16 +437,9 @@ export function SettingsDrawer({
   }
 
   /** 保存即时通讯设置；日志只记录计数和状态，不记录 open_id/chat_id 原文。 */
-  async function handleSaveImSettings(options: { enableProviderId?: ImProviderId } = {}) {
+  async function handleSaveImSettings(draft: ImIntegrationSettings) {
     const startedAt = performance.now();
-    const draftForSave = options.enableProviderId
-      ? updateImProvider(imSettingsDraft, options.enableProviderId, (provider) => ({
-          ...provider,
-          enabled: true,
-          updatedAt: formatLocalDateTime(),
-        }))
-      : imSettingsDraft;
-    const nextSettings = buildNormalizedImSettings(draftForSave);
+    const nextSettings = buildNormalizedImSettings(draft);
 
     logInfo("设置页保存即时通讯设置。", {
       category: "im",
@@ -503,14 +452,14 @@ export function SettingsDrawer({
     });
 
     try {
-      await onSaveImSettings(nextSettings);
-      setImSettingsDraft(nextSettings);
+      const saved = await onSaveImSettings(nextSettings);
       logInfo("设置页即时通讯设置保存完成。", {
         category: "im",
         event: "im_settings_save",
         status: "completed",
         durationMs: performance.now() - startedAt,
       });
+      return saved;
     } catch (error) {
       logError("设置页即时通讯设置保存失败。", {
         category: "im",
@@ -528,7 +477,8 @@ export function SettingsDrawer({
     const startedAt = performance.now();
 
     try {
-      await handleSaveImSettings({ enableProviderId: providerId });
+      setImSettingsDraft((current) => updateImProvider(current, providerId, (provider) => ({ ...provider, enabled: true })));
+      if (!await imAutosave.flush(true)) return;
       await onStartImGateway(providerId);
       logInfo("设置页启动 IM 网关完成。", {
         category: "im",
@@ -565,8 +515,8 @@ export function SettingsDrawer({
     }
   }
 
-  function updateProviderDraft(providerId: ImProviderId, next: ImProviderSettings) {
-    setImSettingsDraft((currentSettings) => updateImProvider(currentSettings, providerId, () => next));
+  function updateProviderDraft(providerId: ImProviderId, next: ImProviderSettings, defer = false) {
+    setImSettingsDraft((currentSettings) => updateImProvider(currentSettings, providerId, () => next), defer);
   }
 
   /** 将 textarea 的多行 ID 转成去重数组；不记录原始 ID 内容。 */
@@ -738,10 +688,10 @@ export function SettingsDrawer({
         markApiKeyPersisted(providerId, apiKeyDraft.trim());
       }
 
-      await handleSaveSettings();
+      if (!await settingsAutosave.flush()) return;
       const nextSettings = await onRefreshProviderModels(providerId);
 
-      setSettingsDraft(nextSettings);
+      settingsAutosave.replace(nextSettings);
       logInfo("设置页刷新 Provider 模型列表完成。", {
         category: "settings",
         event: "provider_models_refresh",
@@ -808,7 +758,7 @@ export function SettingsDrawer({
             : provider,
         ),
       },
-    }));
+    }), field === "name" || field === "apiBase");
   }
 
   /** 启停 provider 下的单个模型；默认模型必须保持启用，避免运行态无模型可用。 */
@@ -1040,10 +990,11 @@ export function SettingsDrawer({
   }
 
   /** 切换设置分区并写入低频调试日志，便于诊断导航状态但不影响渲染性能。 */
-  function handleActiveSectionChange(sectionId: SettingsSectionId) {
+  async function handleActiveSectionChange(sectionId: SettingsSectionId) {
     if (sectionId === activeSection) {
       return;
     }
+    if (!await flushSettings()) return;
 
     logDebug("切换设置页分区。", {
       category: "settings",
@@ -1055,6 +1006,16 @@ export function SettingsDrawer({
       },
     });
     setActiveSection(sectionId);
+  }
+
+  /** 切换和关闭前等待真实保存结果；失败时留在面板内，避免丢失未保存的输入。 */
+  async function flushSettings() {
+    if (!await settingsAutosave.flush()) return false;
+    return imAutosave.flush();
+  }
+
+  async function handleClose() {
+    if (await flushSettings()) onClose();
   }
 
   /** 返回当前运行日志筛选条件，供刷新和清空后重载列表复用。 */
@@ -1146,7 +1107,6 @@ export function SettingsDrawer({
           apiKeyVisibleByProvider={apiKeyVisibleByProvider}
           revealedApiKeyByProvider={revealedApiKeyByProvider}
           isBusy={isBusy}
-          onSaveSettings={handleSaveSettings}
           onModelEnabledChange={(enabled) => updateModelConfig("enabled", enabled)}
           onPrivacyPolicyChange={(privacyPolicy) =>
             setSettingsDraft((currentSettings) => ({
@@ -1183,9 +1143,7 @@ export function SettingsDrawer({
           skills={skills}
           enabledSkillCount={enabledSkillCount}
           customSkillCount={customSkillCount}
-          isBusy={isBusy}
           onOpenSkillsModal={() => setIsSkillsModalOpen(true)}
-          onSaveSettings={handleSaveSettings}
         />
       );
     }
@@ -1195,7 +1153,7 @@ export function SettingsDrawer({
     }
 
     if (activeSection === "semanticSearch") {
-      return <SemanticSearchSettingsSection knowledgeBases={knowledgeBases} settingsDraft={settingsDraft} isBusy={isBusy} onSettingsChange={setSettingsDraft} onSaved={async (saved) => { setSettingsDraft(saved); await onSaveSettings(saved); }} />;
+      return <SemanticSearchSettingsSection settingsDraft={settingsDraft} isBusy={isBusy} onSettingsChange={setSettingsDraft} />;
     }
 
     if (activeSection === "webSearch") {
@@ -1204,7 +1162,6 @@ export function SettingsDrawer({
           settingsDraft={settingsDraft}
           isBusy={isBusy}
           onSettingsChange={setSettingsDraft}
-          onSaveSettings={handleSaveSettings}
         />
       );
     }
@@ -1215,7 +1172,6 @@ export function SettingsDrawer({
           settingsDraft={settingsDraft}
           isBusy={isBusy}
           onSettingsChange={setSettingsDraft}
-          onSaveSettings={handleSaveSettings}
         />
       );
     }
@@ -1226,7 +1182,6 @@ export function SettingsDrawer({
           settingsDraft={settingsDraft}
           isBusy={isBusy}
           onSettingsChange={setSettingsDraft}
-          onSaveSettings={handleSaveSettings}
         />
       );
     }
@@ -1261,7 +1216,6 @@ export function SettingsDrawer({
           onRefreshStatus={onRefreshImStatus}
           onStopGateway={onStopImGateway}
           onStartGateway={handleStartImGateway}
-          onSaveImSettings={() => handleSaveImSettings()}
           onSaveSecret={handleSaveImSecret}
           onStartWeixinLogin={() => {
             void onStartWeixinLogin();
@@ -1293,7 +1247,7 @@ export function SettingsDrawer({
   }
 
   return (
-    <ModalBackdrop onClose={onClose} className="z-settings p-6 max-[760px]:p-2.5">
+    <ModalBackdrop onClose={() => void handleClose()} className="z-settings p-6 max-[760px]:p-2.5">
       <aside
         className="settings-drawer relative grid h-[min(820px,calc(100vh-40px))] w-[min(1120px,calc(100vw-40px))] min-h-0 isolate grid-rows-[auto_minmax(0,1fr)] overflow-hidden rounded-2xl border border-border bg-surface shadow-app max-[760px]:h-[calc(100vh-20px)] max-[760px]:w-[min(100%,calc(100vw-20px))]"
         aria-label="设置"
@@ -1303,7 +1257,13 @@ export function SettingsDrawer({
           <div className="min-w-0">
             <h2 className="m-0 text-base font-semibold leading-tight text-ink-strong">设置</h2>
           </div>
-          <Button variant="icon" title="关闭设置" onClick={onClose}>
+          <div className="ml-auto">
+            <SettingsSaveStatus
+              saves={[settingsAutosave, imAutosave]}
+              onRetry={() => void flushSettings()}
+            />
+          </div>
+          <Button variant="icon" title="关闭设置" onClick={() => void handleClose()}>
             <X size={18} />
           </Button>
         </ModalHeader>
@@ -1312,10 +1272,18 @@ export function SettingsDrawer({
           <nav className="grid min-h-0 min-w-0 content-start gap-4 overflow-auto border-r border-border bg-app p-3" aria-label="设置项">
             {SETTINGS_SECTION_GROUPS.map((group) => renderNavigationGroup(group))}
           </nav>
-          <main className="min-h-0 min-w-0 overflow-auto bg-surface p-5 max-[1100px]:p-4 max-[760px]:p-4" aria-label="设置主要内容">
+          <main className="min-h-0 min-w-0 overflow-auto bg-surface p-5 max-[1100px]:p-4 max-[760px]:p-4" aria-label="设置主要内容"
+            onBlur={(event) => {
+              if (event.target instanceof HTMLInputElement || event.target instanceof HTMLTextAreaElement) void flushSettings();
+            }}
+            onKeyDown={(event) => {
+              // 单行输入按回车即完成编辑；中文输入法选词和多行文本换行不触发保存。
+              if (event.key === "Enter" && !event.nativeEvent.isComposing && event.target instanceof HTMLInputElement && !event.target.closest("form")) event.target.blur();
+            }}>
             {renderActiveSection()}
           </main>
         </div>
+        {settingsAutosave.needsCloudConsent && <SemanticCloudConsentDialog knowledgeBases={knowledgeBases} onResolve={settingsAutosave.resolveCloudConsent} />}
         {isSkillsModalOpen && (
           <SkillsModal
             skills={skills}

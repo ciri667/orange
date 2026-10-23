@@ -1,5 +1,4 @@
 import { useEffect, useState } from "react";
-import { Save } from "lucide-react";
 import { Button } from "../../shared/Button";
 import { Checkbox } from "../../shared/Checkbox";
 import {
@@ -32,12 +31,10 @@ export function WebSearchSettingsSection({
   settingsDraft,
   isBusy,
   onSettingsChange,
-  onSaveSettings,
 }: {
   settingsDraft: UserSettings;
   isBusy: boolean;
   onSettingsChange: (settings: UserSettings) => void;
-  onSaveSettings: () => void | Promise<void>;
 }) {
   const [credential, setCredential] = useState<WebSearchCredentialStatus | null>(null);
   const [apiKeyDraft, setApiKeyDraft] = useState("");
@@ -112,12 +109,6 @@ export function WebSearchSettingsSection({
         title="联网搜索"
         titleId="web-search-settings-title"
         description="选择搜索供应商查公开网页。默认关闭。打开后，基础、进阶和完全级别都可以用。"
-        actions={
-          <Button variant="primary" size="compact" type="button" disabled={locked} onClick={() => void onSaveSettings()}>
-            <Save size={14} />
-            保存设置
-          </Button>
-        }
       />
       <label className="mt-4 flex items-center gap-2 text-sm text-ink">
         <Checkbox

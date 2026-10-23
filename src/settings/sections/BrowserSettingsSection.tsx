@@ -1,4 +1,4 @@
-import { Download, Save } from "lucide-react";
+import { Download } from "lucide-react";
 import { useChromiumInstall } from "../../browser/useChromiumInstall";
 import { Button } from "../../shared/Button";
 import { Checkbox } from "../../shared/Checkbox";
@@ -15,12 +15,10 @@ export function BrowserSettingsSection({
   settingsDraft,
   isBusy,
   onSettingsChange,
-  onSaveSettings,
 }: {
   settingsDraft: UserSettings;
   isBusy: boolean;
   onSettingsChange: (settings: UserSettings) => void;
-  onSaveSettings: () => void | Promise<void>;
 }) {
   const { status: installStatus, error, requesting, download } = useChromiumInstall();
   const browser = settingsDraft.browser;
@@ -47,12 +45,6 @@ export function BrowserSettingsSection({
         title="内嵌浏览器"
         titleId="browser-settings-title"
         description="让 Agent 在受控 Chromium 里打开网页、读取元素并执行点击/填表。只有本机交互会话的进阶和完全级别可用；截图不会发给模型，你可以随时在面板里接管。"
-        actions={
-          <Button variant="primary" size="compact" type="button" disabled={isBusy} onClick={() => void onSaveSettings()}>
-            <Save size={14} />
-            保存设置
-          </Button>
-        }
       />
       <label className="mt-4 flex items-center gap-2 text-sm text-ink">
         <Checkbox

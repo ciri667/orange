@@ -107,10 +107,13 @@ export function useWorkspaceSettingsActions({
     beginBusy("正在保存 Agent 设置...");
 
     try {
-      setUserSettings(await saveUserSettings(nextSettings));
+      const saved = await saveUserSettings(nextSettings);
+      setUserSettings(saved);
       setNotice("已保存 Agent 设置。");
+      return saved;
     } catch (error) {
       setNotice(formatSettingsErrorMessage(error));
+      throw error;
     } finally {
       endBusy();
     }
@@ -158,9 +161,11 @@ export function useWorkspaceSettingsActions({
     beginBusy("正在保存即时通讯设置...");
 
     try {
-      setImSettings(await saveImSettings(nextSettings));
+      const saved = await saveImSettings(nextSettings);
+      setImSettings(saved);
       await refreshAllImStatuses();
       setNotice("已保存即时通讯设置。");
+      return saved;
     } catch (error) {
       setNotice(formatSettingsErrorMessage(error));
       throw error;

@@ -100,7 +100,7 @@ export async function probeWebSearch(
 ): Promise<WebSearchCredentialStatus> {
   if (!isTauriRuntime()) {
     if (!browserMock.userSettings.webSearch.enabled) {
-      throw new Error("请先打开联网搜索并保存设置。");
+      throw new Error("请先打开联网搜索。");
     }
     if (!browserMock.webSearchKeyConfigured) {
       browserMock.userSettings.webSearch.credentialStatus = "not_configured";

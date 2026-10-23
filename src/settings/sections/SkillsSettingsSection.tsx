@@ -1,24 +1,20 @@
-import { Save, Sparkles } from "lucide-react";
+import { Sparkles } from "lucide-react";
 import { Button } from "../../shared/Button";
 import { settingsSectionClassName } from "../../shared/ui";
 import { SettingsSectionHeader } from "../SettingsChrome";
-import type { AgentSkill, UserSettings } from "../../shared/types";
+import type { AgentSkill } from "../../shared/types";
 
 /** Skills 设置摘要分区，完整 CRUD 仍由 SkillsModal 承载。 */
 export function SkillsSettingsSection({
   skills,
   enabledSkillCount,
   customSkillCount,
-  isBusy,
   onOpenSkillsModal,
-  onSaveSettings,
 }: {
   skills: AgentSkill[];
   enabledSkillCount: number;
   customSkillCount: number;
-  isBusy: boolean;
   onOpenSkillsModal: () => void;
-  onSaveSettings: () => void | Promise<void>;
 }) {
   return (
     <section className={settingsSectionClassName} aria-labelledby="skills-settings-title">
@@ -32,10 +28,6 @@ export function SkillsSettingsSection({
             <Button variant="ghost" onClick={onOpenSkillsModal}>
               <Sparkles size={14} />
               管理 Skills
-            </Button>
-            <Button variant="primary" size="compact" onClick={onSaveSettings} disabled={isBusy}>
-              <Save size={14} />
-              保存设置
             </Button>
           </>
         }

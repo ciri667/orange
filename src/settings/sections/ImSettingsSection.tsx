@@ -1,4 +1,4 @@
-import { KeyRound, MessageCircle, QrCode, RotateCw, Save } from "lucide-react";
+import { KeyRound, MessageCircle, QrCode, RotateCw } from "lucide-react";
 import { useState } from "react";
 import { Button } from "../../shared/Button";
 import { Checkbox } from "../../shared/Checkbox";
@@ -51,7 +51,6 @@ export function ImSettingsSection({
   onRefreshStatus,
   onStopGateway,
   onStartGateway,
-  onSaveImSettings,
   onSaveSecret,
   onStartWeixinLogin,
   onCancelWeixinLogin,
@@ -63,7 +62,7 @@ export function ImSettingsSection({
   secretDraftByProvider: Partial<Record<ImProviderId, string>>;
   weixinLoginStatus: ImLoginStatus | null;
   isBusy: boolean;
-  onProviderDraftChange: (providerId: ImProviderId, next: ImProviderSettings) => void;
+  onProviderDraftChange: (providerId: ImProviderId, next: ImProviderSettings, defer?: boolean) => void;
   onSecretDraftChange: (providerId: ImProviderId, value: string) => void;
   onParseMultilineIds: (value: string) => string[];
   onAllowDiscoveredUser: (providerId: ImProviderId, openId: string) => void;
@@ -71,7 +70,6 @@ export function ImSettingsSection({
   onRefreshStatus: (providerId: ImProviderId) => void | Promise<void>;
   onStopGateway: (providerId: ImProviderId) => void | Promise<void>;
   onStartGateway: (providerId: ImProviderId) => void | Promise<void>;
-  onSaveImSettings: () => void | Promise<void>;
   onSaveSecret: (providerId: ImProviderId) => void | Promise<void>;
   onStartWeixinLogin: () => void | Promise<void>;
   onCancelWeixinLogin: () => void | Promise<void>;
@@ -105,10 +103,6 @@ export function ImSettingsSection({
                 启动
               </Button>
             )}
-            <Button variant="primary" size="compact" onClick={onSaveImSettings} disabled={isBusy}>
-              <Save size={14} />
-              保存设置
-            </Button>
           </>
         }
       />
@@ -147,13 +141,13 @@ export function ImSettingsSection({
         {provider.config.type === "feishu" ? (
           <FeishuConfigFields
             config={provider.config}
-            onChange={(config) => onProviderDraftChange(provider.providerId, { ...provider, config })}
+            onChange={(config, defer) => onProviderDraftChange(provider.providerId, { ...provider, config }, defer)}
           />
         ) : null}
         {provider.config.type === "qq" ? (
           <QqConfigFields
             config={provider.config}
-            onChange={(config) => onProviderDraftChange(provider.providerId, { ...provider, config })}
+            onChange={(config, defer) => onProviderDraftChange(provider.providerId, { ...provider, config }, defer)}
           />
         ) : null}
         {provider.config.type === "weixin" ? (
@@ -162,7 +156,7 @@ export function ImSettingsSection({
         {provider.config.type === "wecom" ? (
           <WecomConfigFields
             config={provider.config}
-            onChange={(config) => onProviderDraftChange(provider.providerId, { ...provider, config })}
+            onChange={(config, defer) => onProviderDraftChange(provider.providerId, { ...provider, config }, defer)}
           />
         ) : null}
         {provider.config.type !== "weixin" ? (
@@ -239,7 +233,7 @@ export function ImSettingsSection({
       </div>
 
       <div className="grid gap-3">
-        <SettingsSubblockHeader title="待授权对象" description="收到未授权消息后会自动出现在这里；点击允许后保存设置即可生效。" />
+        <SettingsSubblockHeader title="待授权对象" description="收到未授权消息后会自动出现在这里；点击允许后立即保存生效。" />
         {provider.discoveredUserOpenIds.length || provider.discoveredChatIds.length ? (
           <div className="grid gap-2">
             {provider.discoveredUserOpenIds.map((openId, index) => (
@@ -276,7 +270,7 @@ export function ImSettingsSection({
           <textarea
             className={fieldTextareaClassName}
             value={provider.allowedUserOpenIds.join("\n")}
-            onChange={(event) => onProviderDraftChange(provider.providerId, { ...provider, allowedUserOpenIds: onParseMultilineIds(event.target.value) })}
+            onChange={(event) => onProviderDraftChange(provider.providerId, { ...provider, allowedUserOpenIds: onParseMultilineIds(event.target.value) }, true)}
             rows={4}
             placeholder="每行一个用户 ID；私聊必须授权发送人"
           />
@@ -286,7 +280,7 @@ export function ImSettingsSection({
           <textarea
             className={fieldTextareaClassName}
             value={provider.allowedChatIds.join("\n")}
-            onChange={(event) => onProviderDraftChange(provider.providerId, { ...provider, allowedChatIds: onParseMultilineIds(event.target.value) })}
+            onChange={(event) => onProviderDraftChange(provider.providerId, { ...provider, allowedChatIds: onParseMultilineIds(event.target.value) }, true)}
             rows={4}
             placeholder="每行一个群 ID；私聊可留空"
           />
@@ -308,7 +302,7 @@ function FeishuConfigFields({
   onChange,
 }: {
   config: FeishuProviderConfig;
-  onChange: (config: FeishuProviderConfig) => void;
+  onChange: (config: FeishuProviderConfig, defer?: boolean) => void;
 }) {
   return (
     <>
@@ -321,7 +315,7 @@ function FeishuConfigFields({
       </label>
       <label className={fieldLabelClassName}>
         <span>App ID</span>
-        <input className={fieldControlClassName} value={config.appId} onChange={(event) => onChange({ ...config, appId: event.target.value })} placeholder="cli_xxx" />
+        <input className={fieldControlClassName} value={config.appId} onChange={(event) => onChange({ ...config, appId: event.target.value }, true)} placeholder="cli_xxx" />
       </label>
     </>
   );
@@ -332,12 +326,12 @@ function QqConfigFields({
   onChange,
 }: {
   config: QqProviderConfig;
-  onChange: (config: QqProviderConfig) => void;
+  onChange: (config: QqProviderConfig, defer?: boolean) => void;
 }) {
   return (
     <label className={cn(fieldLabelClassName, "col-span-full")}>
       <span>App ID</span>
-      <input className={fieldControlClassName} value={config.appId} onChange={(event) => onChange({ ...config, appId: event.target.value })} placeholder="QQ 开放平台 AppID" />
+      <input className={fieldControlClassName} value={config.appId} onChange={(event) => onChange({ ...config, appId: event.target.value }, true)} placeholder="QQ 开放平台 AppID" />
     </label>
   );
 }
@@ -347,17 +341,17 @@ function WecomConfigFields({
   onChange,
 }: {
   config: WecomProviderConfig;
-  onChange: (config: WecomProviderConfig) => void;
+  onChange: (config: WecomProviderConfig, defer?: boolean) => void;
 }) {
   return (
     <>
       <label className={fieldLabelClassName}>
         <span>Bot ID</span>
-        <input className={fieldControlClassName} value={config.botId} onChange={(event) => onChange({ ...config, botId: event.target.value })} placeholder="智能机器人 BotId" />
+        <input className={fieldControlClassName} value={config.botId} onChange={(event) => onChange({ ...config, botId: event.target.value }, true)} placeholder="智能机器人 BotId" />
       </label>
       <label className={fieldLabelClassName}>
         <span>机器人名称</span>
-        <input className={fieldControlClassName} value={config.robotName} onChange={(event) => onChange({ ...config, robotName: event.target.value })} placeholder="与企业微信后台显示名一致" />
+        <input className={fieldControlClassName} value={config.robotName} onChange={(event) => onChange({ ...config, robotName: event.target.value }, true)} placeholder="与企业微信后台显示名一致" />
       </label>
     </>
   );

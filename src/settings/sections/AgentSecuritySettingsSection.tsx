@@ -1,12 +1,11 @@
 import { useState } from "react";
-import { Save } from "lucide-react";
 import { AGENT_SECURITY_LEVEL_COPY } from "../../agent/AgentPanelSections";
-import { Button } from "../../shared/Button";
 import { ConfirmDialog } from "../../shared/ConfirmDialog";
 import { SegmentedControl, SegmentedControlItem } from "../../shared/SegmentedControl";
 import { fieldControlClassName, fieldLabelClassName, settingsSectionClassName } from "../../shared/ui";
 import type { AgentSecurityLevel, UserSettings } from "../../shared/types";
 import { SettingsSectionHeader, SettingsSubblockHeader } from "../SettingsChrome";
+import type { SettingsDraftChange } from "../useSettingsAutosave";
 
 const DEFAULT_LEVELS = ["basic", "advanced", "autonomous"] as const satisfies readonly AgentSecurityLevel[];
 
@@ -30,12 +29,10 @@ export function AgentSecuritySettingsSection({
   settingsDraft,
   isBusy,
   onSettingsChange,
-  onSaveSettings,
 }: {
   settingsDraft: UserSettings;
   isBusy: boolean;
-  onSettingsChange: (settings: UserSettings) => void;
-  onSaveSettings: () => void | Promise<void>;
+  onSettingsChange: SettingsDraftChange<UserSettings>;
 }) {
   const security = settingsDraft.agentSecurity;
   const selectedLevel = selectedDefaultLevel(security.defaultLevel);
@@ -56,10 +53,10 @@ export function AgentSecuritySettingsSection({
           [key]: Number.isFinite(value) ? value : 0,
         },
       },
-    });
+    }, true);
   }
 
-  /** 写入草稿中的默认档；完全权限要等确认弹窗点头后才进入草稿。 */
+  /** 默认档选择后自动保存；完全权限仍须先完成确认。 */
   function applyDefaultLevel(level: AgentSecurityLevel) {
     onSettingsChange({
       ...settingsDraft,
@@ -85,12 +82,6 @@ export function AgentSecuritySettingsSection({
         title="Agent 权限"
         titleId="agent-security-settings-title"
         description="新会话按这里的默认权限开始。已经打开的会话保持原样，需要时在协作区里单独切换。"
-        actions={
-          <Button variant="primary" size="compact" onClick={onSaveSettings} disabled={isBusy}>
-            <Save size={14} />
-            保存设置
-          </Button>
-        }
       />
 
       <div className="grid gap-3">

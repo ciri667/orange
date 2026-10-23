@@ -1,4 +1,4 @@
-import { Cloud, Plus, Save, ShieldCheck, X } from "lucide-react";
+import { Cloud, Plus, ShieldCheck, X } from "lucide-react";
 import { useId, useState } from "react";
 import { Button } from "../../shared/Button";
 import { cn } from "../../shared/cn";
@@ -19,7 +19,6 @@ export function ModelSettingsSection({
   apiKeyVisibleByProvider,
   revealedApiKeyByProvider,
   isBusy,
-  onSaveSettings,
   onModelEnabledChange,
   onPrivacyPolicyChange,
   onSelectedTemplateIdChange,
@@ -44,7 +43,6 @@ export function ModelSettingsSection({
   apiKeyVisibleByProvider: Record<string, boolean>;
   revealedApiKeyByProvider: Record<string, string>;
   isBusy: boolean;
-  onSaveSettings: () => void | Promise<void>;
   onModelEnabledChange: (enabled: boolean) => void;
   onPrivacyPolicyChange: (policy: UserSettings["privacyPolicy"]) => void;
   onSelectedTemplateIdChange: (templateId: string) => void;
@@ -83,12 +81,6 @@ export function ModelSettingsSection({
         title="模型与隐私"
         titleId="model-settings-title"
         description="连接你的模型服务，选择适合 Agent 的默认模型。"
-        actions={
-          <Button variant="primary" size="compact" onClick={onSaveSettings} disabled={isBusy}>
-            <Save size={14} />
-            保存设置
-          </Button>
-        }
       />
 
       <div className="grid min-w-0 gap-4 rounded-xl border border-border bg-surface-warm p-4 @min-[680px]:grid-cols-[minmax(0,1fr)_minmax(220px,0.8fr)] @min-[680px]:gap-5">
@@ -183,7 +175,7 @@ export function ModelSettingsSection({
       </div>
 
       <p className="m-0 flex items-center gap-2 px-1 text-xs leading-relaxed text-ink-muted">
-        <ShieldCheck size={14} className="shrink-0" />模型配置在保存后生效；API 密钥单独保存至系统安全存储。
+        <ShieldCheck size={14} className="shrink-0" />选择或确认后自动保存，文字输入在失焦或按回车后保存；API 密钥单独保存至系统安全存储。
       </p>
     </section>
   );
