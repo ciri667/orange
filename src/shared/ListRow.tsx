@@ -12,8 +12,8 @@ export interface ListRowVisualProps {
 export function listRowClassName({ active = false, error = false, className }: ListRowVisualProps = {}) {
   return cn(
     "flex w-full min-w-0 items-center gap-2.5 rounded-control border border-transparent bg-transparent px-2.5 py-2 text-left text-ink",
-    "hover:bg-[rgba(17,24,39,0.05)]",
-    active && "bg-[rgba(17,24,39,0.06)] text-ink-strong",
+    "hover:border-border",
+    active && "border-border-strong bg-surface font-medium text-ink-strong",
     error && "bg-danger-soft text-danger",
     className,
   );

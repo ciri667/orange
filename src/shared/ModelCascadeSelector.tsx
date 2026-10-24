@@ -215,7 +215,7 @@ export function ModelCascadeSelector({
           "inline-flex w-full min-w-0 items-center justify-between gap-1.5 border-0 bg-transparent text-left font-bold focus-visible:outline-[3px] focus-visible:outline-[var(--control-ring)] focus-visible:outline-offset-2",
           variant === "inline"
             ? "min-h-7 rounded-full px-0 py-[3px] text-xs font-medium text-ink-muted"
-            : "min-h-[var(--control-height)] rounded-control border border-border bg-white px-[11px] py-0 text-[13px] font-medium text-ink",
+            : "min-h-[var(--control-height)] rounded-control border border-border bg-white px-[11px] py-0 text-ui font-medium text-ink",
         )}
         type="button"
         aria-haspopup="menu"
@@ -239,7 +239,7 @@ export function ModelCascadeSelector({
             <div className="grid min-w-0 content-start overflow-auto border-r border-border bg-app p-2.5" role="group" aria-label="Provider">
               <button
                 className={cn(
-                  "flex min-w-0 items-center justify-between gap-2.5 rounded-[10px] border-0 bg-transparent px-2.5 py-[9px] text-left text-ink hover:bg-surface-muted focus-visible:bg-surface-muted focus-visible:outline-none",
+                  "flex min-w-0 items-center justify-between gap-2.5 rounded-[10px] border-0 bg-transparent px-2.5 py-[9px] text-left text-ink hover:shadow-[inset_0_0_0_1px_var(--border)] focus-visible:shadow-[inset_0_0_0_1px_var(--border-strong)] focus-visible:outline-none",
                   value === FOLLOW_DEFAULT_MODEL_SELECTION && "text-ink-strong",
                 )}
                 type="button"
@@ -259,8 +259,8 @@ export function ModelCascadeSelector({
                 return (
                   <button
                     className={cn(
-                      "flex min-w-0 items-center justify-between gap-2.5 rounded-[10px] border-0 bg-transparent px-2.5 py-[9px] text-left text-ink hover:bg-surface-muted focus-visible:bg-surface-muted focus-visible:outline-none",
-                      isActive && "bg-surface-muted",
+                      "flex min-w-0 items-center justify-between gap-2.5 rounded-[10px] border-0 bg-transparent px-2.5 py-[9px] text-left text-ink hover:shadow-[inset_0_0_0_1px_var(--border)] focus-visible:shadow-[inset_0_0_0_1px_var(--border-strong)] focus-visible:outline-none",
+                      isActive && "shadow-[inset_0_0_0_1px_var(--border-strong)]",
                       isSelectedProvider && "text-ink-strong",
                     )}
                     key={group.provider.id}
@@ -290,7 +290,7 @@ export function ModelCascadeSelector({
                   return (
                     <button
                       className={cn(
-                        "flex min-w-0 items-center justify-between gap-2.5 rounded-[10px] border-0 bg-transparent px-2.5 py-[9px] text-left text-ink hover:bg-surface-muted focus-visible:bg-surface-muted focus-visible:outline-none",
+                        "flex min-w-0 items-center justify-between gap-2.5 rounded-[10px] border-0 bg-transparent px-2.5 py-[9px] text-left text-ink hover:shadow-[inset_0_0_0_1px_var(--border)] focus-visible:shadow-[inset_0_0_0_1px_var(--border-strong)] focus-visible:outline-none",
                         isSelected && "text-ink-strong",
                       )}
                       key={`${activeGroup.provider.id}:${model.id}`}

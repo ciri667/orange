@@ -93,7 +93,7 @@ export function ConfirmDialog({
     >
       <section
         className={cn(
-          "grid w-[min(430px,calc(100vw-40px))] isolate gap-3.5 rounded-2xl border border-border bg-surface p-4 shadow-app max-[760px]:w-[min(100%,calc(100vw-20px))]",
+          "grid w-[min(430px,calc(100vw-40px))] isolate gap-3.5 rounded-panel border border-border bg-surface p-4 shadow-app max-[760px]:w-[min(100%,calc(100vw-20px))]",
           tone === "danger" && "border-danger/40",
         )}
         data-confirm-dialog

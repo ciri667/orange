@@ -17,11 +17,11 @@ export const markdownRemarkPlugins = [remarkGfm, remarkRestoreProtectedTablePipe
 
 /** Markdown 预览容器：编辑器阅读区。 */
 export const markdownPreviewClassName =
-  "min-h-0 min-w-0 overflow-auto bg-surface p-1 text-sm leading-[1.76] text-ink [scrollbar-gutter:stable] [&>:first-child]:mt-0 [&>:last-child]:mb-0";
+  "note-reading min-h-0 min-w-0 overflow-auto bg-surface text-body leading-[1.75] text-ink [scrollbar-gutter:stable] [&>:first-child]:mt-0 [&>:last-child]:mb-0";
 
 /** Agent 消息里的 Markdown 容器。 */
 export const markdownMessageClassName =
-  "mt-2 text-[13px] leading-[1.62] text-ink [overflow-wrap:anywhere] [&>:first-child]:mt-0 [&>:last-child]:mb-0";
+  "mt-2 text-body leading-[1.75] text-ink [overflow-wrap:anywhere] [&>:first-child]:mt-0 [&>:last-child]:mb-0";
 
 const previewHeadingClassName = "mt-[1.2em] mb-[0.45em] leading-[1.28] text-ink-strong";
 const messageHeadingClassName = "mt-[0.95em] mb-[0.35em] leading-[1.28] text-ink-strong";
@@ -156,7 +156,7 @@ export function createMarkdownComponents(
       />
     ),
     h2: ({ node: _node, className, ...props }) => (
-      <h2 className={cn(headingClassName, isPreview ? "text-[22px]" : "text-base", className)} {...props} />
+      <h2 className={cn(headingClassName, isPreview ? "text-lg" : "text-base", className)} {...props} />
     ),
     h3: ({ node: _node, className, ...props }) => (
       <h3 className={cn(headingClassName, isPreview ? "text-lg" : "text-sm", className)} {...props} />
@@ -249,8 +249,8 @@ export function createMarkdownComponents(
         <input
           {...props}
           className={cn(
-            "mr-[7px] size-[14px] align-[-2px] rounded border border-border-strong bg-white",
-            "checked:border-accent checked:bg-[linear-gradient(135deg,transparent_45%,#ffffff_45%_55%,transparent_55%),var(--accent)]",
+            // Markdown 任务项保持原生勾选标记，避免用渐变模拟勾号。
+            "mr-[7px] size-[14px] align-[-2px] [appearance:auto] accent-accent",
             className,
           )}
         />

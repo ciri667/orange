@@ -70,7 +70,7 @@ export function MenuItem({
       type={type}
       role="menuitem"
       className={cn(
-        "inline-flex min-h-8 items-center justify-start gap-2 rounded-small border-0 bg-transparent px-[9px] text-left text-xs text-ink hover:bg-surface-hover",
+        "inline-flex min-h-8 items-center justify-start gap-2 rounded-small border-0 bg-transparent px-[9px] text-left text-xs text-ink hover:shadow-[inset_0_0_0_1px_var(--border)]",
         tone === "danger" && "text-danger",
         nested && "pl-[26px] text-ink-muted",
         className,

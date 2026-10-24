@@ -14,7 +14,7 @@ import {
 import { createPortal } from "react-dom";
 import { logDebug } from "./logger";
 
-type OverflowTooltipElement = "span" | "strong" | "p" | "h2" | "h3" | "small" | "code" | "time" | "em";
+type OverflowTooltipElement = "span" | "strong" | "p" | "h1" | "h2" | "h3" | "small" | "code" | "time" | "em";
 type OverflowTooltipTrigger = "hover" | "focus";
 
 interface TooltipPosition {

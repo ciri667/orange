@@ -3,38 +3,39 @@
  * 新 UI 用 src/styles/tailwind.css 中的工具类和 shared 原语。
  */
 :root {
-  color: #111827;
-  background: #f3f4f6;
+  color: #292724;
+  background: #ffffff;
   font-family:
-    "SF Pro Text", "SF Pro Display", -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC",
-    "Microsoft YaHei", "Noto Sans SC", sans-serif;
+    "Segoe UI Variable Text", "Segoe UI", -apple-system, BlinkMacSystemFont, "PingFang SC",
+    "Microsoft YaHei UI", "Microsoft YaHei", "Noto Sans SC", sans-serif;
   font-synthesis: none;
   text-rendering: optimizeLegibility;
   -webkit-font-smoothing: antialiased;
-  --app-bg: #f3f4f6;
-  --app-bg-strong: #e5e7eb;
-  --border: #e5e7eb;
-  --border-strong: #d1d5db;
+  /* 纯白工作台用边框和字重区分状态，避免再次出现整块主题底色。 */
+  --app-bg: #ffffff;
+  --app-bg-strong: #ffffff;
+  --border: #e8ebef;
+  --border-strong: #c9cfd7;
   --surface: #ffffff;
-  --surface-warm: #f9fafb;
-  --surface-muted: #f3f4f6;
-  --surface-hover: #f3f4f6;
-  --text: #111827;
-  --text-strong: #0b1220;
-  --text-muted: #6b7280;
-  --text-soft: #9ca3af;
-  --accent: #e05a1a;
-  --accent-strong: #c44a12;
-  --accent-soft: rgba(224, 90, 26, 0.08);
-  --agent: #4b5563;
-  --agent-strong: #111827;
-  --agent-soft: #f3f4f6;
+  --surface-warm: #ffffff;
+  --surface-muted: #ffffff;
+  --surface-hover: #ffffff;
+  --text: #292724;
+  --text-strong: #201f1c;
+  --text-muted: #716d65;
+  --text-soft: #7a756d;
+  --accent: #c6531b;
+  --accent-strong: #a84213;
+  --accent-soft: var(--surface-muted);
+  --agent: #716d65;
+  --agent-strong: #292724;
+  --agent-soft: var(--surface);
   --danger: #b42318;
   --danger-soft: #fef2f2;
   --success: #067647;
   --success-soft: #ecfdf3;
   --warning: #b54708;
-  --warning-soft: #fffaeb;
+  --warning-soft: var(--surface-muted);
   /* 代码块语法色，接近 GitHub 浅色主题，保证白底上能分开关键字、字符串和注释。 */
   --code-keyword: #cf222e;
   --code-string: #0a3069;
@@ -43,12 +44,17 @@
   --code-function: #8250df;
   --code-type: #953800;
   --code-property: #116329;
-  --radius-panel: 16px;
+  --radius-panel: 12px;
   --radius-control: 8px;
   --radius-small: 6px;
-  --shadow: 0 8px 24px rgba(17, 24, 39, 0.06);
-  --shadow-soft: 0 4px 12px rgba(17, 24, 39, 0.05);
-  --mono-font: "SF Mono", "JetBrains Mono", "Roboto Mono", ui-monospace, monospace;
+  --shadow: 0 12px 36px rgba(41, 39, 36, 0.10);
+  --shadow-soft: 0 2px 8px rgba(41, 39, 36, 0.05);
+  --editor-content-width: 840px;
+  /* 正文、标题与界面字号分别管理，行号测量层也复用正文 token。 */
+  --font-ui: 12px;
+  --font-body: 14px;
+  --font-document-title: 20px;
+  --mono-font: "SF Mono", "JetBrains Mono", "Cascadia Code", "Microsoft YaHei", ui-monospace, monospace;
   --z-menu: 120;
   --z-agent-popover: 180;
   --z-settings: 320;
@@ -61,23 +67,23 @@
   --region-rail-size: 44px;
   /** 区域展开/收起时列宽和行高的过渡时长。 */
   --region-transition: 180ms;
-  --paper-rgb: 243, 244, 246;
-  --paper-strong-rgb: 229, 231, 235;
+  --paper-rgb: 255, 255, 255;
+  --paper-strong-rgb: 255, 255, 255;
   --surface-rgb: 255, 255, 255;
-  --surface-warm-rgb: 249, 250, 251;
-  --border-rgb: 229, 231, 235;
-  --border-strong-rgb: 209, 213, 219;
-  --ink-rgb: 17, 24, 39;
-  --primary-rgb: 17, 24, 39;
-  --primary-strong-rgb: 11, 18, 32;
-  --accent-rgb: 224, 90, 26;
+  --surface-warm-rgb: 255, 255, 255;
+  --border-rgb: 232, 235, 239;
+  --border-strong-rgb: 201, 207, 215;
+  --ink-rgb: 41, 39, 36;
+  --primary-rgb: 41, 39, 36;
+  --primary-strong-rgb: 32, 31, 28;
+  --accent-rgb: 198, 83, 27;
   --success-rgb: 6, 118, 71;
   --warning-rgb: 181, 71, 8;
   --danger-rgb: 180, 35, 24;
   --color-primary-border: rgba(var(--ink-rgb), 0.08);
   --color-primary-border-strong: rgba(var(--ink-rgb), 0.14);
-  --color-primary-wash: rgba(var(--ink-rgb), 0.04);
-  --color-primary-wash-strong: rgba(var(--ink-rgb), 0.08);
+  --color-primary-wash: var(--surface);
+  --color-primary-wash-strong: var(--surface);
   --color-surface-translucent: rgba(var(--surface-rgb), 0.86);
   --color-surface-translucent-strong: rgba(var(--surface-rgb), 0.96);
   --color-warm-panel: var(--surface-warm);
@@ -106,6 +112,7 @@ body {
   overflow: hidden;
   color: var(--text);
   background: var(--app-bg);
+  font-size: var(--font-ui);
 }
 
 body.workspace-resize-active {
@@ -221,7 +228,7 @@ select:focus-visible {
   display: flex;
   flex-direction: column;
   height: 100%;
-  background: var(--surface);
+  background: var(--app-bg);
 }
 
 .brand-mark {
@@ -342,7 +349,7 @@ select:focus-visible {
   bottom: 6px;
   width: 2px;
   border-radius: 999px;
-  background: var(--accent);
+  background: var(--text-muted);
   content: "";
 }
 
@@ -535,7 +542,7 @@ select:focus-visible {
   gap: 6px;
   font-size: 12px;
   font-weight: 600;
-  color: var(--ink-strong);
+  color: var(--text-strong);
 }
 
 .browser-tab-strip {
@@ -555,14 +562,14 @@ select:focus-visible {
   border: 1px solid var(--border);
   border-radius: 6px;
   background: transparent;
-  color: var(--ink-muted);
+  color: var(--text-muted);
   font-size: 11px;
   cursor: pointer;
 }
 
 .browser-tab.is-active {
   border-color: var(--accent);
-  color: var(--ink-strong);
+  color: var(--text-strong);
   background: var(--accent-soft);
 }
 
@@ -580,7 +587,7 @@ select:focus-visible {
   width: 14px;
   height: 14px;
   border-radius: 3px;
-  color: var(--ink-soft);
+  color: var(--text-soft);
   border: 0;
   background: transparent;
   padding: 0;
@@ -602,7 +609,7 @@ select:focus-visible {
   border: 1px solid var(--border);
   border-radius: 8px;
   background: var(--surface-muted);
-  color: var(--ink);
+  color: var(--text);
   font-size: 12px;
   outline: none;
 }
@@ -645,7 +652,7 @@ select:focus-visible {
   flex-direction: column;
   align-items: center;
   gap: 6px;
-  color: var(--ink-soft);
+  color: var(--text-soft);
   font-size: 12px;
 }
 
@@ -656,7 +663,7 @@ select:focus-visible {
   padding: 2px 8px;
   border-radius: 999px;
   background: var(--warning-soft);
-  color: var(--ink-strong);
+  color: var(--text-strong);
   font-size: 11px;
 }
 
@@ -673,7 +680,7 @@ select:focus-visible {
   min-width: 0;
   flex: 1;
   font-size: 12px;
-  color: var(--ink-muted);
+  color: var(--text-muted);
 }
 
 .browser-status-agent {
@@ -681,7 +688,7 @@ select:focus-visible {
 }
 
 .browser-status-activity {
-  color: var(--ink-strong);
+  color: var(--text-strong);
 }
 
 .browser-takeover-active {
@@ -706,20 +713,20 @@ select:focus-visible {
   border: 1px solid var(--border);
   border-radius: 12px;
   background: var(--surface);
-  box-shadow: var(--shadow-app);
+  box-shadow: var(--shadow);
 }
 
 .browser-approval-card h3 {
   margin: 0 0 8px;
   font-size: 13px;
-  color: var(--ink-strong);
+  color: var(--text-strong);
 }
 
 .browser-approval-operation {
   margin: 0 0 6px;
   font-family: ui-monospace, monospace;
   font-size: 12px;
-  color: var(--ink);
+  color: var(--text);
 }
 
 .browser-approval-detail {
@@ -728,7 +735,7 @@ select:focus-visible {
   text-overflow: ellipsis;
   white-space: nowrap;
   font-size: 11px;
-  color: var(--ink-soft);
+  color: var(--text-soft);
 }
 
 .browser-approval-actions {

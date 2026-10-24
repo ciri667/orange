@@ -20,7 +20,7 @@ export function Checkbox({
           "after:h-1 after:w-2 after:-translate-y-px after:-rotate-45 after:border-b-2 after:border-l-2 after:border-current after:opacity-0 after:content-['']",
           "checkbox-box",
           "peer-checked:border-agent peer-checked:bg-agent peer-checked:after:opacity-100",
-          "peer-disabled:border-[rgba(213,203,189,0.7)] peer-disabled:bg-[#f4f1eb]",
+          "peer-disabled:border-border peer-disabled:bg-surface",
           boxClassName,
         )}
       />

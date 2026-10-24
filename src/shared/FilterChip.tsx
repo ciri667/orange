@@ -16,7 +16,7 @@ export function FilterChip({
       type={type}
       className={cn(
         "inline-flex items-center gap-1.5 rounded-full border border-border bg-surface px-2 py-[5px] text-xs text-ink-muted",
-        active && "border-transparent bg-surface-muted text-ink-strong",
+        active && "border-border-strong bg-surface font-medium text-ink-strong",
         className,
       )}
       {...props}

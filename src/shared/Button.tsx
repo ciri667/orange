@@ -18,13 +18,13 @@ export interface ButtonProps extends ButtonHTMLAttributes<HTMLButtonElement> {
 }
 
 const baseClassName =
-  "inline-flex shrink-0 items-center justify-center gap-2 whitespace-nowrap rounded-control border border-solid transition-[background,border-color,color] duration-[140ms]";
+  "inline-flex shrink-0 items-center justify-center gap-2 whitespace-nowrap rounded-control border border-solid text-ui transition-[background,border-color,color] duration-[140ms] disabled:opacity-50";
 
 const variantClassName: Record<ButtonVariant, string> = {
-  primary: "min-h-9 border-transparent bg-accent px-3.5 font-semibold text-white hover:enabled:bg-accent-strong",
-  ghost: "min-h-8 border-transparent bg-transparent px-3 text-ink hover:enabled:bg-surface-hover",
-  text: "min-h-8 border-transparent bg-transparent px-3 text-ink hover:enabled:bg-surface-hover",
-  icon: "size-8 min-h-8 border-transparent bg-transparent p-0 text-ink-muted hover:enabled:bg-surface-hover hover:enabled:text-ink",
+  primary: "min-h-9 border-border-strong bg-surface px-3.5 font-medium text-ink-strong hover:enabled:border-ink-muted",
+  ghost: "min-h-8 border-transparent bg-transparent px-3 text-ink hover:enabled:border-border",
+  text: "min-h-8 border-transparent bg-transparent px-3 text-ink hover:enabled:border-border",
+  icon: "size-8 min-h-8 border-transparent bg-transparent p-0 text-ink-muted hover:enabled:border-border hover:enabled:text-ink",
 };
 
 /** 统一按钮。应用内行动点用这个组件。 */

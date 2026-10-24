@@ -23,7 +23,7 @@ export function Chip({
     <span
       className={cn(
         "inline-flex min-w-0 max-w-[150px] items-center gap-1.5 overflow-hidden rounded-full border border-border bg-surface py-0.5 pr-1.5 pl-2 text-xs font-medium text-ink-muted",
-        missing && "border-warning/35 bg-warning/10 text-warning",
+        missing && "border-warning/35 bg-surface-muted text-warning",
         className,
       )}
     >
