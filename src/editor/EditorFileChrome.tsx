@@ -49,12 +49,12 @@ export function EditorFileHeader({
   actions?: ReactNode;
 }) {
   return (
-    <header className="flex items-start justify-between gap-3">
-      <div className="min-w-0">
+    <header className="editor-file-header">
+      <div className="editor-file-topline">
         <OverflowTooltipText as="p" className={pathLabelClassName} text={title.pathLabel} logArea={title.pathLogArea} />
-        <OverflowTooltipText as="h2" className="mt-0.5 mb-0 truncate text-base font-semibold leading-tight text-ink-strong" text={title.title} logArea={title.titleLogArea} />
+        <div className="editor-file-actions">{actions}</div>
       </div>
-      <div className="flex min-w-0 flex-wrap items-center justify-end gap-[7px]">{actions}</div>
+      <OverflowTooltipText as="h1" className="editor-file-title" text={title.title} logArea={title.titleLogArea} />
     </header>
   );
 }
@@ -70,52 +70,52 @@ export function EditorEmptyHeader({
   title: string;
 }) {
   return (
-    <header className="flex items-start justify-between gap-3">
-      <div className="min-w-0">
-        <OverflowTooltipText as="p" className={pathLabelClassName} text={pathLabel} logArea={pathLogArea} />
-        <h2 className="mt-0.5 mb-0 truncate text-base font-semibold leading-tight text-ink-strong">{title}</h2>
-      </div>
-      <div className="flex min-w-0 flex-wrap items-center justify-end gap-[7px]" />
+    <header className="editor-file-header">
+      <OverflowTooltipText as="p" className={pathLabelClassName} text={pathLabel} logArea={pathLogArea} />
+      <h1 className="editor-file-title">{title}</h1>
     </header>
   );
 }
 
-/** 编辑器元信息条，复用保存状态、阅读统计和文档类型的紧凑展示。 */
-export function EditorMetaStrip({ items }: { items: EditorMetaItem[] }) {
+/** 元信息和辅助操作独立于文件工具栏，窄编辑区内可自然换行。 */
+export function EditorMetaStrip({ items, actions }: { items: EditorMetaItem[]; actions?: ReactNode }) {
   return (
-    <div className="flex gap-2 overflow-x-auto text-xs text-ink-muted [scrollbar-width:none] [&::-webkit-scrollbar]:hidden">
-      {items.map((item, index) => {
-        const itemClassName = cn(
-          "inline-flex shrink-0 items-center gap-1.5 rounded-full border border-border bg-surface px-2 py-1",
-          item.className === "dirty-indicator" && "border-[rgba(var(--warning-rgb),0.28)] bg-warning-soft font-bold text-warning",
-          item.className !== "dirty-indicator" && item.className,
-          item.onClick && "cursor-pointer hover:border-border-strong hover:bg-surface-hover",
-        );
+    <div className="editor-meta-strip">
+      <div className="editor-meta-items">
+        {items.map((item, index) => {
+          const itemClassName = cn(
+            "inline-flex shrink-0 items-center gap-1.5 rounded-small border-0 bg-transparent px-1 py-1 text-xs text-ink-muted",
+            item.className === "dirty-indicator" && "bg-warning-soft font-medium text-warning",
+            item.className !== "dirty-indicator" && item.className,
+            item.onClick && "cursor-pointer hover:border-border-strong hover:bg-surface-hover",
+          );
 
-        if (item.onClick) {
+          if (item.onClick) {
+            return (
+              <button
+                className={itemClassName}
+                key={index}
+                type="button"
+                title={item.title}
+                aria-label={item.ariaLabel}
+                aria-expanded={item.ariaExpanded}
+                onClick={item.onClick}
+              >
+                {item.icon}
+                {item.text}
+              </button>
+            );
+          }
+
           return (
-            <button
-              className={itemClassName}
-              key={index}
-              type="button"
-              title={item.title}
-              aria-label={item.ariaLabel}
-              aria-expanded={item.ariaExpanded}
-              onClick={item.onClick}
-            >
+            <span className={itemClassName} key={index}>
               {item.icon}
               {item.text}
-            </button>
+            </span>
           );
-        }
-
-        return (
-          <span className={itemClassName} key={index}>
-            {item.icon}
-            {item.text}
-          </span>
-        );
-      })}
+        })}
+      </div>
+      {actions && <div className="editor-meta-actions">{actions}</div>}
     </div>
   );
 }

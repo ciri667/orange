@@ -198,7 +198,7 @@ export function EditorTabBar({ tabs, activeTab, onSelect, onClose, onScroll, age
 
   return (
     <div
-      className="grid min-h-11 min-w-0 grid-cols-[auto_minmax(0,1fr)_auto] items-center gap-1 border-b border-border bg-surface px-2 max-[900px]:gap-[3px]"
+      className="editor-tabs grid h-9 min-w-0 grid-cols-[auto_minmax(0,1fr)_auto] items-center gap-1 border-b border-border bg-surface-warm px-2 max-[900px]:gap-[3px]"
       aria-label="已打开文件"
     >
       {tabs.length > 0 ? (
@@ -232,7 +232,7 @@ export function EditorTabBar({ tabs, activeTab, onSelect, onClose, onScroll, age
               className={cn(
                 "flex min-h-[30px] min-w-0 max-w-[210px] shrink-0 items-center rounded-md border border-transparent bg-transparent text-xs text-ink-muted max-[900px]:max-w-[156px]",
                 "hover:bg-surface-muted hover:text-ink",
-                isActive && "bg-surface-muted text-ink-strong",
+                isActive && "border-border-strong bg-surface font-medium text-ink-strong",
               )}
               key={tabKey}
             >
@@ -259,7 +259,7 @@ export function EditorTabBar({ tabs, activeTab, onSelect, onClose, onScroll, age
                 <span className="min-w-0 truncate">{tab.title}</span>
                 {tab.isDirty && (
                   <span
-                    className="size-1.5 shrink-0 rounded-full bg-warning shadow-[0_0_0_2px_var(--warning-soft)]"
+                    className="size-1.5 shrink-0 rounded-full bg-ink-soft shadow-[0_0_0_2px_var(--warning-soft)]"
                     aria-label="包含未保存的更改"
                   />
                 )}

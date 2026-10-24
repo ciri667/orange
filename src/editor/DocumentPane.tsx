@@ -105,7 +105,7 @@ export function DocumentPane({
     const hasDocuments = knowledgeBase.documentCount > 0;
 
     return (
-      <section className="editor-pane" aria-label="文档预览">
+      <section className="editor-pane is-empty" aria-label="文档预览">
         <EditorEmptyHeader
           pathLabel={knowledgeBase.name}
           pathLogArea="document_empty_knowledge_base"
@@ -148,84 +148,79 @@ export function DocumentPane({
         }}
         actions={
           <>
-          {onSelectSession ? (
-            <RelatedSessionsButton
-              sessions={sessions}
-              file={{ id: document.id, knowledgeBaseId: document.knowledgeBaseId, path: document.path }}
-              onSelectSession={onSelectSession}
+            {isTextDocument && (
+              <Button variant="text" className="editor-save-action" onClick={onSaveDocument} disabled={isBusy || !isDirty}>
+                <Save size={16} />
+                {isDirty ? "保存草稿" : "已保存"}
+              </Button>
+            )}
+            <EditorMoreActionMenu
+              exportOptions={exportOptions}
+              isBusy={isBusy}
+              logContext={{
+                event: "document_more_menu_toggle",
+                metadata: { fileType: document.fileType, isBusy, isDirty },
+              }}
+              onExportFile={onExportFile}
+              onOpenHistory={isTextDocument ? onOpenHistory : undefined}
+              onRename={isTextDocument ? onRenameDocument : undefined}
+              onDelete={isTextDocument ? onDeleteDocument : undefined}
             />
-          ) : null}
-          {isTextDocument && (
-            <VoiceDictationButton
-              getTextarea={() => textAreaRef.current}
-              onValueChange={onContentChange}
-              onNotice={onNotice}
-              disabled={isBusy}
-            />
-          )}
-          {isTextDocument && (
-            <Button variant="text" onClick={onSaveDocument} disabled={isBusy || !isDirty}>
-              <Save size={16} />
-              {isDirty ? "保存草稿" : "已保存"}
-            </Button>
-          )}
-          <EditorMoreActionMenu
-            exportOptions={exportOptions}
-            isBusy={isBusy}
-            logContext={{
-              event: "document_more_menu_toggle",
-              metadata: { fileType: document.fileType, isBusy, isDirty },
-            }}
-            onExportFile={onExportFile}
-            onOpenHistory={isTextDocument ? onOpenHistory : undefined}
-            onRename={isTextDocument ? onRenameDocument : undefined}
-            onDelete={isTextDocument ? onDeleteDocument : undefined}
-          />
           </>
         }
       />
 
-      <EditorMetaStrip
-        items={[
-          { icon: <Clock3 size={14} />, text: document.updatedAt },
-          { icon: <FileText size={14} />, text: getDocumentTypeLabel(document) },
-          ...(isTextDocument
-            ? [
-                { icon: <FilePenLine size={14} />, text: `${stats.words} 字，${stats.lines} 行` },
-                {
-                  icon: <Save size={14} />,
-                  text: isDirty ? "未保存草稿" : "已保存到本地",
-                  className: isDirty ? "dirty-indicator" : undefined,
-                },
-              ]
-            : [{ icon: <Eye size={14} />, text: "只读预览" }]),
-        ]}
-      />
+      <div className="editor-content-column">
+        <EditorMetaStrip
+          actions={
+            <>
+              {onSelectSession && <RelatedSessionsButton sessions={sessions} file={{ id: document.id, knowledgeBaseId: document.knowledgeBaseId, path: document.path }} onSelectSession={onSelectSession} />}
+              {isTextDocument && <VoiceDictationButton getTextarea={() => textAreaRef.current} onValueChange={onContentChange} onNotice={onNotice} disabled={isBusy} />}
+            </>
+          }
+          items={[
+            { icon: <Clock3 size={14} />, text: document.updatedAt },
+            { icon: <FileText size={14} />, text: getDocumentTypeLabel(document) },
+            ...(isTextDocument
+              ? [
+                  { icon: <FilePenLine size={14} />, text: `${stats.words} 字，${stats.lines} 行` },
+                  {
+                    icon: <Save size={14} />,
+                    text: isDirty ? "未保存草稿" : "已保存到本地",
+                    className: isDirty ? "dirty-indicator" : undefined,
+                  },
+                ]
+              : [{ icon: <Eye size={14} />, text: "只读预览" }]),
+          ]}
+        />
+      </div>
 
-      {isTextDocument ? (
-        <LineNumberedTextarea
-          ref={textAreaRef}
-          fileType="txt"
-          value={content}
-          onChange={(event) => onContentChange(event.target.value)}
-          onKeyDown={(event) => {
-            // 拦截系统保存快捷键，确保 txt 写入也经过 Tauri hash 和路径校验。
-            if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "s") {
-              event.preventDefault();
-              onSaveDocument();
-            }
-          }}
-          spellCheck={false}
-          ariaLabel="当前 TXT 文档内容"
-        />
-      ) : (
-        <DocumentPreviewView
-          document={document}
-          preview={preview}
-          previewError={previewError}
-          isPreviewLoading={isPreviewLoading}
-        />
-      )}
+      <div className="editor-body">
+        {isTextDocument ? (
+          <LineNumberedTextarea
+            ref={textAreaRef}
+            fileType="txt"
+            value={content}
+            onChange={(event) => onContentChange(event.target.value)}
+            onKeyDown={(event) => {
+              // 拦截系统保存快捷键，确保 txt 写入也经过 Tauri hash 和路径校验。
+              if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "s") {
+                event.preventDefault();
+                onSaveDocument();
+              }
+            }}
+            spellCheck={false}
+            ariaLabel="当前 TXT 文档内容"
+          />
+        ) : (
+          <DocumentPreviewView
+            document={document}
+            preview={preview}
+            previewError={previewError}
+            isPreviewLoading={isPreviewLoading}
+          />
+        )}
+      </div>
     </section>
   );
 }
@@ -320,10 +315,10 @@ function DocumentPreviewView({
     const blocks = preview?.blocks ?? [];
 
     return (
-      <div className="min-h-0 min-w-0 overflow-auto rounded-none border-0 bg-surface p-[22px] text-sm leading-[1.76] text-ink [scrollbar-gutter:stable] [&>:last-child]:mb-0" aria-label="DOCX 预览">
+      <div className="min-h-0 min-w-0 overflow-auto rounded-none border-0 bg-surface py-4 text-body leading-[1.75] text-ink [scrollbar-gutter:stable] [&>:last-child]:mb-0" aria-label="DOCX 预览">
         {blocks.map((block, index) =>
           block.type === "heading" ? (
-            <h3 className="mb-3 mt-0 text-[19px] leading-[1.35] text-ink-strong" key={`${block.type}-${index}`}>{block.text}</h3>
+            <h3 className="mb-3 mt-0 text-lg leading-[1.35] text-ink-strong" key={`${block.type}-${index}`}>{block.text}</h3>
           ) : block.type === "table" ? (
             <pre className="whitespace-pre-wrap font-[inherit]" key={`${block.type}-${index}`}>{block.text}</pre>
           ) : (

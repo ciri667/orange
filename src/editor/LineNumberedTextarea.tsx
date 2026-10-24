@@ -29,6 +29,8 @@ interface LineNumberedTextareaProps {
 
 /** 默认行高兜底值，只有浏览器无法提供 textarea 计算样式时使用。 */
 const FALLBACK_LINE_HEIGHT = 24;
+/** 正文、行号和隐藏测量层必须使用相同字号与行高，软换行后才不会逐行错位。 */
+const SOURCE_TYPOGRAPHY_CLASS_NAME = "font-sans text-body leading-[1.75]";
 
 /** 将 textarea ref 同时写入内部状态和外部调用方 ref，确保现有滚动同步逻辑仍能访问原生控件。 */
 function assignTextareaRef(ref: Ref<HTMLTextAreaElement>, element: HTMLTextAreaElement | null) {
@@ -123,8 +125,9 @@ export const LineNumberedTextarea = forwardRef<HTMLTextAreaElement, LineNumbered
     className,
   );
   const textareaClassName = cn(
-    "relative z-[1] h-full w-full min-h-0 resize-none overflow-auto border-0 bg-transparent p-5 font-mono text-sm leading-[1.74] text-ink outline-0 [scrollbar-gutter:stable]",
-    "pl-[calc(var(--line-number-gutter-width)+20px)]",
+    "relative z-[1] h-full w-full min-h-0 resize-none overflow-auto border-0 bg-transparent px-3 py-4 text-ink outline-0 [scrollbar-gutter:stable]",
+    SOURCE_TYPOGRAPHY_CLASS_NAME,
+    "pl-[calc(var(--line-number-gutter-width)+12px)]",
     "focus-visible:outline-none",
   );
   /** 行号 gutter 的宽度 token，随行数位数变化但不触发布局跳变。 */
@@ -245,11 +248,11 @@ export const LineNumberedTextarea = forwardRef<HTMLTextAreaElement, LineNumbered
   return (
     <div className={wrapperClassName} style={wrapperStyle} data-file-type={fileType} data-gutter-width={gutterWidthToken}>
       <div
-        className="line-number-gutter pointer-events-none absolute top-0 bottom-0 left-0 z-[2] overflow-hidden border-r border-border bg-transparent font-mono text-sm leading-[1.74] text-ink-soft select-none"
+        className={cn("line-number-gutter pointer-events-none absolute top-0 bottom-0 left-0 z-[2] overflow-hidden bg-transparent text-ink-soft select-none", SOURCE_TYPOGRAPHY_CLASS_NAME)}
         style={{ width: "var(--line-number-gutter-width)" }}
         aria-hidden="true"
       >
-        <div className="py-5 pr-2.5 pl-0 will-change-transform" ref={gutterScrollRef}>
+        <div className="py-4 pr-2.5 pl-0 will-change-transform" ref={gutterScrollRef}>
           {logicalLines.map((_line, index) => (
             <div className="flex min-h-[1.72em] justify-end overflow-hidden tabular-nums" key={index} style={{ height: lineHeights[index] ?? lineHeight }}>
               {index + 1}
@@ -269,9 +272,9 @@ export const LineNumberedTextarea = forwardRef<HTMLTextAreaElement, LineNumbered
         aria-label={ariaLabel}
       />
       <div
-        className="pointer-events-none absolute top-0 font-mono text-sm leading-[1.74] text-transparent whitespace-pre-wrap [overflow-wrap:break-word]"
+        className={cn("pointer-events-none absolute top-0 whitespace-pre-wrap [overflow-wrap:break-word]", SOURCE_TYPOGRAPHY_CLASS_NAME)}
         ref={measureRef}
-        style={{ left: "calc(var(--line-number-gutter-width) + 20px)", width: contentWidth || undefined, visibility: "hidden" }}
+        style={{ left: "calc(var(--line-number-gutter-width) + 12px)", width: contentWidth || undefined, visibility: "hidden" }}
         aria-hidden="true"
       >
         {logicalLines.map((line, index) => (

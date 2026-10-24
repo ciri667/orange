@@ -95,7 +95,7 @@ export function DiffPanel({
   }
 
   return (
-    <aside className="flex max-h-[min(620px,55vh)] min-h-80 flex-col overflow-hidden rounded-2xl border border-border bg-surface" aria-label="Agent 变更审阅工作台">
+    <aside className="diff-panel flex max-h-[min(620px,55vh)] min-h-80 min-w-0 flex-col overflow-hidden rounded-panel border border-border bg-surface" aria-label="Agent 变更审阅工作台">
       <div className="flex items-center justify-between gap-3 px-4 pt-4">
         <div className="min-w-0">
           <p className={sectionLabelClassName}>{change.type === "create" ? "新建文件建议" : "文档变更审阅"}</p>

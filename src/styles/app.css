@@ -479,9 +479,9 @@ select:focus-visible {
 
 .editor-pane {
   display: grid;
-  grid-template-rows: auto auto 1fr auto;
-  gap: 12px;
-  padding: 16px 22px 22px;
+  grid-template-rows: auto auto minmax(0, 1fr) auto;
+  gap: 0;
+  padding: 0 0 16px;
   background: var(--surface);
 }
 
@@ -787,6 +787,9 @@ select:focus-visible {
   grid-template-rows: auto minmax(0, 1fr);
   gap: 0;
   background: var(--surface);
+  overflow: hidden;
+  /* 工具栏跟随编辑区实际宽度变化，而不是跟随整个窗口的宽度。 */
+  container: editor / inline-size;
 }
 
 .editor-workbench.is-schedules {
@@ -851,6 +854,238 @@ select:focus-visible {
   background: transparent;
 }
 
+/* 文件头共用一个工具行；标题、元信息与正文共用同一条内容列。 */
+
+.editor-file-header {
+  display: grid;
+  min-width: 0;
+}
+
+.editor-file-topline {
+  display: flex;
+  min-height: 44px;
+  min-width: 0;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px 12px;
+  padding: 6px 20px;
+  border-bottom: 1px solid var(--border);
+}
+
+.editor-file-topline > p {
+  min-width: 0;
+  flex: 1;
+}
+
+.editor-file-title {
+  width: calc(100% - 48px);
+  max-width: var(--editor-content-width);
+  margin: 24px auto 8px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: var(--font-document-title);
+  line-height: 1.4;
+  font-weight: 600;
+  letter-spacing: -0.02em;
+  color: var(--text-strong);
+}
+
+.editor-file-actions {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: 6px;
+}
+
+.editor-file-actions > button {
+  font-size: 12px;
+}
+
+.editor-file-actions > button:not([class*="size-"]) {
+  gap: 5px;
+  padding-inline: 8px;
+}
+
+.editor-save-action:disabled {
+  opacity: 1;
+  color: var(--text-muted);
+  cursor: default;
+}
+
+.editor-save-action:not(:disabled) {
+  background: var(--accent-soft);
+  color: var(--accent-strong);
+}
+
+.editor-content-column, .editor-body {
+  width: calc(100% - 48px);
+  max-width: var(--editor-content-width);
+  min-width: 0;
+  margin-inline: auto;
+}
+
+.editor-meta-strip {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 4px 12px;
+  min-width: 0;
+  padding-bottom: 12px;
+  border-bottom: 1px solid var(--border);
+}
+
+.editor-meta-items {
+  display: flex;
+  min-width: 0;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 12px;
+}
+
+.editor-meta-items > * {
+  max-width: 100%;
+  padding: 2px 0;
+  font-size: 12px;
+}
+
+.editor-meta-items > button {
+  min-width: 0;
+  flex-shrink: 1;
+}
+
+.editor-meta-items > button > span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.editor-meta-items svg {
+  width: 12px;
+  height: 12px;
+  flex-shrink: 0;
+}
+
+.editor-meta-actions {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  margin-left: auto;
+}
+
+.editor-meta-actions button {
+  min-height: 26px;
+  font-size: 12px;
+}
+
+.editor-meta-actions > button {
+  width: 26px;
+  height: 26px;
+}
+
+.editor-body {
+  display: grid;
+  min-height: 0;
+  grid-template-columns: minmax(0, 1fr);
+  padding-top: 8px;
+}
+
+.editor-body.is-split {
+  max-width: none;
+  width: calc(100% - 32px);
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 16px;
+}
+
+.editor-body.is-split > :first-child {
+  border-right: 1px solid var(--border);
+}
+
+.editor-source {
+  width: 100%;
+}
+
+.line-number-gutter {
+  border: 0;
+  color: var(--text-soft);
+}
+
+.note-reading {
+  width: 100%;
+  padding: 16px 0;
+}
+
+.note-reading > h1:first-child {
+  border: 0;
+  padding: 0;
+}
+
+.editor-pane.is-empty {
+  grid-template-rows: auto minmax(0, 1fr);
+  gap: 20px;
+  padding: 20px 24px;
+}
+
+.editor-pane.is-empty .editor-file-header > p {
+  margin: 0;
+}
+
+.editor-pane.is-empty .editor-file-title {
+  width: 100%;
+  max-width: none;
+  margin: 12px 0 0;
+}
+
+.editor-pane > .diff-panel {
+  margin: 12px 24px 0;
+}
+
+/* 同一窗口内可拖出窄编辑区，所以断点必须以容器而非 viewport 为准。 */
+
+@container editor (max-width: 639px) {
+  .editor-file-topline {
+    flex-wrap: wrap;
+    padding: 8px 16px;
+    gap: 6px;
+  }
+  .editor-file-topline > p {
+    flex-basis: 100%;
+  }
+  .editor-file-actions {
+    width: 100%;
+    justify-content: flex-end;
+  }
+  .editor-file-title {
+    margin-top: 20px;
+  }
+  .editor-content-column, .editor-body, .editor-file-title {
+    width: calc(100% - 32px);
+  }
+}
+
+@container editor (max-width: 519px) {
+  .editor-file-actions [aria-label="Markdown 视图模式"] span {
+    display: none;
+  }
+  .editor-file-actions [aria-label="Markdown 视图模式"] button {
+    width: 30px;
+    padding-inline: 0;
+  }
+  .editor-file-title {
+    font-size: 18px;
+  }
+  .editor-body.is-split {
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-rows: repeat(2, minmax(0, 1fr));
+    gap: 8px;
+  }
+  .editor-body.is-split > :first-child {
+    border-right: 0;
+    border-bottom: 1px solid var(--border);
+  }
+}
 @media (max-width: 1180px) {
   html,
   body,

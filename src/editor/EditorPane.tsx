@@ -145,7 +145,7 @@ export function EditorPane({
     const hasMarkdownFiles = knowledgeBase.noteCount > 0;
 
     return (
-      <section className="editor-pane" aria-label="Markdown 编辑器">
+      <section className="editor-pane is-empty" aria-label="Markdown 编辑器">
         <EditorEmptyHeader
           pathLabel={knowledgeBase.name}
           pathLogArea="editor_empty_knowledge_base"
@@ -194,6 +194,12 @@ export function EditorPane({
   }
 
   const stats = getReadingStats(note.content);
+  // 阅读模式由文件头承担标题；相同的首行标题只展示一次，不改源文或分屏内容。
+  const readingContent = viewMode === "preview"
+    ? note.content.replace(/^(\s*)#\s+([^\r\n]+)\r?\n?/, (heading, _space: string, text: string) =>
+        text.trim().replace(/\s+#+\s*$/, "") === note.title.trim() ? "" : heading,
+      )
+    : note.content;
   const shouldShowEditor = viewMode === "edit" || viewMode === "split";
   const shouldShowPreview = viewMode === "preview" || viewMode === "split";
   /** 图片粘贴需要先落盘附件，再把返回的 Markdown 片段插入当前草稿。 */
@@ -219,56 +225,49 @@ export function EditorPane({
         }}
         actions={
           <>
-          {onSelectSession ? (
-            <RelatedSessionsButton
-              sessions={sessions}
-              file={{ id: note.id, knowledgeBaseId: note.knowledgeBaseId, path: note.path }}
-              onSelectSession={onSelectSession}
+            <SegmentedControl aria-label="Markdown 视图模式">
+              {MARKDOWN_VIEW_OPTIONS.map(({ mode, label, title, icon: Icon }) => (
+                <SegmentedControlItem
+                  active={viewMode === mode}
+                  aria-pressed={viewMode === mode}
+                  aria-label={label}
+                  key={mode}
+                  title={title}
+                  onClick={() => onViewModeChange(mode)}
+                >
+                  <Icon size={15} />
+                  <span>{label}</span>
+                </SegmentedControlItem>
+              ))}
+            </SegmentedControl>
+            <Button variant="text" className="editor-save-action" onClick={onSaveNote} disabled={isBusy || !isDirty}>
+              <Save size={16} />
+              {isDirty ? "保存草稿" : "已保存"}
+            </Button>
+            <EditorMoreActionMenu
+              exportOptions={MARKDOWN_EXPORT_OPTIONS}
+              isBusy={isBusy}
+              logContext={{
+                event: "markdown_more_menu_toggle",
+                metadata: { isBusy, isDirty, viewMode },
+              }}
+              onExportFile={onExportFile}
+              onOpenHistory={onOpenHistory}
+              onRename={onRenameNote}
+              onDelete={onDeleteNote}
             />
-          ) : null}
-          {viewMode !== "preview" ? (
-            <VoiceDictationButton
-              getTextarea={() => editorRef.current}
-              onValueChange={onContentChange}
-              onNotice={onNotice}
-              disabled={isBusy}
-            />
-          ) : null}
-          <SegmentedControl aria-label="Markdown 视图模式">
-            {MARKDOWN_VIEW_OPTIONS.map(({ mode, label, title, icon: Icon }) => (
-              <SegmentedControlItem
-                active={viewMode === mode}
-                key={mode}
-                title={title}
-                onClick={() => onViewModeChange(mode)}
-              >
-                <Icon size={15} />
-                <span>{label}</span>
-              </SegmentedControlItem>
-            ))}
-          </SegmentedControl>
-          <Button variant="text" onClick={onSaveNote} disabled={isBusy || !isDirty}>
-            <Save size={16} />
-            {isDirty ? "保存草稿" : "已保存"}
-          </Button>
-          <EditorMoreActionMenu
-            exportOptions={MARKDOWN_EXPORT_OPTIONS}
-            isBusy={isBusy}
-            logContext={{
-              event: "markdown_more_menu_toggle",
-              metadata: { isBusy, isDirty, viewMode },
-            }}
-            onExportFile={onExportFile}
-            onOpenHistory={onOpenHistory}
-            onRename={onRenameNote}
-            onDelete={onDeleteNote}
-          />
           </>
         }
       />
 
-      <div className={`relative min-w-0 ${tagEditorOpen ? "z-menu" : ""}`} ref={tagEditorRef}>
+      <div className={`editor-content-column relative min-w-0 ${tagEditorOpen ? "z-menu" : ""}`} ref={tagEditorRef}>
         <EditorMetaStrip
+          actions={
+            <>
+              {onSelectSession && <RelatedSessionsButton sessions={sessions} file={{ id: note.id, knowledgeBaseId: note.knowledgeBaseId, path: note.path }} onSelectSession={onSelectSession} />}
+              {viewMode !== "preview" && <VoiceDictationButton getTextarea={() => editorRef.current} onValueChange={onContentChange} onNotice={onNotice} disabled={isBusy} />}
+            </>
+          }
           items={[
             { icon: <Clock3 size={14} />, text: note.updatedAt },
             { icon: <PencilLine size={14} />, text: `${stats.words} 字，约 ${stats.minutes} 分钟` },
@@ -285,11 +284,6 @@ export function EditorPane({
               ariaExpanded: tagEditorOpen,
               onClick: () => setTagEditorOpen((open) => !open),
             },
-            {
-              icon: <Save size={14} />,
-              text: isDirty ? "未保存草稿" : "已保存到本地",
-              className: isDirty ? "dirty-indicator" : undefined,
-            },
           ]}
         />
         {tagEditorOpen ? (
@@ -302,7 +296,7 @@ export function EditorPane({
         ) : null}
       </div>
 
-      <div className={viewMode === "split" ? "grid min-h-0 min-w-0 gap-3 grid-cols-1 min-[761px]:grid-cols-2" : "grid min-h-0 min-w-0 gap-3 grid-cols-1"}>
+      <div className={`editor-body${viewMode === "split" ? " is-split" : ""}`}>
         {shouldShowEditor && (
           <LineNumberedTextarea
             ref={editorRef}
@@ -324,7 +318,7 @@ export function EditorPane({
         )}
         {shouldShowPreview && (
           <MarkdownPreview
-            content={note.content}
+            content={readingContent}
             knowledgeBase={knowledgeBase}
             note={note}
             previewRef={previewRef}
