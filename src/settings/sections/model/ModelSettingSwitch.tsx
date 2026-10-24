@@ -19,7 +19,7 @@ export function ModelSettingSwitch({ checked, onChange, label, disabled, describ
       onClick={() => onChange(!checked)}
       className={cn(
         "h-5 min-h-5 w-9 rounded-full border-0 p-0.5",
-        checked ? "bg-accent hover:enabled:bg-accent-strong" : "bg-border-strong hover:enabled:bg-ink-soft",
+        checked ? "bg-ink hover:enabled:bg-ink-strong" : "bg-border-strong hover:enabled:bg-ink-soft",
       )}
     >
       <span aria-hidden="true" className={cn(

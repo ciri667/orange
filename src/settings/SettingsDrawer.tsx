@@ -26,6 +26,7 @@ import { logDebug, logError, logInfo } from "../shared/logger";
 import { ModalBackdrop, ModalHeader } from "../shared/Modal";
 import { cn } from "../shared/cn";
 import { OverflowTooltipText } from "../shared/OverflowTooltipText";
+import { SelectControl } from "../shared/SelectControl";
 import {
   addManualProviderModel,
   removeManualProviderModel,
@@ -1043,9 +1044,9 @@ export function SettingsDrawer({
     const groupItems = settingsNavItems.filter((item) => item.group === group);
 
     return (
-      <div className="grid gap-2 max-[1100px]:min-w-0 max-[1100px]:shrink-0" key={group}>
+      <div className="grid min-w-0 gap-2" key={group}>
         <p className={sectionLabelClassName}>{group}</p>
-        <div className="grid gap-[7px] max-[1100px]:flex max-[1100px]:gap-2">
+        <div className="grid gap-[7px]">
           {groupItems.map((item) => {
             const SectionIcon = item.icon;
 
@@ -1249,7 +1250,7 @@ export function SettingsDrawer({
   return (
     <ModalBackdrop onClose={() => void handleClose()} className="z-settings p-6 max-[760px]:p-2.5">
       <aside
-        className="settings-drawer relative grid h-[min(820px,calc(100vh-40px))] w-[min(1120px,calc(100vw-40px))] min-h-0 isolate grid-rows-[auto_minmax(0,1fr)] overflow-hidden rounded-2xl border border-border bg-surface shadow-app max-[760px]:h-[calc(100vh-20px)] max-[760px]:w-[min(100%,calc(100vw-20px))]"
+        className="settings-drawer relative grid h-[min(820px,calc(100vh-40px))] w-[min(1120px,calc(100vw-40px))] min-h-0 isolate grid-rows-[auto_minmax(0,1fr)] overflow-hidden rounded-panel border border-border bg-surface shadow-app max-[760px]:h-[calc(100vh-20px)] max-[760px]:w-[min(100%,calc(100vw-20px))]"
         aria-label="设置"
         onMouseDown={(event) => event.stopPropagation()}
       >
@@ -1268,10 +1269,21 @@ export function SettingsDrawer({
           </Button>
         </ModalHeader>
 
-        <div className="grid min-h-0 min-w-0 grid-cols-[260px_minmax(0,1fr)]">
-          <nav className="grid min-h-0 min-w-0 content-start gap-4 overflow-auto border-r border-border bg-app p-3" aria-label="设置项">
+        <div className="grid min-h-0 min-w-0 grid-cols-[240px_minmax(0,1fr)] max-[760px]:grid-cols-1 max-[760px]:grid-rows-[auto_minmax(0,1fr)]">
+          <nav className="grid min-h-0 min-w-0 content-start gap-4 overflow-auto border-r border-border bg-app p-3 max-[760px]:hidden" aria-label="设置项">
             {SETTINGS_SECTION_GROUPS.map((group) => renderNavigationGroup(group))}
           </nav>
+          {/* 小窗口以同一份分区目录提供选择，不把正文挤在固定宽度导航旁。 */}
+          <label className="hidden gap-2 border-b border-border bg-app px-4 py-3 text-xs text-ink-muted max-[760px]:grid">
+            设置分区
+            <SelectControl value={activeSection} onChange={(event) => void handleActiveSectionChange(event.target.value as SettingsSectionId)}>
+              {SETTINGS_SECTION_GROUPS.map((group) => (
+                <optgroup key={group} label={group}>
+                  {settingsNavItems.filter((item) => item.group === group).map((item) => <option key={item.id} value={item.id}>{item.label}</option>)}
+                </optgroup>
+              ))}
+            </SelectControl>
+          </label>
           <main className="min-h-0 min-w-0 overflow-auto bg-surface p-5 max-[1100px]:p-4 max-[760px]:p-4" aria-label="设置主要内容"
             onBlur={(event) => {
               if (event.target instanceof HTMLInputElement || event.target instanceof HTMLTextAreaElement) void flushSettings();

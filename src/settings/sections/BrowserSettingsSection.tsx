@@ -78,7 +78,7 @@ export function BrowserSettingsSection({
               aria-valuetext={phase === "extracting" ? "下载完成，正在校验并解压安装" : percent === null ? `已下载 ${downloadedMb} MB，总大小未知` : `${percent}%`}
             >
               <div
-                className={cn("h-full rounded-full bg-accent transition-[width]", percent === null && "w-1/3 animate-pulse motion-reduce:animate-none")}
+                className={cn("h-full rounded-full bg-ink transition-[width]", percent === null && "w-1/3 animate-pulse motion-reduce:animate-none")}
                 style={percent === null ? undefined : { width: `${percent}%` }}
               />
             </div>

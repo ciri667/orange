@@ -1,10 +1,9 @@
 import { type ReactNode } from "react";
 import { cn } from "../shared/cn";
-import { sectionLabelClassName, settingsContentTitleClassName } from "../shared/ui";
+import { settingsContentTitleClassName } from "../shared/ui";
 
 /** 设置分区标题：左侧说明，右侧操作。 */
 export function SettingsSectionHeader({
-  kicker,
   title,
   titleId,
   description,
@@ -19,7 +18,6 @@ export function SettingsSectionHeader({
   return (
     <div className={settingsContentTitleClassName}>
       <div className="min-w-0">
-        <p className={sectionLabelClassName}>{kicker}</p>
         <h3 id={titleId} className="m-0 text-base font-semibold leading-tight text-ink-strong [overflow-wrap:anywhere]">
           {title}
         </h3>
