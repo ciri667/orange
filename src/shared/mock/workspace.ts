@@ -528,7 +528,19 @@ function createInitialSessions(): AgentSession[] {
 /** 返回浏览器开发态的完整工作台快照。 */
 export function createMockWorkspaceSnapshot(): WorkspaceSnapshot {
   return {
-    knowledgeBases: initialKnowledgeBases,
+    // 扫描总数从各类型数量汇总，避免演示界面的侧栏与设置明细不一致。
+    knowledgeBases: initialKnowledgeBases.map((knowledgeBase) => ({
+      ...knowledgeBase,
+      scanReport: knowledgeBase.scanReport
+        ? {
+            ...knowledgeBase.scanReport,
+            scannedFileCount: Object.values(knowledgeBase.scanReport.scannedByType).reduce(
+              (total, count) => total + count,
+              0,
+            ),
+          }
+        : undefined,
+    })),
     folders: initialFolders,
     notes: hydrateNoteHashes(initialNotes),
     documents: hydrateDocumentHashes(initialDocuments),
