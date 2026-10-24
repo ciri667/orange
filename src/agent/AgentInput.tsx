@@ -821,7 +821,7 @@ export function AgentInput({
     ? "已有一条排队指令，当前回合结束后发送"
     : isBusy
       ? "Enter 排队到当前回合之后；Esc 停止生成"
-      : "问橘记，或 @ 文件、/ 指令";
+      : "写下想法，或用 @ 文件、/ 指令";
   const sendTitle = queuedFollowUp ? "已有一条排队指令" : isBusy ? "排队到当前回合之后发送" : "发送";
   const showStopButton = isBusy;
   /** 规划模式开启、且最后一条回复确实是「执行计划」形状时才出横幅；问候、通用问答与澄清追问不满足形状，不打扰。 */
@@ -830,7 +830,7 @@ export function AgentInput({
 
   return (
     <footer
-      className="m-3 mt-1 flex min-w-0 shrink-0 flex-col gap-1 rounded-[18px] border border-border bg-surface px-3 py-2.5 shadow-app-soft"
+      className="agent-composer flex min-w-0 shrink-0 flex-col gap-2 rounded-panel border border-border-strong bg-surface p-3"
       onDragOver={handleComposerDragOver}
       onDrop={handleComposerDrop}
     >
@@ -939,7 +939,7 @@ export function AgentInput({
                 <button
                   className={cn(
                     "grid min-w-0 cursor-pointer grid-cols-[auto_minmax(0,1fr)_auto] items-center gap-[9px] rounded-md border border-transparent bg-transparent p-2 text-left text-ink",
-                    index === activeMentionFilePickerIndex && "bg-surface-muted",
+                    index === activeMentionFilePickerIndex && "border-border-strong bg-surface",
                   )}
                   key={file.id}
                   type="button"
@@ -980,7 +980,7 @@ export function AgentInput({
                       <button
                         className={cn(
                           "flex min-w-0 cursor-pointer items-center justify-between gap-2.5 rounded-md border border-transparent bg-transparent px-2 py-1.5 text-left text-ink",
-                          index === activeSkillPickerIndex && "bg-surface-muted",
+                          index === activeSkillPickerIndex && "border-border-strong bg-surface",
                         )}
                         data-picker-index={index}
                         key={item.key}
@@ -995,7 +995,7 @@ export function AgentInput({
                             <span className="grid min-w-0 gap-0.5">
                               <OverflowTooltipText
                                 as="strong"
-                                className="min-w-0 truncate text-[13px] font-semibold"
+                                className="min-w-0 truncate text-ui font-semibold"
                                 text={`/${item.command.name}${item.command.argumentHint ? ` ${item.command.argumentHint}` : ""}`}
                                 logArea="agent_command_picker_name"
                               />
@@ -1013,7 +1013,7 @@ export function AgentInput({
                             <span className="grid min-w-0 gap-0.5">
                               <OverflowTooltipText
                                 as="strong"
-                                className="min-w-0 truncate text-[13px] font-semibold"
+                                className="min-w-0 truncate text-ui font-semibold"
                                 text={item.skill.displayName}
                                 logArea="agent_skill_picker_name"
                               />
@@ -1055,91 +1055,92 @@ export function AgentInput({
           aria-label="Agent 输入"
         />
       </div>
-        <div className="flex min-w-0 items-center gap-2 pt-0.5">
-          <input
-            ref={imageFileInputRef}
-            type="file"
-            accept="image/png,image/jpeg,image/webp,image/gif"
-            multiple
-            className="hidden"
-            aria-hidden="true"
-            tabIndex={-1}
-            onChange={(event) => {
-              const files = Array.from(event.currentTarget.files ?? []);
-              event.currentTarget.value = "";
-              void appendDraftImages(files);
-            }}
+      {/* 模型名独占一行，长 Provider / Model 不再挤压权限、计划和发送入口。 */}
+      {modelConfig.enabled && enabledProviders.length > 0 && (
+        <div className="agent-composer-model" aria-label="本轮使用的模型">
+          <BrainCircuit size={14} className="shrink-0" />
+          <ModelCascadeSelector
+            value={turnModelSelection}
+            providers={enabledProviders}
+            defaultLabel={`跟随默认${followDefaultLabel ? `（${followDefaultLabel}）` : ""}`}
+            triggerPrefix=""
+            ariaLabel="本轮使用的模型"
+            onChange={onTurnModelSelectionChange}
+            logArea="agent_turn_model_cascade"
           />
-          <Button
-            variant="icon"
-            size="compact"
-            className="text-ink-muted hover:text-ink"
-            title="添加图片"
-            aria-label="添加图片"
-            disabled={Boolean(queuedFollowUp) || draftImages.length >= MAX_CONVERSATION_IMAGES}
-            onClick={() => imageFileInputRef.current?.click()}
-          >
-            <ImagePlus size={16} />
-          </Button>
-          <VoiceDictationButton
-            getTextarea={() => promptTextareaRef.current}
-            onValueChange={onPromptChange}
-            onNotice={onNotice}
-            disabled={Boolean(queuedFollowUp)}
-          />
-          {!activeSession.imIdentity && (
-            <AgentSecurityLevelControl
-              activeSession={activeSession}
-              agentSecurity={resolvedAgentSecurity}
-              isBusy={isBusy}
-              onSecurityLevelChange={onSecurityLevelChange}
-            />
-          )}
-          {!activeSession.imIdentity && (
-            <PlanModeToggle activeSession={activeSession} isBusy={isBusy} onPlanModeChange={onPlanModeChange} />
-          )}
-          <div className="ml-auto flex min-w-0 items-center justify-end gap-1.5">
-            {modelConfig.enabled && enabledProviders.length > 0 && (
-              <div className="inline-flex min-w-0 max-w-[220px] items-center gap-1.5 text-ink-muted" aria-label="本轮使用的模型">
-                <BrainCircuit size={14} />
-                <ModelCascadeSelector
-                  value={turnModelSelection}
-                  providers={enabledProviders}
-                  defaultLabel={`跟随默认${followDefaultLabel ? `（${followDefaultLabel}）` : ""}`}
-                  triggerPrefix=""
-                  ariaLabel="本轮使用的模型"
-                  onChange={onTurnModelSelectionChange}
-                  logArea="agent_turn_model_cascade"
-                />
-              </div>
-            )}
-            {showStopButton ? (
-              <Button
-                variant="primary"
-                size="compact"
-                tone="danger"
-                className="inline-grid size-8 min-h-8 min-w-8 shrink-0 place-items-center rounded-full border-transparent bg-danger p-0 hover:enabled:bg-danger disabled:opacity-[0.38]"
-                title="停止生成"
-                aria-label="停止生成"
-                onClick={onAbortTurn}
-              >
-                <Square size={12} fill="currentColor" />
-              </Button>
-            ) : (
-              <Button
-                variant="primary"
-                size="compact"
-                className="inline-grid size-8 min-h-8 min-w-8 shrink-0 place-items-center rounded-full border-transparent bg-accent p-0 hover:enabled:bg-accent-strong disabled:opacity-[0.38]"
-                title={sendTitle}
-                aria-label={sendTitle}
-                onClick={onSubmitPrompt}
-                disabled={(!prompt.trim() && !draftImages.length) || Boolean(queuedFollowUp)}
-              >
-                <ArrowRight size={16} />
-              </Button>
-            )}
-          </div>
         </div>
+      )}
+      <div className="agent-composer-actions flex min-w-0 items-center gap-1 pt-0.5">
+        <input
+          ref={imageFileInputRef}
+          type="file"
+          accept="image/png,image/jpeg,image/webp,image/gif"
+          multiple
+          className="hidden"
+          aria-hidden="true"
+          tabIndex={-1}
+          onChange={(event) => {
+            const files = Array.from(event.currentTarget.files ?? []);
+            event.currentTarget.value = "";
+            void appendDraftImages(files);
+          }}
+        />
+        <Button
+          variant="icon"
+          size="compact"
+          className="text-ink-muted hover:text-ink"
+          title="添加图片"
+          aria-label="添加图片"
+          disabled={Boolean(queuedFollowUp) || draftImages.length >= MAX_CONVERSATION_IMAGES}
+          onClick={() => imageFileInputRef.current?.click()}
+        >
+          <ImagePlus size={16} />
+        </Button>
+        <VoiceDictationButton
+          getTextarea={() => promptTextareaRef.current}
+          onValueChange={onPromptChange}
+          onNotice={onNotice}
+          disabled={Boolean(queuedFollowUp)}
+        />
+        {!activeSession.imIdentity && (
+          <AgentSecurityLevelControl
+            activeSession={activeSession}
+            agentSecurity={resolvedAgentSecurity}
+            isBusy={isBusy}
+            onSecurityLevelChange={onSecurityLevelChange}
+          />
+        )}
+        {!activeSession.imIdentity && (
+          <PlanModeToggle activeSession={activeSession} isBusy={isBusy} onPlanModeChange={onPlanModeChange} />
+        )}
+        <div className="ml-auto flex min-w-0 items-center justify-end gap-1.5">
+          {showStopButton ? (
+            <Button
+              variant="primary"
+              size="compact"
+              tone="danger"
+              className="inline-grid size-8 min-h-8 min-w-8 shrink-0 place-items-center rounded-full border-transparent bg-danger p-0 hover:enabled:bg-danger disabled:opacity-[0.38]"
+              title="停止生成"
+              aria-label="停止生成"
+              onClick={onAbortTurn}
+            >
+              <Square size={12} fill="currentColor" />
+            </Button>
+          ) : (
+            <Button
+              variant="primary"
+              size="compact"
+              className="inline-grid size-8 min-h-8 min-w-8 shrink-0 place-items-center rounded-full border-border-strong bg-surface p-0 text-ink-strong hover:enabled:border-ink-muted disabled:opacity-[0.38]"
+              title={sendTitle}
+              aria-label={sendTitle}
+              onClick={onSubmitPrompt}
+              disabled={(!prompt.trim() && !draftImages.length) || Boolean(queuedFollowUp)}
+            >
+              <ArrowRight size={16} />
+            </Button>
+          )}
+        </div>
+      </div>
       {previewImage ? (
         <ImageLightbox src={previewImage.src} alt={previewImage.alt} onClose={() => setPreviewImage(null)} />
       ) : null}

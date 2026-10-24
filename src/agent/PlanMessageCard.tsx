@@ -192,8 +192,6 @@ export function PlanMessageCard({
             collapsed
               ? {
                   maxHeight: PLAN_CARD_COLLAPSED_MAX_PX,
-                  maskImage: "linear-gradient(to bottom, #000 62%, transparent 100%)",
-                  WebkitMaskImage: "linear-gradient(to bottom, #000 62%, transparent 100%)",
                 }
               : undefined
           }

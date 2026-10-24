@@ -1086,6 +1086,122 @@ select:focus-visible {
     border-bottom: 1px solid var(--border);
   }
 }
+/* Agent 保持轻量停靠；模型和权限各有稳定位置，长名称不能推走发送。 */
+
+.agent-panel-header {
+  height: 36px;
+  min-height: 36px;
+  padding-inline: 14px;
+  border-bottom: 1px solid var(--border);
+  background: var(--surface-warm);
+}
+
+.agent-panel-context {
+  padding-inline: 14px;
+}
+
+.agent-panel-context [aria-label="当前会话摘要"] {
+  justify-content: flex-end;
+}
+
+.agent-message-list {
+  scrollbar-gutter: stable;
+}
+
+.agent-conversation-start {
+  display: grid;
+  align-content: start;
+  justify-items: start;
+  gap: 18px;
+  width: 100%;
+  max-width: 340px;
+  margin: 0 auto;
+  padding: 24px 0;
+}
+
+.conversation-source {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  padding: 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-control);
+  background: var(--surface-warm);
+}
+
+.conversation-starters {
+  display: grid;
+  width: 100%;
+  gap: 4px;
+}
+
+.conversation-starter {
+  min-height: 56px;
+  width: 100%;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 8px;
+  font-size: var(--font-ui);
+  font-weight: 400;
+  white-space: normal;
+}
+
+.conversation-starter-arrow {
+  transition: transform 140ms ease;
+}
+
+.conversation-starter:hover .conversation-starter-arrow {
+  transform: translate(2px, -2px);
+}
+
+.agent-message-list:has(.agent-conversation-start) {
+  display: flex;
+}
+
+.agent-composer {
+  margin: 4px 12px 12px;
+}
+
+.agent-composer:focus-within {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 2px rgba(var(--accent-rgb), 0.09);
+}
+
+.agent-composer textarea {
+  font-size: 13px;
+  min-height: 72px;
+  max-height: 200px;
+  line-height: 1.75;
+}
+
+.agent-composer-model {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 2px;
+  border-bottom: 1px solid var(--border);
+  color: var(--text-muted);
+}
+
+.agent-composer-model > div {
+  min-width: 0;
+  flex: 1;
+}
+
+.agent-composer-model button {
+  max-width: 100%;
+}
+
+.agent-composer-actions {
+  flex-wrap: wrap;
+  row-gap: 6px;
+}
+
+.agent-composer-actions > button {
+  flex-shrink: 0;
+}
 @media (max-width: 1180px) {
   html,
   body,

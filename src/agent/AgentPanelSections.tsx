@@ -65,6 +65,7 @@ import {
   shouldRenderTurnTrace,
 } from "./agentTrace";
 import { ToolCallList } from "./ToolCallList";
+import { AgentConversationStart } from "./AgentConversationStart";
 
 /** 会话摘要条只保留上下文占用和待确认写入。知识库范围由旁边的范围入口展示，文件不在这里绑定。 */
 export function AgentSessionSummary({
@@ -693,6 +694,9 @@ export function AgentMessageList({
   liveTurn,
   queuedFollowUp,
   onEditUserMessage,
+  readingNote,
+  knowledgeBaseName = "当前授权知识库",
+  onChoosePrompt,
 }: {
   activeSession: AgentSession;
   notes: Note[];
@@ -702,6 +706,9 @@ export function AgentMessageList({
   queuedFollowUp?: string | null;
   /** 编辑已发送的用户消息并重跑；IM 会话不提供。 */
   onEditUserMessage?: (messageId: string, prompt: string) => void;
+  readingNote?: Note;
+  knowledgeBaseName?: string;
+  onChoosePrompt?: (prompt: string, noteId?: string) => void;
 }) {
   const persistedIds = new Set(activeSession.messages.map((message) => message.id));
   const showLiveTurn =
@@ -732,7 +739,7 @@ export function AgentMessageList({
 
   return (
     <div
-      className="min-h-0 flex-1 overflow-auto px-4 py-4"
+      className="agent-message-list min-h-0 flex-1 overflow-auto px-4 py-4"
       aria-live="polite"
       ref={listRef}
       onScroll={(event) => {
@@ -741,10 +748,7 @@ export function AgentMessageList({
       }}
     >
       {activeSession.messages.length === 0 && !showLiveTurn && !queuedFollowUp && (
-        <div className="grid min-h-full place-content-center justify-items-center gap-1 px-6 py-10 text-center text-ink-muted">
-          <p className="m-0 text-sm text-ink-muted">从下面开始提问</p>
-          <span className="text-xs leading-[1.45] text-ink-soft">@ 引用文件，/ 选择指令或 Skill</span>
-        </div>
+        <AgentConversationStart note={readingNote} knowledgeBaseName={knowledgeBaseName} onChoosePrompt={onChoosePrompt ?? (() => {})} />
       )}
       {activeSession.messages.map((message, index) => (
         <AgentMessageItem
@@ -929,7 +933,7 @@ function AgentMessageItem({
           queued && "opacity-80",
         )}
       >
-        <div className="max-w-[86%] rounded-[18px] bg-surface-muted px-3.5 py-2.5 text-[13px] leading-[1.62] text-ink">
+        <div className="max-w-[90%] rounded-xl border border-border bg-surface px-3.5 py-2.5 text-sm leading-[1.75] text-ink">
           {statusChip ? <div className="mb-1">{statusChip}</div> : null}
           {mentionedFiles}
           {imageBlock}

@@ -25,6 +25,7 @@ export function RelatedSessionsButton({
     <Menu open={open} onClose={() => setOpen(false)}>
       <Button
         variant="text"
+        size="compact"
         title="打开引用或改过这个文件的会话"
         aria-haspopup="menu"
         aria-expanded={open}

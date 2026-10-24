@@ -1,9 +1,10 @@
 import { History, Book, Play, Plus, ShieldAlert, X } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import { Button } from "../shared/Button";
+import { OrangeMark } from "../shared/OrangeMark";
 import { Checkbox } from "../shared/Checkbox";
 import { OverflowTooltipText } from "../shared/OverflowTooltipText";
-import { getImSessionSourceLabel } from "../shared/selectors";
+import { getImSessionSourceLabel, getSessionKnowledgeBaseLabel } from "../shared/selectors";
 import { useDismissable } from "../shared/useDismissable";
 import type {
   AgentContextCompactionReport,
@@ -34,6 +35,8 @@ export function AgentPanel({
   activeKnowledgeBase,
   knowledgeBases,
   notes,
+  readingNote,
+  primaryTitle = false,
   documents,
   prompt,
   skills,
@@ -96,6 +99,10 @@ export function AgentPanel({
   activeKnowledgeBase: KnowledgeBase;
   knowledgeBases: KnowledgeBase[];
   notes: Note[];
+  /** 当前编辑区的笔记只作起点；使用前仍检查是否在本会话可 @ 的范围内。 */
+  readingNote?: Note;
+  /** 单栏对话视图用会话名作为页面主标题；并排时由笔记承担主标题。 */
+  primaryTitle?: boolean;
   /** 所有已索引普通文档，用于历史 @ 文件名称回显。 */
   documents: WorkspaceDocument[];
   prompt: string;
@@ -189,9 +196,10 @@ export function AgentPanel({
 
   return (
     <aside ref={panelRef} className="agent-panel" aria-label="AI 协作区">
-      <header className="flex h-11 shrink-0 items-center justify-between gap-2 border-b border-border px-3">
+      <header className="agent-panel-header flex shrink-0 items-center justify-between gap-2">
         <div className="flex min-w-0 flex-1 items-center gap-2">
-          <OverflowTooltipText as="h2" className="m-0 block truncate text-sm font-medium text-ink-strong" text={activeSession.title} logArea="agent_session_title" />
+          <OrangeMark className="size-5 shrink-0" />
+          <OverflowTooltipText as={primaryTitle ? "h1" : "h2"} className="m-0 block truncate text-sm font-medium text-ink-strong" text={activeSession.title} logArea="agent_session_title" />
           {activeImSourceLabel && (
             <span className="max-w-full shrink-0 truncate rounded-full border border-border px-1.5 py-px text-[11px] font-medium text-ink-muted">
               {activeImSourceLabel}
@@ -217,7 +225,7 @@ export function AgentPanel({
             <History size={16} />
             {inFlightSessionIds.length > 0 && (
               <span
-                className="absolute -top-0.5 -right-0.5 flex size-3.5 items-center justify-center rounded-full bg-accent text-[9px] font-bold text-white"
+                className="absolute -top-0.5 -right-0.5 flex size-3.5 items-center justify-center rounded-full bg-ink text-[9px] font-bold text-white"
                 aria-label={`${inFlightSessionIds.length} 个任务运行中`}
               >
                 {inFlightSessionIds.length}
@@ -230,7 +238,7 @@ export function AgentPanel({
         </div>
       </header>
 
-      <div className="flex min-w-0 shrink-0 items-center gap-1.5 px-3 py-2" aria-label="当前会话上下文">
+      <div className="agent-panel-context flex min-w-0 shrink-0 items-center gap-1.5 py-2" aria-label="当前会话上下文">
         <AgentScopeSelector
           activeSession={activeSession}
           activeKnowledgeBase={activeKnowledgeBase}
@@ -285,6 +293,16 @@ export function AgentPanel({
         notes={notes}
         queuedFollowUp={queuedFollowUpInList}
         onEditUserMessage={onEditUserMessage}
+        readingNote={readingNote && mentionedFiles.some((file) => file.id === readingNote.id) ? readingNote : undefined}
+        knowledgeBaseName={getSessionKnowledgeBaseLabel(activeSession, knowledgeBases)}
+        onChoosePrompt={(nextPrompt, noteId) => {
+          // 只附带已授权文件，不更改会话范围；发送继续使用原有确认与工具流程。
+          if (noteId && mentionedFiles.some((file) => file.id === noteId)) {
+            onSelectedMentionedFileIdsChange([...new Set([...selectedMentionedFileIds, noteId])]);
+          }
+          onPromptChange(nextPrompt);
+          requestAnimationFrame(() => panelRef.current?.querySelector<HTMLTextAreaElement>('textarea[aria-label="Agent 输入"]')?.focus());
+        }}
       />
 
       {activeSession.pendingExecution?.status === "pending" && (

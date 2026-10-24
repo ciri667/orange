@@ -26,14 +26,15 @@ export function CitationList({ citations }: { citations?: Citation[] }) {
       <span className="text-[11px] text-ink-soft">{summary}</span>
       {noteCitations.map((citation) => (
         <span
-          className="inline-flex max-w-[280px] flex-col items-start rounded-full border border-border bg-surface px-2 py-1 text-[11px] text-ink-muted"
+          className="inline-flex min-w-0 max-w-[min(280px,100%)] flex-col items-start rounded-full border border-border bg-surface px-2 py-1 text-[11px] text-ink-muted"
           key={`note-${citation.noteId}-${citation.path}`}
           title={`${citation.knowledgeBaseName} · ${citation.path}${citation.location ? ` · ${citation.location}` : ""}\n${citation.snippet}`}
         >
-          <OverflowTooltipText text={citation.title} logArea="agent_citation_title" />
+          {/* 标题和位置都限制在引用条内，避免长路径撑出整个对话栏的横向滚动。 */}
+          <OverflowTooltipText className="block max-w-full truncate" text={citation.title} logArea="agent_citation_title" />
           {citation.location ? (
             <span
-              className="block truncate text-[11px] text-ink-soft"
+              className="block max-w-full truncate text-[11px] text-ink-soft"
               title={citation.location}
             >
               {citation.location}
@@ -43,13 +44,13 @@ export function CitationList({ citations }: { citations?: Citation[] }) {
       ))}
       {webCitations.map((citation) => (
         <MarkdownLink
-          className="inline-flex max-w-[220px] items-center rounded-full border border-border bg-surface px-2 py-0.5 text-[11px] text-ink-muted"
+          className="inline-flex min-w-0 max-w-[min(220px,100%)] items-center rounded-full border border-border bg-surface px-2 py-0.5 text-[11px] text-ink-muted"
           href={citation.url}
           key={`web-${citation.url}`}
           source="agent_message"
           title={citation.publishedAt ? `${citation.url} · ${citation.publishedAt}\n${citation.snippet}` : `${citation.url}\n${citation.snippet}`}
         >
-          <OverflowTooltipText text={citation.title} logArea="agent_citation_title" />
+          <OverflowTooltipText className="block min-w-0 truncate" text={citation.title} logArea="agent_citation_title" />
         </MarkdownLink>
       ))}
     </section>
