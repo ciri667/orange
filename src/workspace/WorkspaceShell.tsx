@@ -57,6 +57,7 @@ import { useSessionActions } from "./useSessionActions";
 import { useWorkspaceBootData } from "./useWorkspaceBootData";
 import { useWorkspaceDrafts } from "./useWorkspaceDrafts";
 import { useWorkspaceSettingsActions } from "./useWorkspaceSettingsActions";
+import { useCompactWorkspaceView } from "./useCompactWorkspaceView";
 
 /** 将未知异常统一转换为可展示文案，避免启动错误页渲染空对象。 */
 function formatErrorMessage(error: unknown) {
@@ -71,6 +72,7 @@ interface PendingConfirmation extends ConfirmDialogConfig {
 }
 
 export function WorkspaceShell() {
+  const compactView = useCompactWorkspaceView();
   /** 左侧目录搜索词，只影响当前前端文件树过滤，不写入持久化。 */
   const [searchTerm, setSearchTerm] = useState("");
   /** 目录树折叠状态由前端维护，切换知识库、重扫或恢复会话时重置。 */
@@ -841,6 +843,8 @@ export function WorkspaceShell() {
         activeKnowledgeBase={activeKnowledgeBase}
         knowledgeBases={currentSnapshot.knowledgeBases}
         notes={currentSnapshot.notes}
+        readingNote={activeNote}
+        primaryTitle={compactView.singlePane && compactView.pane === "agent"}
         documents={currentSnapshot.documents}
         prompt={agentPrompt}
         skills={agentSkills}
@@ -988,18 +992,26 @@ export function WorkspaceShell() {
         不必再靠悬浮收起态图标栏、从浮层里点「展开」。
       */}
       <WorkspaceTopBar
-        sidebarOpen={regionOpen.sidebar}
+        sidebarOpen={compactView.compact ? compactView.sidebarOpen : regionOpen.sidebar}
         browserEnabled={browserEnabled}
         browserOpen={isBrowserPanelOpen}
         onToggleBrowser={() => setIsBrowserPanelOpen((open) => !open)}
-        onToggleSidebar={() => toggleRegion("sidebar")}
+        onToggleSidebar={() => compactView.compact ? compactView.setSidebarOpen((open) => !open) : toggleRegion("sidebar")}
+        compact={compactView.compact}
+        compactPane={compactView.pane}
+        onCompactPaneChange={(pane) => {
+          compactView.showPane(pane);
+          if (pane === "agent") setAgentOpen(true);
+        }}
       />
       <main
-        className={`workspace-grid${resizingPane ? " is-resizing" : ""}${agentOpen ? " agent-open" : ""}`}
+        className={`workspace-grid${resizingPane ? " is-resizing" : ""}${agentOpen ? " agent-open" : ""}${compactView.compact && compactView.sidebarOpen ? " sidebar-overlay-open" : ""}`}
+        data-compact-pane={compactView.pane}
         ref={workspaceRef}
         style={{ gridTemplateColumns }}
       >
-        {regionOpen.sidebar ? (
+        {compactView.compact && compactView.sidebarOpen && <button className="workspace-sidebar-backdrop" aria-label="关闭知识库导航" onClick={() => compactView.setSidebarOpen(false)} />}
+        {regionOpen.sidebar || compactView.compact ? (
         <KnowledgeBaseSidebar
           knowledgeBases={currentSnapshot.knowledgeBases}
           activeKnowledgeBase={activeKnowledgeBase}
@@ -1021,10 +1033,12 @@ export function WorkspaceShell() {
           onAddKnowledgeBase={handleAddKnowledgeBase}
           onToggleFolder={handleToggleFolder}
           onSelectNote={(noteId) => {
+            compactView.showPane("editor");
             setIsSchedulesOpen(false);
             handleSelectNote(noteId);
           }}
           onSelectDocument={(documentId) => {
+            compactView.showPane("editor");
             setIsSchedulesOpen(false);
             handleSelectDocument(documentId);
           }}
@@ -1040,13 +1054,14 @@ export function WorkspaceShell() {
           onCreateProjectInstruction={() => handleCreateOrOpenProjectInstruction()}
           onRefreshKnowledgeBase={handleRescanKnowledgeBase}
           onCreateSession={() => {
+            compactView.showPane("agent");
             setIsSchedulesOpen(false);
             if (!agentOpen) {
               setAgentOpen(true);
             }
             void handleCreateSession();
           }}
-          onOpenSchedules={() => setIsSchedulesOpen(true)}
+          onOpenSchedules={() => { compactView.showPane("editor"); setIsSchedulesOpen(true); }}
           schedulesActive={isSchedulesOpen}
           onOpenSettings={handleOpenSettings}
           sessions={currentSnapshot.sessions}
@@ -1054,6 +1069,7 @@ export function WorkspaceShell() {
           inFlightSessionIds={inFlightSessionIds}
           queuedSessionIds={queuedSessionIds}
           onSelectSession={(sessionId) => {
+            compactView.showPane("agent");
             setIsSchedulesOpen(false);
             if (!agentOpen) {
               setAgentOpen(true);
@@ -1132,8 +1148,15 @@ export function WorkspaceShell() {
             activeTab={activeEditorTab}
             onSelect={(tab) => activateEditorTab(tab, "tab")}
             onClose={closeEditorTab}
-            agentOpen={agentOpen}
-            onToggleAgent={handleToggleAgentPanel}
+            agentOpen={agentOpen && !compactView.singlePane}
+            onToggleAgent={() => {
+              if (compactView.singlePane) {
+                compactView.showPane("agent");
+                setAgentOpen(true);
+              } else {
+                handleToggleAgentPanel();
+              }
+            }}
           />
           <div className="editor-file-panel" id="editor-file-panel" role="tabpanel" aria-label="当前文件内容">
             {activeDocument ? renderDocumentPane() : renderEditorPane()}

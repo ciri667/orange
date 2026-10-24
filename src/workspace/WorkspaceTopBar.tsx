@@ -7,6 +7,8 @@ import { cn } from "../shared/cn";
 import { useDismissable } from "../shared/useDismissable";
 import { isTauriRuntime } from "../shared/api/runtime";
 import { logError } from "../shared/logger";
+import type { CompactWorkspacePane } from "./useCompactWorkspaceView";
+import { OrangeMark } from "../shared/OrangeMark";
 
 /** 顶栏一个下拉菜单的声明。 */
 export interface TopBarMenuItem {
@@ -72,6 +74,10 @@ export interface WorkspaceTopBarProps {
   browserEnabled?: boolean;
   browserOpen?: boolean;
   onToggleBrowser?: () => void;
+  /** 窄窗口侧栏用可关闭的导航层，笔记和对话以标签切换。 */
+  compact?: boolean;
+  compactPane?: CompactWorkspacePane;
+  onCompactPaneChange?: (pane: CompactWorkspacePane) => void;
 }
 
 /**
@@ -90,7 +96,7 @@ function TopBarMenu({ menu }: { menu: (typeof TOP_BAR_MENUS)[number] }) {
       <button
         type="button"
         className={cn(
-          "inline-flex min-h-7 items-center rounded-small border-0 bg-transparent px-2.5 text-[13px] text-ink-muted",
+          "inline-flex min-h-7 items-center rounded-small border-0 bg-transparent px-2.5 text-ui text-ink-muted",
           "hover:bg-surface-hover hover:text-ink",
           open && "bg-surface-muted text-ink",
         )}
@@ -148,7 +154,7 @@ function runWindowCommand(command: string, action: () => Promise<void>) {
  * Windows 关闭系统装饰后，这里负责拖拽和窗口控制；macOS 用 Overlay 把系统红绿灯
  * 叠进同一行，因此不需要自绘窗口控制。
  */
-export function WorkspaceTopBar({ sidebarOpen, onToggleSidebar, browserEnabled, browserOpen, onToggleBrowser }: WorkspaceTopBarProps) {
+export function WorkspaceTopBar({ sidebarOpen, onToggleSidebar, browserEnabled, browserOpen, onToggleBrowser, compact, compactPane, onCompactPaneChange }: WorkspaceTopBarProps) {
   const [platform, setPlatform] = useState<DesktopPlatform | null>(null);
 
   useEffect(() => {
@@ -172,10 +178,11 @@ export function WorkspaceTopBar({ sidebarOpen, onToggleSidebar, browserEnabled, 
   return (
     <header
       className={cn(
-        "flex min-h-11 shrink-0 select-none items-center gap-2 border-b border-border bg-surface px-2",
+        "workspace-topbar flex shrink-0 select-none items-center gap-2",
         platform === "macos" && "pl-[76px]",
       )}
       aria-label="工作台标题栏"
+      data-platform={platform ?? undefined}
       onPointerDown={handleDragStart}
       onDoubleClick={(event) => {
         if (isTauriRuntime() && !isTitleBarControl(event.target)) {
@@ -184,22 +191,19 @@ export function WorkspaceTopBar({ sidebarOpen, onToggleSidebar, browserEnabled, 
       }}
     >
       <div className="flex shrink-0 items-center gap-2 pl-1" data-no-drag>
-        <div className="grid size-6 place-items-center overflow-hidden rounded-md">
-          <img className="block size-full object-contain" src="/orange-logo.svg" alt="" />
-        </div>
-        <strong className="text-[14px] font-semibold text-ink-strong">橘记</strong>
+        <OrangeMark className="size-7" />
+        <strong className="text-sm font-semibold tracking-tight text-ink-strong">橘记</strong>
       </div>
 
       <Button
         variant="icon"
-        className="max-[760px]:hidden"
         data-no-drag
         title={sidebarOpen ? "收起知识库栏" : "展开知识库栏"}
         aria-label={sidebarOpen ? "收起知识库栏" : "展开知识库栏"}
         aria-pressed={sidebarOpen}
         onClick={onToggleSidebar}
       >
-        <PanelLeftClose size={16} />
+        <PanelLeftClose size={16} className={compact && !sidebarOpen ? "rotate-180" : undefined} />
       </Button>
 
       <nav className="flex min-w-0 items-center gap-0.5" aria-label="主菜单">
@@ -207,6 +211,11 @@ export function WorkspaceTopBar({ sidebarOpen, onToggleSidebar, browserEnabled, 
           <TopBarMenu key={menu.id} menu={menu} />
         ))}
       </nav>
+
+      <div className="compact-workspace-tabs" aria-label="工作区切换" data-no-drag>
+        <Button className={cn("px-3 text-sm", compactPane === "editor" && "border-border-strong font-medium")} aria-pressed={compactPane === "editor"} onClick={() => onCompactPaneChange?.("editor")}>笔记</Button>
+        <Button className={cn("px-3 text-sm", compactPane === "agent" && "border-border-strong font-medium")} aria-pressed={compactPane === "agent"} onClick={() => onCompactPaneChange?.("agent")}>对话</Button>
+      </div>
 
       {browserEnabled && <Button variant="ghost" size="compact" className="ml-auto" data-no-drag aria-label={browserOpen ? "收起浏览器面板" : "打开浏览器面板"} aria-pressed={browserOpen} onClick={onToggleBrowser}><Globe size={14} />浏览器</Button>}
 

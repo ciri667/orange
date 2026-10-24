@@ -102,9 +102,9 @@ html,
 body,
 #root {
   width: 100%;
-  min-width: 960px;
+  min-width: 0;
   height: 100%;
-  min-height: 640px;
+  min-height: 0;
   margin: 0;
 }
 
@@ -255,7 +255,7 @@ select:focus-visible {
   min-width: 0;
   min-height: 0;
   flex: 1;
-  grid-template-columns: minmax(220px, 260px) 10px minmax(440px, 1fr) 10px minmax(320px, 400px);
+  grid-template-columns: 248px 10px minmax(0, 1fr) 10px 360px;
   gap: 0;
   overflow: hidden;
   padding: 0;
@@ -758,6 +758,11 @@ select:focus-visible {
   touch-action: none;
 }
 
+/* 拖拽命中区域保持 10px，仅让 1px 分隔线可见，三栏共享连续的背景。 */
+.workspace-resizer-sidebar {
+  background: linear-gradient(to right, var(--app-bg) 50%, var(--surface) 50%);
+}
+
 .workspace-resizer::before {
   position: absolute;
   top: 0;
@@ -852,6 +857,22 @@ select:focus-visible {
 
 *::-webkit-scrollbar-track {
   background: transparent;
+}
+
+/* 工作台标题栏与导航：连续色面不使用外围卡片。 */
+
+.workspace-topbar {
+  height: 44px;
+  min-height: 44px;
+  border-bottom: 1px solid var(--border);
+  background: var(--app-bg);
+  padding-inline: 10px;
+}
+
+/* macOS 的原生红绿灯叠在标题栏内，不能被通用 padding-inline 覆盖。 */
+
+.workspace-topbar[data-platform="macos"] {
+  padding-left: 76px;
 }
 
 /* 文件头共用一个工具行；标题、元信息与正文共用同一条内容列。 */
@@ -1086,6 +1107,7 @@ select:focus-visible {
     border-bottom: 1px solid var(--border);
   }
 }
+
 /* Agent 保持轻量停靠；模型和权限各有稳定位置，长名称不能推走发送。 */
 
 .agent-panel-header {
@@ -1202,68 +1224,85 @@ select:focus-visible {
 .agent-composer-actions > button {
   flex-shrink: 0;
 }
-@media (max-width: 1180px) {
-  html,
-  body,
-  #root {
-    min-width: 900px;
-  }
 
+.compact-workspace-tabs {
+  display: none;
+}
+
+.workspace-sidebar-backdrop {
+  position: absolute;
+  inset: 0;
+  z-index: var(--z-menu);
+  border: 0;
+  background: rgba(var(--ink-rgb), 0.16);
+}
+
+@media (max-width: 1100px) {
+  /* 覆盖导航不占列；不把临时的小窗口显隐写回桌面分栏偏好。 */
   .workspace-grid {
-    padding: 0;
+    grid-template-columns: minmax(0, 1fr) 10px minmax(300px, 0.85fr) !important;
+  }
+  .workspace-grid:not(.agent-open) {
+    grid-template-columns: minmax(0, 1fr) 44px !important;
+  }
+  .workspace-grid > .sidebar, .workspace-grid > .region-rail-left, .workspace-resizer-sidebar {
+    display: none;
+  }
+  .workspace-grid.sidebar-overlay-open > .sidebar {
+    position: absolute;
+    inset: 0 auto 0 0;
+    z-index: calc(var(--z-menu) + 1);
+    display: flex;
+    width: min(300px, calc(100% - 32px));
+    border-right: 1px solid var(--border);
+    box-shadow: var(--shadow);
   }
 }
 
-@media (max-width: 980px) {
-  html,
-  body,
-  #root {
-    min-width: 760px;
+@media (max-width: 760px) {
+  .workspace-topbar {
+    gap: 4px;
+    padding-inline: 8px;
   }
-
+  .workspace-topbar > nav[aria-label="主菜单"] {
+    display: none;
+  }
+  .compact-workspace-tabs {
+    display: flex;
+    margin-left: auto;
+    align-items: center;
+    gap: 2px;
+    padding: 2px;
+    border-radius: var(--radius-control);
+    background: var(--surface-muted);
+  }
+  .compact-workspace-tabs button {
+    min-height: 28px;
+    padding-inline: 10px;
+    font-size: 12px;
+  }
+  .workspace-grid, .workspace-grid.agent-open, .workspace-grid:not(.agent-open) {
+    grid-template-columns: minmax(0, 1fr) !important;
+  }
+  .workspace-grid > .workspace-resizer, .workspace-grid > .region-rail-right {
+    display: none;
+  }
+  .workspace-grid[data-compact-pane="agent"] > .editor-workbench, .workspace-grid[data-compact-pane="editor"] > .agent-panel {
+    display: none;
+  }
+  .agent-conversation-start {
+    padding: 20px 0;
+  }
+  .browser-panel.browser-panel-floating {
+    width: 100%;
+  }
   .settings-drawer [data-confirm-overlay] {
     padding: 12px;
   }
 }
 
-@media (max-width: 900px) {
-  .editor-workbench {
-    gap: 8px;
-  }
-}
-
-@media (max-width: 760px) {
-  html,
-  body,
-  #root {
-    min-width: 0;
-  }
-
-  /* 窄屏隐藏资料库和分隔条；编辑区仍占中间，Agent 打开时并排停靠。 */
-  .workspace-grid {
-    grid-template-columns: minmax(0, 1fr) !important;
-    overflow: auto;
-  }
-
-  .workspace-grid.agent-open {
-    grid-template-columns: minmax(0, 1fr) minmax(260px, 38vw) !important;
-  }
-
-  .workspace-grid > .sidebar,
-  .workspace-grid > .workspace-resizer-sidebar,
-  .workspace-grid > .workspace-resizer-agent {
-    display: none;
-  }
-
-  .settings-drawer [data-confirm-overlay] {
-    padding: 10px;
-  }
-}
-
 @media (prefers-reduced-motion: reduce) {
-  *,
-  *::before,
-  *::after {
+  *, *::before, *::after {
     animation-duration: 0.001ms !important;
     scroll-behavior: auto !important;
     transition-duration: 0.001ms !important;

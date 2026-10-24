@@ -43,16 +43,16 @@ const DEFAULT_REGION_OPEN_STATE: RegionOpenState = {
   agent: true,
 };
 
-/** 各区域默认激活的条目，决定收起态图标栏初始高亮和浮层内容。 */
+/** 新工作区从资料开始；已保存的会话/文件选择仍优先于这个默认值。 */
 const DEFAULT_REGION_ACTIVE_ITEMS: RegionActiveItems = {
-  sidebar: "sessions",
+  sidebar: "files",
   agent: "main",
 };
 
 /** 默认布局沿用三栏宽度；Agent 默认展开，让协作区成为一等停靠栏。 */
 const DEFAULT_WORKSPACE_LAYOUT: WorkspaceLayoutSizes = {
-  sidebarWidth: 285,
-  agentWidth: 380,
+  sidebarWidth: 248,
+  agentWidth: 360,
   agentOpen: true,
   regions: DEFAULT_REGION_OPEN_STATE,
   activeItems: DEFAULT_REGION_ACTIVE_ITEMS,
@@ -347,21 +347,14 @@ function clampWorkspaceLayoutSizes(
   return { ...nextSizes, sidebarWidth, agentWidth };
 }
 
-/** 切换单个区域显隐并重新夹取尺寸；agent 区域同步派生字段，兼容既有调用点。 */
+/** 切换区域显隐时保留用户栏宽；临时窗口约束由渲染尺寸承担。 */
 function setRegionOpenState(
   currentSizes: WorkspaceLayoutSizes,
   regionId: RegionId,
   open: boolean,
-  containerWidth: number,
 ): WorkspaceLayoutSizes {
   const regions = { ...currentSizes.regions, [regionId]: open };
-  const nextSizes = { ...currentSizes, regions, agentOpen: regions.agent };
-
-  return clampWorkspaceLayoutSizes(
-    nextSizes,
-    containerWidth,
-    regionId === "sidebar" || regionId === "agent" ? regionId : undefined,
-  );
+  return { ...currentSizes, regions, agentOpen: regions.agent };
 }
 
 /** 计算某个分隔条当前可表达的 aria 最小值和最大值；对应区域收起时返回 null，表示没有可用把手。 */
@@ -400,12 +393,14 @@ export function useResizableWorkspaceLayout() {
   const [workspaceWidth, setWorkspaceWidth] = useState(DEFAULT_WORKSPACE_WIDTH);
   const [sizes, setSizes] = useState<WorkspaceLayoutSizes>(() => readStoredWorkspaceLayout());
   const [resizingPane, setResizingPane] = useState<ResizablePane | null>(null);
+  /** 窗口缩放只约束显示宽度，避免覆盖默认值或用户保存的桌面栏宽。 */
+  const renderedSizes = useMemo(() => clampWorkspaceLayoutSizes(sizes, workspaceWidth), [sizes, workspaceWidth]);
   /** 当前工作台 DOM 节点，供原生 pointer 事件读取最新容器宽度。 */
   const workspaceElementRef = useRef<HTMLElement | null>(null);
   /** 内容区宽度，不含 padding，与 grid-template-columns 使用同一坐标系。 */
   const workspaceWidthRef = useRef(DEFAULT_WORKSPACE_WIDTH);
-  /** 最新布局尺寸引用，避免 pointerdown 闭包拿到过期宽度。 */
-  const sizesRef = useRef(sizes);
+  /** 拖拽从实际显示宽度开始，避免窗口临时压缩后按偏好宽度计算而跳动。 */
+  const sizesRef = useRef(renderedSizes);
   /** 当前拖拽起点；为空表示没有处于拖拽会话。 */
   const dragStateRef = useRef<ResizeDragState | null>(null);
 
@@ -421,8 +416,8 @@ export function useResizableWorkspaceLayout() {
   }, []);
 
   useEffect(() => {
-    sizesRef.current = sizes;
-  }, [sizes]);
+    sizesRef.current = renderedSizes;
+  }, [renderedSizes]);
 
   useEffect(() => {
     if (!workspaceElement) {
@@ -437,11 +432,10 @@ export function useResizableWorkspaceLayout() {
       return undefined;
     }
 
-    /** 同步内容区宽度并顺手修正超出新窗口范围的已保存尺寸。 */
+    /** 只同步容器尺寸；临时窄窗口不能把桌面布局偏好永久压小。 */
     function syncWorkspaceWidth(nextWidth: number) {
       workspaceWidthRef.current = nextWidth;
       setWorkspaceWidth(nextWidth);
-      setSizes((currentSizes) => clampWorkspaceLayoutSizes(currentSizes, nextWidth));
     }
 
     syncWorkspaceWidth(readWorkspaceContentWidth(workspaceElement));
@@ -587,8 +581,8 @@ export function useResizableWorkspaceLayout() {
 
   /** 切换某个可收起区域的显隐；再次展开时沿用上次宽度或默认宽度。 */
   const setRegionOpen = useCallback((regionId: RegionId, open: boolean) => {
-    setSizes((currentSizes) => setRegionOpenState(currentSizes, regionId, open, getWorkspaceWidth()));
-  }, [getWorkspaceWidth]);
+    setSizes((currentSizes) => setRegionOpenState(currentSizes, regionId, open));
+  }, []);
 
   /** 既有调用点仍按布尔值开关 Agent 区域，这里保持旧签名。 */
   const setAgentOpen = useCallback((open: boolean) => {
@@ -597,8 +591,8 @@ export function useResizableWorkspaceLayout() {
 
   /** 在收起按钮、顶栏图标和区域内的收起入口之间复用同一个开关。 */
   const toggleRegion = useCallback((regionId: RegionId) => {
-    setSizes((currentSizes) => setRegionOpenState(currentSizes, regionId, !currentSizes.regions[regionId], getWorkspaceWidth()));
-  }, [getWorkspaceWidth]);
+    setSizes((currentSizes) => setRegionOpenState(currentSizes, regionId, !currentSizes.regions[regionId]));
+  }, []);
 
   /** 记录某个区域图标栏上当前激活的条目，决定悬浮浮层预览哪一块内容。 */
   const setRegionActiveItem = useCallback((regionId: RegionId, itemId: RegionItemId) => {
@@ -613,31 +607,31 @@ export function useResizableWorkspaceLayout() {
 
   /** 主 grid 的列定义由 hook 统一生成；收起区域退化为图标栏，中间编辑区始终占剩余空间。 */
   const gridTemplateColumns = useMemo(() => {
-    const editorMin = getEditorMinWidth(workspaceWidth, sizes.regions);
+    const editorMin = getEditorMinWidth(workspaceWidth, renderedSizes.regions);
     const tracks: string[] = [];
 
-    if (sizes.regions.sidebar) {
-      tracks.push(`${sizes.sidebarWidth}px`, `${RESIZER_TRACK_WIDTH}px`);
+    if (renderedSizes.regions.sidebar) {
+      tracks.push(`${renderedSizes.sidebarWidth}px`, `${RESIZER_TRACK_WIDTH}px`);
     } else {
       tracks.push(`${REGION_RAIL_SIZE}px`);
     }
 
     tracks.push(`minmax(${editorMin}px, 1fr)`);
 
-    if (sizes.regions.agent) {
-      tracks.push(`${RESIZER_TRACK_WIDTH}px`, `${sizes.agentWidth}px`);
+    if (renderedSizes.regions.agent) {
+      tracks.push(`${RESIZER_TRACK_WIDTH}px`, `${renderedSizes.agentWidth}px`);
     } else {
       tracks.push(`${REGION_RAIL_SIZE}px`);
     }
 
     return tracks.join(" ");
-  }, [sizes.agentWidth, sizes.regions, sizes.sidebarWidth, workspaceWidth]);
+  }, [renderedSizes, workspaceWidth]);
 
   /** 生成分隔条需要的交互和 aria 属性，保持两个把手行为一致。 */
   const getSeparatorProps = useCallback(
     (pane: ResizablePane) => {
-      const paneBounds = getPaneBounds(pane, sizes, workspaceWidth);
-      const currentValue = pane === "sidebar" ? sizes.sidebarWidth : sizes.agentWidth;
+      const paneBounds = getPaneBounds(pane, renderedSizes, workspaceWidth);
+      const currentValue = pane === "sidebar" ? renderedSizes.sidebarWidth : renderedSizes.agentWidth;
 
       return {
         role: "separator",
@@ -656,7 +650,7 @@ export function useResizableWorkspaceLayout() {
       handleSeparatorDoubleClick,
       handleSeparatorKeyDown,
       handleSeparatorPointerDown,
-      sizes,
+      renderedSizes,
       workspaceWidth,
     ],
   );
