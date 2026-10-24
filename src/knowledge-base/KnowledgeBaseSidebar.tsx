@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { AlertCircle, Clock, Database, MessageSquarePlus, Plus, RefreshCw, Search, Settings } from "lucide-react";
+import { AlertCircle, Clock, Database, Plus, RefreshCw, Search, Settings } from "lucide-react";
 import { SessionList } from "../agent/SessionList";
 import { FileTree } from "./FileTree";
 import { Button } from "../shared/Button";
@@ -120,7 +120,7 @@ export function KnowledgeBaseSidebar({
    */
   compactPreview?: boolean;
 }) {
-  const [internalPane, setInternalPane] = useState<SidebarPane>("sessions");
+  const [internalPane, setInternalPane] = useState<SidebarPane>("files");
   const sidebarPane = activePane ?? internalPane;
   const setSidebarPane = onActivePaneChange ?? setInternalPane;
   const runningSessionCount = inFlightSessionIds.length;
@@ -148,14 +148,14 @@ export function KnowledgeBaseSidebar({
         品牌和收起按钮都已在工作台顶栏，这里不再放重复入口：
         收起/展开只走顶栏那一个按钮，避免同一操作出现两处。
       */}
-      <Button variant="ghost" className="w-full shrink-0 justify-start gap-2 px-2.5 text-[13px]" onClick={onCreateSession}>
-        <MessageSquarePlus size={16} />
+      <Button variant="ghost" className="sidebar-new-conversation w-full shrink-0 justify-start gap-2.5 px-3 text-sm" onClick={onCreateSession}>
+        <Plus size={18} />
         新对话
       </Button>
       {onOpenSchedules ? (
         <Button
           variant="ghost"
-          className={cn("w-full shrink-0 justify-start gap-2 px-2.5 text-[13px]", schedulesActive && "bg-surface-muted text-ink-strong")}
+          className={cn("w-full shrink-0 justify-start gap-2 px-2.5 text-ui", schedulesActive && "bg-surface-muted text-ink-strong")}
           onClick={onOpenSchedules}
         >
           <Clock size={16} />
@@ -163,7 +163,7 @@ export function KnowledgeBaseSidebar({
         </Button>
       ) : null}
 
-      <SegmentedControl aria-label="侧栏内容" role="radiogroup" className="flex w-full shrink-0">
+      <SegmentedControl aria-label="侧栏内容" role="radiogroup" className="sidebar-pane-tabs flex shrink-0">
         <SegmentedControlItem
           active={sidebarPane === "sessions"}
           role="radio"
@@ -174,7 +174,7 @@ export function KnowledgeBaseSidebar({
         >
           会话
           {runningSessionCount > 0 ? (
-            <span className="inline-flex min-w-4 items-center justify-center rounded-full bg-accent px-1 text-[10px] font-medium leading-4 text-white">
+            <span className="inline-flex min-w-4 items-center justify-center rounded-full bg-ink px-1 text-[11px] font-medium leading-4 text-white">
               {runningSessionCount}
             </span>
           ) : null}
@@ -230,11 +230,11 @@ export function KnowledgeBaseSidebar({
                 onClick={() => onSelectKnowledgeBase(knowledgeBase.id)}
               >
                 {knowledgeBase.status === "error" ? <AlertCircle size={15} /> : <Database size={15} />}
-                <OverflowTooltipText as="span" className="min-w-0 truncate text-[13px]" text={knowledgeBase.name} logArea="knowledge_base_row_name" />
+                <OverflowTooltipText as="span" className="min-w-0 truncate text-ui" text={knowledgeBase.name} logArea="knowledge_base_row_name" />
               </ListRow>
             );
           })}
-          <Button variant="ghost" className="w-full justify-start px-2.5 text-[13px] text-ink-muted" onClick={onAddKnowledgeBase}>
+          <Button variant="ghost" className="w-full justify-start px-2.5 text-ui text-ink-muted" onClick={onAddKnowledgeBase}>
             <Plus size={15} />
             连接资料库
           </Button>
@@ -243,10 +243,10 @@ export function KnowledgeBaseSidebar({
         <OperationNotice isBusy={isBusy} busyLabel={busyLabel} notice={notice} />
 
         <div className="shrink-0 px-1.5 py-1.5">
-          <label className={cn("flex min-h-8 items-center gap-2 rounded-control bg-white/70 px-2 text-ink-muted", focusShellClassName)}>
-            <Search size={14} />
+          <label className={cn("sidebar-search flex min-h-8 items-center gap-2 rounded-control px-2 text-ink-muted", focusShellClassName)}>
+            <Search size={14} className="shrink-0" />
             <input
-              className="min-w-0 w-full border-0 bg-transparent text-[13px] outline-0"
+              className="min-w-0 w-full border-0 bg-transparent text-ui outline-0"
               value={searchTerm}
               onChange={(event) => onSearchChange(event.target.value)}
               placeholder="过滤文件"
@@ -293,7 +293,7 @@ export function KnowledgeBaseSidebar({
       </section>
       </div>
 
-      <Button variant="ghost" className="w-full shrink-0 justify-start px-2.5 text-[13px] text-ink-muted" onClick={onOpenSettings}>
+      <Button variant="ghost" className="w-full shrink-0 justify-start px-2.5 text-ui text-ink-muted" onClick={onOpenSettings}>
         <Settings size={16} />
         设置
       </Button>

@@ -25,10 +25,10 @@ import type { FileTreeNode } from "../shared/types";
 /** 文件树行的共用外观；active 只用于当前打开的文件。 */
 function fileTreeRowClassName({ isRoot = false, isActive = false }: { isRoot?: boolean; isActive?: boolean } = {}) {
   return cn(
-    "group relative flex min-h-8 min-w-0 w-full items-center gap-[7px] overflow-visible rounded-control border border-transparent bg-transparent pr-2 text-left text-[13px] text-ink",
-    !isActive && "hover:bg-[rgba(17,24,39,0.05)]",
+    "group relative flex min-h-[30px] min-w-0 w-full items-center gap-[7px] overflow-visible rounded-control border border-transparent bg-transparent pr-2 text-left text-ui text-ink",
+    !isActive && "hover:border-border",
     isRoot && "bg-transparent",
-    isActive && "bg-[rgba(17,24,39,0.06)] text-ink-strong",
+    isActive && "border-border-strong bg-surface font-medium text-ink-strong",
   );
 }
 
@@ -198,7 +198,7 @@ export function FileTree({
           <li key={node.id}>
             <div
               className={fileTreeRowClassName({ isActive: isActiveFile })}
-              style={{ paddingLeft: depth * 14 + 28 }}
+              style={{ paddingLeft: depth * 12 + 16 }}
               role="treeitem"
               aria-selected={isActiveFile}
             >
@@ -216,9 +216,9 @@ export function FileTree({
               >
                 <FileTreeIcon node={node} />
                 <OverflowTooltipText className="min-w-0 flex-1 truncate" text={node.name} logArea="file_tree_file" />
-                <span className="shrink-0 rounded-full bg-[rgba(241,238,232,0.9)] px-[5px] py-px text-[10px] font-bold text-ink-soft">
+                {!noteId && <span className="shrink-0 rounded-small bg-surface-muted px-[5px] py-px text-[11px] font-medium text-ink-muted">
                   {formatFileTreeTypeLabel(node)}
-                </span>
+                </span>}
               </button>
               {(canOpenHistory || canRename || canDelete) && (
                 <div className="relative inline-flex shrink-0 overflow-visible">
@@ -266,7 +266,7 @@ function EmptyFolderCreateHint({
 }) {
   return (
     <div className="mx-1 my-2 rounded-lg border border-dashed border-border bg-surface-translucent p-3">
-      <p className="mb-2.5 mt-0 text-[13px] text-ink-muted">
+      <p className="mb-2.5 mt-0 text-ui text-ink-muted">
         {isFiltered ? "没有匹配的支持文档" : "当前知识库还没有文件，可以在根目录新建。"}
       </p>
       <div className="flex flex-wrap gap-1.5">

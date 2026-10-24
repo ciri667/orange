@@ -103,10 +103,10 @@ export function SessionList({
     <div className="flex h-full min-h-0 flex-1 flex-col">
       {/* 侧栏和浮层都是 overflow-hidden，外扩的焦点描边需要自己的空隙，否则上边和左右会被裁掉。 */}
       <div className="flex shrink-0 items-center gap-1 px-1.5 pt-1.5 pb-1.5">
-        <label className={cn("flex min-h-8 min-w-0 flex-1 items-center gap-2 rounded-control bg-white/70 px-2 text-ink-muted", focusShellClassName)}>
-          <Search size={14} />
+        <label className={cn("sidebar-search flex min-h-8 min-w-0 flex-1 items-center gap-2 rounded-control px-2 text-ink-muted", focusShellClassName)}>
+          <Search size={14} className="shrink-0" />
           <input
-            className="min-w-0 w-full border-0 bg-transparent text-[13px] outline-0"
+            className="min-w-0 w-full border-0 bg-transparent text-ui outline-0"
             value={searchTerm}
             onChange={(event) => setSearchTerm(event.target.value)}
             placeholder="搜索会话"
@@ -132,7 +132,7 @@ export function SessionList({
               {SESSION_LIST_FACETS.map((item) => (
                 <MenuItem
                   key={item.id}
-                  className={cn(item.id === facet && "bg-surface-muted text-ink-strong")}
+                  className={cn(item.id === facet && "font-medium text-ink-strong shadow-[inset_0_0_0_1px_var(--border-strong)]")}
                   onClick={() => {
                     setFacet(item.id);
                     setFacetMenuOpen(false);
@@ -298,7 +298,7 @@ function SessionRow({
             {session.pinnedAt ? <Pin size={12} className="shrink-0 text-accent" aria-label="已置顶" /> : null}
             {renaming ? (
               <input
-                className="min-w-0 flex-1 border-0 bg-transparent text-[13px] font-medium text-ink-strong outline-0"
+                className="min-w-0 flex-1 border-0 bg-transparent text-ui font-medium text-ink-strong outline-0"
                 value={renameDraft}
                 aria-label="会话标题"
                 autoFocus
@@ -319,7 +319,7 @@ function SessionRow({
             ) : (
               <OverflowTooltipText
                 as="strong"
-                className="block min-w-0 truncate text-[13px] font-medium leading-5 text-ink-strong"
+                className="block min-w-0 truncate text-ui font-medium leading-5 text-ink-strong"
                 text={session.title}
                 logArea="agent_session_history_title"
               />

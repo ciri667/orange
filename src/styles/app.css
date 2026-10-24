@@ -473,7 +473,7 @@ select:focus-visible {
   display: flex;
   flex-direction: column;
   gap: 8px;
-  padding: 12px 10px 8px;
+  padding: 12px 10px 10px;
   background: var(--app-bg);
 }
 
@@ -873,6 +873,35 @@ select:focus-visible {
 
 .workspace-topbar[data-platform="macos"] {
   padding-left: 76px;
+}
+
+.sidebar-new-conversation {
+  min-height: 36px;
+  background: var(--accent-soft);
+  border-color: var(--border);
+  color: var(--text-strong);
+  font-size: var(--font-ui);
+  font-weight: 600;
+}
+
+.sidebar-new-conversation:hover:enabled {
+  background: var(--surface-hover);
+  border-color: var(--border-strong);
+}
+
+.sidebar-pane-tabs {
+  margin: 6px 2px 2px;
+  width: calc(100% - 4px);
+}
+
+.sidebar-pane-tabs button {
+  min-height: 28px;
+  font-size: var(--font-ui);
+}
+
+.sidebar-search {
+  border: 1px solid var(--border);
+  background: var(--surface-warm);
 }
 
 /* 文件头共用一个工具行；标题、元信息与正文共用同一条内容列。 */
