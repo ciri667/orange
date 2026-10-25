@@ -16,6 +16,7 @@ pub mod settings;
 pub mod skills;
 pub mod voice;
 pub mod workspace;
+pub mod terminal;
 
 pub(crate) use agent::{
     handle_im_builtin_command, handle_im_pending_change_command, run_agent_turn_from_im,

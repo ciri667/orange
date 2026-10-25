@@ -5,6 +5,7 @@ mod agent_tools;
 mod agent_trace;
 mod agent_writes;
 mod browser;
+mod terminal;
 mod builtin_commands;
 mod commands;
 mod domain;
@@ -387,6 +388,10 @@ pub fn run() {
             commands::mcp::test_mcp_server,
             commands::mcp::decide_mcp_tool_call,
             commands::browser::browser_status,
+            commands::terminal::terminal_create,
+            commands::terminal::terminal_input,
+            commands::terminal::terminal_resize,
+            commands::terminal::terminal_close,
             commands::browser::browser_start,
             commands::browser::browser_create_tab,
             commands::browser::browser_activate_tab,
@@ -414,6 +419,7 @@ pub fn run() {
                 // 浏览器管理器是全局静态值，不会自动 Drop；退出前等待 Chromium 释放 profile。
                 tauri::async_runtime::block_on(browser::shutdown(app));
                 mcp::shutdown_processes();
+                terminal::shutdown();
                 im::stop_all_gateways(app);
             }
             _ => {}

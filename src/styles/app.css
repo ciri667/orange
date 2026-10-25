@@ -44,6 +44,32 @@
   --code-function: #8250df;
   --code-type: #953800;
   --code-property: #116329;
+  /*
+   * 交互终端跟随应用浅色主题，而不是系统终端配色：
+   * xterm 画布在创建时读取这些 token，未来加暗色主题只需覆盖这一组变量。
+   */
+  --terminal-bg: var(--surface);
+  --terminal-fg: var(--text);
+  --terminal-cursor: var(--accent);
+  --terminal-cursor-accent: var(--surface);
+  --terminal-selection: rgba(var(--accent-rgb), 0.18);
+  --terminal-selection-inactive: rgba(var(--accent-rgb), 0.10);
+  --terminal-ansi-black: #57606a;
+  --terminal-ansi-red: var(--code-keyword);
+  --terminal-ansi-green: var(--code-property);
+  --terminal-ansi-yellow: #9a6700;
+  --terminal-ansi-blue: var(--code-number);
+  --terminal-ansi-magenta: var(--code-function);
+  --terminal-ansi-cyan: #1b7c83;
+  --terminal-ansi-white: var(--text);
+  --terminal-ansi-bright-black: var(--code-comment);
+  --terminal-ansi-bright-red: var(--danger);
+  --terminal-ansi-bright-green: var(--success);
+  --terminal-ansi-bright-yellow: #7d4e00;
+  --terminal-ansi-bright-blue: #218bff;
+  --terminal-ansi-bright-magenta: #a475f9;
+  --terminal-ansi-bright-cyan: #3192aa;
+  --terminal-ansi-bright-white: var(--text-strong);
   --radius-panel: 12px;
   --radius-control: 8px;
   --radius-small: 6px;
@@ -468,6 +494,18 @@ select:focus-visible {
   border-radius: 0;
   box-shadow: none;
 }
+
+/* 内容区始终持有终端实例；hidden 必须覆盖组件本身的 flex 布局。 */
+.terminal-panel[hidden] { display: none !important; }
+.terminal-panel { display: flex; flex-direction: column; flex: 1; min-width: 0; min-height: 0; background: var(--terminal-bg); color: var(--terminal-fg); }
+.terminal-toolbar { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 8px 12px; font-size: 11px; color: var(--text-muted); }
+.terminal-toolbar > span { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; }
+.terminal-screen { flex: 1; min-height: 0; min-width: 0; padding: 4px 8px 8px; overflow: hidden; }
+.terminal-screen > .xterm { height: 100%; }
+/* xterm 默认把 viewport 涂黑；透明后露出面板的浅色底，滚动条沿用全局样式。 */
+.terminal-screen .xterm-viewport { background-color: transparent !important; }
+.terminal-notice { margin: 0; padding: 6px 12px; font-size: 12px; color: var(--warning); border-top: 1px solid var(--border); }
+.terminal-notice.is-error { color: var(--danger); }
 
 .sidebar {
   display: flex;

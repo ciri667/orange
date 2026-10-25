@@ -1026,6 +1026,19 @@ export interface EditorFileTab {
   id: string;
 }
 
+/** 终端进程描述，不含输入或输出正文。 */
+export interface TerminalDescriptor {
+  terminalId: string;
+  shell: string;
+  cwd: string;
+}
+
+/** 使用独立 IPC Channel 传输高频输出，字节流由前端持续解码。 */
+export type TerminalEvent =
+  | { kind: "output"; data: number[] }
+  | { kind: "exit"; code: number | null }
+  | { kind: "error"; message: string };
+
 /** 编辑器会话状态；只保存稳定 ID 和标签顺序，不保存文件标题、路径或正文。 */
 export interface WorkspaceEditorState {
   activeKnowledgeBaseId: string;
