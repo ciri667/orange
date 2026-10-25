@@ -77,7 +77,7 @@ pub async fn restore_session_context(
     payload: RestoreSessionContextPayload,
 ) -> Result<WorkspaceSnapshot, String> {
     run_blocking("恢复 Agent 会话上下文", move || {
-        storage::restore_session_context(&app, payload.snapshot, &payload.session_id)
+        storage::restore_session_context(&app, payload.snapshot, &payload.session_id, payload.restore_editor_context)
     })
     .await
 }

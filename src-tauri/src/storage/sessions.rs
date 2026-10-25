@@ -633,6 +633,7 @@ pub fn restore_session_context(
     app: &AppHandle,
     mut snapshot: WorkspaceSnapshot,
     session_id: &str,
+    restore_editor_context: bool,
 ) -> Result<WorkspaceSnapshot, String> {
     // 切会话时以 SQLite 为准合并会话列表，避免带回过期回合快照、丢掉其它线程的新消息。
     let persisted_sessions = load_sessions_for_snapshot(app, &snapshot)?;
@@ -646,6 +647,10 @@ pub fn restore_session_context(
         .find(|session| session.id == session_id)
         .cloned()
         .ok_or_else(|| "找不到要恢复的会话".to_owned())?;
+    if !restore_editor_context {
+        snapshot.active_session_id = session.id;
+        return Ok(snapshot);
+    }
     let next_knowledge_base_id = session
         .knowledge_base_ids
         .iter()

@@ -350,7 +350,12 @@ pub struct UpdateSessionScopePayload {
 pub struct RestoreSessionContextPayload {
     pub snapshot: WorkspaceSnapshot,
     pub session_id: String,
+    /** 旧调用默认恢复编辑区；统一内容页签仅切换会话焦点。 */
+    #[serde(default = "restore_editor_context_default")]
+    pub restore_editor_context: bool,
 }
+
+fn restore_editor_context_default() -> bool { true }
 
 /** 编辑一条用户消息并截断其后历史的命令入参。 */
 #[derive(Clone, Debug, Deserialize)]

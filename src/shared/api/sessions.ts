@@ -103,7 +103,7 @@ export async function updateSessionScope(
 }
 
 /** 恢复历史会话绑定的知识库和会话焦点；文件焦点只在会话仍有有效笔记引用时同步。 */
-export async function restoreSessionContext(snapshot: WorkspaceSnapshot, sessionId: string): Promise<WorkspaceSnapshot> {
+export async function restoreSessionContext(snapshot: WorkspaceSnapshot, sessionId: string, restoreEditorContext = true): Promise<WorkspaceSnapshot> {
   if (!isTauriRuntime()) {
     const nextSnapshot = normalizeMockSnapshotSessions(cloneWorkspaceSnapshot(snapshot));
     const session = nextSnapshot.sessions.find((item) => item.id === sessionId);
@@ -112,6 +112,7 @@ export async function restoreSessionContext(snapshot: WorkspaceSnapshot, session
       return nextSnapshot;
     }
 
+    if (!restoreEditorContext) return { ...nextSnapshot, activeSessionId: session.id };
     const nextKnowledgeBaseId =
       session.knowledgeBaseIds.find((knowledgeBaseId) =>
         nextSnapshot.knowledgeBases.some((knowledgeBase) => knowledgeBase.id === knowledgeBaseId),
@@ -135,7 +136,7 @@ export async function restoreSessionContext(snapshot: WorkspaceSnapshot, session
     return nextSnapshot;
   }
 
-  return invokeLogged<WorkspaceSnapshot>("restore_session_context", { payload: { snapshot, sessionId } });
+  return invokeLogged<WorkspaceSnapshot>("restore_session_context", { payload: { snapshot, sessionId, restoreEditorContext } });
 }
 
 /** 截断会话到指定用户消息并删除模型 transcript，供随后用同一消息 ID 重跑。 */
