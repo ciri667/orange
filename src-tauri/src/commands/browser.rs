@@ -29,6 +29,11 @@ pub async fn browser_activate_tab(app: AppHandle, tab_id: String) -> Result<Brow
     browser::user_activate_tab(&app, &tab_id).await
 }
 
+#[tauri::command]
+pub async fn browser_show_tab(app: AppHandle, tab_id: String) -> Result<BrowserState, String> {
+    browser::show_tab(&app, &tab_id).await
+}
+
 /** 面板输入只用于用户操作，Agent 仍通过既有 run 工具闭集调用。 */
 #[tauri::command]
 pub async fn browser_user_input(
@@ -80,8 +85,8 @@ pub async fn browser_chromium_status(
 
 /** 用户在面板地址栏手动导航。 */
 #[tauri::command]
-pub async fn browser_user_navigate(app: AppHandle, url: String) -> Result<BrowserState, String> {
-    browser_navigate(&app, &url).await
+pub async fn browser_user_navigate(app: AppHandle, url: String, tab_id: Option<String>) -> Result<BrowserState, String> {
+    browser_navigate(&app, &url, tab_id.as_deref()).await
 }
 
 /** 用户点击“我来接管”。 */

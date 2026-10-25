@@ -129,7 +129,7 @@ pub async fn browser_status(app: &AppHandle) -> BrowserState {
         if session.browser.try_wait().ok().flatten().is_some() {
             session.close().await;
             *state = None;
-        } else if let Err(error) = session.sync_tabs(true).await {
+        } else if let Err(error) = session.sync_tabs(false).await {
             *manager.launch_error.lock().await = Some(error);
             session.close().await;
             *state = None;
@@ -283,6 +283,17 @@ pub async fn user_activate_tab(app: &AppHandle, tab_id: &str) -> Result<BrowserS
     Ok(browser_status(app).await)
 }
 
+/** 页签查看与接管分离；仅更新实时画面的来源。 */
+pub async fn show_tab(app: &AppHandle, tab_id: &str) -> Result<BrowserState, String> {
+    let manager = browser_manager().await;
+    let mut state = manager.state.lock().await;
+    state.as_mut().ok_or_else(|| "浏览器尚未启动。".to_owned())?.show_tab(tab_id).await?;
+    drop(state);
+    refresh_screencast(app).await?;
+    publish_state(app).await;
+    Ok(browser_status(app).await)
+}
+
 /** 每个用户输入都先撤销 Agent 操作权；只发送到当前可见页面。 */
 pub async fn user_input(
     app: &AppHandle,
@@ -343,7 +354,7 @@ async fn revoke_control(manager: &BrowserManager, session_id: Option<String>) ->
 }
 
 /** 面板上的用户手动导航；只改地址，不经过模型。 */
-pub async fn user_navigate(app: &AppHandle, url: &str) -> Result<BrowserState, String> {
+pub async fn user_navigate(app: &AppHandle, url: &str, tab_id: Option<&str>) -> Result<BrowserState, String> {
     let url = normalize_web_url(url)?;
     let manager = browser_manager().await;
     {
@@ -358,7 +369,8 @@ pub async fn user_navigate(app: &AppHandle, url: &str) -> Result<BrowserState, S
     let session = state
         .as_mut()
         .ok_or_else(|| "浏览器尚未启动。".to_owned())?;
-    let active_tab_id = session.active_tab_id.clone();
+    let active_tab_id = if let Some(id) = tab_id { id.to_owned() } else if !session.visible_tab_id.is_empty() { session.visible_tab_id.clone() } else if !session.active_tab_id.is_empty() { session.active_tab_id.clone() } else { session.create_tab().await? };
+    session.activate_tab(&active_tab_id).await?;
     let tab = session
         .tabs
         .get_mut(&active_tab_id)
@@ -539,7 +551,7 @@ async fn ensure_browser(app: &AppHandle) -> Result<(), String> {
     let mut state = manager.state.lock().await;
     if let Some(session) = state.as_mut() {
         if session.browser.try_wait().ok().flatten().is_some()
-            || session.sync_tabs(true).await.is_err()
+            || session.sync_tabs(false).await.is_err()
         {
             session.close().await;
             *state = None;
@@ -1093,19 +1105,6 @@ async fn dispatch_operation(
         .get("tabId")
         .and_then(Value::as_str)
         .map(str::to_owned);
-    let tab_id = requested_tab
-        .clone()
-        .unwrap_or_else(|| session.active_tab_id.clone());
-    let tab = session.tabs.get_mut(&tab_id).ok_or_else(|| {
-        (
-            "TAB_NOT_FOUND".to_owned(),
-            format!("找不到标签页 {tab_id}。"),
-        )
-    })?;
-    let page = tab.page.clone();
-    let generation = tab.page_generation;
-    set_activity(app, operation, Some(tab_id.clone())).await;
-
     let mut result = BrowserRunResult {
         ok: true,
         operation: operation.to_owned(),
@@ -1133,6 +1132,7 @@ async fn dispatch_operation(
         "browser.create_tab" => {
             let new_tab_id = session.create_tab_for_request(params).await?;
             result.tab = Some(tab_view(session, &new_tab_id).await?);
+            return finish_operation(result, operation);
         }
         "browser.activate_tab" | "browser.switch_tab" => {
             let tab_id =
@@ -1144,13 +1144,14 @@ async fn dispatch_operation(
                 ));
             }
             session
-                .activate_tab(&tab_id)
-                .await
+                .activate_agent_tab(&tab_id)
                 .map_err(|error| ("CDP_ERROR".to_owned(), error))?;
             result.tab = Some(tab_view(session, &tab_id).await?);
+            return finish_operation(result, operation);
         }
         "browser.release_tab" => {
-            session.active_tab_id = session.visible_tab_id.clone();
+            if session.tabs.contains_key(&session.visible_tab_id) { session.active_tab_id = session.visible_tab_id.clone(); }
+            return finish_operation(result, operation);
         }
         "browser.close_tab" => {
             let tab_id =
@@ -1162,6 +1163,24 @@ async fn dispatch_operation(
             result.tab = None;
             return finish_operation(result, operation);
         }
+        _ => {}
+    }
+    // 列表和管理操作允许零网页；导航或搜索才按需创建默认页。
+    if requested_tab.is_none() && session.tabs.is_empty() && matches!(operation, "tab.navigate" | "tab.search") { session.create_tab_for_request(&json!({})).await?; }
+    let tab_id = requested_tab
+        .clone()
+        .unwrap_or_else(|| session.active_tab_id.clone());
+    let tab = session.tabs.get_mut(&tab_id).ok_or_else(|| {
+        (
+            "TAB_NOT_FOUND".to_owned(),
+            format!("找不到标签页 {tab_id}。"),
+        )
+    })?;
+    let page = tab.page.clone();
+    let generation = tab.page_generation;
+    set_activity(app, operation, Some(tab_id.clone())).await;
+
+    match operation {
         "tab.navigate" => {
             let url = params
                 .get("url")

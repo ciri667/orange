@@ -1,6 +1,6 @@
 import { listen } from "@tauri-apps/api/event";
 import { invokeLogged, isTauriRuntime } from "./runtime";
-import { loadMockChromiumStatus, loadMockEmbeddedBrowserStatus } from "../mock/embeddedBrowser";
+import { loadMockChromiumStatus, loadMockEmbeddedBrowserStatus, createMockBrowserTab, showMockBrowserTab, closeMockBrowserTab, navigateMockBrowserTab } from "../mock/embeddedBrowser";
 import type {
   BrowserApprovalDecision,
   BrowserApprovalRequest,
@@ -35,8 +35,14 @@ export async function browserStart(): Promise<BrowserState> {
 }
 
 export async function browserCreateTab(): Promise<BrowserState> {
-  if (!isTauriRuntime()) return loadBrowserStatus();
+  if (!isTauriRuntime()) return createMockBrowserTab();
   return invokeLogged<BrowserState>("browser_create_tab");
+}
+
+/** 查看页签不撤销 Agent 的浏览器控制租约。 */
+export async function browserShowTab(tabId: string): Promise<BrowserState> {
+  if (!isTauriRuntime()) return showMockBrowserTab(tabId);
+  return invokeLogged<BrowserState>("browser_show_tab", { tabId });
 }
 
 export async function browserActivateTab(tabId: string): Promise<BrowserState> {
@@ -75,11 +81,11 @@ export async function loadBrowserChromiumStatus(): Promise<ChromiumInstallStatus
 }
 
 /** 用户在面板地址栏手动导航。 */
-export async function browserUserNavigate(url: string): Promise<BrowserState> {
+export async function browserUserNavigate(url: string, tabId?: string): Promise<BrowserState> {
   if (!isTauriRuntime()) {
-    return loadBrowserStatus();
+    return navigateMockBrowserTab(url, tabId);
   }
-  return invokeLogged<BrowserState>("browser_user_navigate", { url });
+  return invokeLogged<BrowserState>("browser_user_navigate", { url, tabId });
 }
 
 /** 用户点击“我来接管”。 */
@@ -93,7 +99,7 @@ export async function browserUserTakeOver(sessionId?: string | null): Promise<Br
 /** 面板关闭某个标签页。 */
 export async function browserCloseTab(tabId: string): Promise<BrowserState> {
   if (!isTauriRuntime()) {
-    return loadBrowserStatus();
+    return closeMockBrowserTab(tabId);
   }
   return invokeLogged<BrowserState>("browser_close_tab", { tabId });
 }

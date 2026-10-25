@@ -62,6 +62,7 @@ impl BrowserSessionState {
             .arg("--disable-features=Translate,MediaRouter,PasswordLeakDetection")
             .arg("--no-first-run")
             .arg("--no-default-browser-check")
+            .arg("--no-startup-window")
             .arg("--mute-audio")
             .build()
             .map_err(|error| format!("浏览器配置无效：{error}"))?;
@@ -86,7 +87,7 @@ impl BrowserSessionState {
             frame_task: None,
             frame_tab_id: None,
         };
-        if let Err(error) = session.sync_tabs(true).await {
+        if let Err(error) = session.sync_tabs(false).await {
             session.close().await;
             return Err(error);
         }
@@ -120,9 +121,7 @@ impl BrowserSessionState {
         if !self.tabs.contains_key(&self.active_tab_id) {
             self.active_tab_id = self.tabs.keys().min().cloned().unwrap_or_default();
         }
-        if !self.tabs.contains_key(&self.visible_tab_id) {
-            self.visible_tab_id = self.active_tab_id.clone();
-        }
+        if !self.tabs.contains_key(&self.visible_tab_id) { self.visible_tab_id.clear(); }
         Ok(())
     }
 
@@ -159,10 +158,13 @@ impl BrowserSessionState {
                     .map_err(|error| ("INVALID_URL".to_owned(), error))
             })
             .transpose()?;
+        let previous_visible = self.visible_tab_id.clone();
         let id = self
             .create_tab()
             .await
             .map_err(|error| ("CDP_ERROR".to_owned(), error))?;
+        // Agent 新建页面只改变操作目标，不能切走用户正在观察的网页。
+        self.visible_tab_id = previous_visible;
         if let Some(url) = url {
             let tab = self.tabs.get_mut(&id).unwrap();
             // 等待导航完成后才返回 URL 和标题，避免把 about:blank 报成目标页。
@@ -190,6 +192,21 @@ impl BrowserSessionState {
         Ok(())
     }
 
+    /** 查看页面仅切换画面来源，不改变 Agent 的默认操作目标。 */
+    pub async fn show_tab(&mut self, tab_id: &str) -> Result<(), String> {
+        let tab = self.tabs.get(tab_id).ok_or_else(|| "标签页已关闭。".to_owned())?;
+        tab.page.bring_to_front().await.map_err(|error| error.to_string())?;
+        self.visible_tab_id = tab_id.to_owned();
+        Ok(())
+    }
+
+    /** Agent 切换自己的目标页不影响用户选择的画面。 */
+    pub fn activate_agent_tab(&mut self, tab_id: &str) -> Result<(), String> {
+        if !self.tabs.contains_key(tab_id) { return Err("标签页已关闭。".to_owned()); }
+        self.active_tab_id = tab_id.to_owned();
+        Ok(())
+    }
+
     /** 先成功关闭实际页面再更新索引；关掉最后一页后自动创建空白页。 */
     pub async fn close_tab(&mut self, tab_id: &str) -> Result<(), String> {
         let page = self
@@ -200,14 +217,8 @@ impl BrowserSessionState {
             .clone();
         page.close().await.map_err(|error| error.to_string())?;
         self.tabs.remove(tab_id);
-        if self.tabs.is_empty() {
-            self.create_tab().await?;
-        } else if !self.tabs.contains_key(&self.active_tab_id)
-            || !self.tabs.contains_key(&self.visible_tab_id)
-        {
-            let next = self.tabs.keys().min().cloned().unwrap();
-            self.activate_tab(&next).await?;
-        }
+        if !self.tabs.contains_key(&self.active_tab_id) { self.active_tab_id = self.tabs.keys().min().cloned().unwrap_or_default(); }
+        if !self.tabs.contains_key(&self.visible_tab_id) { self.visible_tab_id.clear(); }
         Ok(())
     }
 
@@ -395,6 +406,7 @@ mod tests {
         let mut session = BrowserSessionState::launch(executable.clone(), profile.clone())
             .await
             .unwrap();
+        session.create_tab().await.unwrap();
         assert!(!session.active_tab_id.is_empty());
         assert!(session.tabs.contains_key(&session.visible_tab_id));
         let initial_tab = session.active_tab_id.clone();
@@ -430,7 +442,8 @@ mod tests {
         );
         assert_eq!(session.tabs[&created].page_generation, 1);
         assert_eq!(session.active_tab_id, created);
-        assert_eq!(session.visible_tab_id, created);
+        assert_eq!(session.visible_tab_id, initial_tab);
+        session.show_tab(&created).await.unwrap();
         session.close_tab(&initial_tab).await.unwrap();
         let first = session.active_tab_id.clone();
         let page = session.tabs[&first].page.clone();
@@ -575,7 +588,8 @@ mod tests {
             .clone();
         session.activate_tab(&popup).await.unwrap();
         session.close_tab(&popup).await.unwrap();
-        assert_eq!(session.visible_tab_id, first);
+        assert!(session.visible_tab_id.is_empty());
+        session.show_tab(&first).await.unwrap();
 
         let second = session.create_tab().await.unwrap();
         assert_ne!(first, second);
@@ -595,11 +609,10 @@ mod tests {
         assert_eq!(session.visible_tab_id, first);
         session.close_tab(&second).await.unwrap();
         session.close_tab(&first).await.unwrap();
-        assert_eq!(
-            session.tabs.len(),
-            1,
-            "closing the last page must create a usable blank page"
-        );
+        assert!(session.tabs.is_empty(), "closing the last page must leave no replacement page");
+        session.sync_tabs(false).await.unwrap();
+        assert!(session.tabs.is_empty());
+        session.create_tab().await.unwrap();
         session.set_screencast(false, sink.clone()).await.unwrap();
         assert!(session.frame_task.is_none());
         // 静态页重新开启也必须收到首帧，不能一直停在“等待页面画面”。
@@ -621,7 +634,8 @@ mod tests {
         let mut restarted = BrowserSessionState::launch(executable, profile.clone())
             .await
             .unwrap();
-        assert!(!restarted.tabs.is_empty());
+        assert!(restarted.tabs.is_empty());
+        restarted.create_tab().await.unwrap();
         // 可选公网烟测仍使用临时 profile；默认回归仅依赖本地页面。
         if let Ok(url) = std::env::var("ORANGE_BROWSER_TEST_URL") {
             let page = &restarted.tabs[&restarted.active_tab_id].page;
