@@ -2,7 +2,7 @@ import { isTauri } from "@tauri-apps/api/core";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { Archive, Download, Edit3, ExternalLink, FolderOpen, Link, Plus, Save, Search, Trash2, X } from "lucide-react";
 import type { FormEvent } from "react";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { previewOnlineSkill, searchOnlineSkills } from "../shared/api/skills";
 import { Button } from "../shared/Button";
 import { cn } from "../shared/cn";
@@ -39,9 +39,6 @@ const DISCOVER_CHIPS: Array<{ id: string; label: string; query: string; owner?: 
   { id: "translate", label: "翻译", query: "translate" },
   { id: "official", label: "官方", query: "skill", owner: "anthropics" },
 ];
-
-/** 在线搜索防抖，避免每个按键都打到 skills.sh。 */
-const DISCOVER_SEARCH_DEBOUNCE_MS = 250;
 
 /** 把搜索词和 owner 编成缓存键，空 owner 与未指定来源视为同一次搜索。 */
 function discoverSearchCacheKey(query: string, owner: string) {
@@ -130,11 +127,17 @@ export function SkillsModal({
   const [discoverResults, setDiscoverResults] = useState<OnlineSkill[]>([]);
   const [discoverError, setDiscoverError] = useState("");
   const [isSearching, setIsSearching] = useState(false);
+  /** 当前结果对应的搜索词，用来区分「还没搜」和「搜过但没结果」。 */
+  const [discoverSearchedQuery, setDiscoverSearchedQuery] = useState("");
   const [selectedOnlineSkillId, setSelectedOnlineSkillId] = useState("");
   const [onlinePreviewDescription, setOnlinePreviewDescription] = useState("");
   const [replaceOnlineSkill, setReplaceOnlineSkill] = useState(false);
   /** 会话内缓存已成功的在线搜索，切回已搜过的分类或关键词时不再请求。 */
   const discoverSearchCacheRef = useRef(new Map<string, OnlineSkill[]>());
+  /** 请求序号用于丢弃过期响应，避免慢请求覆盖新关键词的结果。 */
+  const discoverRequestIdRef = useRef(0);
+  /** 正在请求的搜索键，避免同一关键词重复点击时发两次请求。 */
+  const discoverInFlightKeyRef = useRef("");
 
   /** 可用标签来自当前 skill 列表，便于用户快速按能力类别筛选。 */
   const availableTags = useMemo(
@@ -200,19 +203,6 @@ export function SkillsModal({
     setInstallDraft(null);
   }
 
-  /** 推荐分类写入搜索词和 owner，由防抖 effect 真正发请求。 */
-  function handleSelectDiscoverChip(chipId: string) {
-    const chip = DISCOVER_CHIPS.find((item) => item.id === chipId);
-
-    if (!chip) {
-      return;
-    }
-
-    setActiveDiscoverChip(chip.id);
-    setDiscoverQuery(chip.query);
-    setDiscoverOwner(chip.owner ?? "");
-  }
-
   /** 在系统浏览器打开 skills.sh 详情，主窗口不跟跳。 */
   async function handleOpenOnlineSkillPage(url: string) {
     try {
@@ -269,26 +259,16 @@ export function SkillsModal({
     });
   }
 
-  useEffect(() => {
-    if (panel !== "discover") {
-      return;
-    }
-
-    const query = discoverQuery.trim();
-    const owner = discoverOwner.trim();
-
-    if (query.length < 2) {
-      setDiscoverResults([]);
-      setDiscoverError("");
-      setIsSearching(false);
-      return;
-    }
-
+  /** 发起一次在线搜索；命中会话缓存时直接还原结果，避免重复请求 skills.sh。 */
+  const startDiscoverSearch = useCallback((query: string, owner: string) => {
     const cacheKey = discoverSearchCacheKey(query, owner);
+    // 每次搜索都换一个序号，旧请求返回后不再覆盖当前列表。
+    const requestId = ++discoverRequestIdRef.current;
+    const cachedSkills = discoverSearchCacheRef.current.get(cacheKey);
 
-    // 命中会话缓存时直接还原结果，避免切回已搜过的标签再次请求。
-    if (discoverSearchCacheRef.current.has(cacheKey)) {
-      const cachedSkills = discoverSearchCacheRef.current.get(cacheKey) ?? [];
+    setDiscoverSearchedQuery(query);
+
+    if (cachedSkills) {
       setDiscoverResults(cachedSkills);
       setDiscoverError("");
       setIsSearching(false);
@@ -298,47 +278,93 @@ export function SkillsModal({
       return;
     }
 
-    let cancelled = false;
-    const timeoutId = window.setTimeout(() => {
-      setIsSearching(true);
-      void searchOnlineSkills({
-        query,
-        owner: owner || undefined,
+    // 同一关键词已在请求中时直接复用这次请求，避免连点按钮发两次。
+    if (discoverInFlightKeyRef.current === cacheKey) {
+      return;
+    }
+
+    discoverInFlightKeyRef.current = cacheKey;
+    setIsSearching(true);
+    void searchOnlineSkills({
+      query,
+      owner: owner || undefined,
+    })
+      .then((result) => {
+        // 成功结果写入缓存，即使已经切走也保留，方便马上切回来。
+        discoverSearchCacheRef.current.set(cacheKey, result.skills);
+
+        if (requestId !== discoverRequestIdRef.current) {
+          return;
+        }
+
+        setDiscoverResults(result.skills);
+        setDiscoverError("");
+        setSelectedOnlineSkillId((currentId) =>
+          result.skills.some((skill) => skill.id === currentId) ? currentId : (result.skills[0]?.id ?? ""),
+        );
       })
-        .then((result) => {
-          // 成功结果写入缓存，即使已经切走也保留，方便马上切回来。
-          discoverSearchCacheRef.current.set(cacheKey, result.skills);
+      .catch((error) => {
+        if (requestId !== discoverRequestIdRef.current) {
+          return;
+        }
 
-          if (cancelled) {
-            return;
-          }
+        setDiscoverResults([]);
+        setDiscoverError(error instanceof Error ? error.message : String(error));
+      })
+      .finally(() => {
+        if (discoverInFlightKeyRef.current === cacheKey) {
+          discoverInFlightKeyRef.current = "";
+        }
 
-          setDiscoverResults(result.skills);
-          setDiscoverError("");
-          setSelectedOnlineSkillId((currentId) =>
-            result.skills.some((skill) => skill.id === currentId) ? currentId : (result.skills[0]?.id ?? ""),
-          );
-        })
-        .catch((error) => {
-          if (cancelled) {
-            return;
-          }
+        if (requestId === discoverRequestIdRef.current) {
+          setIsSearching(false);
+        }
+      });
+  }, []);
 
-          setDiscoverResults([]);
-          setDiscoverError(error instanceof Error ? error.message : String(error));
-        })
-        .finally(() => {
-          if (!cancelled) {
-            setIsSearching(false);
-          }
-        });
-    }, DISCOVER_SEARCH_DEBOUNCE_MS);
+  /** 推荐分类写入搜索词和 owner，并立刻搜索，省掉再点一次按钮。 */
+  function handleSelectDiscoverChip(chipId: string) {
+    const chip = DISCOVER_CHIPS.find((item) => item.id === chipId);
 
-    return () => {
-      cancelled = true;
-      window.clearTimeout(timeoutId);
-    };
-  }, [discoverOwner, discoverQuery, panel]);
+    if (!chip) {
+      return;
+    }
+
+    setActiveDiscoverChip(chip.id);
+    setDiscoverQuery(chip.query);
+    setDiscoverOwner(chip.owner ?? "");
+    startDiscoverSearch(chip.query, chip.owner ?? "");
+  }
+
+  /** 搜索按钮和回车触发搜索，不做按键防抖，点击后立即请求。 */
+  function handleSubmitDiscoverSearch(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+
+    const query = discoverQuery.trim();
+
+    if (query.length < 2) {
+      return;
+    }
+
+    startDiscoverSearch(query, discoverOwner.trim());
+  }
+
+  /** 输入变化时同步清空过期结果，避免列表和搜索词对不上。 */
+  function handleDiscoverQueryChange(value: string) {
+    setDiscoverQuery(value);
+    setActiveDiscoverChip("");
+    setDiscoverOwner("");
+
+    if (value.trim().length < 2) {
+      // 不足两个字时回到分类引导，并让在途请求的结果失效。
+      discoverRequestIdRef.current += 1;
+      discoverInFlightKeyRef.current = "";
+      setDiscoverResults([]);
+      setDiscoverError("");
+      setDiscoverSearchedQuery("");
+      setIsSearching(false);
+    }
+  }
 
   useEffect(() => {
     if (panel !== "discover" || !selectedOnlineSkill) {
@@ -576,20 +602,30 @@ export function SkillsModal({
         {panel === "discover" ? (
           <div className="grid min-h-0 overflow-hidden grid-cols-[300px_minmax(0,1fr)] max-[980px]:grid-cols-[minmax(220px,280px)_minmax(0,1fr)] max-[760px]:grid-cols-1 max-[760px]:grid-rows-[minmax(180px,38%)_minmax(0,1fr)]">
             <aside className="grid min-h-0 grid-rows-[auto_auto_minmax(0,1fr)_auto] gap-2.5 overflow-hidden border-r border-border bg-warm-panel p-3.5 max-[760px]:border-r-0 max-[760px]:border-b">
-              <div className={cn("flex items-center gap-[7px] rounded-[7px] border border-border bg-surface-translucent px-[9px] text-ink-muted", focusShellClassName)}>
-                <Search size={15} />
+              <form
+                className={cn("flex items-center gap-[7px] rounded-[7px] border border-border bg-surface-translucent pl-[9px] pr-1 text-ink-muted", focusShellClassName)}
+                role="search"
+                onSubmit={handleSubmitDiscoverSearch}
+              >
+                <Search size={15} className="shrink-0" />
                 <input
-                  className="min-h-[34px] w-full border-0 bg-transparent outline-0"
+                  className="min-h-[34px] w-full min-w-0 border-0 bg-transparent outline-0"
                   value={discoverQuery}
-                  onChange={(event) => {
-                    setDiscoverQuery(event.target.value);
-                    setActiveDiscoverChip("");
-                    setDiscoverOwner("");
-                  }}
-                  placeholder="搜索在线 Skills，例如 写作、PDF"
+                  onChange={(event) => handleDiscoverQueryChange(event.target.value)}
+                  placeholder="搜索在线 Skills，如 写作、PDF"
                   aria-label="搜索在线 Skills"
                 />
-              </div>
+                <Button
+                  variant="primary"
+                  size="compact"
+                  type="submit"
+                  className="shrink-0 px-2.5"
+                  title="搜索在线 Skills"
+                  disabled={discoverQuery.trim().length < 2}
+                >
+                  搜索
+                </Button>
+              </form>
               <div className="flex flex-wrap gap-1.5" aria-label="推荐分类">
                 {DISCOVER_CHIPS.map((chip) => (
                   <FilterChip active={activeDiscoverChip === chip.id} key={chip.id} onClick={() => handleSelectDiscoverChip(chip.id)}>
@@ -601,12 +637,13 @@ export function SkillsModal({
                 {isSearching && <p className="m-0 text-[13px] text-ink-muted">正在搜索在线 Skills…</p>}
                 {!isSearching && discoverError && <p className="m-0 text-[13px] text-ink-muted">{discoverError}</p>}
                 {!isSearching && !discoverError && discoverQuery.trim().length < 2 && (
-                  <p className="m-0 text-[13px] text-ink-muted">从分类开始，或输入至少两个字搜索公开目录。</p>
+                  <p className="m-0 text-[13px] text-ink-muted">从分类开始，或输入至少两个字后点搜索。</p>
                 )}
-                {!isSearching &&
-                  !discoverError &&
-                  discoverQuery.trim().length >= 2 &&
-                  !discoverResults.length && <p className="m-0 text-[13px] text-ink-muted">没有匹配的在线 Skill。</p>}
+                {!isSearching && !discoverError && discoverQuery.trim().length >= 2 && !discoverResults.length && (
+                  <p className="m-0 text-[13px] text-ink-muted">
+                    {discoverSearchedQuery === discoverQuery.trim() ? "没有匹配的在线 Skill。" : "点搜索查找公开目录。"}
+                  </p>
+                )}
                 {discoverResults.map((skill) => {
                   const isInstalled = skills.some((item) => item.name === skill.skillId || item.name === skill.name);
 
