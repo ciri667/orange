@@ -61,7 +61,7 @@ export function useKnowledgeBaseActions({
       activeKnowledgeBaseId: knowledgeBaseId,
       activeNoteId: nextNotes[0]?.id ?? "",
       activeDocumentId: nextNotes[0] ? "" : nextDocuments[0]?.id ?? "",
-      activeSessionId: nextActiveSessionId,
+      activeSessionId: currentSnapshot.activeSessionId,
     };
 
     logInfo("切换知识库浏览焦点。", {

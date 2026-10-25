@@ -133,6 +133,16 @@ export function resolveActiveSessionForKnowledgeBase(snapshot: WorkspaceSnapshot
   return snapshot.sessions.find((session) => session.id === sessionId);
 }
 
+/** 右侧会话焦点不随左侧知识库或中间文件改变。 */
+export function resolveActivePanelSession(snapshot: WorkspaceSnapshot) {
+  return snapshot.sessions.find((session) => session.id === snapshot.activeSessionId);
+}
+
+/** 会话自己的主知识库决定默认工具范围；编辑器位置不能扩大其授权。 */
+export function resolveSessionKnowledgeBase(snapshot: WorkspaceSnapshot, session?: AgentSession) {
+  return session?.knowledgeBaseIds.map((id) => snapshot.knowledgeBases.find((knowledgeBase) => knowledgeBase.id === id)).find(Boolean) ?? snapshot.knowledgeBases.find((knowledgeBase) => knowledgeBase.id === snapshot.activeKnowledgeBaseId) ?? snapshot.knowledgeBases[0];
+}
+
 /** 判断会话是否已经持久化在当前快照中，草稿会话不能直接提交给后端 Agent。 */
 export function isPersistedSession(snapshot: WorkspaceSnapshot, session: AgentSession) {
   return snapshot.sessions.some((item) => item.id === session.id);

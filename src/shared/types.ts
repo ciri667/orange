@@ -1026,6 +1026,12 @@ export interface EditorFileTab {
   id: string;
 }
 
+/** 右侧内容使用稳定引用；终端和网页仅存在于当前应用运行期。 */
+export type RightPanelTab =
+  | { kind: "session"; id: string }
+  | { kind: "terminal"; id: string }
+  | { kind: "browser"; id: string };
+
 /** 终端进程描述，不含输入或输出正文。 */
 export interface TerminalDescriptor {
   terminalId: string;

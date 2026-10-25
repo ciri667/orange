@@ -1,9 +1,7 @@
-import { History, Book, Play, Plus, ShieldAlert, X } from "lucide-react";
-import { useEffect, useRef, useState } from "react";
+import { Book, Play, ShieldAlert, X } from "lucide-react";
+import { useRef } from "react";
 import { Button } from "../shared/Button";
-import { OrangeMark } from "../shared/OrangeMark";
 import { Checkbox } from "../shared/Checkbox";
-import { OverflowTooltipText } from "../shared/OverflowTooltipText";
 import { getImSessionSourceLabel, getSessionKnowledgeBaseLabel } from "../shared/selectors";
 import { useDismissable } from "../shared/useDismissable";
 import type {
@@ -24,7 +22,6 @@ import {
   AgentMessageList,
   AgentScopeSelector,
   AgentSessionContextPopover,
-  AgentSessionHistoryPopover,
   AgentSessionSummary,
 } from "./AgentPanelSections";
 
@@ -32,11 +29,11 @@ import {
 export function AgentPanel({
   sessions,
   activeSession,
+  messageScrollPositions,
   activeKnowledgeBase,
   knowledgeBases,
   notes,
   readingNote,
-  primaryTitle = false,
   documents,
   prompt,
   skills,
@@ -50,24 +47,13 @@ export function AgentPanel({
   agentSecurity,
   turnModelSelection,
   isComposerBusy = false,
-  inFlightSessionIds = [],
-  queuedSessionIds = [],
   liveTurn,
   queuedFollowUp,
   queuedFollowUpInList,
-  isSessionListOpen,
   isSessionContextOpen,
   isScopeSelectorOpen,
-  onToggleSessionList,
   onToggleSessionContext,
   onToggleScopeSelector,
-  onCreateSession,
-  onSelectSession,
-  onDeleteSession,
-  onRenameSession,
-  onTogglePinSession,
-  onToggleArchiveSession,
-  onShowSessionList,
   onToggleScopeKnowledgeBase,
   onPromptChange,
   onSelectedSkillIdsChange,
@@ -96,13 +82,12 @@ export function AgentPanel({
 }: {
   sessions: AgentSession[];
   activeSession: AgentSession;
+  messageScrollPositions?: Map<string, { top: number; stickToBottom: boolean }>;
   activeKnowledgeBase: KnowledgeBase;
   knowledgeBases: KnowledgeBase[];
   notes: Note[];
   /** 当前编辑区的笔记只作起点；使用前仍检查是否在本会话可 @ 的范围内。 */
   readingNote?: Note;
-  /** 单栏对话视图用会话名作为页面主标题；并排时由笔记承担主标题。 */
-  primaryTitle?: boolean;
   /** 所有已索引普通文档，用于历史 @ 文件名称回显。 */
   documents: WorkspaceDocument[];
   prompt: string;
@@ -124,30 +109,16 @@ export function AgentPanel({
   turnModelSelection: string;
   /** 当前正在查看的会话是否有进行中的回合或排队指令，供输入条和权限开关使用。 */
   isComposerBusy?: boolean;
-  /** 正在跑 Agent 的会话 ID，供会话列表和标题栏显示运行态。 */
-  inFlightSessionIds?: string[];
-  /** 已排队等待开跑的会话 ID。 */
-  queuedSessionIds?: string[];
   /** 当前正在执行的过程快照；完成后由持久化助手消息接管。 */
   liveTurn?: AgentTurnProgressEvent | null;
   /** 当前会话排队指令，用于输入条；可能已经乐观写入该会话。 */
   queuedFollowUp?: string | null;
   /** 尚未落库、需要画在消息列表里的同会话 follow-up。 */
   queuedFollowUpInList?: string | null;
-  isSessionListOpen: boolean;
   isSessionContextOpen: boolean;
   isScopeSelectorOpen: boolean;
-  onToggleSessionList: () => void;
   onToggleSessionContext: () => void;
   onToggleScopeSelector: () => void;
-  onCreateSession: () => void;
-  onSelectSession: (sessionId: string) => void;
-  onDeleteSession: (sessionId: string) => void;
-  onRenameSession: (sessionId: string, title: string) => void;
-  onTogglePinSession: (sessionId: string) => void;
-  onToggleArchiveSession: (sessionId: string) => void;
-  /** 侧栏可见时切回会话列表；窄屏仍用本面板里的历史浮层。 */
-  onShowSessionList: () => void;
   onToggleScopeKnowledgeBase: (knowledgeBaseId: string) => void;
   onPromptChange: (value: string) => void;
   onSelectedSkillIdsChange: (skillIds: string[]) => void;
@@ -182,62 +153,17 @@ export function AgentPanel({
   onExecutePlan: () => void;
   onToggleChangeOperation: (operationId: string, selected: boolean) => void;
 }) {
-  /** 当前 IM 来源标签仅用于补充标题，不替代稳定会话名称。 */
+  /** 当前 IM 来源标签放在会话信息行，提示这条会话来自哪个渠道。 */
   const activeImSourceLabel = getImSessionSourceLabel(activeSession);
-  // AgentPanel 三个 popover 共用同一个外层 aside 作为 ref 容器：
+  // 上下文浮层和范围浮层共用同一个外层 aside 作为 ref 容器：
   // 点击 Agent 面板以外的区域才关闭浮层；面板内切入别的功能按钮时由各按钮的 toggle 自行处理。
   const panelRef = useRef<HTMLElement | null>(null);
-  /** 窄屏会整栏隐藏左侧导航，会话列表改回协作区浮层。 */
-  const sidebarHidden = useSidebarHidden();
-  const showSessionPopover = sidebarHidden && isSessionListOpen;
-  useDismissable(showSessionPopover, onToggleSessionList, { externalRef: panelRef });
   useDismissable(isSessionContextOpen, onToggleSessionContext, { externalRef: panelRef });
   useDismissable(isScopeSelectorOpen, onToggleScopeSelector, { externalRef: panelRef });
 
   return (
     <aside ref={panelRef} className="agent-panel" aria-label="AI 协作区">
-      <header className="agent-panel-header flex shrink-0 items-center justify-between gap-2">
-        <div className="flex min-w-0 flex-1 items-center gap-2">
-          <OrangeMark className="size-5 shrink-0" />
-          <OverflowTooltipText as={primaryTitle ? "h1" : "h2"} className="m-0 block truncate text-sm font-medium text-ink-strong" text={activeSession.title} logArea="agent_session_title" />
-          {activeImSourceLabel && (
-            <span className="max-w-full shrink-0 truncate rounded-full border border-border px-1.5 py-px text-[11px] font-medium text-ink-muted">
-              {activeImSourceLabel}
-            </span>
-          )}
-        </div>
-        <div className="flex items-center gap-0.5">
-          <Button variant="icon" title="查看上下文" onClick={onToggleSessionContext}>
-            <Book size={16} />
-          </Button>
-          <Button
-            variant="icon"
-            className="relative"
-            title={inFlightSessionIds.length ? `${inFlightSessionIds.length} 个任务运行中` : "会话历史"}
-            onClick={() => {
-              if (sidebarHidden) {
-                onToggleSessionList();
-              } else {
-                onShowSessionList();
-              }
-            }}
-          >
-            <History size={16} />
-            {inFlightSessionIds.length > 0 && (
-              <span
-                className="absolute -top-0.5 -right-0.5 flex size-3.5 items-center justify-center rounded-full bg-ink text-[9px] font-bold text-white"
-                aria-label={`${inFlightSessionIds.length} 个任务运行中`}
-              >
-                {inFlightSessionIds.length}
-              </span>
-            )}
-          </Button>
-          <Button variant="icon" title="新建会话" onClick={onCreateSession}>
-            <Plus size={16} />
-          </Button>
-        </div>
-      </header>
-
+      {/* 会话名已由右侧页签展示；内容区顶部只保留范围、上下文占用和上下文入口。 */}
       <div className="agent-panel-context flex min-w-0 shrink-0 items-center gap-1.5 py-2" aria-label="当前会话上下文">
         <AgentScopeSelector
           activeSession={activeSession}
@@ -247,29 +173,20 @@ export function AgentPanel({
           onToggleScopeSelector={onToggleScopeSelector}
           onToggleScopeKnowledgeBase={onToggleScopeKnowledgeBase}
         />
+        {activeImSourceLabel && (
+          <span className="max-w-[38%] shrink-0 truncate rounded-full border border-border px-1.5 py-px text-[11px] font-medium text-ink-muted">
+            {activeImSourceLabel}
+          </span>
+        )}
         <AgentSessionSummary
           activeSession={activeSession}
           sessions={sessions}
           modelConfig={modelConfig}
         />
+        <Button variant="icon" size="compact" title="查看上下文" onClick={onToggleSessionContext}>
+          <Book size={16} />
+        </Button>
       </div>
-
-      {showSessionPopover && (
-        <AgentSessionHistoryPopover
-          sessions={sessions}
-          activeSession={activeSession}
-          knowledgeBases={knowledgeBases}
-          inFlightSessionIds={inFlightSessionIds}
-          queuedSessionIds={queuedSessionIds}
-          onToggleSessionList={onToggleSessionList}
-          activeKnowledgeBaseId={activeKnowledgeBase.id}
-          onSelectSession={onSelectSession}
-          onDeleteSession={onDeleteSession}
-          onRenameSession={onRenameSession}
-          onTogglePinSession={onTogglePinSession}
-          onToggleArchiveSession={onToggleArchiveSession}
-        />
-      )}
 
       {isSessionContextOpen && (
         <AgentSessionContextPopover
@@ -287,6 +204,7 @@ export function AgentPanel({
       )}
 
       <AgentMessageList
+        scrollPositions={messageScrollPositions}
         activeSession={activeSession}
         documents={documents}
         liveTurn={liveTurn}
@@ -399,20 +317,4 @@ export function AgentPanel({
       />
     </aside>
   );
-}
-
-/** 与样式里隐藏左侧栏的断点一致，窄窗口才把会话入口放回协作区。 */
-function useSidebarHidden() {
-  const query = "(max-width: 760px)";
-  const [hidden, setHidden] = useState(() => typeof window !== "undefined" && window.matchMedia(query).matches);
-
-  useEffect(() => {
-    const media = window.matchMedia(query);
-    const onChange = () => setHidden(media.matches);
-    onChange();
-    media.addEventListener("change", onChange);
-    return () => media.removeEventListener("change", onChange);
-  }, []);
-
-  return hidden;
 }

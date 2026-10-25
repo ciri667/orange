@@ -172,7 +172,7 @@ export function useEditorActions(options: EditorActionsOptions) {
       activeKnowledgeBaseId: nextKnowledgeBase.id,
       activeNoteId: tab.kind === "note" ? tab.id : "",
       activeDocumentId: tab.kind === "document" ? tab.id : "",
-      activeSessionId: resolveKnowledgeBaseSessionId(baseSnapshot, nextKnowledgeBase.id),
+      activeSessionId: baseSnapshot.activeSessionId,
     };
 
     setOpenFileTabs((currentTabs) =>
@@ -485,7 +485,7 @@ export function useEditorActions(options: EditorActionsOptions) {
               activeKnowledgeBaseId: nextKnowledgeBase.id,
               activeNoteId: nextNote.id,
               activeDocumentId: "",
-              activeSessionId: resolveKnowledgeBaseSessionId(nextSnapshot, nextKnowledgeBase.id),
+              activeSessionId: nextSnapshot.activeSessionId,
             }
           : nextSnapshot;
 

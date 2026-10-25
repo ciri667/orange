@@ -1,7 +1,15 @@
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { AgentPanel } from "../agent/AgentPanel";
 import { McpApprovalDialog } from "../agent/McpApprovalDialog";
 import { BrowserPanel } from "../browser/BrowserPanel";
+import { BrowserApprovalDialog } from "../browser/BrowserApprovalDialog";
+import { useBrowserWorkspace } from "../browser/useBrowserWorkspace";
+import { TerminalPanel } from "../terminal/TerminalPanel";
+import { useTerminals } from "../terminal/useTerminals";
+import { RightPanel, type RightPanelTabItem } from "./RightPanel";
+import { rightTabId } from "./rightPanelModel";
+import { useRightPanelTabs } from "./useRightPanelTabs";
+import { useRightPanelActions } from "./useRightPanelActions";
 import { DocumentPane } from "../editor/DocumentPane";
 import { EditorTabBar, type EditorTabBarItem } from "../editor/EditorTabBar";
 import { EditorPane } from "../editor/EditorPane";
@@ -43,7 +51,7 @@ import {
   getCreatePlaceholder,
   getCreateSubmitLabel,
 } from "./fileNameUtils";
-import { DRAFT_SESSION_ID, buildDraftAgentSession, buildMentionableFiles, resolveActiveSessionForKnowledgeBase, resolveNewSessionSecurityLevel } from "./sessionUtils";
+import { DRAFT_SESSION_ID, buildDraftAgentSession, buildMentionableFiles, resolveActivePanelSession, resolveSessionKnowledgeBase, resolveNewSessionSecurityLevel } from "./sessionUtils";
 import { PLAN_EXECUTION_PROMPT } from "../shared/planMode";
 import { useAgentTurn } from "./useAgentTurn";
 import { useAgentTurnDraft } from "./useAgentTurnDraft";
@@ -77,10 +85,6 @@ export function WorkspaceShell() {
   const [searchTerm, setSearchTerm] = useState("");
   /** 目录树折叠状态由前端维护，切换知识库、重扫或恢复会话时重置。 */
   const [collapsedFolderPaths, setCollapsedFolderPaths] = useState<Set<string>>(new Set());
-  /** 会话历史浮层开关，和上下文、scope 浮层互斥。 */
-  const [isSessionListOpen, setIsSessionListOpen] = useState(false);
-  /** 递增后让侧栏从文件树切回会话列表。 */
-  const [sessionPaneRequest, setSessionPaneRequest] = useState(0);
   /** 当前会话上下文浮层开关，避免长消息列表挤占主输入区。 */
   const [isSessionContextOpen, setIsSessionContextOpen] = useState(false);
   /** 会话工具范围选择器开关，用于多知识库 scope 管理。 */
@@ -185,12 +189,15 @@ export function WorkspaceShell() {
     },
     onNoticeChange: setNotice,
   });
-  /** 浏览器面板显隐：跟随设置里的浏览器功能开关，默认隐藏。 */
-  const [isBrowserPanelOpen, setIsBrowserPanelOpen] = useState(false);
   const browserEnabled = userSettings?.browser?.enabled ?? false;
-  useEffect(() => {
-    setIsBrowserPanelOpen(browserEnabled);
-  }, [browserEnabled]);
+  const setRightOpen = useCallback((open: boolean) => { setAgentOpen(open); if (!open && compactView.singlePane) compactView.showPane("editor"); }, [setAgentOpen, compactView.singlePane, compactView.showPane]);
+  const rightTabs = useRightPanelTabs(snapshot, setSnapshot, setRightOpen);
+  const selectedRightTab = rightTabs.tabs.find((tab) => rightTabId(tab) === rightTabs.activeId);
+  const rightVisible = agentOpen && (!compactView.singlePane || compactView.pane === "agent");
+  const browserWorkspace = useBrowserWorkspace(selectedRightTab?.kind === "browser" ? selectedRightTab.id : null, rightVisible && browserEnabled && selectedRightTab?.kind === "browser");
+  const terminals = useTerminals();
+  /** 显式打开内容才展开右栏；后台网页事件不会经过此入口。 */
+  function revealRightPanel() { setAgentOpen(true); compactView.showPane("agent"); }
   useEffect(() => {
     let unlisten: (() => void) | undefined;
     void listenScheduledJobUpdated((payload) => {
@@ -219,6 +226,7 @@ export function WorkspaceShell() {
   useReviewChangeLogger(snapshot);
   /** Agent 输入草稿按会话隔离，切走再切回时保留该会话的模型和未发送文字。 */
   const {
+    messageScrollPositions,
     agentPrompt,
     setAgentPrompt,
     turnModelSelection,
@@ -484,7 +492,6 @@ export function WorkspaceShell() {
     handleToggleScopeKnowledgeBase,
     handleSetSessionModelSelection,
     handleCompactAgentContext,
-    handleToggleSessionList,
     handleToggleSessionContext,
     handleToggleScopeSelector,
     handleToggleAgentPanel,
@@ -503,10 +510,8 @@ export function WorkspaceShell() {
     requestConfirmation,
     setSearchTerm,
     setCollapsedFolderPaths,
-    setIsSessionListOpen,
     setIsSessionContextOpen,
     setIsScopeSelectorOpen,
-    isSessionListOpen,
     isSessionContextOpen,
     isScopeSelectorOpen,
     agentOpen,
@@ -514,6 +519,8 @@ export function WorkspaceShell() {
     setUserSettings,
     setContextCompaction,
     prepareSessionForDelete: handlePrepareSessionForDelete,
+    onSessionOpened: (id, activate = true) => { rightTabs.openTab({ kind: "session", id }, activate); if (activate) revealRightPanel(); },
+    capturePanelFocus: rightTabs.captureFocus,
   });
   const { handleAddReviewComment, handleSubmitReviewComments, handleAcceptChange, handleRejectChange } = useReviewActions({
     snapshot,
@@ -526,6 +533,8 @@ export function WorkspaceShell() {
     setAppEventLogs,
     handleSubmitPrompt,
   });
+
+  const rightActions = useRightPanelActions({ panel: rightTabs, browser: browserWorkspace, terminals, snapshot, browserEnabled, reveal: revealRightPanel, showSettings: () => setIsSettingsOpen(true), selectSession: handleSelectSession, createSession: handleCreateSession, confirm: requestConfirmation, notice: setNotice });
 
   if (isBooting) {
     return (
@@ -577,7 +586,8 @@ export function WorkspaceShell() {
   }
 
   const activeKnowledgeBase = getActiveKnowledgeBase(currentSnapshot);
-  const persistedActiveSession = resolveActiveSessionForKnowledgeBase(currentSnapshot, activeKnowledgeBase);
+  const persistedActiveSession = resolveActivePanelSession(currentSnapshot);
+  const sessionKnowledgeBase = resolveSessionKnowledgeBase(currentSnapshot, persistedActiveSession) ?? activeKnowledgeBase;
   const activeSession = persistedActiveSession ?? buildDraftAgentSession(
     activeKnowledgeBase,
     resolveNewSessionSecurityLevel(userSettings.agentSecurity.defaultLevel),
@@ -821,7 +831,6 @@ export function WorkspaceShell() {
         onRenameSession={handleRenameSession}
         onTogglePinSession={handleTogglePinSession}
         onToggleArchiveSession={handleToggleArchiveSession}
-        sessionPaneRequest={sessionPaneRequest}
       />
     );
   }
@@ -838,13 +847,14 @@ export function WorkspaceShell() {
   function renderAgentPanel() {
     return (
       <AgentPanel
+        key={activeSession.id}
         sessions={currentSnapshot.sessions}
         activeSession={activeSession}
-        activeKnowledgeBase={activeKnowledgeBase}
+        messageScrollPositions={messageScrollPositions}
+        activeKnowledgeBase={sessionKnowledgeBase}
         knowledgeBases={currentSnapshot.knowledgeBases}
         notes={currentSnapshot.notes}
-        readingNote={activeNote}
-        primaryTitle={compactView.singlePane && compactView.pane === "agent"}
+        readingNote={activeNote && activeSession.knowledgeBaseIds.includes(activeNote.knowledgeBaseId) ? activeNote : undefined}
         documents={currentSnapshot.documents}
         prompt={agentPrompt}
         skills={agentSkills}
@@ -858,24 +868,13 @@ export function WorkspaceShell() {
         agentSecurity={currentSettings.agentSecurity}
         turnModelSelection={turnModelSelection}
         isComposerBusy={isCurrentSessionBusy}
-        inFlightSessionIds={inFlightSessionIds}
-        queuedSessionIds={queuedSessionIds}
         liveTurn={liveTurn}
         queuedFollowUp={queuedFollowUp}
         queuedFollowUpInList={queuedFollowUpInList}
-        isSessionListOpen={isSessionListOpen}
         isSessionContextOpen={isSessionContextOpen}
         isScopeSelectorOpen={isScopeSelectorOpen}
-        onToggleSessionList={handleToggleSessionList}
         onToggleSessionContext={handleToggleSessionContext}
         onToggleScopeSelector={handleToggleScopeSelector}
-        onCreateSession={handleCreateSession}
-        onSelectSession={handleSelectSession}
-        onDeleteSession={handleDeleteSession}
-        onRenameSession={handleRenameSession}
-        onTogglePinSession={handleTogglePinSession}
-        onToggleArchiveSession={handleToggleArchiveSession}
-        onShowSessionList={() => setSessionPaneRequest((current) => current + 1)}
         onToggleScopeKnowledgeBase={handleToggleScopeKnowledgeBase}
         onPromptChange={setAgentPrompt}
         onSelectedSkillIdsChange={setExplicitSkillIds}
@@ -993,9 +992,6 @@ export function WorkspaceShell() {
       */}
       <WorkspaceTopBar
         sidebarOpen={compactView.compact ? compactView.sidebarOpen : regionOpen.sidebar}
-        browserEnabled={browserEnabled}
-        browserOpen={isBrowserPanelOpen}
-        onToggleBrowser={() => setIsBrowserPanelOpen((open) => !open)}
         onToggleSidebar={() => compactView.compact ? compactView.setSidebarOpen((open) => !open) : toggleRegion("sidebar")}
         compact={compactView.compact}
         compactPane={compactView.pane}
@@ -1080,7 +1076,6 @@ export function WorkspaceShell() {
           onRenameSession={handleRenameSession}
           onTogglePinSession={handleTogglePinSession}
           onToggleArchiveSession={handleToggleArchiveSession}
-          sessionPaneRequest={sessionPaneRequest}
         />
         ) : (
           <RegionRail
@@ -1132,7 +1127,8 @@ export function WorkspaceShell() {
                   beginBusy("正在打开任务会话...");
                   try {
                     const sessions = await loadSessions(currentSnapshot);
-                    commitSnapshot(await restoreSessionContext({ ...currentSnapshot, sessions }, sessionId));
+                    commitSnapshot(await restoreSessionContext({ ...currentSnapshot, sessions }, sessionId, false));
+                    rightTabs.openTab({ kind: "session", id: sessionId });
                   } catch (error) {
                     setNotice(formatErrorMessage(error));
                   } finally {
@@ -1170,23 +1166,28 @@ export function WorkspaceShell() {
             {...getSeparatorProps("agent")}
           />
         )}
-        {regionOpen.agent ? (
-          renderAgentPanel()
-        ) : (
-          <RegionRail
-            edge="right"
-            label={getRegion("agent").label}
-            items={getRegion("agent").items}
-            activeItemId={activeItems.agent}
-            onSelectItem={(itemId) => setRegionActiveItem("agent", itemId)}
-            renderPreview={renderAgentPreview}
-            previewWidth={regionPreviewWidth.agent}
-          />
-        )}
-        {isBrowserPanelOpen && (
-          <BrowserPanel className="browser-panel-floating" onClose={() => setIsBrowserPanelOpen(false)} />
-        )}
+        <RightPanel
+          items={rightTabs.tabs.map<RightPanelTabItem>((tab) => {
+            if (tab.kind === "session") {
+              const session = currentSnapshot.sessions.find((item) => item.id === tab.id);
+              return { tab, title: session?.title ?? "会话", status: inFlightSessionIds.includes(tab.id) || queuedSessionIds.includes(tab.id) ? "运行中" : session?.pendingChange?.status === "pending" || session?.pendingChangeSet?.status === "pending" || session?.pendingExecution?.status === "pending" ? "待确认" : session?.messages.at(-1)?.role === "assistant" ? "已完成" : undefined };
+            }
+            if (tab.kind === "terminal") {
+              const terminal = terminals.get(tab.id);
+              return { tab, title: terminal?.descriptor?.shell ?? "终端", status: terminal?.status === "running" ? "运行中" : terminal?.status === "failed" ? "启动失败" : terminal?.status === "exited" ? "已退出" : "启动中" };
+            }
+            const page = browserWorkspace.state?.tabs.find((item) => item.tabId === tab.id);
+            return { tab, title: page?.title || (page?.url === "about:blank" ? "空白页" : page?.url) || "浏览器", status: browserWorkspace.activity?.tabId === tab.id ? "运行中" : undefined };
+          })}
+          activeId={rightTabs.activeId} open={agentOpen} onExpand={revealRightPanel} onCollapse={() => setRightOpen(false)}
+          onSelect={rightActions.select} onClose={rightActions.close} onCreate={rightActions.create} onReorder={rightTabs.reorder} browserEnabled={browserEnabled}
+        >
+          <div className="right-session-content" hidden={selectedRightTab?.kind !== "session"}>{selectedRightTab?.kind === "session" && renderAgentPanel()}</div>
+          {terminals.contents.map((content) => <TerminalPanel key={content.id} content={content} active={rightVisible && selectedRightTab?.kind === "terminal" && selectedRightTab.id === content.id} onRestart={() => void terminals.restart(content.id).catch(setNotice)} />)}
+          <BrowserPanel browser={browserWorkspace} tabId={selectedRightTab?.kind === "browser" ? selectedRightTab.id : null} active={selectedRightTab?.kind === "browser"} onRetry={() => selectedRightTab?.kind === "browser" && rightActions.retryBrowser(selectedRightTab.id)} />
+        </RightPanel>
       </main>
+      <BrowserApprovalDialog browser={browserWorkspace} />
       {isSettingsOpen && (
         <SettingsDrawer
           knowledgeBases={currentSnapshot.knowledgeBases}

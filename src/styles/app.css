@@ -495,8 +495,25 @@ select:focus-visible {
   box-shadow: none;
 }
 
-/* 内容区始终持有终端实例；hidden 必须覆盖组件本身的 flex 布局。 */
-.terminal-panel[hidden] { display: none !important; }
+/* 统一内容区始终持有终端实例；hidden 必须覆盖组件本身的 flex 布局。 */
+.right-workbench[hidden], .right-session-content[hidden], .terminal-panel[hidden], .browser-panel[hidden] { display: none !important; }
+.right-workbench { display: flex; flex-direction: column; position: relative; min-width: 0; min-height: 0; height: 100%; background: var(--surface); }
+.right-panel-header { display: flex; align-items: center; height: 44px; flex-shrink: 0; min-width: 0; border-bottom: 1px solid var(--border); position: relative; z-index: 3; }
+.right-tab-strip { display: flex; flex: 1; min-width: 0; overflow-x: auto; scrollbar-width: thin; align-self: stretch; align-items: center; padding-left: 6px; gap: 3px; }
+.right-tab { display: flex; align-items: center; flex-shrink: 0; min-width: 100px; max-width: 200px; height: 34px; border: 1px solid transparent; border-radius: var(--radius-control); color: var(--text-muted); }
+.right-tab:hover { background: var(--surface-hover); }
+.right-tab.is-active { color: var(--text-strong); border-color: var(--border); background: var(--surface); }
+.right-tab-select { display: flex; align-items: center; gap: 6px; min-width: 0; flex: 1; padding: 6px 3px 6px 8px; border: 0; background: transparent; font-size: 12px; }
+.right-tab-select > svg { flex-shrink: 0; }
+.right-tab-select > span { min-width: 0; white-space: nowrap; text-overflow: ellipsis; overflow: hidden; }
+.right-tab-close { flex-shrink: 0; }
+.right-tab-status { width: 5px; height: 5px; border-radius: 50%; flex-shrink: 0; background: var(--accent); }
+.right-tab-status.is-running { box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent) 18%, transparent); }
+.right-panel-tools { display: flex; align-items: center; flex-shrink: 0; padding: 0 6px; gap: 1px; background: var(--surface); }
+.right-panel-content, .right-session-content { display: flex; flex-direction: column; flex: 1; min-height: 0; min-width: 0; overflow: hidden; }
+.right-session-content > .agent-panel, .right-panel-content > .browser-panel { flex: 1; min-height: 0; }
+.right-panel-empty { display: flex; flex: 1; flex-direction: column; align-items: center; justify-content: center; gap: 12px; padding: 24px; color: var(--text-muted); font-size: 13px; }
+.right-content-rail { display: flex; flex-direction: column; align-items: center; gap: 8px; padding-top: 9px; overflow: visible; }
 .terminal-panel { display: flex; flex-direction: column; flex: 1; min-width: 0; min-height: 0; background: var(--terminal-bg); color: var(--terminal-fg); }
 .terminal-toolbar { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 8px 12px; font-size: 11px; color: var(--text-muted); }
 .terminal-toolbar > span { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; }
@@ -1177,14 +1194,6 @@ select:focus-visible {
 
 /* Agent 保持轻量停靠；模型和权限各有稳定位置，长名称不能推走发送。 */
 
-.agent-panel-header {
-  height: 36px;
-  min-height: 36px;
-  padding-inline: 14px;
-  border-bottom: 1px solid var(--border);
-  background: var(--surface-warm);
-}
-
 .agent-panel-context {
   padding-inline: 14px;
 }
@@ -1354,7 +1363,7 @@ select:focus-visible {
   .workspace-grid > .workspace-resizer, .workspace-grid > .region-rail-right {
     display: none;
   }
-  .workspace-grid[data-compact-pane="agent"] > .editor-workbench, .workspace-grid[data-compact-pane="editor"] > .agent-panel {
+  .workspace-grid[data-compact-pane="agent"] > .editor-workbench, .workspace-grid[data-compact-pane="editor"] > .right-workbench {
     display: none;
   }
   .agent-conversation-start {

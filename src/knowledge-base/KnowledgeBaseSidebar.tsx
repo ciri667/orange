@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useState } from "react";
 import { AlertCircle, Clock, Database, Plus, RefreshCw, Search, Settings } from "lucide-react";
 import { SessionList } from "../agent/SessionList";
 import { FileTree } from "./FileTree";
@@ -63,7 +63,6 @@ export function KnowledgeBaseSidebar({
   onRenameSession,
   onTogglePinSession,
   onToggleArchiveSession,
-  sessionPaneRequest = 0,
   activePane,
   onActivePaneChange,
   compactPreview = false,
@@ -108,8 +107,6 @@ export function KnowledgeBaseSidebar({
   onRenameSession: (sessionId: string, title: string) => void;
   onTogglePinSession: (sessionId: string) => void;
   onToggleArchiveSession: (sessionId: string) => void;
-  /** 外部递增时把侧栏切回会话列表，文件树保持原样。 */
-  sessionPaneRequest?: number;
   /** 收起态图标栏选中的条目；由布局 hook 持有，展开后侧栏直接落在同一块内容上。 */
   activePane?: SidebarPane;
   /** 侧栏内切换条目时回写布局 hook，保证收起后再悬浮看到的是同一块内容。 */
@@ -124,23 +121,6 @@ export function KnowledgeBaseSidebar({
   const sidebarPane = activePane ?? internalPane;
   const setSidebarPane = onActivePaneChange ?? setInternalPane;
   const runningSessionCount = inFlightSessionIds.length;
-
-  /**
-   * 外部要求切回会话列表时才重置。
-   *
-   * 跳过首次渲染：这个 effect 以前一挂载就把分块写回 sessions，
-   * 当分块是外部受控状态时（收起态浮层和展开态共用它），
-   * 浮层里那份实例的挂载会把共享状态抹回 sessions，导致点「文件」立刻被打回。
-   */
-  const lastSessionPaneRequestRef = useRef(sessionPaneRequest);
-  useEffect(() => {
-    if (lastSessionPaneRequestRef.current === sessionPaneRequest) {
-      return;
-    }
-
-    lastSessionPaneRequestRef.current = sessionPaneRequest;
-    setSidebarPane("sessions");
-  }, [sessionPaneRequest, setSidebarPane]);
 
   return (
     <aside className={cn("sidebar", compactPreview && "is-preview")} aria-label="知识库导航">

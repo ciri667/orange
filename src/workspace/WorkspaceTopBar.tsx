@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { getCurrentWindow } from "@tauri-apps/api/window";
-import { Globe, Minus, PanelLeftClose, Square, X } from "lucide-react";
+import { Minus, PanelLeftClose, Square, X } from "lucide-react";
 import { Button } from "../shared/Button";
 import { MenuItem, MenuPanel } from "../shared/Menu";
 import { cn } from "../shared/cn";
@@ -52,7 +52,7 @@ export const TOP_BAR_MENUS: { id: TopBarMenuId; label: string; items: TopBarMenu
     label: "视图",
     items: [
       { id: "toggle-sidebar", label: "收展知识库栏", disabled: true },
-      { id: "toggle-agent", label: "收展 Agent 协作区", disabled: true },
+      { id: "toggle-agent", label: "收展右侧内容区", disabled: true },
       { id: "toggle-schedules", label: "定时任务", disabled: true },
       { id: "open-settings", label: "设置", disabled: true },
     ],
@@ -71,9 +71,6 @@ export interface WorkspaceTopBarProps {
   /** 左栏是否展开，决定收展按钮的图标和提示。 */
   sidebarOpen: boolean;
   onToggleSidebar: () => void;
-  browserEnabled?: boolean;
-  browserOpen?: boolean;
-  onToggleBrowser?: () => void;
   /** 窄窗口侧栏用可关闭的导航层，笔记和对话以标签切换。 */
   compact?: boolean;
   compactPane?: CompactWorkspacePane;
@@ -154,7 +151,7 @@ function runWindowCommand(command: string, action: () => Promise<void>) {
  * Windows 关闭系统装饰后，这里负责拖拽和窗口控制；macOS 用 Overlay 把系统红绿灯
  * 叠进同一行，因此不需要自绘窗口控制。
  */
-export function WorkspaceTopBar({ sidebarOpen, onToggleSidebar, browserEnabled, browserOpen, onToggleBrowser, compact, compactPane, onCompactPaneChange }: WorkspaceTopBarProps) {
+export function WorkspaceTopBar({ sidebarOpen, onToggleSidebar, compact, compactPane, onCompactPaneChange }: WorkspaceTopBarProps) {
   const [platform, setPlatform] = useState<DesktopPlatform | null>(null);
 
   useEffect(() => {
@@ -214,13 +211,11 @@ export function WorkspaceTopBar({ sidebarOpen, onToggleSidebar, browserEnabled, 
 
       <div className="compact-workspace-tabs" aria-label="工作区切换" data-no-drag>
         <Button className={cn("px-3 text-sm", compactPane === "editor" && "border-border-strong font-medium")} aria-pressed={compactPane === "editor"} onClick={() => onCompactPaneChange?.("editor")}>笔记</Button>
-        <Button className={cn("px-3 text-sm", compactPane === "agent" && "border-border-strong font-medium")} aria-pressed={compactPane === "agent"} onClick={() => onCompactPaneChange?.("agent")}>对话</Button>
+        <Button className={cn("px-3 text-sm", compactPane === "agent" && "border-border-strong font-medium")} aria-pressed={compactPane === "agent"} onClick={() => onCompactPaneChange?.("agent")}>右侧内容</Button>
       </div>
 
-      {browserEnabled && <Button variant="ghost" size="compact" className="ml-auto" data-no-drag aria-label={browserOpen ? "收起浏览器面板" : "打开浏览器面板"} aria-pressed={browserOpen} onClick={onToggleBrowser}><Globe size={14} />浏览器</Button>}
-
       {platform === "windows" && (
-        <div className={cn("flex h-full items-stretch", !browserEnabled && "ml-auto")} data-no-drag>
+        <div className="ml-auto flex h-full items-stretch" data-no-drag>
           <button
             type="button"
             className="grid w-11 place-items-center border-0 bg-transparent text-ink-muted hover:bg-surface-hover hover:text-ink"

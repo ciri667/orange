@@ -1,5 +1,5 @@
 import { Check, ChevronDown, Clock, Copy, Database, FolderOpen, Gauge, Layers3, ListChecks, Pencil, Sparkles, X } from "lucide-react";
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import ReactMarkdown from "react-markdown";
 import rehypeSanitize from "rehype-sanitize";
 import { Button } from "../shared/Button";
@@ -12,7 +12,6 @@ import { Checkbox } from "../shared/Checkbox";
 import { Chip } from "../shared/Chip";
 import { cn } from "../shared/cn";
 import { listRowClassName } from "../shared/ListRow";
-import { SessionList } from "./SessionList";
 import { logWarn } from "../shared/logger";
 import {
   createMarkdownComponents,
@@ -272,62 +271,6 @@ export function PlanReadyBanner({
         </Button>
       </span>
     </div>
-  );
-}
-
-/** 窄屏侧栏被隐藏时，用同一套紧凑列表补回会话入口。 */
-export function AgentSessionHistoryPopover({
-  sessions,
-  activeSession,
-  knowledgeBases,
-  inFlightSessionIds = [],
-  queuedSessionIds = [],
-  onToggleSessionList,
-  onSelectSession,
-  onDeleteSession,
-  onRenameSession,
-  onTogglePinSession,
-  onToggleArchiveSession,
-  activeKnowledgeBaseId,
-}: {
-  sessions: AgentSession[];
-  activeSession: AgentSession;
-  knowledgeBases: KnowledgeBase[];
-  inFlightSessionIds?: string[];
-  queuedSessionIds?: string[];
-  onToggleSessionList: () => void;
-  onSelectSession: (sessionId: string) => void;
-  onDeleteSession: (sessionId: string) => void;
-  onRenameSession: (sessionId: string, title: string) => void;
-  onTogglePinSession: (sessionId: string) => void;
-  onToggleArchiveSession: (sessionId: string) => void;
-  activeKnowledgeBaseId?: string;
-}) {
-  return (
-    <section className={agentPopoverClassName} aria-label="会话历史">
-      <div className={popoverHeaderClassName}>
-        <div>
-          <p className={sectionLabelClassName}>Sessions</p>
-          <h3 className="m-0 text-lg text-ink-strong">会话历史</h3>
-        </div>
-        <Button variant="icon" title="关闭会话历史" onClick={onToggleSessionList}>
-          <X size={15} />
-        </Button>
-      </div>
-      <SessionList
-        sessions={sessions}
-        activeSessionId={activeSession.id}
-        knowledgeBases={knowledgeBases}
-        inFlightSessionIds={inFlightSessionIds}
-        queuedSessionIds={queuedSessionIds}
-        activeKnowledgeBaseId={activeKnowledgeBaseId}
-        onSelectSession={onSelectSession}
-        onDeleteSession={onDeleteSession}
-        onRenameSession={onRenameSession}
-        onTogglePinSession={onTogglePinSession}
-        onToggleArchiveSession={onToggleArchiveSession}
-      />
-    </section>
   );
 }
 
@@ -688,6 +631,7 @@ export function AgentScopeSelector({
 
 /** Agent 消息列表，安全渲染 Markdown、过程轨迹和知识库引用。 */
 export function AgentMessageList({
+  scrollPositions,
   activeSession,
   notes,
   documents,
@@ -698,6 +642,7 @@ export function AgentMessageList({
   knowledgeBaseName = "当前授权知识库",
   onChoosePrompt,
 }: {
+  scrollPositions?: Map<string, { top: number; stickToBottom: boolean }>;
   activeSession: AgentSession;
   notes: Note[];
   documents: WorkspaceDocument[];
@@ -722,6 +667,15 @@ export function AgentMessageList({
   }
   const traceScrollFingerprint = getTraceScrollFingerprint(showLiveTurn ? (liveTurn?.steps ?? []) : []);
 
+  useLayoutEffect(() => {
+    const list = listRef.current;
+    const saved = scrollPositions?.get(activeSession.id);
+    if (list && saved) { list.scrollTop = saved.top; stickToBottomRef.current = saved.stickToBottom; }
+    return () => {
+      if (list) scrollPositions?.set(activeSession.id, { top: list.scrollTop, stickToBottom: stickToBottomRef.current });
+    };
+  }, [activeSession.id, scrollPositions]);
+
   useEffect(() => {
     const list = listRef.current;
     if (!list || !stickToBottomRef.current) {
@@ -745,6 +699,7 @@ export function AgentMessageList({
       onScroll={(event) => {
         const list = event.currentTarget;
         stickToBottomRef.current = isNearScrollBottom(list.scrollTop, list.scrollHeight, list.clientHeight);
+        scrollPositions?.set(activeSession.id, { top: list.scrollTop, stickToBottom: stickToBottomRef.current });
       }}
     >
       {activeSession.messages.length === 0 && !showLiveTurn && !queuedFollowUp && (

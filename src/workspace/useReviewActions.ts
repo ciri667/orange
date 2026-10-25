@@ -6,7 +6,7 @@ import { getActiveDocument, getActiveKnowledgeBase, getActiveNote } from "../sha
 import { acceptProposedChange, loadAppEventLogs, rejectProposedChange, saveSession } from "../shared/tauriApi";
 import type { AgentActionType, AppEventLog, ProposedChange, ReviewComment, WorkspaceSnapshot } from "../shared/types";
 import { buildReviewFeedbackPrompt, buildReviewState, updateActivePendingChange } from "./reviewUtils";
-import { buildDraftAgentSession, isPersistedSession, resolveActiveSessionForKnowledgeBase, resolveNewSessionSecurityLevel } from "./sessionUtils";
+import { buildDraftAgentSession, isPersistedSession, resolveActivePanelSession, resolveNewSessionSecurityLevel } from "./sessionUtils";
 import type { WorkspaceChrome } from "./workspaceChrome";
 
 interface ReviewActionsOptions extends WorkspaceChrome {
@@ -33,7 +33,7 @@ export function useReviewActions(options: ReviewActionsOptions) {
   const activeKnowledgeBase = getActiveKnowledgeBase(currentSnapshot);
   const activeNote = getActiveNote(currentSnapshot);
   const activeDocument = getActiveDocument(currentSnapshot);
-  const persistedActiveSession = resolveActiveSessionForKnowledgeBase(currentSnapshot, activeKnowledgeBase);
+  const persistedActiveSession = resolveActivePanelSession(currentSnapshot);
   const activeSession = persistedActiveSession ?? buildDraftAgentSession(
     activeKnowledgeBase,
     resolveNewSessionSecurityLevel(userSettings?.agentSecurity.defaultLevel),

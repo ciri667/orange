@@ -49,7 +49,8 @@ import {
   isPersistedSession,
   mergeSessionTurn,
   removeSessionMessage,
-  resolveActiveSessionForKnowledgeBase,
+  resolveActivePanelSession,
+  resolveSessionKnowledgeBase,
   MAX_PARALLEL_AGENT_TURNS,
   resolveAgentTurnStart,
   shouldUseFirstPromptAsTitle,
@@ -320,8 +321,8 @@ export function useAgentTurn(options: AgentTurnOptions) {
   }
 
   const currentSnapshot = snapshot;
-  const activeKnowledgeBase = getActiveKnowledgeBase(currentSnapshot);
-  const persistedActiveSession = resolveActiveSessionForKnowledgeBase(currentSnapshot, activeKnowledgeBase);
+  const persistedActiveSession = resolveActivePanelSession(currentSnapshot);
+  const activeKnowledgeBase = resolveSessionKnowledgeBase(currentSnapshot, persistedActiveSession) ?? getActiveKnowledgeBase(currentSnapshot);
   const defaultSecurityLevel = resolveNewSessionSecurityLevel(userSettings?.agentSecurity.defaultLevel);
   const activeSession = persistedActiveSession ?? buildDraftAgentSession(activeKnowledgeBase, defaultSecurityLevel);
 
@@ -602,8 +603,7 @@ export function useAgentTurn(options: AgentTurnOptions) {
     const turnAction = replay?.action ?? action;
     const turnDraftImages = replay || presetPrompt ? [] : draftImages;
     const sourceActiveKnowledgeBase =
-      sourceSnapshot.knowledgeBases.find((knowledgeBase) => knowledgeBase.id === sourceSnapshot.activeKnowledgeBaseId) ??
-      activeKnowledgeBase;
+      resolveSessionKnowledgeBase(sourceSnapshot, sourceSnapshot.sessions.find((session) => session.id === (replay?.sessionId ?? sourceSnapshot.activeSessionId))) ?? activeKnowledgeBase;
     const requestedSessionId = replay?.sessionId ?? sourceSnapshot.activeSessionId;
     const sourceActiveSession =
       sourceSnapshot.sessions.find((session) => session.id === requestedSessionId) ??

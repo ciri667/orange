@@ -10,17 +10,19 @@ import {
   buildDraftAgentSession,
   isPersistedSession,
   resolveNewSessionSecurityLevel,
-  resolveActiveSessionForKnowledgeBase,
+  resolveActivePanelSession,
+  resolveSessionKnowledgeBase,
 } from "./sessionUtils";
 import type { WorkspaceChrome } from "./workspaceChrome";
 
 interface SessionActionsOptions extends WorkspaceChrome {
+  /** 成功打开会话后由统一内容区新增或激活页签。 */
+  onSessionOpened: (sessionId: string, activate?: boolean) => void;
+  capturePanelFocus: () => () => boolean;
   setSearchTerm: (value: string) => void;
   setCollapsedFolderPaths: (value: Set<string>) => void;
-  setIsSessionListOpen: (value: boolean | ((current: boolean) => boolean)) => void;
   setIsSessionContextOpen: (value: boolean | ((current: boolean) => boolean)) => void;
   setIsScopeSelectorOpen: (value: boolean | ((current: boolean) => boolean)) => void;
-  isSessionListOpen: boolean;
   isSessionContextOpen: boolean;
   isScopeSelectorOpen: boolean;
   agentOpen: boolean;
@@ -47,10 +49,8 @@ export function useSessionActions(options: SessionActionsOptions) {
     requestConfirmation,
     setSearchTerm,
     setCollapsedFolderPaths,
-    setIsSessionListOpen,
     setIsSessionContextOpen,
     setIsScopeSelectorOpen,
-    isSessionListOpen,
     isSessionContextOpen,
     isScopeSelectorOpen,
     agentOpen,
@@ -72,7 +72,6 @@ export function useSessionActions(options: SessionActionsOptions) {
       handleToggleScopeKnowledgeBase: noopAsync,
       handleSetSessionModelSelection: noopAsync,
       handleCompactAgentContext: noopAsync,
-      handleToggleSessionList: noop,
       handleToggleSessionContext: noop,
       handleToggleScopeSelector: noop,
       handleToggleAgentPanel: noop,
@@ -89,13 +88,15 @@ export function useSessionActions(options: SessionActionsOptions) {
   const activeKnowledgeBase = getActiveKnowledgeBase(currentSnapshot);
   const activeNote = getActiveNote(currentSnapshot);
   const activeDocument = getActiveDocument(currentSnapshot);
-  const persistedActiveSession = resolveActiveSessionForKnowledgeBase(currentSnapshot, activeKnowledgeBase);
+  const persistedActiveSession = resolveActivePanelSession(currentSnapshot);
+  const sessionKnowledgeBase = resolveSessionKnowledgeBase(currentSnapshot, persistedActiveSession);
   const defaultSecurityLevel = resolveNewSessionSecurityLevel(currentUserSettings.agentSecurity.defaultLevel);
   const activeSession = persistedActiveSession ?? buildDraftAgentSession(activeKnowledgeBase, defaultSecurityLevel);
 
 
   /** 新建一个空白知识库会话；标题等到首条用户输入后再确定。 */
   async function handleCreateSession() {
+    const shouldFocus = options.capturePanelFocus();
     logInfo("创建空白会话。", {
       category: "frontend",
       event: "create_session",
@@ -118,7 +119,12 @@ export function useSessionActions(options: SessionActionsOptions) {
     beginBusy("正在创建 Agent 会话...");
 
     try {
-      commitSnapshot(await saveSession(nextSnapshot, nextSession));
+      const saved = await saveSession(nextSnapshot, nextSession);
+      // 保存期间用户可以继续浏览文件；仅合并新会话，不回写旧编辑器焦点。
+      const latest = snapshotRef.current ?? currentSnapshot;
+      const activate = shouldFocus();
+      commitSnapshot({ ...latest, sessions: saved.sessions, activeSessionId: activate ? nextSession.id : latest.activeSessionId });
+      options.onSessionOpened(nextSession.id, activate);
       logInfo("空白会话已创建。", {
         category: "frontend",
         event: "create_session",
@@ -127,7 +133,6 @@ export function useSessionActions(options: SessionActionsOptions) {
           knowledgeBaseId: activeKnowledgeBase.id,
         },
       });
-      setIsSessionListOpen(false);
       setIsSessionContextOpen(false);
       setIsScopeSelectorOpen(false);
     } catch (error) {
@@ -145,15 +150,18 @@ export function useSessionActions(options: SessionActionsOptions) {
       return;
     }
 
+    // 立即切换目标，恢复请求仍在途时也不能把输入提交到上一个会话。
+    const beforeRestore = snapshotRef.current ?? currentSnapshot;
+    commitSnapshot({ ...beforeRestore, activeSessionId: sessionId });
+    options.onSessionOpened(sessionId);
+
     beginBusy("正在恢复 Agent 会话...");
 
     try {
-      const nextSnapshot = await restoreSessionContext(currentSnapshot, sessionId);
+      const nextSnapshot = await restoreSessionContext(snapshotRef.current ?? currentSnapshot, sessionId, false);
 
-      commitSnapshot(nextSnapshot);
-      setSearchTerm("");
-      setCollapsedFolderPaths(new Set());
-      setIsSessionListOpen(false);
+      const latest = snapshotRef.current ?? currentSnapshot;
+      commitSnapshot({ ...latest, sessions: nextSnapshot.sessions });
       setIsSessionContextOpen(false);
       setIsScopeSelectorOpen(false);
     } catch (error) {
@@ -205,12 +213,12 @@ export function useSessionActions(options: SessionActionsOptions) {
       return;
     }
 
-    const selectedIds = new Set(activeSession.knowledgeBaseIds.length ? activeSession.knowledgeBaseIds : [activeKnowledgeBase.id]);
+    const selectedIds = new Set(activeSession.knowledgeBaseIds.length ? activeSession.knowledgeBaseIds : [sessionKnowledgeBase.id]);
 
-    selectedIds.add(activeKnowledgeBase.id);
+    selectedIds.add(sessionKnowledgeBase.id);
 
     // 当前激活知识库是默认工具范围边界，不能在本会话中取消。
-    if (knowledgeBaseId !== activeKnowledgeBase.id) {
+    if (knowledgeBaseId !== sessionKnowledgeBase.id) {
       if (selectedIds.has(knowledgeBaseId)) {
         selectedIds.delete(knowledgeBaseId);
       } else {
@@ -222,7 +230,7 @@ export function useSessionActions(options: SessionActionsOptions) {
 
     try {
       commitSnapshot(
-        await updateSessionScope(currentSnapshot, activeSession.id, Array.from(selectedIds), activeKnowledgeBase.id),
+        await updateSessionScope(currentSnapshot, activeSession.id, Array.from(selectedIds), sessionKnowledgeBase.id),
       );
     } catch (error) {
       setNotice(error instanceof Error ? error.message : String(error));
@@ -341,24 +349,6 @@ export function useSessionActions(options: SessionActionsOptions) {
     }
   }
 
-  /** 切换会话历史浮层；日志只记录状态和数量，不写入会话标题、消息正文或路径。 */
-  function handleToggleSessionList() {
-    const nextOpen = !isSessionListOpen;
-
-    logInfo("切换会话历史浮层。", {
-      category: "frontend",
-      event: "toggle_session_list",
-      status: nextOpen ? "opened" : "closed",
-      metadata: {
-        sessionCount: currentSnapshot.sessions.length,
-        hasActivePendingChange: activeSession.pendingChange?.status === "pending",
-      },
-    });
-    setIsSessionListOpen(nextOpen);
-    setIsSessionContextOpen(false);
-    setIsScopeSelectorOpen(false);
-  }
-
   /** 切换上下文浮层；日志只记录数量和状态，不写入标题、正文、知识库名称或路径。 */
   function handleToggleSessionContext() {
     const nextOpen = !isSessionContextOpen;
@@ -374,7 +364,6 @@ export function useSessionActions(options: SessionActionsOptions) {
       },
     });
     setIsSessionContextOpen(nextOpen);
-    setIsSessionListOpen(false);
     setIsScopeSelectorOpen(false);
   }
 
@@ -392,7 +381,6 @@ export function useSessionActions(options: SessionActionsOptions) {
       },
     });
     setIsScopeSelectorOpen(nextOpen);
-    setIsSessionListOpen(false);
     setIsSessionContextOpen(false);
   }
 
@@ -582,7 +570,6 @@ export function useSessionActions(options: SessionActionsOptions) {
     handleToggleScopeKnowledgeBase,
     handleSetSessionModelSelection,
     handleCompactAgentContext,
-    handleToggleSessionList,
     handleToggleSessionContext,
     handleToggleScopeSelector,
     handleToggleAgentPanel,
