@@ -131,6 +131,8 @@ mod tests {
         let mut session = BrowserSessionState::launch(executable, directory.path().join("profile"))
             .await
             .unwrap();
+        // 启动只创建进程；测试页面与用户新建页签一样显式创建。
+        session.create_tab().await.unwrap();
         let page = session.tabs[&session.active_tab_id].page.clone();
         let fields = (0..45)
             .map(|index| {

@@ -57,13 +57,18 @@ impl BrowserSessionState {
                 ..Viewport::default()
             })
             .request_timeout(Duration::from_secs(15))
-            .arg("--disable-extensions")
-            .arg("--disable-sync")
-            .arg("--disable-features=Translate,MediaRouter,PasswordLeakDetection")
-            .arg("--no-first-run")
-            .arg("--no-default-browser-check")
-            .arg("--no-startup-window")
-            .arg("--mute-audio")
+            // chromiumoxide 自动添加 `--`，带值参数用键值对传入；否则启动开关会失效。
+            .arg("disable-extensions")
+            .arg("disable-sync")
+            .arg((
+                "disable-features",
+                "Translate,MediaRouter,PasswordLeakDetection",
+            ))
+            .arg("no-first-run")
+            .arg("no-default-browser-check")
+            // 首次点击只由 create_tab 建页，禁止 Chromium 额外打开默认 New Tab。
+            .arg("no-startup-window")
+            .arg("mute-audio")
             .build()
             .map_err(|error| format!("浏览器配置无效：{error}"))?;
         let (browser, mut handler) = Browser::launch(config)
@@ -371,8 +376,54 @@ mod tests {
     use super::super::input::{send_input, BrowserUserInput};
     use super::*;
     use base64::Engine;
+    use futures_util::FutureExt;
     use std::io::{Read, Write};
     use std::time::Instant;
+
+    /** 启动进程不能隐式创建 New Tab；首次和后续新建都只能增加一个空白页。 */
+    #[tokio::test]
+    #[ignore = "requires ORANGE_BROWSER_TEST_EXECUTABLE pointing to an installed Chromium"]
+    async fn live_browser_only_opens_explicitly_created_tabs() {
+        let executable = PathBuf::from(std::env::var("ORANGE_BROWSER_TEST_EXECUTABLE").unwrap());
+        let directory = tempfile::tempdir().unwrap();
+        let profile = directory.path().join("profile");
+        // 复用测试 profile 再次启动，覆盖首次启动与已有会话数据两条路径。
+        for _ in 0..2 {
+            let mut session = BrowserSessionState::launch(executable.clone(), profile.clone())
+                .await
+                .unwrap();
+            let result = async {
+                assert!(
+                    session.tabs.is_empty(),
+                    "launch must not create a startup tab"
+                );
+                for expected in 1..=3 {
+                    let id = session.create_tab().await.unwrap();
+                    session.sync_tabs(false).await.unwrap();
+                    assert_eq!(
+                        session.tabs.len(),
+                        expected,
+                        "each request must create exactly one tab"
+                    );
+                    assert_eq!(session.active_tab_id, id);
+                    assert_eq!(session.visible_tab_id, id);
+                    for tab in session.tabs.values() {
+                        assert_eq!(
+                            tab.page.url().await.unwrap().as_deref(),
+                            Some("about:blank")
+                        );
+                    }
+                }
+            };
+            // 断言失败也关闭测试进程，避免临时 profile 被 Windows 文件句柄占用。
+            let outcome = std::panic::AssertUnwindSafe(result).catch_unwind().await;
+            session.close().await;
+            if let Err(error) = outcome {
+                std::panic::resume_unwind(error);
+            }
+        }
+        remove_profile(&profile).await.unwrap();
+    }
 
     /** 仅使用显式指定的已有内核和临时 profile，绝不下载或读取用户浏览器数据。 */
     #[tokio::test]
@@ -610,7 +661,18 @@ mod tests {
         session.close_tab(&second).await.unwrap();
         session.close_tab(&first).await.unwrap();
         assert!(session.tabs.is_empty(), "closing the last page must leave no replacement page");
-        session.sync_tabs(false).await.unwrap();
+        // Page.close 应答先于 targetDestroyed；等待事件泵移除旧 target 后再检查真实页签。
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                session.sync_tabs(false).await.unwrap();
+                if session.tabs.is_empty() {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("closed targets must disappear after CDP close events");
         assert!(session.tabs.is_empty());
         session.create_tab().await.unwrap();
         session.set_screencast(false, sink.clone()).await.unwrap();
