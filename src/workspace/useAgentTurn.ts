@@ -297,7 +297,7 @@ export function useAgentTurn(options: AgentTurnOptions) {
     setInFlightSessionIds(Array.from(inFlightSessionIdsRef.current));
   }
 
-  if (!snapshot) {
+  if (!snapshot || !snapshot.knowledgeBases.length) {
     return {
       liveTurn,
       queuedFollowUp,
@@ -1052,8 +1052,12 @@ export function useAgentTurn(options: AgentTurnOptions) {
       const nextSnapshot = isAgentChangeSet
         ? await applyAgentChangeSet(currentSnapshot)
         : await applySkillChangeSet(currentSnapshot);
-      commitTurnSnapshot(nextSnapshot, new Set(), new Set());
-      setNotice(isAgentChangeSet ? "已应用 Agent 文件变更集。" : "已应用 Skill 文件变更集。");
+      const touched = collectTouchedFileIds(currentSnapshot, nextSnapshot);
+      commitTurnSnapshot(mergeSessionTurn(snapshotRef.current ?? currentSnapshot, nextSnapshot, activeSession.id, {
+        dirtyNoteIds: dirtyNoteIdsRef.current, dirtyDocumentIds: dirtyDocumentIdsRef.current,
+        touchedNoteIds: touched.touchedNoteIds, touchedDocumentIds: touched.touchedDocumentIds,
+      }));
+      setNotice(nextSnapshot.sessions.find((s) => s.id === activeSession.id)?.pendingChangeSet?.status === "partial" ? "批次部分完成；已停止后续操作，请检查失败项。" : "已应用已选文件变更。");
     } catch (error) {
       setNotice(error instanceof Error ? error.message : String(error));
     } finally {

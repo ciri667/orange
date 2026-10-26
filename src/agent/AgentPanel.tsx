@@ -1,3 +1,4 @@
+import { FileChangeSetReview } from "./FileChangeSetReview";
 import { Book, Play, ShieldAlert, X } from "lucide-react";
 import { useRef } from "react";
 import { Button } from "../shared/Button";
@@ -223,67 +224,8 @@ export function AgentPanel({
         }}
       />
 
-      {activeSession.pendingExecution?.status === "pending" && (
-        <section className="mx-3 my-2 shrink-0 rounded-xl border border-border bg-surface p-3" aria-label="待确认 Skill 执行">
-          <div className="flex items-center gap-2">
-            <ShieldAlert size={16} />
-            <div className="grid min-w-0 gap-[3px]">
-              <strong>{activeSession.pendingExecution.skillName}</strong>
-              <span className="text-xs text-ink-muted">{activeSession.pendingExecution.commandPreview}</span>
-            </div>
-          </div>
-          <dl className="my-2.5">
-            <div className="flex items-center justify-between gap-3 py-[3px]"><dt className="m-0">范围</dt><dd className="m-0 text-xs text-ink-muted">{activeSession.pendingExecution.knowledgeBaseIds.length} 个知识库副本</dd></div>
-            <div className="flex items-center justify-between gap-3 py-[3px]"><dt className="m-0">网络</dt><dd className="m-0 text-xs text-ink-muted">{activeSession.pendingExecution.networkDomains.length ? "已声明" : "关闭"}</dd></div>
-            <div className="flex items-center justify-between gap-3 py-[3px]"><dt className="m-0">凭证</dt><dd className="m-0 text-xs text-ink-muted">{activeSession.pendingExecution.credentialAliases.length ? "已声明" : "不注入"}</dd></div>
-          </dl>
-          <div className="flex items-center justify-end gap-2">
-            <Button variant="ghost" size="compact" onClick={onRejectExecution} disabled={isComposerBusy}>
-              <X size={14} />
-              拒绝
-            </Button>
-            <Button variant="primary" size="compact" onClick={onApproveExecution} disabled={isComposerBusy}>
-              <Play size={14} />
-              在隔离区运行
-            </Button>
-          </div>
-        </section>
-      )}
-
-      {activeSession.pendingChangeSet?.status === "pending" && (
-        <section
-          className="mx-3 my-2 shrink-0 rounded-xl border border-border bg-surface p-3"
-          aria-label={activeSession.pendingChangeSet.executionId === "agent-direct" ? "Agent 文件变更集" : "Skill 文件变更集"}
-        >
-          <strong>{activeSession.pendingChangeSet.summary}</strong>
-          <ul className="mt-2 mb-0 list-none p-0">
-            {activeSession.pendingChangeSet.operations.slice(0, 8).map((operation) => (
-              <li className="relative flex min-w-0 items-center gap-2 py-[3px]" key={operation.id}>
-                <Checkbox
-                  checked={operation.selected}
-                  onChange={(event) => onToggleChangeOperation(operation.id, event.target.checked)}
-                  aria-label={`${operation.selected ? "取消选择" : "选择"} ${operation.targetPath}`}
-                />
-                <span className="w-12 shrink-0 text-[11px] uppercase text-accent">{operation.operation}</span>
-                <code className="min-w-0 truncate">{operation.targetPath}</code>
-              </li>
-            ))}
-          </ul>
-          {activeSession.pendingChangeSet.operations.length > 8 && (
-            <p className="text-xs text-ink-muted">另有 {activeSession.pendingChangeSet.operations.length - 8} 项。</p>
-          )}
-          <div className="flex items-center justify-end gap-2">
-            <Button variant="ghost" size="compact" onClick={onRejectChangeSet} disabled={isComposerBusy}>
-              <X size={14} />
-              全部拒绝
-            </Button>
-            <Button variant="primary" size="compact" onClick={onApplyChangeSet} disabled={isComposerBusy}>
-              <Play size={14} />
-              应用已选变更
-            </Button>
-          </div>
-        </section>
-      )}
+      {activeSession.pendingExecution && <p className="mx-3 text-xs text-ink-muted">旧 Skill 请求已过期：{activeSession.pendingExecution.skillName}。副本保留，请按新工具流程重新提出操作。</p>}
+      <FileChangeSetReview session={activeSession} busy={isComposerBusy} onToggle={onToggleChangeOperation} onApply={onApplyChangeSet} onReject={onRejectChangeSet} />
 
       <AgentInput
         activeSession={activeSession}

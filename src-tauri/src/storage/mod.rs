@@ -125,6 +125,8 @@ mod attachments;
 mod config;
 mod db;
 mod files;
+mod file_references;
+pub use file_references::*;
 mod history;
 mod ids;
 mod logs;
@@ -226,6 +228,7 @@ mod tests {
             pending_change_set: None,
             pending_execution: None,
             security_level: "basic".to_owned(),
+            permission_version: 0,
             plan_mode: false,
             context_summary: None,
             created_at: created_at.to_owned(),

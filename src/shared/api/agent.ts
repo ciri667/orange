@@ -298,7 +298,10 @@ export async function applyAgentChangeSet(snapshot: WorkspaceSnapshot): Promise<
   if (!isTauriRuntime()) {
     throw new Error("Agent 文件变更集仅在橘记桌面端可用。");
   }
-  return invokeLogged<WorkspaceSnapshot>("apply_agent_change_set", { payload: { snapshot } });
+  const session = snapshot.sessions.find((s) => s.id === snapshot.activeSessionId);
+  const set = session?.pendingChangeSet;
+  if (!session || !set) throw new Error("没有待确认变更集。");
+  return invokeLogged<WorkspaceSnapshot>("apply_file_change_set", { sessionId: session.id, changeSetId: set.id, operationIds: set.operations.filter((op) => op.selected && op.status !== "completed").map((op) => op.id) });
 }
 
 /**

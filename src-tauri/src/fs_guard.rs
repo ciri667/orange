@@ -45,12 +45,9 @@ pub fn resolve_agent_fs_target(
         .collect::<HashSet<_>>();
 
     let resolved = if path.is_absolute() {
-        if !level.allows_external_filesystem() {
-            return Err(
-                "当前不是完全级别，只能使用知识库根目录内的相对路径；绝对路径已拒绝。".to_owned(),
-            );
-        }
-        resolve_absolute_compliant_target(knowledge_bases, &session_ids, path)?
+        let target = resolve_absolute_compliant_target(knowledge_bases, &session_ids, path)?;
+        if target.is_external() && !level.allows_external_filesystem() { return Err("工作区外路径需要完全权限。".into()); }
+        target
     } else {
         if path.components().any(|component| {
             matches!(
@@ -174,6 +171,7 @@ fn resolve_relative_inside_knowledge_base(
         return Err("目标路径超出知识库根目录，已阻止访问。".to_owned());
     }
 
+    crate::file_changes::reject_links(&target)?;
     Ok(ResolvedFsTarget {
         knowledge_base_id: knowledge_base.id.clone(),
         stored_path: portable_path(relative).trim_end_matches('/').to_owned(),
@@ -187,7 +185,7 @@ fn resolve_absolute_compliant_target(
     path: &Path,
 ) -> Result<ResolvedFsTarget, String> {
     let absolute = materialize_absolute_path(path)?;
-    assert_compliant_path(&absolute)?;
+    crate::file_changes::reject_links(path)?;
 
     if let Some((knowledge_base, root)) =
         find_containing_knowledge_base(knowledge_bases, session_ids, &absolute)?
@@ -235,13 +233,7 @@ fn find_containing_knowledge_base<'a>(
         }
     }
 
-    if best.is_none() {
-        if let Some(knowledge_base_id) = blocked {
-            return Err(format!(
-                "目标路径位于当前会话未授权的知识库中：{knowledge_base_id}。"
-            ));
-        }
-    }
+    let _ = blocked;
     Ok(best)
 }
 
@@ -276,25 +268,6 @@ fn materialize_absolute_path(path: &Path) -> Result<PathBuf, String> {
     Ok(target)
 }
 
-fn assert_compliant_path(path: &Path) -> Result<(), String> {
-    if has_forbidden_component(path) {
-        return Err("目标路径包含受保护的系统目录，已拒绝。".to_owned());
-    }
-
-    let mut probe = path;
-    while !probe.exists() {
-        probe = probe
-            .parent()
-            .ok_or_else(|| "无法解析目标路径。".to_owned())?;
-    }
-    let canonical =
-        fs::canonicalize(probe).map_err(|error| format!("无法解析目标路径：{error}"))?;
-    if is_under_protected_root(&canonical) {
-        return Err("目标路径位于受保护的系统目录，已拒绝。".to_owned());
-    }
-    Ok(())
-}
-
 fn join_without_escape(root: &Path, relative: &Path) -> Result<PathBuf, String> {
     let mut target = root.to_path_buf();
     for component in relative.components() {
@@ -307,70 +280,6 @@ fn join_without_escape(root: &Path, relative: &Path) -> Result<PathBuf, String> 
         }
     }
     Ok(target)
-}
-
-fn has_forbidden_component(path: &Path) -> bool {
-    path.components().any(|component| match component {
-        Component::Normal(name) => {
-            let value = name.to_string_lossy();
-            value.eq_ignore_ascii_case("$Recycle.Bin")
-                || value.eq_ignore_ascii_case("System Volume Information")
-        }
-        _ => false,
-    })
-}
-
-fn is_under_protected_root(path: &Path) -> bool {
-    protected_system_roots()
-        .iter()
-        .any(|root| path == root.as_path() || path.starts_with(root))
-}
-
-fn protected_system_roots() -> Vec<PathBuf> {
-    let mut roots = Vec::new();
-    let mut push_env = |key: &str| {
-        if let Ok(value) = std::env::var(key) {
-            if let Ok(canonical) = fs::canonicalize(PathBuf::from(value)) {
-                if !roots.iter().any(|existing| existing == &canonical) {
-                    roots.push(canonical);
-                }
-            }
-        }
-    };
-
-    #[cfg(windows)]
-    {
-        push_env("windir");
-        push_env("SystemRoot");
-        push_env("ProgramFiles");
-        push_env("ProgramFiles(x86)");
-        push_env("ProgramW6432");
-    }
-
-    #[cfg(unix)]
-    {
-        for candidate in [
-            "/bin",
-            "/sbin",
-            "/usr",
-            "/etc",
-            "/dev",
-            "/proc",
-            "/sys",
-            "/System",
-            "/Library",
-            "/private/etc",
-        ] {
-            if let Ok(canonical) = fs::canonicalize(candidate) {
-                if !roots.iter().any(|existing| existing == &canonical) {
-                    roots.push(canonical);
-                }
-            }
-        }
-    }
-
-    let _ = &mut push_env;
-    roots
 }
 
 fn expand_user_path(raw: &str) -> String {
@@ -426,7 +335,7 @@ mod tests {
             &[kb.clone()],
             &session_ids,
             "kb-a",
-            "advanced",
+            "workspace-write",
             None,
             "../escape",
             false,
@@ -437,12 +346,12 @@ mod tests {
             &[kb],
             &session_ids,
             "kb-a",
-            "advanced",
+            "workspace-write",
             None,
             &root.path().join("outside-sibling").to_string_lossy(),
             false,
         );
-        assert!(absolute.unwrap_err().contains("完全级别"));
+        assert!(!absolute.unwrap().is_external());
     }
 
     #[test]
@@ -450,7 +359,7 @@ mod tests {
         let root = tempfile::tempdir().expect("kb root");
         let kb = knowledge_base("kb-a", root.path());
         let session_ids = vec!["kb-a".to_owned()];
-        for level in ["advanced", "autonomous"] {
+        for level in ["workspace-write", "full-auto"] {
             for relative in [".", "./", "./."] {
                 let resolved = resolve_agent_fs_target(
                     &[kb.clone()],
@@ -491,7 +400,7 @@ mod tests {
             &[kb],
             &["kb-a".to_owned()],
             "kb-a",
-            "advanced",
+            "workspace-write",
             None,
             "Notes/新目录",
             false,
@@ -516,7 +425,7 @@ mod tests {
             &[kb],
             &["kb-a".to_owned()],
             "kb-a",
-            "autonomous",
+            "full-auto",
             None,
             &absolute.to_string_lossy(),
             false,
@@ -539,7 +448,7 @@ mod tests {
             &[kb],
             &["kb-a".to_owned()],
             "kb-a",
-            "autonomous",
+            "full-auto",
             None,
             &target.to_string_lossy(),
             false,
@@ -552,7 +461,7 @@ mod tests {
     }
 
     #[test]
-    fn full_mode_rejects_unscoped_knowledge_base_absolute_path() {
+    fn full_mode_treats_unscoped_knowledge_base_as_external() {
         let scoped = tempfile::tempdir().expect("scoped kb");
         let other = tempfile::tempdir().expect("other kb");
         let knowledge_bases = vec![
@@ -561,38 +470,38 @@ mod tests {
         ];
         let target = other.path().join("secret");
 
-        let error = resolve_agent_fs_target(
+        let resolved = resolve_agent_fs_target(
             &knowledge_bases,
             &["kb-a".to_owned()],
             "kb-a",
-            "autonomous",
+            "full-auto",
             None,
             &target.to_string_lossy(),
             false,
         )
-        .unwrap_err();
-        assert!(error.contains("未授权的知识库"));
+        .unwrap();
+        assert!(resolved.is_external());
     }
 
     #[cfg(windows)]
     #[test]
-    fn full_mode_rejects_windows_directory() {
+    fn full_mode_uses_os_permissions_for_system_directory() {
         let kb_root = tempfile::tempdir().expect("kb root");
         let kb = knowledge_base("kb-a", kb_root.path());
         let windir = std::env::var("windir").unwrap_or_else(|_| r"C:\Windows".to_owned());
         let target = PathBuf::from(windir).join("orange-not-allowed");
 
-        let error = resolve_agent_fs_target(
+        let resolved = resolve_agent_fs_target(
             &[kb],
             &["kb-a".to_owned()],
             "kb-a",
-            "autonomous",
+            "full-auto",
             None,
             &target.to_string_lossy(),
             false,
         )
-        .unwrap_err();
-        assert!(error.contains("受保护"));
+        .unwrap();
+        assert!(resolved.is_external());
     }
 
     #[test]
@@ -605,7 +514,7 @@ mod tests {
         let denied = resolve_persisted_operation_target(
             &[kb.clone()],
             &["kb-a".to_owned()],
-            "advanced",
+            "workspace-write",
             EXTERNAL_FILESYSTEM_SCOPE_ID,
             &stored,
         );
@@ -614,7 +523,7 @@ mod tests {
         let allowed = resolve_persisted_operation_target(
             &[kb],
             &["kb-a".to_owned()],
-            "autonomous",
+            "full-auto",
             EXTERNAL_FILESYSTEM_SCOPE_ID,
             &stored,
         );

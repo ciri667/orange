@@ -18,6 +18,8 @@ use tauri::AppHandle;
 
 /** 两路 Agent 同时确认写入时，按规范化绝对路径串行化落盘。 */
 static FILE_WRITE_LOCKS: OnceLock<Mutex<HashMap<PathBuf, Arc<Mutex<()>>>>> = OnceLock::new();
+/** 目录操作与后代单文件操作也必须互斥，避免只按相等路径加锁遗漏祖先关系。 */
+static FILE_MUTATION_GATE: Mutex<()> = Mutex::new(());
 
 /** 文件已被其它会话或编辑器改过时的稳定文案。 */
 pub const STALE_FILE_WRITE_ERROR: &str = "文件已被其它会话或编辑器更新，请重新读取后再写。";
@@ -27,6 +29,7 @@ pub fn with_write_paths<T>(
     paths: &[PathBuf],
     f: impl FnOnce() -> Result<T, String>,
 ) -> Result<T, String> {
+    let _mutation_guard = FILE_MUTATION_GATE.lock().map_err(|_| "文件变更锁已损坏。".to_owned())?;
     let mut unique = paths.to_vec();
     unique.sort();
     unique.dedup();
@@ -55,11 +58,11 @@ pub fn with_write_paths<T>(
 /** 本地完全级别会话才允许自动落盘；IM 入口永远需要人工确认。 */
 pub fn allows_autonomous_auto_apply(
     session: &AgentSession,
-    settings: &AgentSecuritySettings,
+    _settings: &AgentSecuritySettings,
 ) -> bool {
-    session.im_identity.is_none()
+    !session.plan_mode && session.schedule_identity.is_none() && session.im_identity.is_none()
         && AgentSecurityLevel::parse(&session.security_level).allows_auto_apply()
-        && settings.autonomous_mode_enabled
+
 }
 
 /** 自主模式可对 Agent 直接产出的单文件 pendingChange 自动应用。 */
@@ -80,8 +83,24 @@ pub fn can_auto_apply_pending_change(
 /** 确认待写入 diff：校验知识库边界和内容 hash 后原子写回 Markdown/TXT。 */
 pub fn apply_pending_change(
     app: &AppHandle,
-    mut snapshot: WorkspaceSnapshot,
+    snapshot: WorkspaceSnapshot,
 ) -> Result<WorkspaceSnapshot, String> {
+    apply_pending_change_from_source(app,snapshot,false)
+}
+
+/** 仅 IM 路由完成 channel 与变更编号验证后可调用，不注册为 IPC。 */
+pub(crate) fn apply_im_pending_change(app: &AppHandle, snapshot: WorkspaceSnapshot) -> Result<WorkspaceSnapshot,String> {
+    apply_pending_change_from_source(app,snapshot,true)
+}
+
+fn apply_pending_change_from_source(app: &AppHandle, mut snapshot: WorkspaceSnapshot, from_im: bool) -> Result<WorkspaceSnapshot,String> {
+    // 兼容旧 IPC：只读会话标识，完全忽略客户端的正文与审批状态。
+    let requested_session_id = snapshot.active_session_id.clone();
+    snapshot = storage::load_workspace_snapshot(app)?;
+    snapshot.active_session_id = requested_session_id;
+    let authority = snapshot.sessions.iter().find(|s|s.id==snapshot.active_session_id).ok_or("会话不存在")?;
+    crate::permissions::ensure(authority,crate::permissions::Operation::Apply)?;
+    if authority.im_identity.is_some() && !from_im { return Err("IM 草稿必须由原身份在对应会话中确认。".into()); }
     let started_at = Instant::now();
     let operation_id = storage::create_id("op");
     let session_id = snapshot.active_session_id.clone();
@@ -93,12 +112,16 @@ pub fn apply_pending_change(
     let Some(change) = snapshot.sessions[session_index].pending_change.clone() else {
         return Ok(snapshot);
     };
+    if !snapshot.sessions[session_index].knowledge_base_ids.contains(&change.knowledge_base_id) {
+        return Err("草稿目标已不在当前会话授权范围，请重新提出变更。".into());
+    }
     let knowledge_base = snapshot
         .knowledge_bases
         .iter()
         .find(|item| item.id == change.knowledge_base_id)
         .ok_or_else(|| "找不到变更所属知识库".to_owned())?;
     let knowledge_base_id = knowledge_base.id.clone();
+    crate::file_changes::reject_links(&PathBuf::from(&knowledge_base.path).join(&change.target_path))?;
     let target_path = storage::resolve_inside_root(
         PathBuf::from(&knowledge_base.path).as_path(),
         &change.target_path,
@@ -114,6 +137,8 @@ pub fn apply_pending_change(
 
     let lock_paths = vec![target_path.clone()];
     with_write_paths(&lock_paths, move || {
+        crate::operation_approval::check_current(app, &snapshot.sessions[session_index])?;
+        if change.status != "pending" { return Err("草稿已处理或已迁移，请使用当前变更集。".into()); }
         if change.r#type == "create" {
             apply_create_change(&mut snapshot, &change, &target_path, &change_file_type)?;
         } else if change_file_type == "txt" {
@@ -194,11 +219,11 @@ pub fn apply_pending_change(
 pub fn apply_rewrite_change(
     current_content: &str,
     current_hash: &str,
-    snapshot_hash: &str,
+    _snapshot_hash: &str,
     change: &ProposedChange,
 ) -> Result<String, String> {
     // hash 不一致说明文件可能被外部修改或其它会话先落盘，必须阻止写入。
-    if current_hash != change.original_hash && snapshot_hash != change.original_hash {
+    if current_hash != change.original_hash {
         return Err(STALE_FILE_WRITE_ERROR.to_owned());
     }
 
@@ -317,11 +342,11 @@ fn apply_txt_rewrite(
         .iter()
         .position(|document| document.id == *document_id && document.file_type == "txt")
         .ok_or_else(|| "找不到待写入 TXT 文件。".to_owned())?;
-    let fallback_content = snapshot.documents[document_index]
+    let _fallback_content = snapshot.documents[document_index]
         .content
         .clone()
         .unwrap_or_default();
-    let current_content = fs::read_to_string(target_path).unwrap_or(fallback_content);
+    let current_content = fs::read_to_string(target_path).map_err(|e| format!("无法读取磁盘原文：{e}"))?;
     let current_hash = storage::hash_content(&current_content);
     let next_content = apply_rewrite_change(
         &current_content,
@@ -371,8 +396,7 @@ fn apply_markdown_rewrite(
         .iter()
         .position(|note| note.id == note_id)
         .ok_or_else(|| "找不到待写入笔记".to_owned())?;
-    let fallback_content = snapshot.notes[note_index].content.clone();
-    let current_content = fs::read_to_string(target_path).unwrap_or(fallback_content);
+    let current_content = fs::read_to_string(target_path).map_err(|e| format!("无法读取磁盘原文：{e}"))?;
     let current_hash = storage::hash_content(&current_content);
     let next_content = match apply_rewrite_change(
         &current_content,
@@ -564,6 +588,7 @@ mod tests {
             pending_change_set: None,
             pending_execution: None,
             security_level: level.to_owned(),
+            permission_version: 0,
             plan_mode: false,
             context_summary: None,
             created_at: "t".to_owned(),
@@ -585,29 +610,29 @@ mod tests {
         settings.autonomous_mode_enabled = true;
 
         assert!(can_auto_apply_pending_change(
-            &session_with("autonomous", false, true),
+            &session_with("full-auto", false, true),
             &settings
         ));
         assert!(!can_auto_apply_pending_change(
-            &session_with("advanced", false, true),
+            &session_with("workspace-write", false, true),
             &settings
         ));
         assert!(!can_auto_apply_pending_change(
-            &session_with("basic", false, true),
+            &session_with("workspace-write", false, true),
             &settings
         ));
         assert!(!can_auto_apply_pending_change(
-            &session_with("autonomous", true, true),
+            &session_with("full-auto", true, true),
             &settings
         ));
         assert!(!can_auto_apply_pending_change(
-            &session_with("autonomous", false, false),
+            &session_with("full-auto", false, false),
             &settings
         ));
 
         settings.autonomous_mode_enabled = false;
-        assert!(!can_auto_apply_pending_change(
-            &session_with("autonomous", false, true),
+        assert!(can_auto_apply_pending_change(
+            &session_with("full-auto", false, true),
             &settings
         ));
     }
@@ -723,4 +748,23 @@ mod tests {
 
         assert_eq!(next, "标题\r\n结尾\r\n");
     }
+}
+
+/** 通用变更集沿用文档历史；未索引的外部文本也使用稳定目标标识。 */
+pub(crate) fn capture_file_history(app: &AppHandle, snapshot: &WorkspaceSnapshot, session_id: &str, path: &std::path::Path) -> Result<(),String> {
+    let mut info=None;
+    for kb in &snapshot.knowledge_bases {
+        if let Ok(relative)=path.strip_prefix(fs::canonicalize(&kb.path).map_err(|e|e.to_string())?) {
+            let relative=relative.to_string_lossy().replace('\\',"/");
+            let markdown=storage::is_markdown_file(path);
+            let id=if markdown {storage::create_stable_note_id(&kb.id,&relative)} else {storage::create_stable_document_id(&kb.id,&relative)};
+            info=Some((kb.id.clone(),relative,id,if markdown {"note"} else {"document"})); break;
+        }
+    }
+    let Some((kb,relative,id,kind))=info else { return Ok(()); };
+    capture_history_before_write(app,storage::DocumentHistoryCapture {
+        target_kind:kind.into(),knowledge_base_id:kb,target_id:id,relative_path:relative,title:path.file_stem().unwrap_or_default().to_string_lossy().into_owned(),
+        file_type:if kind=="note" {"markdown"} else {"txt"}.into(),content:fs::read_to_string(path).map_err(|e|e.to_string())?,source:"agent-change".into(),
+        session_id:Some(session_id.into()),change_id:None,operation_id:None,
+    },Instant::now())
 }
