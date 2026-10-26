@@ -894,7 +894,8 @@ pub(crate) async fn handle_im_pending_change_command(
     let result = if normalized_action == "cancel" {
         reject_proposed_change(app.clone(), ChangePayload { snapshot }).await
     } else {
-        apply_proposed_change(app.clone(), ChangePayload { snapshot }).await
+        let apply_app=app.clone();
+        run_blocking("应用原身份确认的 IM 草稿",move || crate::agent_writes::apply_im_pending_change(&apply_app,snapshot)).await
     };
 
     match result {
@@ -1383,16 +1384,11 @@ pub(super) async fn hydrate_persisted_sessions_for_turn(
     app: &AppHandle,
     mut snapshot: WorkspaceSnapshot,
 ) -> Result<WorkspaceSnapshot, String> {
-    let sessions_app = app.clone();
-    let snapshot_for_sessions = snapshot.clone();
-    let persisted_sessions = run_blocking("读取持久化 Agent 会话", move || {
-        storage::load_sessions_for_snapshot(&sessions_app, &snapshot_for_sessions)
-    })
-    .await?;
-
-    if !persisted_sessions.is_empty() {
-        snapshot.sessions = persisted_sessions;
-    }
+    let load_app = app.clone();
+    let viewer_session = snapshot.active_session_id.clone();
+    // 根目录、正文、权限与待审状态都来自后端，不能用 IPC 快照伪造路径或范围。
+    snapshot = run_blocking("加载可信 Agent 工作台", move || storage::load_workspace_snapshot(&load_app)).await?;
+    snapshot.active_session_id = viewer_session;
 
     storage::normalize_sessions_for_snapshot(&mut snapshot);
 

@@ -108,7 +108,7 @@ pub fn operation_kind(operation: &str) -> Option<BrowserOperationKind> {
 
 /** 进阶级别下非只读操作等待用户确认；完全级自动执行。 */
 pub fn operation_requires_approval(security_level: &str, operation: &str) -> bool {
-    operation_kind(operation) == Some(BrowserOperationKind::Mutate) && security_level != "autonomous"
+    operation_kind(operation).is_some() && security_level == "full-confirm"
 }
 
 /** 浏览器功能只对本机交互会话的进阶/完全级别可见；IM、定时、规划模式一律拒绝。 */
@@ -121,7 +121,7 @@ pub fn session_allows_browser(
     !has_im_identity
         && !has_schedule_identity
         && !plan_mode
-        && matches!(security_level, "advanced" | "autonomous")
+        && matches!(security_level, "full-confirm" | "full-auto")
 }
 
 /** 文本快照单页最大字符数；超过后分页并返回 nextTextOffset。 */
@@ -216,13 +216,13 @@ mod tests {
 
     #[test]
     fn session_gate_blocks_non_local_or_low_levels() {
-        assert!(session_allows_browser(false, false, false, "advanced"));
-        assert!(session_allows_browser(false, false, false, "autonomous"));
-        assert!(!session_allows_browser(false, false, false, "basic"));
-        assert!(!session_allows_browser(true, false, false, "advanced"));
-        assert!(!session_allows_browser(false, true, false, "advanced"));
-        assert!(!session_allows_browser(false, false, true, "advanced"));
-        assert!(!session_allows_browser(false, false, true, "autonomous"));
+        assert!(session_allows_browser(false, false, false, "full-confirm"));
+        assert!(session_allows_browser(false, false, false, "full-auto"));
+        assert!(!session_allows_browser(false, false, false, "workspace-readonly"));
+        assert!(!session_allows_browser(true, false, false, "full-confirm"));
+        assert!(!session_allows_browser(false, true, false, "full-confirm"));
+        assert!(!session_allows_browser(false, false, true, "full-confirm"));
+        assert!(!session_allows_browser(false, false, true, "full-auto"));
     }
 
     #[test]

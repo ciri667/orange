@@ -33,12 +33,12 @@ pub struct ProjectedCall {
 
 /** 只有本机交互会话的进阶或完全级别能看见 MCP 工具；规划模式一律隐藏。 */
 pub fn session_exposes_mcp(local_interactive: bool, security_level: &str, plan_mode: bool) -> bool {
-    !plan_mode && local_interactive && matches!(security_level, "advanced" | "autonomous")
+    !plan_mode && local_interactive && matches!(security_level, "full-confirm" | "full-auto")
 }
 
 /** 完全级别不再打断。其余级别只放行显式标注只读的工具。 */
-pub fn needs_user_approval(security_level: &str, read_only: bool) -> bool {
-    security_level != "autonomous" && !read_only
+pub fn needs_user_approval(security_level: &str, _read_only: bool) -> bool {
+    security_level == "full-confirm"
 }
 
 /** 补齐供应商要求的 object schema，并去掉不会被调用的元字段。 */
@@ -124,25 +124,25 @@ mod tests {
 
     #[test]
     fn basic_and_remote_sessions_hide_mcp() {
-        assert!(!session_exposes_mcp(true, "basic", false));
-        assert!(!session_exposes_mcp(false, "advanced", false));
-        assert!(!session_exposes_mcp(false, "autonomous", false));
-        assert!(session_exposes_mcp(true, "advanced", false));
-        assert!(session_exposes_mcp(true, "autonomous", false));
+        assert!(!session_exposes_mcp(true, "workspace-readonly", false));
+        assert!(!session_exposes_mcp(false, "full-confirm", false));
+        assert!(!session_exposes_mcp(false, "full-auto", false));
+        assert!(session_exposes_mcp(true, "full-confirm", false));
+        assert!(session_exposes_mcp(true, "full-auto", false));
     }
 
     /** 规划模式下任何级别的本机会话都不得暴露 MCP。 */
     #[test]
     fn plan_mode_hides_mcp() {
-        assert!(!session_exposes_mcp(true, "advanced", true));
-        assert!(!session_exposes_mcp(true, "autonomous", true));
+        assert!(!session_exposes_mcp(true, "full-confirm", true));
+        assert!(!session_exposes_mcp(true, "full-auto", true));
     }
 
     #[test]
     fn approval_skips_readonly_and_autonomous() {
-        assert!(needs_user_approval("advanced", false));
-        assert!(!needs_user_approval("advanced", true));
-        assert!(!needs_user_approval("autonomous", false));
+        assert!(needs_user_approval("full-confirm", false));
+        assert!(needs_user_approval("full-confirm", true));
+        assert!(!needs_user_approval("full-auto", false));
     }
 
     #[test]

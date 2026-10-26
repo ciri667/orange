@@ -44,7 +44,7 @@ export function BrowserSettingsSection({
         kicker="Agent"
         title="内嵌浏览器"
         titleId="browser-settings-title"
-        description="让 Agent 在受控 Chromium 里打开网页、读取元素并执行点击/填表。只有本机交互会话的进阶和完全级别可用；截图不会发给模型，你可以随时在面板里接管。"
+        description="让 Agent 在受控 Chromium 里打开网页、读取元素并执行点击/填表。只有本机交互会话的两种完全权限档可用；截图不会发给模型，你可以随时在面板里接管。"
       />
       <label className="mt-4 flex items-center gap-2 text-sm text-ink">
         <Checkbox
@@ -105,7 +105,7 @@ export function BrowserSettingsSection({
       </div>
       {error ? <p className="mt-2 text-xs text-danger" role="alert">{error}</p> : null}
       <p className="mt-3 text-xs text-ink-soft">
-        进阶级别下，非只读操作（点击、填表、导航）会先请求你的确认；完全级别自动执行。清除站点数据会关闭浏览器并删除隔离 profile。
+        完全权限，需审批档的所有操作（包括读取）逐次确认；无需审批档自动执行，Plan 禁用。清除站点数据会关闭浏览器并删除隔离 profile。
       </p>
     </section>
   );

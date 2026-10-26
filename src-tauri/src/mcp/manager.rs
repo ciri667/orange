@@ -14,7 +14,6 @@ use crate::domain::{
 use crate::runtime::AgentCancel;
 use crate::storage::create_id;
 
-use super::approval::{confirm_then_call, ApprovalBoard};
 use super::client::{self, LiveSession};
 use super::config::{
     self, load_mcp_config, tool_is_exposed, write_mcp_servers, LoadedMcpConfig, McpTransport,
@@ -55,7 +54,6 @@ struct Shared {
     calls: Mutex<BTreeMap<String, mpsc::Sender<CallJob>>>,
     shutdown: Mutex<watch::Sender<bool>>,
     connect_limit: Arc<Semaphore>,
-    approvals: Arc<ApprovalBoard>,
 }
 
 /** 进程内的 MCP 连接管理。关窗口不会停掉它，真正退出时要 shutdown。 */
@@ -79,13 +77,13 @@ impl McpManager {
                 calls: Mutex::new(BTreeMap::new()),
                 shutdown: Mutex::new(shutdown),
                 connect_limit: Arc::new(Semaphore::new(CONNECT_CONCURRENCY)),
-                approvals: Arc::new(ApprovalBoard::new()),
             }),
         }
     }
 
     pub fn decide(&self, approval_id: &str, approved: bool) -> bool {
-        self.shared.approvals.decide(approval_id, approved)
+        let _ = (approval_id, approved);
+        false // 旧审批 IPC 已停用，统一操作审批拥有唯一授权记录。
     }
 
     pub async fn wait_initial(&self) {
@@ -188,15 +186,14 @@ impl McpManager {
     pub async fn execute(
         &self,
         app: &AppHandle,
-        session_id: &str,
-        security_level: &str,
-        local_interactive: bool,
-        plan_mode: bool,
+        session: &AgentSession,
+        permit: &crate::operation_approval::Permit,
         public_name: &str,
         arguments: Value,
         cancel: &AgentCancel,
     ) -> ToolOutcome {
-        if !session_exposes_mcp(local_interactive, security_level, plan_mode) {
+        if let Err(e)=permit.validate(app,session,public_name,&arguments,cancel) { return failed(public_name,&arguments,&e); }
+        if !session_exposes_mcp(session.im_identity.is_none() && session.schedule_identity.is_none(), &session.security_level, session.plan_mode) {
             return failed(public_name, &arguments, "当前会话不能使用 MCP。");
         }
         let Some(tool) = self.find_tool(public_name) else {
@@ -205,28 +202,7 @@ impl McpManager {
         if !tool.exposed {
             return failed(public_name, &arguments, "这个 MCP 工具已在设置里关闭。");
         }
-        let arguments_for_call = arguments.clone();
-        let call_result = confirm_then_call(
-            &self.shared.approvals,
-            Some(app),
-            session_id,
-            security_level,
-            &tool,
-            &arguments,
-            cancel,
-            || {
-                let manager = self.clone();
-                let tool = tool.clone();
-                let arguments_for_call = arguments_for_call.clone();
-                let cancel = cancel.clone();
-                async move {
-                    manager
-                        .dispatch_call(&tool, arguments_for_call, cancel)
-                        .await
-                }
-            },
-        )
-        .await;
+        let call_result = self.dispatch_call(&tool, arguments.clone(), cancel.clone()).await;
         match call_result {
             Ok(projected) => outcome(public_name, arguments, projected.success, projected.text),
             Err(error) => failed(public_name, &arguments, &error),
@@ -668,8 +644,8 @@ pub async fn execute_model_tool(
     public_name: &str,
     arguments: Value,
     cancel: &AgentCancel,
+    permit: &crate::operation_approval::Permit,
 ) -> ToolOutcome {
-    let local_interactive = session.im_identity.is_none() && session.schedule_identity.is_none();
     // 执行侧兜底：即使历史 transcript 回放旧 MCP tool_call，规划模式也一律拒绝。
     if session.plan_mode {
         return failed(public_name, &arguments, "规划模式下不能使用 MCP 工具。");
@@ -680,10 +656,8 @@ pub async fn execute_model_tool(
     manager
         .execute(
             app,
-            &session.id,
-            &session.security_level,
-            local_interactive,
-            session.plan_mode,
+            session,
+            permit,
             public_name,
             arguments,
             cancel,

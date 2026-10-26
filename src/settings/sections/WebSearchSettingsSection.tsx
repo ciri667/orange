@@ -108,7 +108,7 @@ export function WebSearchSettingsSection({
         kicker="Web"
         title="联网搜索"
         titleId="web-search-settings-title"
-        description="选择搜索供应商查公开网页。默认关闭。打开后，基础、进阶和完全级别都可以用。"
+        description="选择搜索供应商查公开网页。默认关闭。仅完全权限的本地会话可用；需审批档逐次确认，Plan 禁用。"
       />
       <label className="mt-4 flex items-center gap-2 text-sm text-ink">
         <Checkbox

@@ -5,7 +5,7 @@ use std::collections::HashMap;
 const MAX_PUBLIC_NAME_CHARS: usize = 64;
 
 /** 和宿主闭集撞名时不暴露。`mcp__` 前缀下几乎不会发生，仍按名字拒绝。 */
-const HOST_TOOL_NAMES: [&str; 7] = ["search", "read", "list", "edit", "write", "run", "task"];
+const HOST_TOOL_NAMES: [&str; 8] = ["search", "read", "list", "edit", "write", "exec", "browser", "task"];
 
 /** 一个已分配公开名的 MCP 工具。调用服务器时仍用 raw_name。 */
 #[derive(Clone, Debug, PartialEq, Eq)]

@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { AgentPanel } from "../agent/AgentPanel";
-import { McpApprovalDialog } from "../agent/McpApprovalDialog";
+import { OperationApprovalDialog } from "../agent/OperationApprovalDialog";
 import { BrowserPanel } from "../browser/BrowserPanel";
 import { BrowserApprovalDialog } from "../browser/BrowserApprovalDialog";
 import { useBrowserWorkspace } from "../browser/useBrowserWorkspace";
@@ -576,7 +576,7 @@ export function WorkspaceShell() {
           <img className="brand-logo" src="/orange-logo.svg" alt="" />
         </div>
         <BootTitle>连接一个支持文档目录，开始使用知识库 Agent 助手。</BootTitle>
-        <BootCopy>目录树会展示 Markdown、TXT、DOCX、PDF 和图片；Agent 写入仍只作用于确认后的 Markdown diff。</BootCopy>
+        <BootCopy>目录树会展示 Markdown、TXT、DOCX、PDF 和图片。新会话默认只读，需要修改文件时可切换权限并审阅变更。</BootCopy>
         <OperationNotice className="max-w-[620px]" isBusy={isBusy} busyLabel={busyLabel} notice={notice} />
         <Button variant="primary" onClick={handleAddKnowledgeBase} disabled={isBusy}>
           添加第一个知识库
@@ -1342,7 +1342,7 @@ export function WorkspaceShell() {
         />
       )}
       {/* MCP 工具确认由 agent 模块自订阅事件，这里只负责挂载。 */}
-      <McpApprovalDialog />
+      <OperationApprovalDialog />
     </div>
   );
 }

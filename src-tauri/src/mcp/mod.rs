@@ -1,6 +1,5 @@
 pub(crate) mod naming;
 
-mod approval;
 mod client;
 mod config;
 mod manager;

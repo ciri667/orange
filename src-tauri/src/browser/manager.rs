@@ -15,9 +15,9 @@ use tauri::{AppHandle, Emitter, Manager};
 use tokio::sync::Mutex;
 
 use super::policy::{
-    bing_search_url, normalize_web_url, operation_kind, operation_requires_approval,
-    session_allows_browser, snapshot_reference_matches, url_origin, APPROVAL_ABORTED,
-    APPROVAL_DENIED, APPROVAL_TIMEOUT, MAX_ELEMENT_TEXT_CHARS, MAX_SNAPSHOT_ELEMENTS,
+    bing_search_url, normalize_web_url, operation_kind,
+    session_allows_browser, snapshot_reference_matches, url_origin,
+    MAX_ELEMENT_TEXT_CHARS, MAX_SNAPSHOT_ELEMENTS,
     MAX_TEXT_SNAPSHOT_CHARS,
 };
 use super::session::{BrowserSessionState, FrameSink};
@@ -29,9 +29,7 @@ pub const BROWSER_STATE_EVENT: &str = "browser-state-changed";
 pub const BROWSER_FRAME_EVENT: &str = "browser-frame";
 pub const BROWSER_ACTIVITY_EVENT: &str = "browser-activity";
 pub const BROWSER_RECEIPT_EVENT: &str = "browser-receipt";
-pub const BROWSER_APPROVAL_EVENT: &str = "browser-operation-approval";
 pub const BROWSER_USER_TAKEOVER: &str = "BROWSER_USER_TAKEOVER";
-const APPROVAL_TIMEOUT_SECONDS: u64 = 300;
 
 /** 控制租约：同一时间只有一个 Agent 会话持有操作权；接管后进 blocked。 */
 #[derive(Default)]
@@ -45,7 +43,8 @@ struct BrowserControl {
 pub struct BrowserManager {
     state: Mutex<Option<BrowserSessionState>>,
     control: Mutex<BrowserControl>,
-    approvals: Mutex<HashMap<String, tokio::sync::oneshot::Sender<bool>>>,
+    approval_state: Mutex<Option<BrowserState>>,
+    approval_elements: Mutex<HashMap<String, Value>>,
     /** 最近一次用户手动导航时间，用于让面板活动提示和 screencast 保持冷静。 */
     last_user_navigate: Mutex<Option<Instant>>,
     /** 最近一次操作凭证，键为 receiptId。 */
@@ -62,7 +61,8 @@ impl Default for BrowserManager {
         Self {
             state: Mutex::new(None),
             control: Mutex::new(BrowserControl::default()),
-            approvals: Mutex::new(HashMap::new()),
+            approval_state: Mutex::new(None),
+            approval_elements: Mutex::new(HashMap::new()),
             last_user_navigate: Mutex::new(None),
             receipts: Mutex::new(std::collections::VecDeque::new()),
             screencast_enabled: std::sync::atomic::AtomicBool::new(false),
@@ -187,6 +187,7 @@ async fn tab_identity(page: &chromiumoxide::Page) -> (String, String) {
 
 async fn publish_state(app: &AppHandle) {
     let state = browser_status(app).await;
+    *browser_manager().await.approval_state.lock().await = Some(state.clone());
     let _ = app.emit(BROWSER_STATE_EVENT, state);
 }
 
@@ -339,6 +340,7 @@ async fn revoke_control(manager: &BrowserManager, session_id: Option<String>) ->
     let owner = control.session_id.clone().or(session_id);
     let revoked = owner.is_some();
     if let Some(owner) = owner {
+        crate::operation_approval::cancel_session(&owner);
         control.blocked_sessions.insert(owner);
         control.revision += 1;
         control.session_id = None;
@@ -349,7 +351,7 @@ async fn revoke_control(manager: &BrowserManager, session_id: Option<String>) ->
     }
     drop(control);
     // 接管时拒绝待确认操作，唤醒 Agent；输入永远只到用户当前可见标签。
-    manager.approvals.lock().await.clear();
+    manager.approval_elements.lock().await.clear();
     revoked
 }
 
@@ -478,68 +480,27 @@ async fn refresh_screencast(app: &AppHandle) -> Result<(), String> {
     Ok(())
 }
 
-/** 进阶级别下等待用户确认；拒绝、超时或停止回合都不会执行操作。 */
-async fn request_approval(
-    app: &AppHandle,
-    session_id: &str,
-    request: BrowserApprovalRequest,
-    cancel: &AgentCancel,
-) -> Result<(), String> {
-    if cancel.is_aborted() {
-        return Err(APPROVAL_ABORTED.to_owned());
-    }
-    let approval_id = request.approval_id.clone();
-    let (sender, receiver) = tokio::sync::oneshot::channel();
-    let manager = browser_manager().await;
-    let mut takeover = manager.takeover_revision.subscribe();
-    if manager
-        .control
-        .lock()
-        .await
-        .blocked_sessions
-        .contains(session_id)
-    {
-        return Err(BROWSER_USER_TAKEOVER.to_owned());
-    }
-    manager
-        .approvals
-        .lock()
-        .await
-        .insert(approval_id.clone(), sender);
-    let _ = app.emit(BROWSER_APPROVAL_EVENT, request);
-
-    let decision = tokio::select! {
-        decision = receiver => {
-            if decision.unwrap_or(false) { Ok(()) } else { Err(APPROVAL_DENIED.to_owned()) }
-        }
-        _ = tokio::time::sleep(Duration::from_secs(APPROVAL_TIMEOUT_SECONDS)) => {
-            Err(APPROVAL_TIMEOUT.to_owned())
-        }
-        _ = cancel.cancelled() => Err(APPROVAL_ABORTED.to_owned()),
-        _ = takeover.changed() => Err(BROWSER_USER_TAKEOVER.to_owned()),
-    };
-    manager.approvals.lock().await.remove(&approval_id);
-    decision
+/** 历史审批入口不再拥有执行权。 */
+pub async fn decide_browser_operation(_: &AppHandle, _: &str, _: bool) -> Result<(),String> {
+    Err("旧浏览器审批已结束，请使用当前操作审批。".into())
 }
 
-/** 审批弹窗的裁决入口：把用户选择送回正在等待的回合。 */
-pub async fn decide_browser_operation(
-    app: &AppHandle,
-    approval_id: &str,
-    approved: bool,
-) -> Result<(), String> {
-    let manager = browser_manager().await;
-    let delivered = manager
-        .approvals
-        .lock()
-        .await
-        .remove(approval_id)
-        .is_some_and(|sender| sender.send(approved).is_ok());
-    if !delivered {
-        return Err("这次确认已经结束。".to_owned());
+/** 只读已发布的本地缓存，审批之前不发起 CDP 或网络访问。 */
+pub async fn prepare_operation_approval(app: &AppHandle, session: &AgentSession, args: &Value) -> Result<Value,String> {
+    crate::permissions::ensure(session,crate::permissions::Operation::ExternalTool)?;
+    if !args.is_object() || args["operation"].as_str().and_then(operation_kind).is_none() { return Err("浏览器操作参数无效。".into()); }
+    if !super::fetcher::browser_settings_enabled(app) { return Err("浏览器功能未启用。".into()); }
+    let manager=browser_manager().await;
+    begin_control(manager,&session.id).await?;
+    let mut prepared=args.clone();
+    let cached=manager.approval_state.lock().await.clone();
+    if !matches!(args["operation"].as_str(),Some("browser.get_state"|"browser.create_tab")) && args["tabId"].is_null() {
+        if let Some(tab)=cached.as_ref().and_then(|s|s.active_tab_id.as_ref()) { prepared["tabId"]=json!(tab); }
     }
-    publish_state(app).await;
-    Ok(())
+    let tab=cached.as_ref().and_then(|s|s.tabs.iter().find(|t|prepared["tabId"]==t.tab_id));
+    let element=if let Some(reference)=args["reference"].as_str() {manager.approval_elements.lock().await.get(reference).cloned()} else {None};
+    prepared["approvalContext"]=json!({"currentUrl":tab.map(|t|&t.url),"tabTitle":tab.map(|t|&t.title),"element":element});
+    Ok(prepared)
 }
 
 /** 启动与恢复在同一把状态锁下串行，避免导航与清除数据同时写 profile。 */
@@ -857,7 +818,7 @@ fn cdp_error(error: chromiumoxide::error::CdpError) -> (String, String) {
 }
 
 /**
- * `run + kind: "browser"` 的主入口：校验权限 → 控制租约 → 审批 → 分发。
+ * `browser` 的主入口：校验权限 → 控制租约 → 审批 → 分发。
  * 用户接管后返回 BROWSER_USER_TAKEOVER，模型在本回合内不能再重试。
  */
 pub async fn execute_run_request(
@@ -865,7 +826,9 @@ pub async fn execute_run_request(
     session: &AgentSession,
     args: &Value,
     cancel: &AgentCancel,
+    permit: &crate::operation_approval::Permit,
 ) -> ToolExecutionOutcome {
+    if let Err(e)=permit.validate(app,session,"browser",args,cancel) { return failed_run("PERMISSION_DENIED",&e); }
     let started = Instant::now();
     let request = match serde_json::from_value::<BrowserRunRequest>(args.clone()) {
         Ok(request) => request,
@@ -923,64 +886,7 @@ pub async fn execute_run_request(
         return failed_run(code, message);
     }
 
-    // 需要确认的操作先弹审批；拒绝/超时/中断都直接失败，不碰浏览器。
-    let mut approval_result = super::policy::APPROVAL_NOT_REQUIRED.to_owned();
-    if operation_requires_approval(&session.security_level, operation) {
-        let tab_id = request
-            .params
-            .get("tabId")
-            .and_then(Value::as_str)
-            .map(str::to_owned);
-        let approval = BrowserApprovalRequest {
-            approval_id: crate::storage::create_id("browser-approval"),
-            session_id: session_id.clone(),
-            operation: operation.to_owned(),
-            tab_id,
-            url: None,
-            element_summary: request
-                .params
-                .get("reference")
-                .and_then(Value::as_str)
-                .map(str::to_owned),
-        };
-        match request_approval(app, &session_id, approval, cancel).await {
-            Ok(()) => approval_result = super::policy::APPROVAL_GRANTED.to_owned(),
-            Err(reason) => {
-                end_control(&manager, &session_id).await;
-                let code = match reason.as_str() {
-                    super::policy::APPROVAL_DENIED => "APPROVAL_DENIED",
-                    super::policy::APPROVAL_TIMEOUT => "APPROVAL_TIMEOUT",
-                    BROWSER_USER_TAKEOVER => BROWSER_USER_TAKEOVER,
-                    _ => "OPERATION_ABORTED",
-                };
-                write_audit(
-                    app,
-                    &session_id,
-                    BrowserAuditEntry {
-                        operation: operation.to_owned(),
-                        tab_id: request
-                            .params
-                            .get("tabId")
-                            .and_then(Value::as_str)
-                            .map(str::to_owned),
-                        url_origin: None,
-                        element_summary: None,
-                        approval: reason,
-                        duration_ms: started.elapsed().as_millis(),
-                        error_code: Some(code.to_owned()),
-                    },
-                );
-                let message = match code {
-                    "APPROVAL_DENIED" => "用户拒绝了这次浏览器操作。".to_owned(),
-                    "APPROVAL_TIMEOUT" => "等待浏览器操作确认超时。".to_owned(),
-                    BROWSER_USER_TAKEOVER => "用户已接管浏览器，本轮不能再重试。".to_owned(),
-                    _ => "用户已停止本轮。".to_owned(),
-                };
-                return failed_run(code, &message);
-            }
-        }
-    }
-
+    let approval_result = if session.security_level == "full-confirm" { super::policy::APPROVAL_GRANTED } else { super::policy::APPROVAL_NOT_REQUIRED }.to_owned();
     publish_state(app).await;
     let mut takeover = manager.takeover_revision.subscribe();
     let result = if manager
@@ -995,6 +901,10 @@ pub async fn execute_run_request(
             "用户已接管浏览器，本轮不能再重试。".to_owned(),
         ))
     } else {
+        if let Err(e)=permit.validate(app,session,"browser",args,cancel) {
+            end_control(&manager,&session_id).await;
+            return failed_run("PERMISSION_DENIED",&e);
+        }
         // 接管和 Stop 能释放正在等待 CDP 的状态锁，用户不必等导航或加载超时。
         tokio::select! {
             biased;
@@ -1010,6 +920,11 @@ pub async fn execute_run_request(
     publish_state(app).await;
     match result {
         Ok(mut outcome) => {
+            if let Some(elements)=outcome.result.payload["snapshot"]["elements"].as_array() {
+                let mut cache=manager.approval_elements.lock().await;
+                cache.clear();
+                for element in elements { if let Some(reference)=element["reference"].as_str() { cache.insert(reference.into(),element.clone()); } }
+            }
             outcome.result.audit_fragment = Some(format!(
                 "浏览器操作：operation={operation} duration_ms={} status=completed",
                 started.elapsed().as_millis()
@@ -1542,8 +1457,8 @@ mod tests {
     #[test]
     fn session_gate_matches_policy() {
         // 与 policy::session_allows_browser 联动，防止运行时和策略定义漂移。
-        assert!(session_allows_browser(false, false, false, "advanced"));
-        assert!(!session_allows_browser(true, false, false, "autonomous"));
-        assert!(!session_allows_browser(false, false, false, "basic"));
+        assert!(session_allows_browser(false, false, false, "full-confirm"));
+        assert!(!session_allows_browser(true, false, false, "full-auto"));
+        assert!(!session_allows_browser(false, false, false, "workspace-readonly"));
     }
 }
