@@ -109,7 +109,7 @@ export function useEditorActions(options: EditorActionsOptions) {
     expandFolderPaths,
   } = options;
 
-  if (!snapshot) {
+  if (!snapshot || !snapshot.knowledgeBases.length) {
     return {
       activateEditorTab: noop,
       replaceEditorTabId: noop,

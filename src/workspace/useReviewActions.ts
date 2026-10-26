@@ -20,7 +20,7 @@ const noopAsync = async (..._args: unknown[]) => {};
 export function useReviewActions(options: ReviewActionsOptions) {
   const { snapshot, userSettings, beginBusy, endBusy, setNotice, commitSnapshot, setAppEventLogs, handleSubmitPrompt } = options;
 
-  if (!snapshot) {
+  if (!snapshot || !snapshot.knowledgeBases.length) {
     return {
       handleAddReviewComment: noopAsync,
       handleSubmitReviewComments: noopAsync,
