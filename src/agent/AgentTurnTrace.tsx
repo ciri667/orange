@@ -149,7 +149,7 @@ export function AgentTurnTrace({
       </button>
 
       {isExpanded && (
-        <div className="ml-1.5 grid min-w-0 gap-1.5 border-l border-border pl-3">
+        <div className="grid min-w-0 gap-1.5">
           {steps.length === 0 && resolvedStatus === "running" ? (
             <p className="m-0 text-[12.5px] leading-[1.65] text-ink-muted italic whitespace-pre-wrap [overflow-wrap:anywhere]">
               正在思考…
