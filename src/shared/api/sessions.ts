@@ -7,6 +7,17 @@ import {
   orderValidKnowledgeBaseIds,
 } from "../mock/browser";
 import { rewindSessionToUserMessage } from "../../workspace/sessionUtils";
+
+/** 权限与 Plan 走显式入口；普通保存不能改写授权。 */
+export async function updateSessionAuthority(snapshot: WorkspaceSnapshot, sessionId: string,
+  securityLevel: AgentSession["securityLevel"], planMode: boolean, confirmedFullAccess: boolean): Promise<WorkspaceSnapshot> {
+  if (!isTauriRuntime()) {
+    return { ...snapshot, sessions: snapshot.sessions.map((session) => session.id === sessionId ? {
+      ...session, securityLevel, planMode, permissionVersion: (session.permissionVersion ?? 0) + 1,
+    } : session) };
+  }
+  return invokeLogged<WorkspaceSnapshot>("update_session_authority", { snapshot, sessionId, securityLevel, planMode, confirmedFullAccess });
+}
 import {
   AgentSession,
   KnowledgeBase,

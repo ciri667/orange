@@ -1,6 +1,28 @@
 use super::agent::build_im_identity_event;
 use super::common::*;
 
+/** 显式切换权限/Plan；普通 save_session 不具备这个能力。 */
+#[tauri::command]
+pub async fn update_session_authority(app: AppHandle, snapshot: WorkspaceSnapshot, session_id: String,
+    security_level: String, plan_mode: bool, confirmed_full_access: bool) -> Result<WorkspaceSnapshot, String> {
+    run_blocking("更新会话权限", move || storage::update_session_authority(&app, snapshot, &session_id,
+        &security_level, plan_mode, confirmed_full_access)).await
+}
+
+/** 一次性决定：不接受前端传入命令或替换参数。 */
+#[tauri::command]
+pub fn decide_operation_approval(id: String, approved: bool) -> Result<(), String> {
+    if crate::operation_approval::decide(&id, approved) { Ok(()) }
+    else { Err("审批已关闭、过期或已处理。".into()) }
+}
+
+/** 文件审批仅接受会话、批次和选择 ID。 */
+#[tauri::command]
+pub async fn apply_file_change_set(app: AppHandle, session_id: String, change_set_id: String,
+    operation_ids: Vec<String>) -> Result<WorkspaceSnapshot, String> {
+    run_blocking("应用文件变更集",move || crate::file_changes::apply(&app,&session_id,&change_set_id,&operation_ids)).await
+}
+
 /** 读取持久化 Agent 会话，并按当前工作台快照清理已失效的知识库或笔记引用。 */
 #[tauri::command]
 pub async fn load_sessions(

@@ -1,3 +1,4 @@
+import { updateSessionAuthority } from "../shared/api/sessions";
 import { useRef } from "react";
 import { decodeModelSelection } from "../shared/modelSelection";
 import { logInfo, logWarn } from "../shared/logger";
@@ -64,7 +65,8 @@ export function useSessionActions(options: SessionActionsOptions) {
   /** 正在整理上下文的会话；挡住连点造成的并发摘要请求。 */
   const compactingSessionIdsRef = useRef(new Set<string>());
 
-  if (!snapshot || !userSettings) {
+  // 首次启动尚未连接知识库，草稿会话没有可绑定的根目录。
+  if (!snapshot || !userSettings || !snapshot.knowledgeBases.length) {
     return {
       handleCreateSession: noopAsync,
       handleSelectSession: noopAsync,
@@ -400,66 +402,41 @@ export function useSessionActions(options: SessionActionsOptions) {
     setAgentOpen(nextOpen);
   }
 
+  /** 草稿先创建真实会话，再通过可信入口更新权限，避免把占位 ID 交给后端。 */
+  async function persistActiveAuthority(securityLevel: AgentSession["securityLevel"], planMode: boolean, confirmed: boolean) {
+    let authoritySnapshot = snapshotRef.current ?? currentSnapshot;
+    let target = authoritySnapshot.sessions.find((session) => session.id === activeSession.id);
+    if (!target) {
+      target = buildAgentSession({ knowledgeBase: sessionKnowledgeBase, securityLevel: defaultSecurityLevel });
+      authoritySnapshot = await saveSession(authoritySnapshot, target);
+      authoritySnapshot = { ...authoritySnapshot, activeSessionId: target.id };
+      commitSnapshot(authoritySnapshot);
+      options.onSessionOpened(target.id);
+    }
+    return updateSessionAuthority(authoritySnapshot, target.id, securityLevel, planMode, confirmed);
+  }
+
   /** 更新当前本地会话的安全级别，并将用户的显式选择同步为对应能力授权。 */
   async function handleSessionSecurityLevelChange(securityLevel: AgentSession["securityLevel"]) {
     if (!userSettings || activeSession.imIdentity || securityLevel === activeSession.securityLevel) {
       return;
     }
-    const currentUserSettings = userSettings;
-
-    /** 权限选择是用户的显式授权动作；先保存能力开关，再保存依赖它的会话级别。 */
     async function persistSecurityLevel() {
       beginBusy("正在更新 Agent 权限...");
-
       try {
-        const requiresAdvanced = securityLevel !== "basic";
-        const requiresAutonomous = securityLevel === "autonomous";
-        const nextAgentSecurity = {
-          ...currentUserSettings.agentSecurity,
-          advancedExecutionEnabled: requiresAdvanced ? true : currentUserSettings.agentSecurity.advancedExecutionEnabled,
-          autonomousModeEnabled: requiresAutonomous ? true : currentUserSettings.agentSecurity.autonomousModeEnabled,
-        };
-
-        if (
-          nextAgentSecurity.advancedExecutionEnabled !== currentUserSettings.agentSecurity.advancedExecutionEnabled ||
-          nextAgentSecurity.autonomousModeEnabled !== currentUserSettings.agentSecurity.autonomousModeEnabled
-        ) {
-          setUserSettings(await saveUserSettings({ ...currentUserSettings, agentSecurity: nextAgentSecurity }));
-        }
-
-        const nextSession = { ...activeSession, securityLevel, updatedAt: formatLocalDateTime() };
-        const nextSnapshot = {
-          ...currentSnapshot,
-          sessions: currentSnapshot.sessions.map((session) => session.id === activeSession.id ? nextSession : session),
-        };
-        commitSnapshot(await saveSession(nextSnapshot, nextSession));
-        setNotice(
-          securityLevel === "basic"
-            ? "已切回基础权限：只在选中的知识库里工作，写入需要你确认。"
-            : securityLevel === "advanced"
-              ? "已切换到进阶权限：可整理目录并运行 Skill，落盘前仍需确认。"
-              : "已切换到完全权限：可在合规路径上读列，校验通过后可自动落盘；不是整台电脑。",
-        );
-      } catch (error) {
-        setNotice(error instanceof Error ? error.message : String(error));
-      } finally {
-        endBusy();
-      }
+        commitSnapshot(await persistActiveAuthority(securityLevel, Boolean(activeSession.planMode), true));
+        setNotice("会话权限已更新；在途审批已取消，原有待审文件仍需单独处理。");
+      } catch (error) { setNotice(error instanceof Error ? error.message : String(error)); }
+      finally { endBusy(); }
     }
-
-    if (securityLevel === "autonomous") {
-      requestConfirmation(
-        {
-          title: "切换到完全权限",
-          message: "完全权限意味着你把连续执行权交给 Agent，好让模型一次把任务做完。校验通过的知识库文本写入会自动落盘；已授权的 Skill 可连续运行；也可以在知识库之外的合规路径上用同一套 list / read / write。这不是整台电脑：系统保护目录和隔离边界仍然生效。",
-          confirmLabel: "切换到完全权限",
-          tone: "default",
-        },
-        persistSecurityLevel,
-      );
+    if (securityLevel === "full-confirm" || securityLevel === "full-auto") {
+      requestConfirmation({
+        title: securityLevel === "full-auto" ? "启用完全权限，无需审批" : "启用完全权限，需审批",
+        message: "Agent 将能访问知识库外资源、外部服务并在当前系统用户的真实环境执行命令。不会主动提权，也不提供文件系统沙箱隔离。命令内部修改不逐项展示 diff，失败或取消也可能已有副作用。" + (securityLevel === "full-auto" ? "此档将免去逐次审批并自动应用新文件变更。" : "外部读取和操作会逐次请求审批。"),
+        confirmLabel: "确认切换", tone: "default",
+      }, persistSecurityLevel);
       return;
     }
-
     await persistSecurityLevel();
   }
 
@@ -475,14 +452,7 @@ export function useSessionActions(options: SessionActionsOptions) {
     beginBusy("正在更新规划模式...");
 
     try {
-      const nextSession = { ...activeSession, planMode, updatedAt: formatLocalDateTime() };
-      const nextSnapshot = {
-        ...currentSnapshot,
-        sessions: currentSnapshot.sessions.map((session) =>
-          session.id === activeSession.id ? nextSession : session,
-        ),
-      };
-      const savedSnapshot = await saveSession(nextSnapshot, nextSession);
+      const savedSnapshot = await persistActiveAuthority(activeSession.securityLevel, planMode, false);
       commitSnapshot(savedSnapshot);
       setNotice(
         planMode

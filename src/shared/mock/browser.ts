@@ -73,7 +73,7 @@ export const defaultBrowserUserSettings: UserSettings = {
   privacyPolicy: "allow-selected-scope",
   writeConfirmationRequired: true,
   agentSecurity: {
-    defaultLevel: "basic",
+    defaultLevel: "workspace-readonly",
     advancedExecutionEnabled: false,
     autonomousModeEnabled: false,
     resourceLimits: { timeoutSeconds: 120, maxMemoryMb: 512, maxProcesses: 20, maxArtifactMb: 100 },

@@ -8,7 +8,7 @@ export type AgentActionType = "ask" | "find" | "rewrite" | "create" | "organize"
 export type AgentSessionType = "note" | "knowledge-base" | "task";
 
 /** Agent 安全等级决定工具范围和确认策略：基础由用户盯紧，进阶扩大能力仍需确认，完全在校验后连续执行。提高等级只能由用户主动操作。 */
-export type AgentSecurityLevel = "basic" | "advanced" | "autonomous";
+export type AgentSecurityLevel = "workspace-readonly" | "workspace-write" | "full-confirm" | "full-auto";
 
 /** Markdown 编辑器视图模式，控制编辑、预览和分屏布局。 */
 export type MarkdownViewMode = "edit" | "preview" | "split";
@@ -25,6 +25,8 @@ export type AgentToolName =
   | "list"
   | "edit"
   | "write"
+  | "exec"
+  | "browser"
   | "run"
   | "task"
   | "search_notes"
@@ -159,6 +161,7 @@ export interface AgentSkill {
   displayName: string;
   description: string;
   instructions: string;
+  resources?: string[];
   tags: string[];
   enabled: boolean;
   source: AgentSkillSource;
@@ -170,7 +173,7 @@ export interface AgentSkill {
   relativePath?: string;
   /** 自定义 skill 的解析元数据，首版只记录覆盖来源等轻量信息。 */
   metadata?: Record<string, string>;
-  /** 可执行 Skill 的运行声明；缺失时仍可作为纯指令 Skill 使用。 */
+  /** 历史运行声明，只作为包内参考，不赋予权限。 */
   runtimeManifest?: SkillRuntimeManifest;
   /** 安装包和本机运行时共同决定的兼容性结果。 */
   compatibility?: SkillCompatibilityReport;
@@ -603,7 +606,7 @@ export interface ProposedChange {
   diffStats?: ProposedChangeDiffStats;
 }
 
-export type ProposedFileOperationType = "create" | "modify" | "delete" | "move" | "create_folder";
+export type ProposedFileOperationType = "create" | "modify" | "delete" | "move" | "rename" | "create_folder";
 
 /** Skill 一次执行产生的单个文件影响。 */
 export interface ProposedFileOperation {
@@ -620,23 +623,26 @@ export interface ProposedFileOperation {
   binary: boolean;
   byteSize: number;
   stagedPath?: string;
+  status?: "pending" | "completed" | "failed";
+  error?: string;
+  affectedFiles?: number;
 }
 
-/** 多文件 Skill 结果的统一审批容器。 */
+/** 通用文件操作的统一审批容器。 */
 export interface ProposedChangeSet {
   id: string;
   executionId: string;
   skillId: string;
   summary: string;
   operations: ProposedFileOperation[];
-  status: "pending" | "applied" | "rejected" | "conflict";
+  status: "pending" | "partial" | "applied" | "rejected" | "conflict" | "expired";
   warnings: string[];
   createdAt: string;
 }
 
-export type SkillExecutionStatus = "pending" | "running" | "completed" | "failed" | "rejected";
+export type SkillExecutionStatus = "pending" | "running" | "completed" | "failed" | "rejected" | "expired";
 
-/** 模型提出、用户批准后才会进入系统沙箱的执行请求。 */
+/** 历史 Skill 执行请求，仅用于显示过期记录，不再执行。 */
 export interface SkillExecutionRequest {
   id: string;
   skillId: string;
@@ -698,6 +704,7 @@ export interface AgentSession {
   pendingChangeSet?: ProposedChangeSet;
   pendingExecution?: SkillExecutionRequest;
   securityLevel: AgentSecurityLevel;
+  permissionVersion?: number;
   /** 规划模式开关：开启后 Agent 只用只读工具先出执行计划，用户确认后才执行。IM/定时会话恒为 false。 */
   planMode: boolean;
   /** 会话滚动工作记忆，用于让模型在只带最近历史时仍保留早期目标和决定。 */

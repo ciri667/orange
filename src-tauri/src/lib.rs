@@ -16,6 +16,10 @@ mod logging;
 mod mcp;
 mod model_provider;
 mod provider_error;
+mod permissions;
+mod operation_approval;
+mod command_exec;
+mod file_changes;
 mod retrieval;
 mod runtime;
 mod scheduler;
@@ -288,6 +292,9 @@ pub fn run() {
             commands::knowledge::select_knowledge_base,
             commands::sessions::load_sessions,
             commands::sessions::save_session,
+            commands::sessions::update_session_authority,
+            commands::sessions::decide_operation_approval,
+            commands::sessions::apply_file_change_set,
             commands::sessions::delete_session,
             commands::sessions::update_session_scope,
             commands::sessions::restore_session_context,

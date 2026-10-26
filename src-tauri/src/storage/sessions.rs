@@ -373,13 +373,24 @@ pub fn save_snapshot_session(
     snapshot: &WorkspaceSnapshot,
     session_id: &str,
 ) -> Result<(), String> {
-    let session = snapshot
-        .sessions
-        .iter()
-        .find(|session| session.id == session_id)
-        .ok_or_else(|| "找不到要保存的会话".to_owned())?;
+    let session = snapshot.sessions.iter().find(|s|s.id==session_id).ok_or("找不到要保存的会话")?;
+    let mut trusted = session.clone();
+    let mut connection=open_database(app)?;
+    let _guard=lock_database_writer()?;
+    let transaction=connection.transaction_with_behavior(TransactionBehavior::Immediate).map_err(|e|e.to_string())?;
+    let payload: Option<String>=transaction.query_row("SELECT payload_json FROM agent_sessions WHERE id=?1",params![session_id],|r|r.get(0)).optional().map_err(|e|e.to_string())?;
+    if let Some(payload)=payload {
+        let mut current: AgentSession=serde_json::from_str(&payload).map_err(|e|e.to_string())?;
+        migrate_session_authority(&mut current);
+        if !crate::permissions::same_authority(&current,session) {
+            trusted.security_level=current.security_level; trusted.permission_version=current.permission_version;
+            trusted.plan_mode=current.plan_mode; trusted.knowledge_base_ids=current.knowledge_base_ids;
+            trusted.pending_change=current.pending_change; trusted.pending_change_set=current.pending_change_set;
+        }
+    }
+    persist_session_in_transaction(&transaction,&trusted)?;
+    transaction.commit().map_err(|e|e.to_string())
 
-    save_session_records(app, std::slice::from_ref(session))
 }
 
 /** 保存单个会话，并返回已经写入快照的下一版工作台状态。 */
@@ -390,6 +401,14 @@ pub fn save_session(
 ) -> Result<WorkspaceSnapshot, String> {
     if let Some(existing) = load_persisted_session(app, &session.id)? {
         // 普通会话保存不能改写高权限审批载荷；仅允许按稳定 operation id 更新勾选状态。
+        session.security_level = existing.security_level;
+        session.permission_version = existing.permission_version;
+        session.plan_mode = existing.plan_mode;
+        session.schedule_identity = existing.schedule_identity;
+        session.pending_change = match (existing.pending_change,session.pending_change) {
+            (Some(mut trusted),Some(draft)) if trusted.id==draft.id => { trusted.review_comments=draft.review_comments; trusted.review_state=draft.review_state; Some(trusted) },
+            (trusted,_)=>trusted,
+        };
         session.knowledge_base_ids = existing.knowledge_base_ids;
         session.im_identity = existing.im_identity;
         session.pending_execution = existing.pending_execution;
@@ -410,6 +429,16 @@ pub fn save_session(
             }
             (trusted, _) => trusted,
         };
+    } else {
+        // 新会话只能继承当前默认权限，不能用普通保存伪造审批、变更或远程身份。
+        session.security_level = load_user_settings(app)?.agent_security.default_level;
+        session.permission_version = 0;
+        session.plan_mode = false;
+        session.im_identity = None;
+        session.schedule_identity = None;
+        session.pending_change = None;
+        session.pending_change_set = None;
+        session.pending_execution = None;
     }
 
     if let Some(index) = snapshot
@@ -446,7 +475,7 @@ pub(crate) fn load_persisted_session(
 
     payload
         .map(|payload| {
-            serde_json::from_str(&payload).map_err(|error| format!("无法解析持久化会话：{error}"))
+            serde_json::from_str::<AgentSession>(&payload).map(|mut session| { migrate_session_authority(&mut session); session }).map_err(|error| format!("无法解析持久化会话：{error}"))
         })
         .transpose()
 }
@@ -603,6 +632,9 @@ pub fn update_session_scope(
     requested_knowledge_base_ids: Vec<String>,
     active_knowledge_base_id: &str,
 ) -> Result<WorkspaceSnapshot, String> {
+    let viewer = snapshot.active_session_id.clone();
+    snapshot = load_workspace_snapshot(app)?;
+    snapshot.active_session_id=viewer;
     let active_id = if snapshot
         .knowledge_bases
         .iter()
@@ -619,11 +651,17 @@ pub fn update_session_scope(
         .find(|session| session.id == session_id)
         .ok_or_else(|| "找不到要更新范围的会话".to_owned())?;
 
-    session.knowledge_base_ids = next_ids;
+    let trusted = load_persisted_session(app, session_id)?.ok_or("找不到持久化会话")?;
+    *session = trusted;
+    if session.knowledge_base_ids != next_ids {
+        invalidate_authority(session);
+        session.knowledge_base_ids = next_ids;
+    }
     session.updated_at = "刚刚".to_owned();
     let session_id = session.id.clone();
     normalize_sessions_for_snapshot(&mut snapshot);
-    save_snapshot_session(app, &snapshot, &session_id)?;
+    let changed=snapshot.sessions.iter().find(|s|s.id==session_id).ok_or("会话不存在")?;
+    save_session_records(app,std::slice::from_ref(changed))?;
 
     Ok(snapshot)
 }
@@ -797,23 +835,8 @@ pub fn normalize_session_for_snapshot(
 ) -> bool {
     normalize_session_created_at(session);
 
-    if session.im_identity.is_some() {
-        // 远程入口无论前端或历史 payload 如何声明，都只能保持基础级别和无待执行任务。
-        session.security_level = "basic".to_owned();
-        session.pending_execution = None;
-        session.pending_change_set = None;
-        session.plan_mode = false;
-    } else if !matches!(
-        session.security_level.as_str(),
-        "basic" | "advanced" | "autonomous"
-    ) {
-        session.security_level = "basic".to_owned();
-    }
-
-    // 定时任务无人值守，没有「用户确认计划」的环节，规划模式一律关闭。
-    if session.schedule_identity.is_some() {
-        session.plan_mode = false;
-    }
+    migrate_session_authority(session);
+    crate::file_changes::migrate_legacy_pending(session, &snapshot.knowledge_bases);
 
     if session.deleted_at.is_some() {
         return false;
@@ -876,7 +899,7 @@ pub(crate) fn ordered_valid_scope_ids(
 
 #[cfg(test)]
 mod tests {
-    use super::{normalize_session_for_snapshot, retain_viewer_session_id};
+    use super::{migrate_session_authority, normalize_session_for_snapshot, retain_viewer_session_id};
     use crate::domain::{AgentSession, WorkspaceSnapshot};
 
     fn test_session(id: &str) -> AgentSession {
@@ -894,6 +917,7 @@ mod tests {
             pending_change_set: None,
             pending_execution: None,
             security_level: "basic".to_owned(),
+            permission_version: 0,
             plan_mode: false,
             context_summary: None,
             created_at: "t".to_owned(),
@@ -905,6 +929,30 @@ mod tests {
             title_customized: false,
             pinned_at: None,
             archived_at: None,
+        }
+    }
+
+    #[test]
+    fn legacy_execution_and_artifacts_expire_idempotently_without_losing_records() {
+        for status in ["pending", "partial"] {
+            let mut session = test_session("legacy-migration");
+            session.pending_execution = Some(serde_json::from_value(serde_json::json!({
+                "id":"exec-old", "skillId":"old", "skillName":"旧 Skill", "packageHash":"hash",
+                "runtime":"python", "commandPreview":"old.py", "args":[], "knowledgeBaseIds":["kb-a"],
+                "status":"running", "createdAt":"t"
+            })).unwrap());
+            session.pending_change_set = Some(serde_json::from_value(serde_json::json!({
+                "id":"artifacts-old", "executionId":"exec-old", "skillId":"old", "status":status,
+                "summary":"保留副本", "operations":[], "createdAt":"t"
+            })).unwrap());
+            migrate_session_authority(&mut session);
+            assert_eq!(session.security_level,"workspace-write");
+            assert_eq!(session.pending_execution.as_ref().unwrap().status,"expired");
+            assert_eq!(session.pending_change_set.as_ref().unwrap().status,"expired");
+            assert_eq!(session.pending_change_set.as_ref().unwrap().id,"artifacts-old");
+            let migrated = serde_json::to_value(&session).unwrap();
+            migrate_session_authority(&mut session);
+            assert_eq!(serde_json::to_value(&session).unwrap(),migrated);
         }
     }
 
@@ -1005,4 +1053,44 @@ mod tests {
         retain_viewer_session_id(&mut snapshot, "session-b");
         assert_eq!(snapshot.active_session_id, "session-b");
     }
+}
+
+/** 幂等迁移仅更新元数据，不触碰真实知识库文件与旧产物副本。 */
+pub(crate) fn migrate_session_authority(session: &mut AgentSession) {
+    session.security_level = crate::permissions::migrate_level(&session.security_level);
+    if session.im_identity.is_some() { session.security_level = "workspace-write".into(); session.plan_mode = false; }
+    if session.schedule_identity.is_some() { session.security_level = "workspace-readonly".into(); session.plan_mode = false; }
+    if let Some(execution) = session.pending_execution.as_mut() {
+        if matches!(execution.status.as_str(), "pending" | "running") { execution.status = "expired".into(); }
+    }
+    if let Some(set) = session.pending_change_set.as_mut() {
+        if set.execution_id != crate::domain::AGENT_DIRECT_EXECUTION_ID && matches!(set.status.as_str(), "pending" | "partial") {
+            set.status = "expired".into();
+            set.warnings.push("旧 Skill 运行链路已停用；副本保留，请用新工具重新提出操作。".into());
+        }
+    }
+}
+
+fn invalidate_authority(session: &mut AgentSession) {
+    session.permission_version = session.permission_version.saturating_add(1);
+    crate::operation_approval::cancel_session(&session.id);
+    if crate::runtime::is_session_turn_active(&session.id) { crate::runtime::request_agent_abort(&session.id); }
+}
+
+/** 只有显式权限入口可以切档；进入完全档必须带对应的用户确认。 */
+pub fn update_session_authority(app: &AppHandle, mut snapshot: WorkspaceSnapshot, session_id: &str,
+    level: &str, plan_mode: bool, confirmed_full_access: bool) -> Result<WorkspaceSnapshot, String> {
+    let mut session = load_persisted_session(app, session_id)?.ok_or("找不到持久化会话")?;
+    if session.im_identity.is_some() || session.schedule_identity.is_some() { return Err("远程或定时会话不能修改本地执行权限。".into()); }
+    if !matches!(level, "workspace-readonly" | "workspace-write" | "full-confirm" | "full-auto") { return Err("未知权限档位。".into()); }
+    if session.security_level != level && matches!(level, "full-confirm" | "full-auto") && !confirmed_full_access {
+        return Err("进入完全权限需要确认真实环境访问能力；无需审批档还需要确认自动执行。".into());
+    }
+    if session.security_level != level || session.plan_mode != plan_mode {
+        invalidate_authority(&mut session);
+        session.security_level = level.to_owned(); session.plan_mode = plan_mode;
+    }
+    save_session_records(app, std::slice::from_ref(&session))?;
+    if let Some(existing) = snapshot.sessions.iter_mut().find(|item| item.id == session_id) { *existing = session; }
+    Ok(snapshot)
 }

@@ -139,6 +139,7 @@ mod tests {
             pending_change_set: None,
             pending_execution: None,
             security_level: "basic".to_owned(),
+            permission_version: 0,
             plan_mode: false,
             context_summary: None,
             created_at: "2026/01/01 10:00".to_owned(),

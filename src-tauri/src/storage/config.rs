@@ -197,21 +197,6 @@ pub fn save_user_settings(
     Ok(normalized_settings)
 }
 
-/** 后端在用户实际批准完全模式执行后写入短时 Skill hash 授权。 */
-pub(crate) fn save_trusted_skill_grant(
-    app: &AppHandle,
-    grant: crate::domain::TrustedSkillGrant,
-) -> Result<(), String> {
-    let mut settings = load_user_settings(app)?;
-    settings
-        .agent_security
-        .trusted_skill_grants
-        .retain(|existing| existing.skill_id != grant.skill_id);
-    settings.agent_security.trusted_skill_grants.push(grant);
-    normalize_agent_security_settings(&mut settings.agent_security);
-    persist_user_settings(app, &settings)
-}
-
 /** 写入已经过调用方归一化的设置，避免内部授权写入再次走前端字段保护。 */
 pub(crate) fn persist_user_settings(
     app: &AppHandle,
@@ -265,17 +250,11 @@ pub(crate) fn persist_user_settings(
 pub(crate) fn normalize_agent_security_settings(
     settings: &mut crate::domain::AgentSecuritySettings,
 ) {
-    if !settings.advanced_execution_enabled {
-        settings.default_level = "basic".to_owned();
-        settings.autonomous_mode_enabled = false;
-    } else if settings.default_level == "autonomous" && !settings.autonomous_mode_enabled {
-        settings.default_level = "advanced".to_owned();
-    } else if !matches!(
-        settings.default_level.as_str(),
-        "basic" | "advanced" | "autonomous"
-    ) {
-        settings.default_level = "basic".to_owned();
-    }
+    settings.default_level = crate::permissions::migrate_level(&settings.default_level);
+    settings.advanced_execution_enabled = false;
+    settings.autonomous_mode_enabled = false;
+    settings.trusted_skill_grants.clear();
+    settings.allowed_network_domains.clear();
 
     settings.resource_limits.timeout_seconds =
         settings.resource_limits.timeout_seconds.clamp(5, 1800);

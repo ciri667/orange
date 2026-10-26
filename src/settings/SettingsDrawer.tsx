@@ -299,9 +299,9 @@ export function SettingsDrawer({
         label: "Agent 权限",
         description: "新会话的默认权限",
         meta: AGENT_SECURITY_LEVEL_COPY[
-          settingsDraft.agentSecurity.defaultLevel === "advanced" || settingsDraft.agentSecurity.defaultLevel === "autonomous"
+          settingsDraft.agentSecurity.defaultLevel === "workspace-write" || settingsDraft.agentSecurity.defaultLevel === "full-confirm" || settingsDraft.agentSecurity.defaultLevel === "full-auto"
             ? settingsDraft.agentSecurity.defaultLevel
-            : "basic"
+            : "workspace-readonly"
         ].label,
         icon: ShieldCheck,
         tone: "neutral",

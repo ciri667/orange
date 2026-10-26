@@ -113,23 +113,15 @@ export function AgentSessionSummary({
   );
 }
 
-/** 三级权限是用户愿意把多少执行权交给 Agent。 */
+/** 四档权限同时定义操作范围与审批方式。 */
 export const AGENT_SECURITY_LEVEL_COPY = {
-  basic: {
-    label: "基础",
-    description: "只在选中的知识库里工作，写入需确认。",
-  },
-  advanced: {
-    label: "进阶",
-    description: "可整理目录并运行 Skill，落盘前仍确认。",
-  },
-  autonomous: {
-    label: "完全",
-    description: "可在合规路径上读列，校验通过后可自动落盘；不是整台电脑。",
-  },
+  "workspace-readonly": { label: "工作区内只读", description: "读取和搜索会话授权知识库及已启用 Skill 资源，禁止生成或应用文件变更。" },
+  "workspace-write": { label: "工作区内修改，需审批", description: "可提出工作区文件变更，审阅确认后应用。" },
+  "full-confirm": { label: "完全权限，需审批", description: "可访问工作区外资源及执行真实命令；外部读取和操作逐次审批。" },
+  "full-auto": { label: "完全权限，无需审批", description: "在当前系统用户权限内自动执行真实环境操作；仍校验冲突与功能设置。" },
 } as const;
 
-/** 钉在输入条上的三级权限下拉；IM 会话不渲染。选择更高档仍会走原有授权确认。 */
+/** 会话权限下拉；进入完全档由会话动作统一请求确认。 */
 export function AgentSecurityLevelControl({
   activeSession,
   agentSecurity,
@@ -149,9 +141,10 @@ export function AgentSecurityLevelControl({
 
   const selectedCopy = AGENT_SECURITY_LEVEL_COPY[activeSession.securityLevel];
   const levels = [
-    ["basic", true],
-    ["advanced", agentSecurity.advancedExecutionEnabled],
-    ["autonomous", agentSecurity.autonomousModeEnabled],
+    ["workspace-readonly", true],
+    ["workspace-write", true],
+    ["full-confirm", true],
+    ["full-auto", true],
   ] as const;
 
   return (
@@ -229,7 +222,7 @@ export function PlanModeToggle({
       role="switch"
       aria-checked={active}
       aria-label="计划模式"
-      title={active ? "规划中：Agent 只读探索并先给出执行计划，你确认后才执行。点击可关闭。" : "开启后 Agent 先给出执行计划，你确认后才动手。"}
+      title={active ? "Plan 已开启：仅允许工作区只读操作。关闭后恢复原权限，不会提升档位。" : "开启 Plan：工作区只读，禁用外部工具、命令和所有变更应用。"}
       disabled={isBusy}
       className={cn(
         "shrink-0 rounded-full px-1.5 py-0.5 text-[12px] font-medium",

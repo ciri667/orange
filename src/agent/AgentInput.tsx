@@ -809,7 +809,7 @@ export function AgentInput({
   const hasComposerChips = selectedExplicitSkillChips.length > 0 || selectedMentionFileChips.length > 0 || draftImages.length > 0;
   /** 权限设置缺失时仍展示基础档，避免输入条因旧设置结构崩溃。 */
   const resolvedAgentSecurity = agentSecurity ?? {
-    defaultLevel: "basic" as const,
+    defaultLevel: "workspace-readonly" as const,
     advancedExecutionEnabled: false,
     autonomousModeEnabled: false,
     resourceLimits: { timeoutSeconds: 120, maxMemoryMb: 512, maxProcesses: 20, maxArtifactMb: 100 },
@@ -1102,7 +1102,7 @@ export function AgentInput({
           onNotice={onNotice}
           disabled={Boolean(queuedFollowUp)}
         />
-        {!activeSession.imIdentity && (
+        {!activeSession.imIdentity && !activeSession.scheduleIdentity && (
           <AgentSecurityLevelControl
             activeSession={activeSession}
             agentSecurity={resolvedAgentSecurity}
@@ -1110,7 +1110,7 @@ export function AgentInput({
             onSecurityLevelChange={onSecurityLevelChange}
           />
         )}
-        {!activeSession.imIdentity && (
+        {!activeSession.imIdentity && !activeSession.scheduleIdentity && (
           <PlanModeToggle activeSession={activeSession} isBusy={isBusy} onPlanModeChange={onPlanModeChange} />
         )}
         <div className="ml-auto flex min-w-0 items-center justify-end gap-1.5">

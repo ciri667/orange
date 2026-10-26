@@ -162,6 +162,7 @@ fn build_new_command_session(knowledge_base_id: &str) -> AgentSession {
         pending_change_set: None,
         pending_execution: None,
         security_level: "basic".to_owned(),
+            permission_version: 0,
         plan_mode: false,
         context_summary: None,
         created_at: now.clone(),

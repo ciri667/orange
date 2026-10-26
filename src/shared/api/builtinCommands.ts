@@ -135,7 +135,7 @@ function runMockBuiltinCommand(
       const nextSnapshot = cloneWorkspaceSnapshot(snapshot);
       const nextSession = buildAgentSession({
         knowledgeBase: nextSnapshot.knowledgeBases.find((knowledgeBase) => knowledgeBase.id === nextSnapshot.activeKnowledgeBaseId)!,
-        securityLevel: "basic",
+        securityLevel: "workspace-readonly",
       });
 
       nextSnapshot.sessions = [nextSession, ...nextSnapshot.sessions];

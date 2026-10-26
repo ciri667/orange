@@ -211,6 +211,12 @@ pub struct ProposedFileOperation {
     pub byte_size: usize,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub staged_path: Option<String>,
+    #[serde(default)]
+    pub status: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+    #[serde(default)]
+    pub affected_files: usize,
 }
 
 /** Agent 直接产出（非 Skill 执行）的变更集使用的执行 ID 占位符。 */
@@ -404,9 +410,12 @@ pub struct AgentSession {
     pub pending_change_set: Option<ProposedChangeSet>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pending_execution: Option<SkillExecutionRequest>,
-    /** 安全级别按会话固化；IM 会话始终由入口强制降为 basic。 */
+    /** 安全级别按会话固化；IM 仅保留工作区文本草稿及身份绑定确认。 */
     #[serde(default = "default_agent_security_level")]
     pub security_level: String,
+    /** 每次权限、scope 或 Plan 更新后递增，使在途授权失效。 */
+    #[serde(default)]
+    pub permission_version: u64,
     /** 规划模式开关：开启后工具集收缩为只读，Agent 先出执行计划，用户确认后才进入执行。IM/定时会话强制为 false。 */
     #[serde(default)]
     pub plan_mode: bool,
@@ -476,50 +485,29 @@ pub struct KnowledgeBaseMemory {
     pub updated_at: String,
 }
 
-#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
-#[serde(rename_all = "lowercase")]
+#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
 pub enum AgentSecurityLevel {
-    Basic,
-    Advanced,
-    #[serde(rename = "autonomous")]
-    Full,
+    #[default]
+    WorkspaceReadonly,
+    WorkspaceWrite,
+    FullConfirm,
+    FullAuto,
 }
-
-impl Default for AgentSecurityLevel {
-    fn default() -> Self {
-        Self::Basic
-    }
-}
-
 impl AgentSecurityLevel {
-    /** 解析会话/设置中的安全级别字符串；未知值一律降为基础级别。 */
     pub fn parse(value: &str) -> Self {
         match value {
-            "advanced" => Self::Advanced,
-            "autonomous" | "full" => Self::Full,
-            _ => Self::Basic,
+            "workspace-write" => Self::WorkspaceWrite,
+            "full-confirm" => Self::FullConfirm,
+            "full-auto" => Self::FullAuto,
+            _ => Self::WorkspaceReadonly,
         }
     }
-
-    /** 进阶/完全级别可使用通用文件工具（如 create_folder）。 */
-    pub fn allows_general_fs_tools(self) -> bool {
-        !matches!(self, Self::Basic)
-    }
-
-    /** 完全级别允许对知识库根目录之外的合规绝对路径进行操作。 */
-    pub fn allows_external_filesystem(self) -> bool {
-        matches!(self, Self::Full)
-    }
-
-    /** 完全级别允许校验通过后自动落盘，不再中途打断用户确认。 */
-    pub fn allows_auto_apply(self) -> bool {
-        matches!(self, Self::Full)
-    }
+    pub fn allows_general_fs_tools(self) -> bool { !matches!(self, Self::WorkspaceReadonly) }
+    pub fn allows_external_filesystem(self) -> bool { matches!(self, Self::FullConfirm | Self::FullAuto) }
+    pub fn allows_auto_apply(self) -> bool { self == Self::FullAuto }
 }
-
-fn default_agent_security_level() -> String {
-    "basic".to_owned()
-}
+fn default_agent_security_level() -> String { "workspace-readonly".to_owned() }
 
 fn default_agent_resource_limits() -> AgentResourceLimits {
     AgentResourceLimits {

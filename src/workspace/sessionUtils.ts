@@ -38,7 +38,7 @@ export function buildAgentSession({
   knowledgeBase,
   title = DEFAULT_SESSION_TITLE,
   knowledgeBaseIds,
-  securityLevel = "basic",
+  securityLevel = "workspace-readonly",
 }: {
   knowledgeBase: KnowledgeBase;
   title?: string;
@@ -66,16 +66,16 @@ export function buildAgentSession({
 export function resolveNewSessionSecurityLevel(
   defaultLevel?: AgentSession["securityLevel"],
 ): AgentSession["securityLevel"] {
-  if (defaultLevel === "advanced" || defaultLevel === "autonomous") {
+  if (defaultLevel === "workspace-write" || defaultLevel === "full-confirm" || defaultLevel === "full-auto") {
     return defaultLevel;
   }
-  return "basic";
+  return "workspace-readonly";
 }
 
 /** 构造未落库的侧栏占位会话，避免仅切换文档时隐式创建真实会话。 */
 export function buildDraftAgentSession(
   knowledgeBase: KnowledgeBase,
-  securityLevel: AgentSession["securityLevel"] = "basic",
+  securityLevel: AgentSession["securityLevel"] = "workspace-readonly",
 ): AgentSession {
   return {
     id: DRAFT_SESSION_ID,

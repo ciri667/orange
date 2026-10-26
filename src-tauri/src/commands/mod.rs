@@ -102,6 +102,7 @@ mod tests {
             pending_change_set: None,
             pending_execution: None,
             security_level: "basic".to_owned(),
+            permission_version: 0,
             plan_mode: false,
             context_summary: None,
             created_at: "刚刚".to_owned(),
@@ -291,7 +292,7 @@ mod tests {
 
         assert_eq!(
             result.unwrap_err(),
-            "文件已被其它会话或编辑器更新，已阻止追加写入。请重新读取后再写。"
+            "文件已被其它会话或编辑器更新，请重新读取后再写。"
         );
     }
 
@@ -335,7 +336,7 @@ mod tests {
 
         assert_eq!(
             result.unwrap_err(),
-            "文件已被其它会话或编辑器更新，已阻止多处编辑写入。请重新读取后再写。"
+            "文件已被其它会话或编辑器更新，请重新读取后再写。"
         );
     }
 }
