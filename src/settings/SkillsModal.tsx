@@ -944,24 +944,12 @@ function SkillDetail({
         </section>
       )}
       <section className="grid gap-2">
-        <h4 className="m-0 text-[13px] text-ink-strong">运行兼容性</h4>
-        <div
-          className={cn(
-            "flex items-center justify-between gap-3 rounded-xl border border-border bg-surface px-3 py-2.5",
-            skill.compatibility?.status === "ready" && "[&_strong]:text-success",
-            (skill.compatibility?.status === "missing-runtime" || skill.compatibility?.status === "partial" || skill.compatibility?.status === "unsupported") && "[&_strong]:text-warning",
-          )}
-        >
-          <strong>{skillCompatibilityLabel(skill)}</strong>
-          <span className="text-right text-xs text-ink-muted">{skillRuntimeMessage(skill)}</span>
-        </div>
-        {skill.runtimeManifest && (
-          <dl className="m-0">
-            <div className="grid grid-cols-[72px_minmax(0,1fr)] gap-2 py-[3px]"><dt className="m-0 min-w-0">运行时</dt><dd className="m-0 min-w-0">{skill.runtimeManifest.runtime}</dd></div>
-            <div className="grid grid-cols-[72px_minmax(0,1fr)] gap-2 py-[3px]"><dt className="m-0 min-w-0">入口</dt><dd className="m-0 min-w-0"><code className="[overflow-wrap:anywhere]">{skill.runtimeManifest.entry}</code></dd></div>
-            <div className="grid grid-cols-[72px_minmax(0,1fr)] gap-2 py-[3px]"><dt className="m-0 min-w-0">网络</dt><dd className="m-0 min-w-0">{skill.runtimeManifest.networkDomains.length ? skill.runtimeManifest.networkDomains.join(", ") : "关闭"}</dd></div>
-          </dl>
-        )}
+        <h4 className="m-0 text-[13px] text-ink-strong">参考资源与脚本</h4>
+        <p className="m-0 text-xs text-ink-muted">启用后可按需读取包内资源。读取脚本不授予执行权限；执行由会话档位和通用命令审批决定。</p>
+        <ul className="m-0 max-h-40 overflow-auto pl-5 font-mono text-xs text-ink-muted">
+          {(skill.resources?.length ? skill.resources : ["SKILL.md"]).map((resource) => <li key={resource}>{resource}</li>)}
+        </ul>
+        {skill.runtimeManifest && <p className="m-0 text-xs text-ink-muted">包内保留旧运行清单，仅作参考资料，不触发运行或赋予权限。</p>}
       </section>
       <div className="flex flex-wrap items-center gap-2">
         <ToggleRow checked={skill.enabled} disabled={isBusy} onChange={(checked) => onToggleSkill(skill.id, checked)}>
@@ -974,7 +962,7 @@ function SkillDetail({
         ))}
       </div>
       <section className="rounded-[7px] border border-border-translucent bg-warm-panel p-3">
-        <h4 className="mb-2 mt-0 text-[13px] text-ink-strong">执行说明</h4>
+        <h4 className="mb-2 mt-0 text-[13px] text-ink-strong">任务指令</h4>
         <p className="m-0 whitespace-pre-wrap text-[13px] leading-[1.6] text-[#24323c]">{skill.instructions}</p>
       </section>
     </article>
@@ -993,28 +981,7 @@ function sourceLabel(source: AgentSkillSource) {
 
 /** 将后端兼容性状态转换为简短、可操作的中文标签。 */
 function skillCompatibilityLabel(skill: AgentSkill) {
-  const status = skill.compatibility?.status ?? "instruction-only";
-  const labels = {
-    "instruction-only": "纯指令",
-    ready: "可运行",
-    "missing-runtime": "缺运行时",
-    "approval-required": "需审批",
-    partial: "部分支持",
-    unsupported: "不支持",
-  } as const;
-
-  return labels[status];
-}
-
-/** 运行兼容性说明不暴露绝对运行时路径，只显示版本和后端诊断。 */
-function skillRuntimeMessage(skill: AgentSkill) {
-  if (!skill.runtimeManifest) {
-    return "作为提示词工作流使用，不启动本地进程。";
-  }
-  const runtime = skill.compatibility?.runtime;
-  const warning = skill.compatibility?.warnings[0];
-
-  return warning ?? runtime?.version ?? runtime?.message ?? "等待本机兼容性检测。";
+  return skill.resources?.some((path) => path.startsWith("scripts/")) ? "含脚本资源" : "指令与资源";
 }
 
 /** 把来源筛选值转换为按钮标签。 */
@@ -1115,7 +1082,7 @@ function SkillInstallForm({
       </div>
       <section className="grid gap-1.5 rounded-[7px] border border-border-translucent bg-warm-panel p-2.5">
         <h4 className="m-0 text-[13px] text-ink-strong">安装边界</h4>
-        <p className="m-0 text-xs leading-[1.55] text-ink-muted">安装只复制 Skill 包；脚本必须声明 orange-runtime.yaml，并在进阶权限下审批后隔离执行。</p>
+        <p className="m-0 text-xs leading-[1.55] text-ink-muted">安装只复制 Skill 包；启用后按需读取指令、参考和脚本。脚本使用通用 exec，需完全权限并遵循当前审批方式。</p>
       </section>
       <div className="flex min-w-0 flex-wrap justify-end gap-2">
         <Button variant="ghost" onClick={onCancel} disabled={isBusy}>

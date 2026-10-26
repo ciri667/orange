@@ -508,7 +508,7 @@ fn copy_skill_directory_checked(
                 .components()
                 .any(|component| component.as_os_str() == "scripts")
             {
-                warnings.push("安装包包含 scripts 目录；仅声明 agents/orange-runtime.yaml 且通过权限审批后才可执行。".to_owned());
+                warnings.push("安装包包含 scripts 目录；读取不授予执行权；脚本通过通用 exec，需完全权限并遵循操作审批。".to_owned());
             }
 
             fs::create_dir_all(&target_path)

@@ -47,6 +47,9 @@ pub struct AgentSkill {
     pub display_name: String,
     pub description: String,
     pub instructions: String,
+    /** 包内只读资源标识，包括说明、参考、模板与脚本。 */
+    #[serde(default)]
+    pub resources: Vec<String>,
     pub tags: Vec<String>,
     pub enabled: bool,
     pub source: String,

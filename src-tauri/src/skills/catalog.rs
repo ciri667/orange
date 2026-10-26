@@ -1,5 +1,5 @@
 use crate::domain::{
-    AgentSkill, SkillCompatibilityReport, SkillRuntimeManifest, SkillRuntimeStatus,
+    AgentSkill, SkillCompatibilityReport, SkillRuntimeManifest,
 };
 use crate::storage::{format_local_datetime, lock_database_writer};
 use rusqlite::{params, Connection};
@@ -7,8 +7,6 @@ use sha2::{Digest, Sha256};
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Component, Path, PathBuf};
-use std::process::Command;
-use std::sync::OnceLock;
 use tauri::{AppHandle, Manager};
 use walkdir::WalkDir;
 
@@ -262,7 +260,7 @@ pub fn skill_catalog_prompt(skills: &[AgentSkill]) -> String {
             format!(
                 "<skill name=\"{}\" location=\"{}\">{}</skill>",
                 skill.name,
-                skill_location(skill),
+                format!("skill:{}", skill.id),
                 skill.description
             )
         })
@@ -305,8 +303,8 @@ pub fn format_skill_invocation(skill: &AgentSkill) -> String {
     format!(
         "<skill name=\"{}\" location=\"{}\">\n{}\n</skill>",
         skill.name,
-        skill_location(skill),
-        skill.instructions
+        format!("skill:{}", skill.id),
+        super::resources::read_resource(std::slice::from_ref(skill), &skill.id, None).ok().and_then(|v| v["content"].as_str().map(str::to_owned)).unwrap_or_default()
     )
 }
 
@@ -363,6 +361,7 @@ fn built_in_skill(
         display_name: display_name.to_owned(),
         description: description.to_owned(),
         instructions: instructions.to_owned(),
+        resources: vec!["SKILL.md".into()],
         tags: tags.iter().map(|tag| (*tag).to_owned()).collect(),
         enabled: true,
         source: BUILT_IN_SKILL_SOURCE.to_owned(),
@@ -478,7 +477,9 @@ pub(super) fn load_custom_skill(
     let skill_dir = skill_markdown_path
         .parent()
         .ok_or_else(|| "无法解析 skill 目录。".to_owned())?;
-    let (runtime_manifest, compatibility) = inspect_skill_runtime(skill_dir)?;
+    // 旧运行清单只保留为资源元数据，不赋予能力，也不要求本机安装对应运行时。
+    let runtime_manifest = fs::read_to_string(skill_dir.join("agents").join(ORANGE_RUNTIME_MANIFEST_FILE_NAME)).ok().and_then(|raw| serde_yaml::from_str::<SkillRuntimeManifest>(&raw).ok());
+    let compatibility = SkillCompatibilityReport { status: "instruction-only".into(), package_hash: String::new(), runtime: None, warnings: vec![] };
     let mut skill = AgentSkill {
         id: create_custom_skill_id(&absolute_path),
         name: normalize_skill_name(&parsed_skill.name),
@@ -488,6 +489,7 @@ pub(super) fn load_custom_skill(
             .unwrap_or_else(|| parsed_skill.name.clone()),
         description: parsed_skill.description,
         instructions: parsed_skill.instructions,
+        resources: skill_resource_paths(skill_dir),
         tags: normalize_terms(parsed_skill.tags),
         enabled: true,
         source: CUSTOM_SKILL_SOURCE.to_owned(),
@@ -519,7 +521,7 @@ pub(super) struct ParsedSkillMarkdown {
     pub(super) name: String,
     display_name: Option<String>,
     description: String,
-    instructions: String,
+    pub(super) instructions: String,
     tags: Vec<String>,
 }
 
@@ -655,209 +657,6 @@ fn read_openai_yaml_metadata(skill_dir: &Path) -> OpenAiSkillMetadata {
     }
 
     metadata
-}
-
-/** 从 agents/orange-runtime.yaml 读取并校验可执行 Skill 声明。 */
-fn inspect_skill_runtime(
-    skill_dir: &Path,
-) -> Result<(Option<SkillRuntimeManifest>, SkillCompatibilityReport), String> {
-    let package_hash = hash_skill_directory(skill_dir)?;
-    let manifest_path = skill_dir
-        .join("agents")
-        .join(ORANGE_RUNTIME_MANIFEST_FILE_NAME);
-
-    if !manifest_path.exists() {
-        return Ok((
-            None,
-            SkillCompatibilityReport {
-                status: "instruction-only".to_owned(),
-                package_hash,
-                runtime: None,
-                warnings: Vec::new(),
-            },
-        ));
-    }
-
-    let manifest_content = fs::read_to_string(&manifest_path)
-        .map_err(|error| format!("无法读取 agents/orange-runtime.yaml：{error}"))?;
-    let mut manifest = serde_yaml::from_str::<SkillRuntimeManifest>(&manifest_content)
-        .map_err(|error| format!("orange-runtime.yaml 不是有效 YAML：{error}"))?;
-
-    manifest.runtime = manifest.runtime.trim().to_lowercase();
-    manifest.entry = manifest.entry.trim().replace('\\', "/");
-    manifest.args = normalize_terms(manifest.args);
-    manifest.network_domains = normalize_terms(manifest.network_domains)
-        .into_iter()
-        .map(|domain| domain.to_lowercase())
-        .collect();
-    manifest.credential_aliases = normalize_terms(manifest.credential_aliases);
-    manifest.artifact_patterns = normalize_terms(manifest.artifact_patterns);
-    validate_runtime_manifest(skill_dir, &manifest)?;
-
-    let runtime = detect_runtime(skill_dir, &manifest);
-    let mut warnings = Vec::new();
-    let status = if !runtime.available {
-        "missing-runtime"
-    } else if !strong_sandbox_available() {
-        warnings.push("当前 Windows 环境未通过强沙箱探针，可执行 Skill 已失败关闭。".to_owned());
-        "unsupported"
-    } else if !manifest.network_domains.is_empty() {
-        warnings.push(
-            "当前 Windows 首版尚未开放 Skill 网络代理，声明联网的 Skill 暂不可执行。".to_owned(),
-        );
-        "partial"
-    } else {
-        "ready"
-    };
-
-    Ok((
-        Some(manifest),
-        SkillCompatibilityReport {
-            status: status.to_owned(),
-            package_hash,
-            runtime: Some(runtime),
-            warnings,
-        },
-    ))
-}
-
-/** 强沙箱探针按进程缓存；不可用时可执行 Skill 显示为不支持并拒绝运行。 */
-#[cfg(windows)]
-fn strong_sandbox_available() -> bool {
-    static AVAILABLE: OnceLock<bool> = OnceLock::new();
-
-    *AVAILABLE.get_or_init(|| !sandboxrs_windows::Sandbox::available_backends().is_empty())
-}
-
-#[cfg(not(windows))]
-fn strong_sandbox_available() -> bool {
-    false
-}
-
-/** 运行声明只允许 Skill 目录内的普通入口文件，拒绝绝对路径、父目录和符号链接逃逸。 */
-fn validate_runtime_manifest(
-    skill_dir: &Path,
-    manifest: &SkillRuntimeManifest,
-) -> Result<(), String> {
-    if !matches!(
-        manifest.runtime.as_str(),
-        "python" | "node" | "powershell" | "bash" | "executable"
-    ) {
-        return Err(format!("不支持的 Skill runtime：{}。", manifest.runtime));
-    }
-    if manifest.entry.is_empty() {
-        return Err("orange-runtime.yaml 缺少 entry。".to_owned());
-    }
-
-    let relative_entry = Path::new(&manifest.entry);
-    if relative_entry.is_absolute()
-        || relative_entry.components().any(|component| {
-            matches!(
-                component,
-                Component::ParentDir | Component::RootDir | Component::Prefix(_)
-            )
-        })
-    {
-        return Err("Skill entry 必须是包内相对路径。".to_owned());
-    }
-
-    let entry_path = skill_dir.join(relative_entry);
-    let metadata = fs::symlink_metadata(&entry_path)
-        .map_err(|_| format!("找不到 Skill entry：{}。", manifest.entry))?;
-    if !metadata.is_file() || metadata.file_type().is_symlink() {
-        return Err("Skill entry 必须是包内普通文件，不能是目录或符号链接。".to_owned());
-    }
-    if manifest.args.iter().any(|argument| argument.contains('\0')) {
-        return Err("Skill 参数不能包含空字符。".to_owned());
-    }
-
-    for domain in &manifest.network_domains {
-        if domain.is_empty()
-            || domain.contains('/')
-            || domain.contains(':')
-            || domain.chars().any(char::is_whitespace)
-        {
-            return Err(format!("无效的网络域名声明：{domain}。"));
-        }
-    }
-    Ok(())
-}
-
-/** 检测本机运行时；这里只读系统状态，不安装、不修改 PATH。 */
-fn detect_runtime(skill_dir: &Path, manifest: &SkillRuntimeManifest) -> SkillRuntimeStatus {
-    if manifest.runtime == "executable" {
-        let executable_path = skill_dir.join(&manifest.entry);
-        return SkillRuntimeStatus {
-            runtime: manifest.runtime.clone(),
-            available: executable_path.is_file(),
-            executable_path: executable_path
-                .is_file()
-                .then(|| executable_path.to_string_lossy().to_string()),
-            version: None,
-            message: "使用 Skill 包内可执行文件。".to_owned(),
-        };
-    }
-
-    let candidates: &[&str] = match manifest.runtime.as_str() {
-        "python" => &["python.exe", "python3.exe", "python"],
-        "node" => &["node.exe", "node"],
-        "powershell" => &["pwsh.exe", "powershell.exe", "pwsh", "powershell"],
-        "bash" => &["bash.exe", "bash"],
-        _ => &[],
-    };
-    let executable_path = candidates
-        .iter()
-        .find_map(|candidate| find_executable(candidate));
-    let version = executable_path
-        .as_ref()
-        .and_then(|path| runtime_version(path));
-    let available = executable_path.is_some() && version.is_some();
-
-    SkillRuntimeStatus {
-        runtime: manifest.runtime.clone(),
-        available,
-        executable_path,
-        version,
-        message: if available {
-            "本机运行时可用。".to_owned()
-        } else {
-            "未检测到可用运行时；橘记不会自动安装。".to_owned()
-        },
-    }
-}
-
-/** 通过系统查找命令解析运行时绝对路径，忽略不可执行的 WindowsApps 别名。 */
-fn find_executable(candidate: &str) -> Option<String> {
-    let locator = if cfg!(windows) { "where.exe" } else { "which" };
-    let output = Command::new(locator).arg(candidate).output().ok()?;
-    if !output.status.success() {
-        return None;
-    }
-
-    String::from_utf8_lossy(&output.stdout)
-        .lines()
-        .map(str::trim)
-        .find(|path| !path.is_empty() && !path.to_lowercase().contains("windowsapps"))
-        .map(str::to_owned)
-}
-
-/** 用无副作用的版本参数确认运行时路径不是空壳或系统商店别名。 */
-fn runtime_version(executable_path: &str) -> Option<String> {
-    let output = Command::new(executable_path)
-        .arg("--version")
-        .output()
-        .ok()?;
-    if !output.status.success() {
-        return None;
-    }
-    let value = if output.stdout.is_empty() {
-        &output.stderr
-    } else {
-        &output.stdout
-    };
-    let version = String::from_utf8_lossy(value).trim().to_owned();
-
-    (!version.is_empty()).then_some(version)
 }
 
 /** 从单行 yaml 字段中提取冒号后的标量值。 */
@@ -1485,6 +1284,7 @@ fn skill_state_override_payload(skill: &AgentSkill) -> AgentSkill {
         display_name: String::new(),
         description: String::new(),
         instructions: String::new(),
+        resources: Vec::new(),
         tags: Vec::new(),
         enabled: skill.enabled,
         source: skill.source.clone(),
@@ -1613,7 +1413,7 @@ mod tests {
         let catalog = skill_catalog_prompt(&skills);
         assert!(catalog.contains("<available_skills>"));
         assert!(catalog.contains("name=\"note-research\""));
-        assert!(catalog.contains("location=\"built-in\""));
+        assert!(catalog.contains("location=\"skill:skill-note-research\""));
         assert!(!catalog.contains(&skills[0].instructions));
 
         for skill in &mut skills {
@@ -1630,7 +1430,7 @@ mod tests {
             .find(|skill| skill.id == "skill-note-research")
             .unwrap();
         let prompt = explicit_skill_prompt(std::slice::from_ref(&skill));
-        assert!(prompt.contains("<skill name=\"note-research\" location=\"built-in\">"));
+        assert!(prompt.contains("<skill name=\"note-research\" location=\"skill:skill-note-research\">"));
         assert!(prompt.contains(&skill.instructions));
         assert!(!prompt.contains("本轮显式激活的 Skills：无"));
         assert!(explicit_skill_prompt(&[]).is_empty());
@@ -1658,7 +1458,7 @@ mod tests {
 
     /** 运行清单必须拒绝包外入口路径，防止 Skill 借声明越过安装目录。 */
     #[test]
-    fn runtime_manifest_rejects_parent_directory_entry() {
+    fn legacy_runtime_manifest_does_not_grant_or_block_instruction_loading() {
         let temp_dir = tempdir().expect("create tempdir");
         let root = temp_dir.path().join("skills");
         let connection = test_connection();
@@ -1675,7 +1475,7 @@ mod tests {
 
         let skills = load_agent_skills_from_roots(&connection, &[root]).unwrap();
 
-        assert!(custom_skills(&skills).is_empty());
+        assert_eq!(custom_skills(&skills).len(), 1);
     }
 
     /** 从临时目录加载单个自定义 skill，便于验证扫描后的领域模型。 */
@@ -1702,6 +1502,7 @@ mod tests {
             name: name.to_owned(),
             display_name: "测试 Skill".to_owned(),
             description: "用于验证自定义保存。".to_owned(),
+            resources: Vec::new(),
             instructions: "执行测试 skill。".to_owned(),
             tags: vec!["测试".to_owned()],
             enabled: true,
@@ -1885,7 +1686,7 @@ tags:
         assert!(error.contains("missing-skill"));
     }
 
-    /** 安装包中的 scripts 目录会保留，并提示需要运行清单与审批。 */
+    /** 安装包中的 scripts 目录会保留，执行走通用 exec 与当前会话审批。 */
     #[test]
     fn install_keeps_scripts_but_returns_warning() {
         let temp_dir = tempdir().expect("create tempdir");
@@ -1913,7 +1714,8 @@ tags:
         assert!(result
             .warnings
             .iter()
-            .any(|warning| warning.contains("orange-runtime.yaml")));
+            .any(|warning| warning.contains("exec") && warning.contains("操作审批")));
+        assert!(!result.warnings.iter().any(|warning| warning.contains("orange-runtime.yaml")));
     }
 
     /** 同名 skill 默认拒绝覆盖；replace 策略才会替换已有目录。 */
@@ -2261,4 +2063,12 @@ tags:
         )
         .is_empty());
     }
+}
+
+/** 只枚举包内相对资源名；正文由 read 渐进加载，链接不进入目录。 */
+fn skill_resource_paths(root: &Path) -> Vec<String> {
+    walkdir::WalkDir::new(root).follow_links(false).into_iter().filter_map(Result::ok)
+        .filter(|e|e.file_type().is_file() && !e.file_type().is_symlink())
+        .filter_map(|e|e.path().strip_prefix(root).ok().map(|p|p.to_string_lossy().replace('\\',"/")))
+        .take(500).collect()
 }
