@@ -1,3 +1,4 @@
+mod external_dispatch;
 mod cancel;
 mod compaction;
 mod context;
@@ -899,6 +900,8 @@ async fn run_model_loop(
     let history_pack = model_prompt.history.clone();
     let mut prompt_prefix_len = model_prompt.prefix_len;
     let mut model_messages = model_prompt.messages;
+    let mut loaded_resources=crate::skills::resources::LoadedResources::default();
+    for skill in &explicit_skills { if let Ok(payload)=crate::skills::resources::read_resource(&available_skills,&skill.id,None) {loaded_resources.remember(&payload);} }
     let endpoint = model_provider::chat_completions_endpoint(&provider.api_base);
     let tool_registry =
         ToolRegistry::for_session(&snapshot.sessions[session_index], &agent_security);
@@ -972,6 +975,8 @@ async fn run_model_loop(
                 "content": notice
             }));
         }
+        // 压缩可能丢掉旧 tool/user 消息，已加载指令恢复到当前唯一 system 前缀。
+        loaded_resources.restore(app,&mut model_messages)?;
         audit_trail.record_model_request();
         model_round = model_round.saturating_add(1);
         // 总结请求保留最后一步结果，但临时限制不进入持久化 transcript。
@@ -1363,26 +1368,41 @@ async fn run_model_loop(
                 }
             }
             let model_tool_call = remaining_tool_calls.remove(0);
-            let tool_name = model_tool_call_name(&model_tool_call);
-            let tool_args = parse_tool_args(&model_tool_call);
+            let raw_name = model_tool_call_name(&model_tool_call);
+            let (canonical, tool_args) = crate::agent_tools::remap_tool_call(&raw_name, parse_tool_args(&model_tool_call));
+            let tool_name = canonical.to_owned();
+            let preparation = if tool_name == "exec" {
+                external_dispatch::prepare_exec(app,&snapshot,session_index,&tool_args)
+            } else if tool_name == "browser" {
+                crate::browser::prepare_operation_approval(app,&snapshot.sessions[session_index],&tool_args).await
+            } else { Ok(tool_args.clone()) };
+            let tool_args = preparation.as_ref().cloned().unwrap_or(tool_args);
+            let previous_operation_ids = snapshot.sessions[session_index].pending_change_set.as_ref().map(|set|set.operations.iter().map(|op|op.id.clone()).collect::<Vec<_>>()).unwrap_or_default();
+            let permission = match preparation.and_then(|_| crate::agent_tools::external::decision(&snapshot,session_index,&tool_name,&tool_args)) {
+                Ok(decision) => crate::operation_approval::authorize(app,&snapshot.sessions[session_index],&tool_name,&tool_args,decision,cancel).await,
+                Err(e) => Err(e),
+            };
             let trace_step_id = tracer.begin_tool(
                 &tool_name,
                 &running_tool_summary(&tool_name, &tool_args),
                 tool_args.clone(),
                 Some(app),
             );
-            let tool_outcome = if tool_name.starts_with("mcp__") {
+            let mut tool_outcome = if let Err(error) = &permission {
+                external_dispatch::failed(&tool_name,&tool_args,error)
+            } else if tool_name == "exec" {
+                external_dispatch::exec(app,&mut snapshot,session_index,&tool_args,cancel,permission.as_ref().unwrap()).await
+            } else if tool_name.starts_with("mcp__") {
                 crate::mcp::execute_model_tool(
                     app,
                     &snapshot.sessions[session_index],
                     &tool_name,
                     tool_args.clone(),
                     cancel,
+                    permission.as_ref().unwrap(),
                 )
                 .await
-            } else if tool_name == "run"
-                && tool_args.get("kind").and_then(Value::as_str) == Some("browser")
-            {
+            } else if tool_name == "browser" {
                 // 浏览器操作是异步 CDP 调用，不能走同步 AgentTool::execute；
                 // 与 MCP 分支一样在 runtime 里预分派，结果统一回 ToolOutcome。
                 let outcome = crate::browser::execute_run_request(
@@ -1390,6 +1410,7 @@ async fn run_model_loop(
                     &snapshot.sessions[session_index],
                     &tool_args,
                     cancel,
+                    permission.as_ref().unwrap(),
                 )
                 .await;
                 let (success, summary, payload, citations, audit_fragment) = outcome.into_parts();
@@ -1447,147 +1468,23 @@ async fn run_model_loop(
                     web_override: None,
                 };
 
-                tool_registry.execute_model_tool_call(&mut tool_context, &model_tool_call)
+                tool_registry.execute_with_permit(&mut tool_context, &tool_name, tool_args.clone(), permission.as_ref().ok())
             };
+            if tool_outcome.call.name=="read" && tool_args["target"]=="skill" && tool_outcome.call.status=="completed" {
+                if loaded_resources.remember(&tool_outcome.payload) {
+                    if let Some(object)=tool_outcome.payload.as_object_mut() { object.remove("content"); object.insert("alreadyLoaded".into(),json!(true)); }
+                }
+            }
             tool_budget.observe_call(&tool_outcome.call, &tool_outcome.payload);
             let mut tool_result_text =
                 model_tool_result_text(&tool_outcome.call, &tool_outcome.payload);
-            if !cancel.is_aborted()
-                && tool_outcome.call.name == "run"
-                && tool_outcome.call.status == "completed"
-            {
-                let pending_request = snapshot.sessions[session_index].pending_execution.clone();
-                if let Some(pending_request) = pending_request.filter(|pending_request| {
-                    crate::skill_execution::can_auto_execute(
-                        &snapshot.sessions[session_index],
-                        pending_request,
-                        &agent_security,
-                    )
-                }) {
-                    // 自动批准仍先持久化结构化请求，审批执行器只从 SQLite 重载可信载荷。
-                    crate::storage::save_snapshot_session(app, &snapshot, &request.session_id)?;
-                    let execution_app = app.clone();
-                    let execution_snapshot = snapshot.clone();
-                    snapshot = tauri::async_runtime::spawn_blocking(move || {
-                        crate::skill_execution::approve_and_execute(
-                            &execution_app,
-                            execution_snapshot,
-                        )
-                    })
-                    .await
-                    .map_err(|error| format!("完全级别 Skill 执行任务失败：{error}"))??;
-                    tool_result_text = truncate_chars(
-                        &json!({
-                            "executionId": pending_request.id,
-                            "status": "completed",
-                            "autoApproved": true,
-                            "changeCount": snapshot.sessions[session_index]
-                                .pending_change_set
-                                .as_ref()
-                                .map(|change_set| change_set.operations.len())
-                                .unwrap_or_default()
-                        })
-                        .to_string(),
-                        MAX_TOOL_RESULT_CHARS,
-                    );
-                }
-            }
-            // 完全级别下，Agent 直接产出的变更集在校验通过后自动应用；
-            // 校验失败（受保护目录、既有文件冲突等）会暂停自动应用，保留 pending 让用户处理。
-            if !cancel.is_aborted()
-                && tool_outcome.call.status == "completed"
-                && crate::skill_execution::can_auto_apply_agent_change_set(
-                    &snapshot.sessions[session_index],
-                    &agent_security,
-                )
-            {
-                crate::storage::save_snapshot_session(app, &snapshot, &request.session_id)?;
-                let apply_app = app.clone();
-                let apply_snapshot = snapshot.clone();
-                let auto_result = tauri::async_runtime::spawn_blocking(move || {
-                    crate::skill_execution::apply_agent_change_set(&apply_app, apply_snapshot)
-                })
-                .await
-                .map_err(|error| format!("自主模式 Agent 变更集应用任务失败：{error}"))?;
-                match auto_result {
-                    Ok(applied_snapshot) => {
-                        snapshot = applied_snapshot;
-                        let operation_count = snapshot.sessions[session_index]
-                            .pending_change_set
-                            .as_ref()
-                            .map(|change_set| change_set.operations.len())
-                            .unwrap_or_default();
-                        tool_result_text = truncate_chars(
-                            &json!({
-                                "status": "applied",
-                                "autoApproved": true,
-                                "operationCount": operation_count
-                            })
-                            .to_string(),
-                            MAX_TOOL_RESULT_CHARS,
-                        );
-                    }
-                    Err(error) => {
-                        // 校验未通过：保留 pending，告知模型需等待用户处理，避免它反复重试同一操作。
-                        tool_result_text = truncate_chars(
-                            &json!({
-                                "status": "pending_review",
-                                "autoApproved": false,
-                                "reason": error
-                            })
-                            .to_string(),
-                            MAX_TOOL_RESULT_CHARS,
-                        );
-                    }
-                }
-            }
-            // 完全级别下，Agent 主写入路径（改写/新建文档）校验通过后自动落盘；
-            // 这是放手策略的核心，不只覆盖 Skill 或建文件夹。
-            if !cancel.is_aborted()
-                && tool_outcome.call.status == "completed"
-                && crate::agent_writes::can_auto_apply_pending_change(
-                    &snapshot.sessions[session_index],
-                    &agent_security,
-                )
-            {
-                crate::storage::save_snapshot_session(app, &snapshot, &request.session_id)?;
-                let apply_app = app.clone();
-                let apply_snapshot = snapshot.clone();
-                let auto_result = tauri::async_runtime::spawn_blocking(move || {
-                    crate::agent_writes::apply_pending_change(&apply_app, apply_snapshot)
-                })
-                .await
-                .map_err(|error| format!("自主模式 Agent 写入任务失败：{error}"))?;
-                match auto_result {
-                    Ok(applied_snapshot) => {
-                        snapshot = applied_snapshot;
-                        update_agent_context_summary_deterministic(
-                            &mut snapshot,
-                            session_index,
-                            None,
-                            false,
-                        );
-                        crate::storage::save_snapshot_session(app, &snapshot, &request.session_id)?;
-                        tool_result_text = truncate_chars(
-                            &json!({
-                                "status": "applied",
-                                "autoApproved": true
-                            })
-                            .to_string(),
-                            MAX_TOOL_RESULT_CHARS,
-                        );
-                    }
-                    Err(error) => {
-                        tool_result_text = truncate_chars(
-                            &json!({
-                                "status": "pending_review",
-                                "autoApproved": false,
-                                "reason": error
-                            })
-                            .to_string(),
-                            MAX_TOOL_RESULT_CHARS,
-                        );
-                    }
+            // 只自动应用本次写工具新生成的操作；read、切档、新回合不能触碰旧 pending。
+            if !cancel.is_aborted() && matches!(tool_name.as_str(), "edit" | "write") && tool_outcome.call.status == "completed"
+                && crate::agent_writes::allows_autonomous_auto_apply(&snapshot.sessions[session_index],&agent_security) {
+                match crate::file_changes::auto_apply_new(app,&mut snapshot,session_index,&previous_operation_ids) {
+                    Ok(Some(selected))=> {tool_result_text=json!({"status":"applied","autoApproved":true,"operationIds":selected}).to_string();},
+                    Err(error)=> {tool_result_text=json!({"status":"pending_review","reason":error}).to_string();},
+                    _=>{},
                 }
             }
             log::debug!(
@@ -3870,6 +3767,7 @@ mod tests {
                 pending_change_set: None,
                 pending_execution: None,
                 security_level: "basic".to_owned(),
+            permission_version: 0,
                 plan_mode: false,
                 context_summary: None,
                 created_at: "刚刚".to_owned(),
@@ -4105,7 +4003,7 @@ mod tests {
         assert!(!system_content.contains("本轮很可能需要"));
         assert!(system_content.contains("主知识库"));
         assert!(system_content.contains("<available_skills>"));
-        assert!(system_content.contains("location=\"built-in\""));
+        assert!(system_content.contains("location=\"skill:skill-note-research\""));
         assert!(system_content.contains("name=\"note-research\""));
         assert!(system_content.contains("是否使用、使用哪一个 Skill 都由你自主判断"));
         assert!(!system_content.contains("执行要求"));
@@ -5591,7 +5489,7 @@ mod tests {
             .unwrap_or_default();
 
         assert!(system_content.contains("<available_skills>"));
-        assert!(system_content.contains("不能扩大工具权限"));
+        assert!(system_content.contains("读取脚本不等于允许执行"));
         assert!(!system_content.contains(&explicit_skill.instructions));
         assert!(!system_content.contains("本轮显式激活的 Skills"));
         assert!(last_user.contains("<skill name=\"note-research\""));
@@ -5599,61 +5497,23 @@ mod tests {
         assert!(last_user.contains("按研究流程总结"));
     }
 
-    /** 安全等级指令应讲放手和确认策略，而不是把级别定义成 Skill 开关。 */
+    /** 提示词与四档能力一致；Plan 覆盖原权限但不改档位。 */
     #[test]
-    fn model_messages_describe_security_level_as_autonomy() {
-        let mut snapshot = runtime_test_snapshot("正文内容足够用于测试。".to_owned());
-        let request = runtime_test_request("ask", "总结当前笔记");
-        let available_skills = crate::skills::built_in_skills();
-
-        let basic = build_model_messages(
-            &snapshot,
-            0,
-            &request,
-            &available_skills,
-            &[],
-            "user-current",
-            &[],
-        );
-        let basic_content = basic[0]["content"].as_str().unwrap_or_default();
-        assert!(basic_content.contains("当前为基础级别"));
-        assert!(basic_content.contains("先看紧"));
-        assert!(basic_content.contains("待确认 diff"));
-
-        snapshot.sessions[0].security_level = "advanced".to_owned();
-        let advanced = build_model_messages(
-            &snapshot,
-            0,
-            &request,
-            &available_skills,
-            &[],
-            "user-current",
-            &[],
-        );
-        let advanced_content = advanced[0]["content"].as_str().unwrap_or_default();
-        assert!(advanced_content.contains("当前为进阶级别"));
-        assert!(advanced_content.contains("开始放手"));
-        assert!(advanced_content.contains("仍需用户确认"));
-
-        snapshot.sessions[0].security_level = "autonomous".to_owned();
-        let autonomous = build_model_messages(
-            &snapshot,
-            0,
-            &request,
-            &available_skills,
-            &[],
-            "user-current",
-            &[],
-        );
-        let autonomous_content = autonomous[0]["content"].as_str().unwrap_or_default();
-        assert!(autonomous_content.contains("当前为完全级别"));
-        assert!(autonomous_content.contains("连续执行权"));
-        assert!(autonomous_content.contains("自动落盘"));
-        assert!(autonomous_content.contains("Skill 只是更高权限下可发挥的能力之一"));
-        assert!(autonomous_content.contains("不是整台电脑"));
-        assert!(!autonomous_content.contains("list_path"));
-        assert!(!autonomous_content.contains("create_folder"));
-        assert!(!autonomous_content.contains("生成待确认 diff，不能声称已经写入文件"));
+    fn model_messages_describe_four_permission_levels() {
+        let mut snapshot = runtime_test_snapshot("正文".to_owned());
+        let request = runtime_test_request("ask", "总结");
+        let skills = crate::skills::built_in_skills();
+        for (level, label) in [
+            ("workspace-readonly", "工作区内只读"), ("workspace-write", "工作区内修改，需审批"),
+            ("full-confirm", "完全权限，需审批"), ("full-auto", "完全权限，无需审批"),
+        ] {
+            snapshot.sessions[0].security_level = level.into();
+            let messages = build_model_messages(&snapshot, 0, &request, &skills, &[], "user-current", &[]);
+            let content = messages[0]["content"].as_str().unwrap();
+            assert!(content.contains(label), "{content}");
+            assert!(!content.contains("protected system directories"));
+            if level.starts_with("full-") { assert!(content.contains("不提供文件系统沙箱隔离")); }
+        }
     }
 
     /** summary-only 请求要显式带上本轮失败摘要，避免工具失败只藏在最近消息里。 */

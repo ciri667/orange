@@ -1,4 +1,5 @@
-mod execute;
+pub(crate) mod external;
+pub(crate) mod execute;
 mod registry;
 mod types;
 
@@ -6,8 +7,9 @@ mod types;
 mod web_tests;
 
 pub use registry::ToolRegistry;
-pub(crate) use registry::{model_tool_call_name, parse_tool_args};
-pub use types::{AgentToolContext, ToolOutcome};
+pub(crate) use registry::{model_tool_call_name, parse_tool_args, remap_tool_call};
+pub(crate) use registry::write_kind;
+pub use types::{AgentToolContext, ToolOutcome, ToolExecutionResult};
 
 #[cfg(test)]
 pub(crate) use types::MAX_READ_NOTE_CHARS;
@@ -99,7 +101,8 @@ mod tests {
                 pending_change: None,
                 pending_change_set: None,
                 pending_execution: None,
-                security_level: "basic".to_owned(),
+                security_level: "workspace-write".to_owned(),
+            permission_version: 0,
                 plan_mode: false,
                 context_summary: None,
                 created_at: "刚刚".to_owned(),
@@ -196,68 +199,51 @@ mod tests {
         assert!(!tool_names.contains(&"read_session_context"));
     }
 
-    /** run_skill 仅在本地进阶/完全会话和全局执行开关同时满足时注册；create_folder 同样要求本地进阶会话。 */
+    /** 四档 schema 与执行策略一致；旧全局开关不再赋予或撤回能力。 */
     #[test]
-    fn run_skill_registry_requires_local_advanced_session() {
-        let mut snapshot = tool_test_snapshot("正文内容足够用于测试。".to_owned());
-        let mut settings = AgentSecuritySettings::default();
-        settings.advanced_execution_enabled = true;
-
-        snapshot.sessions[0].security_level = "advanced".to_owned();
-        let advanced_tools =
-            ToolRegistry::for_session(&snapshot.sessions[0], &settings).tool_names();
-        assert!(advanced_tools.contains(&"run"));
-        assert!(!advanced_tools.contains(&"create_folder"));
-        assert!(!advanced_tools.contains(&"list_path"));
-        assert!(!advanced_tools.contains(&"read_path"));
-        assert!(!advanced_tools.contains(&"run_skill"));
-        assert_eq!(
-            advanced_tools,
-            vec!["search", "read", "list", "edit", "write", "task", "run"]
-        );
-
-        snapshot.sessions[0].security_level = "basic".to_owned();
-        let basic_tools = ToolRegistry::for_session(&snapshot.sessions[0], &settings).tool_names();
-        assert!(!basic_tools.contains(&"run"));
-        assert!(!basic_tools.contains(&"create_folder"));
-        assert!(!basic_tools.contains(&"list_path"));
-        assert!(basic_tools.contains(&"task"));
-        assert_eq!(
-            basic_tools,
-            vec!["search", "read", "list", "edit", "write", "task"]
-        );
-
-        snapshot.sessions[0].security_level = "autonomous".to_owned();
-        settings.autonomous_mode_enabled = false;
-        let autonomous_without_toggle =
-            ToolRegistry::for_session(&snapshot.sessions[0], &settings).tool_names();
-        assert!(!autonomous_without_toggle.contains(&"run"));
-        assert!(!autonomous_without_toggle.contains(&"create_folder"));
-        assert!(!autonomous_without_toggle.contains(&"list_path"));
-        assert!(!autonomous_without_toggle.contains(&"read_path"));
-        assert_eq!(
-            autonomous_without_toggle,
-            vec!["search", "read", "list", "edit", "write", "task"]
-        );
-
-        snapshot.sessions[0].security_level = "advanced".to_owned();
-        snapshot.sessions[0].im_identity = Some(crate::domain::ImSessionIdentity {
-            provider_id: "feishu".to_owned(),
-            conversation_kind: "direct".to_owned(),
-            channel_hash: "redacted".to_owned(),
-            initial_message_preview: "IM".to_owned(),
-            last_message_preview: "IM".to_owned(),
-        });
-        let im_tools = ToolRegistry::for_session(&snapshot.sessions[0], &settings).tool_names();
-        assert!(!im_tools.contains(&"run"));
-        assert!(im_tools.contains(&"task"));
-        assert_eq!(
-            im_tools,
-            vec!["search", "read", "list", "edit", "write", "task"]
-        );
+    fn four_levels_register_tools_without_legacy_toggles() {
+        let mut snapshot = tool_test_snapshot("正文".to_owned());
+        let settings = AgentSecuritySettings::default();
+        for (level, writable, external) in [
+            ("workspace-readonly", false, false), ("workspace-write", true, false),
+            ("full-confirm", true, true), ("full-auto", true, true), ("autonomous", false, false),
+        ] {
+            snapshot.sessions[0].security_level = level.into();
+            let registry = ToolRegistry::for_session(&snapshot.sessions[0], &settings);
+            let names = registry.tool_names();
+            assert_eq!(names.contains(&"edit"), writable, "{level}");
+            assert_eq!(names.contains(&"write"), writable, "{level}");
+            assert_eq!(names.contains(&"exec"), external, "{level}");
+            assert_eq!(names.contains(&"browser"), external, "{level}");
+            assert!(!names.contains(&"run"));
+            let read = registry.schemas().as_array().unwrap().iter().find(|s| s["function"]["name"] == "read").unwrap().clone();
+            assert_eq!(read["function"]["parameters"]["properties"].get("url").is_some(), external);
+        }
     }
 
     /** 规划模式无论安全级别多高都只暴露只读闭集；模型硬调 edit 也按未知工具拒绝。 */
+    #[test]
+    fn im_schema_and_execution_both_reject_file_management_aliases() {
+        let mut snapshot = tool_test_snapshot("正文".into());
+        snapshot.sessions[0].im_identity = Some(serde_json::from_value(json!({
+            "providerId":"feishu", "conversationKind":"direct", "channelHash":"test",
+            "initialMessagePreview":"", "lastMessagePreview":""
+        })).unwrap());
+        let registry = ToolRegistry::for_session(&snapshot.sessions[0], &Default::default());
+        let schemas = registry.schemas();
+        let edit = schemas.as_array().unwrap().iter().find(|s|s["function"]["name"]=="edit").unwrap();
+        assert_eq!(edit["function"]["parameters"]["properties"]["operation"]["enum"],json!(["replace","append","multi_replace"]));
+        let write = schemas.as_array().unwrap().iter().find(|s|s["function"]["name"]=="write").unwrap();
+        assert_eq!(write["function"]["parameters"]["properties"]["kind"]["enum"],json!(["file"]));
+        assert_eq!(write["function"]["parameters"]["properties"]["fileType"]["enum"],json!(["markdown","txt"]));
+        let request = tool_test_request("ask","创建目录");
+        for args in [json!({"kind":"folder","targetPath":"new"}), json!({"fileType":"FOLDER","targetPath":"new"}), json!({"file_type":"folder","targetPath":"new"})] {
+            let mut context = tool_test_context(&mut snapshot,&request);
+            assert_eq!(registry.execute_named(&mut context,"write",args).call.status,"failed");
+        }
+        assert!(snapshot.sessions[0].pending_change_set.is_none());
+    }
+
     #[test]
     fn plan_mode_session_omits_write_and_skill_tools() {
         let mut snapshot = tool_test_snapshot("正文内容足够用于测试。".to_owned());
@@ -266,7 +252,7 @@ mod tests {
         settings.autonomous_mode_enabled = true;
         snapshot.sessions[0].plan_mode = true;
 
-        for level in ["basic", "advanced", "autonomous"] {
+        for level in ["workspace-write", "workspace-write", "full-auto"] {
             snapshot.sessions[0].security_level = level.to_owned();
             let names = ToolRegistry::for_session(&snapshot.sessions[0], &settings).tool_names();
             assert_eq!(
@@ -277,7 +263,7 @@ mod tests {
         }
 
         // 执行层兜底：transcript 回放旧 edit 调用时不产生任何待确认写入。
-        snapshot.sessions[0].security_level = "basic".to_owned();
+        snapshot.sessions[0].security_level = "workspace-write".to_owned();
         let registry = ToolRegistry::for_session(&snapshot.sessions[0], &settings);
         let request = tool_test_request("rewrite", "改一下");
         let mut context = tool_test_context(&mut snapshot, &request);
@@ -346,7 +332,7 @@ mod tests {
         let mut settings = AgentSecuritySettings::default();
         settings.advanced_execution_enabled = true;
         settings.autonomous_mode_enabled = true;
-        for level in ["basic", "advanced", "autonomous"] {
+        for level in ["workspace-write", "workspace-write", "full-auto"] {
             snapshot.sessions[0].security_level = level.to_owned();
             let names = ToolRegistry::for_session(&snapshot.sessions[0], &settings).tool_names();
             for forbidden in [
@@ -373,7 +359,7 @@ mod tests {
         let kb_root = tempfile::tempdir().expect("kb root");
         let mut snapshot = tool_test_snapshot("正文内容足够用于测试。".to_owned());
         snapshot.knowledge_bases[0].path = kb_root.path().to_string_lossy().into_owned();
-        snapshot.sessions[0].security_level = "advanced".to_owned();
+        snapshot.sessions[0].security_level = "workspace-write".to_owned();
         let mut settings = AgentSecuritySettings::default();
         settings.advanced_execution_enabled = true;
         let registry = ToolRegistry::for_session(&snapshot.sessions[0], &settings);
@@ -405,7 +391,7 @@ mod tests {
         let kb_root = tempfile::tempdir().expect("kb root");
         let mut snapshot = tool_test_snapshot("正文内容足够用于测试。".to_owned());
         snapshot.knowledge_bases[0].path = kb_root.path().to_string_lossy().into_owned();
-        snapshot.sessions[0].security_level = "advanced".to_owned();
+        snapshot.sessions[0].security_level = "workspace-write".to_owned();
         let mut settings = AgentSecuritySettings::default();
         settings.advanced_execution_enabled = true;
         let registry = ToolRegistry::for_session(&snapshot.sessions[0], &settings);
@@ -435,7 +421,7 @@ mod tests {
     #[test]
     fn create_folder_rejects_unsafe_paths_and_outside_scope() {
         let mut snapshot = tool_test_snapshot("正文内容足够用于测试。".to_owned());
-        snapshot.sessions[0].security_level = "advanced".to_owned();
+        snapshot.sessions[0].security_level = "workspace-write".to_owned();
         let mut settings = AgentSecuritySettings::default();
         settings.advanced_execution_enabled = true;
         let registry = ToolRegistry::for_session(&snapshot.sessions[0], &settings);
@@ -473,7 +459,7 @@ mod tests {
         let external = tempfile::tempdir().expect("external root");
         let mut snapshot = tool_test_snapshot("正文内容足够用于测试。".to_owned());
         snapshot.knowledge_bases[0].path = kb_root.path().to_string_lossy().into_owned();
-        snapshot.sessions[0].security_level = "autonomous".to_owned();
+        snapshot.sessions[0].security_level = "full-auto".to_owned();
         let mut settings = AgentSecuritySettings::default();
         settings.advanced_execution_enabled = true;
         settings.autonomous_mode_enabled = true;
@@ -504,7 +490,7 @@ mod tests {
         std::fs::create_dir_all(kb_root.path().join("Notes")).expect("notes");
         let mut snapshot = tool_test_snapshot("正文内容足够用于测试。".to_owned());
         snapshot.knowledge_bases[0].path = kb_root.path().to_string_lossy().into_owned();
-        snapshot.sessions[0].security_level = "autonomous".to_owned();
+        snapshot.sessions[0].security_level = "full-auto".to_owned();
         let mut settings = AgentSecuritySettings::default();
         settings.advanced_execution_enabled = true;
         settings.autonomous_mode_enabled = true;
@@ -536,7 +522,7 @@ mod tests {
         std::fs::write(external.path().join("hello.txt"), "hello orange").expect("write file");
         let mut snapshot = tool_test_snapshot("正文内容足够用于测试。".to_owned());
         snapshot.knowledge_bases[0].path = kb_root.path().to_string_lossy().into_owned();
-        snapshot.sessions[0].security_level = "autonomous".to_owned();
+        snapshot.sessions[0].security_level = "full-auto".to_owned();
         let mut settings = AgentSecuritySettings::default();
         settings.advanced_execution_enabled = true;
         settings.autonomous_mode_enabled = true;
@@ -594,7 +580,7 @@ mod tests {
         };
         assert_eq!(basic_outcome.call.status, "failed");
 
-        snapshot.sessions[0].security_level = "autonomous".to_owned();
+        snapshot.sessions[0].security_level = "full-auto".to_owned();
         let mut settings = AgentSecuritySettings::default();
         settings.advanced_execution_enabled = true;
         settings.autonomous_mode_enabled = true;
@@ -642,7 +628,7 @@ mod tests {
     #[test]
     fn write_file_builds_pending_create_in_basic_session() {
         let mut snapshot = tool_test_snapshot("正文内容足够用于测试。".to_owned());
-        snapshot.sessions[0].security_level = "basic".to_owned();
+        snapshot.sessions[0].security_level = "workspace-write".to_owned();
         let registry = ToolRegistry::default();
         let request = tool_test_request("create", "写一篇文案");
         let mut context = tool_test_context(&mut snapshot, &request);
@@ -675,7 +661,7 @@ mod tests {
     #[test]
     fn write_file_accepts_common_aliases_in_basic_session() {
         let mut snapshot = tool_test_snapshot("正文内容足够用于测试。".to_owned());
-        snapshot.sessions[0].security_level = "basic".to_owned();
+        snapshot.sessions[0].security_level = "workspace-write".to_owned();
         let registry = ToolRegistry::default();
         let request = tool_test_request("create", "写一篇文案");
         let mut context = tool_test_context(&mut snapshot, &request);
@@ -706,7 +692,7 @@ mod tests {
     #[test]
     fn write_file_infers_markdown_from_extension_in_advanced_session() {
         let mut snapshot = tool_test_snapshot("正文内容足够用于测试。".to_owned());
-        snapshot.sessions[0].security_level = "advanced".to_owned();
+        snapshot.sessions[0].security_level = "workspace-write".to_owned();
         let registry = ToolRegistry::default();
         let request = tool_test_request("create", "写一篇文案");
         let mut context = tool_test_context(&mut snapshot, &request);

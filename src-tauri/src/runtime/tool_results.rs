@@ -6,7 +6,7 @@ use serde_json::Value;
 /** 已分页的浏览器快照必须原样保留，字符串截断会丢失 reference 和下一页偏移。 */
 pub(super) fn model_tool_result_text(call: &AgentToolCall, payload: &Value) -> String {
     let serialized = payload.to_string();
-    if call.name == "run" && call.args.get("kind").and_then(Value::as_str) == Some("browser") {
+    if call.name == "browser" || (call.name == "run" && call.args.get("kind").and_then(Value::as_str) == Some("browser")) {
         serialized
     } else {
         super::context::truncate_tool_result_for_model(&serialized, super::MAX_TOOL_RESULT_CHARS)
@@ -22,7 +22,7 @@ mod tests {
     fn large_browser_result_keeps_element_references_and_paging_metadata() {
         let call = AgentToolCall {
             id: "browser-snapshot".to_owned(),
-            name: "run".to_owned(),
+            name: "browser".to_owned(),
             status: "completed".to_owned(),
             summary: String::new(),
             args: json!({ "kind": "browser", "operation": "page.elements.snapshot" }),

@@ -37,7 +37,8 @@ fn snapshot() -> WorkspaceSnapshot {
             pending_change: None,
             pending_change_set: None,
             pending_execution: None,
-            security_level: "basic".to_owned(),
+            security_level: "full-auto".to_owned(),
+            permission_version: 0,
             plan_mode: false,
             context_summary: None,
             created_at: "刚刚".to_owned(),
@@ -98,6 +99,22 @@ fn gateway(enabled: bool, configured: bool, page: Option<String>) -> Arc<WebOver
         pages,
         budget: Mutex::new(TurnBudget::default()),
     })
+}
+
+#[test]
+fn web_target_variants_cannot_bypass_readonly_or_per_call_approval() {
+    let request = request();
+    for level in ["workspace-readonly", "workspace-write", "full-confirm", "full-auto"] {
+        for target in ["web", "WEB", " Web "] {
+            let mut snapshot = snapshot(); snapshot.sessions[0].security_level = level.into();
+            let registry = ToolRegistry::for_session(&snapshot.sessions[0], &Default::default());
+            let mut context = AgentToolContext { app:None, snapshot:&mut snapshot, session_index:0,
+                request:&request, web_override:Some(gateway(true,true,None)) };
+            let outcome = registry.execute_named(&mut context,"search",json!({"target":target,"query":"orange"}));
+            assert_eq!(outcome.call.status == "completed", level == "full-auto", "{level} {target}: {:?}", outcome.call);
+            if level != "full-auto" { assert!(outcome.citations.is_empty()); }
+        }
+    }
 }
 
 #[test]

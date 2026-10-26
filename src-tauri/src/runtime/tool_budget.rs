@@ -55,7 +55,7 @@ impl ToolRoundBudget {
 
     /** 浏览器成功后扩展预算；接管后立即终止，不把终止信号交给模型自行决定。 */
     pub(super) fn observe_call(&mut self, call: &AgentToolCall, payload: &Value) {
-        if call.name != "run" || call.args.get("kind").and_then(Value::as_str) != Some("browser") {
+        if call.name != "browser" && !(call.name == "run" && call.args.get("kind").and_then(Value::as_str) == Some("browser")) {
             return;
         }
         if payload.pointer("/error/code").and_then(Value::as_str)
@@ -113,7 +113,7 @@ mod tests {
     fn browser_call(status: &str) -> AgentToolCall {
         AgentToolCall {
             id: "tool-browser".to_owned(),
-            name: "run".to_owned(),
+            name: "browser".to_owned(),
             status: status.to_owned(),
             summary: String::new(),
             args: json!({ "kind": "browser", "operation": "page.elements.snapshot" }),
@@ -149,6 +149,7 @@ mod tests {
         for call in [
             browser_call("failed"),
             AgentToolCall {
+                name: "run_skill".into(),
                 args: json!({ "skillId": "test-skill" }),
                 ..browser_call("completed")
             },

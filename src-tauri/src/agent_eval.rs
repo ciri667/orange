@@ -204,7 +204,8 @@ fn eval_snapshot(note_content: String) -> WorkspaceSnapshot {
             pending_change: None,
             pending_change_set: None,
             pending_execution: None,
-            security_level: "basic".to_owned(),
+            security_level: "workspace-write".to_owned(),
+            permission_version: 0,
             plan_mode: false,
             context_summary: None,
             created_at: "刚刚".to_owned(),
@@ -399,9 +400,10 @@ mod tests {
         let basic = ToolRegistry::for_session(&snapshot.sessions[0], &settings);
         assert!(!basic.tool_names().contains(&"run"));
 
-        snapshot.sessions[0].security_level = "advanced".to_owned();
+        snapshot.sessions[0].security_level = "full-confirm".to_owned();
         let advanced = ToolRegistry::for_session(&snapshot.sessions[0], &settings);
-        assert!(advanced.tool_names().contains(&"run"));
+        assert!(advanced.tool_names().contains(&"exec"));
+        assert!(!advanced.tool_names().contains(&"run"));
 
         let request = eval_request("ask", "跑 skill");
         let result = run_scripted_tool_loop(

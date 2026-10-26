@@ -125,7 +125,7 @@ fn builtin_agent(name: &str) -> Option<ResolvedAgent> {
             description: "起草待确认改写或新建".to_owned(),
             tools: WRITER_TOOLS.iter().map(|tool| (*tool).to_owned()).collect(),
             prompt: "你是写作子 Agent。根据任务起草 Markdown/TXT 改写或新建，只能通过 edit / write 生成待确认 diff，不能声称已经写入磁盘。\
-不要调用 task 或 run。改写前先 read 目标。局部替换用 operation=replace，文末追加用 append，多处编辑用 multi_replace。\
+不要调用 task、exec、browser、MCP 或外部联网。改写前先 read 目标。局部替换用 operation=replace，文末追加用 append，多处编辑用 multi_replace。\
 终稿说明改了哪些文件、为什么，以及还需要父 Agent 或用户确认的事项。".to_owned(),
             source: AgentSource::Builtin,
         }),
@@ -289,27 +289,22 @@ pub(super) fn build_subagent_system_prompt(
     snapshot: &WorkspaceSnapshot,
     session_index: usize,
     agent: &ResolvedAgent,
-    web_search_ready: bool,
+    _web_search_ready: bool,
 ) -> String {
     let session = &snapshot.sessions[session_index];
     let scope_summary = build_scope_summary(snapshot, session);
     let cwd_summary = build_cwd_summary(snapshot, session);
     let tools = agent.visible_tools_line();
     let write_clause = if agent.writable() {
-        "你可以调用 edit / write 生成待确认 diff，不能声称已经写入文件。不要调用 task 或 run。"
+        "你可以调用 edit / write 生成待确认 diff，不能声称已经写入文件。不要调用 task、exec、browser、MCP 或外部联网。"
     } else {
-        "只能 search / read / list。不要尝试 edit、write、run 或再次委派。"
-    };
-    let web_clause = if web_search_ready && !agent.writable() {
-        format!("\n{}\n", crate::web::WEB_SUBAGENT_PROMPT_CLAUSE)
-    } else {
-        String::new()
+        "只能 search / read / list。不要尝试 edit、write、exec、browser、MCP、外部联网或再次委派。"
     };
     format!(
         "你是橘记的本地优先知识库 Agent，当前以子 Agent 身份运行。当前可见工具：{tools}。\n\
 你是被委派的子 Agent。权限在启动时已钉死，不能扩大。{write_clause}任务需要超出范围的能力时，在终稿里写明限制，交给父 Agent 处理。你看不到父级对话，只根据本条任务工作。终稿给没读过原文件的父 Agent 用：列文件、摘关键段落、给结论，不要把探索过程原样倒回去。引用只允许来自已执行工具结果。必须使用服务端标准 tool_calls 字段调用工具。\n\
-search 只检索 Markdown；read 可作用于当前 scope 内的 Markdown/TXT，必须提供 fileId；DOCX/PDF 用 read 只读抽取。需要看目录时使用 list。TXT 必须原样按纯文本处理。会话没有默认打开的文件。\n\
-{web_clause}{}\n\n【范围】\n允许 scope：{scope_summary}\n{cwd_summary}",
+search 只检索 Markdown；read 可作用于当前 scope 内的 Markdown/TXT，支持 fileId 和授权 path，Skill 资源用 read target=skill；DOCX/PDF 用 read 只读抽取。需要看目录时使用 list。TXT 必须原样按纯文本处理。会话没有默认打开的文件。\n\
+{}\n\n【范围】\n允许 scope：{scope_summary}\n{cwd_summary}",
         agent.prompt
     )
 }

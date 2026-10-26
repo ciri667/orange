@@ -81,12 +81,10 @@ rmcp = { version = "3.5.1", default-features = false, features = [
 portable-pty = "0.9"
 
 [target.'cfg(windows)'.dependencies]
-# Windows 首版使用无管理员权限的 AppContainer + Job Object 作为强隔离边界。
-sandboxrs-windows = "0.1.1"
 # 动态链接官方预编译库。静态包是 MT 运行库，和 Tauri 默认的 MD 运行库会冲突。
 cpal = "0.15"
 sherpa-onnx = { version = "=1.13.8", default-features = false, features = ["shared"] }
-windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_System_JobObjects", "Win32_System_Threading"] }
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_System_JobObjects", "Win32_System_Threading", "Win32_Security", "Win32_Storage_FileSystem"] }
 
 [target."cfg(unix)".dependencies]
 libc = "0.2"

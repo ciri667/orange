@@ -1,5 +1,5 @@
 use super::execute::{
-    CreateFileDraftTool, ListTreeTool, ProposeFileChangeTool, ReadFileTool, RunSkillTool,
+    CreateFileDraftTool, ListTreeTool, ProposeFileChangeTool, ReadFileTool, BrowserTool,
     SearchNotesTool, TaskTool,
 };
 use super::types::*;
@@ -10,6 +10,8 @@ use serde_json::{json, Value};
 pub struct ToolRegistry {
     /** 已注册工具列表；顺序稳定，便于 UI 和测试比对 schema。 */
     tools: Vec<Box<dyn AgentTool>>,
+    subagent: bool,
+    manage_files: bool,
 }
 
 impl Default for ToolRegistry {
@@ -23,6 +25,8 @@ impl Default for ToolRegistry {
                 Box::new(ProposeFileChangeTool),
                 Box::new(CreateFileDraftTool),
             ],
+            subagent: false,
+            manage_files: true,
         }
     }
 }
@@ -30,26 +34,17 @@ impl Default for ToolRegistry {
 impl ToolRegistry {
     /** 按会话安全级别构造工具集；高权限工具在注册层不可见，而不是执行时才软拒绝。 */
     pub fn for_session(session: &AgentSession, settings: &AgentSecuritySettings) -> Self {
-        // 规划模式：只读闭集 + task；edit/write/run 对模型不可见，写入由运行时硬保证不可能。
-        if session.plan_mode {
-            let mut registry = Self::for_subagent();
-            registry.tools.push(Box::new(TaskTool));
-            return registry;
+        let _ = settings;
+        let mut registry = Self::for_subagent();
+        registry.subagent = false;
+        registry.manage_files = !matches!(crate::permissions::decide(session, crate::permissions::Operation::ManageFiles), crate::permissions::Decision::Deny(_));
+        if !matches!(crate::permissions::decide(session, crate::permissions::Operation::ProposeText), crate::permissions::Decision::Deny(_)) {
+            registry.tools.push(Box::new(ProposeFileChangeTool)); registry.tools.push(Box::new(CreateFileDraftTool));
         }
-
-        let mut registry = Self::default();
-        let local_session = session.im_identity.is_none();
-        let can_run_skills = local_session
-            && session.security_level != "basic"
-            && settings.advanced_execution_enabled
-            && (session.security_level != "autonomous" || settings.autonomous_mode_enabled);
-
         registry.tools.push(Box::new(TaskTool));
-
-        if can_run_skills {
-            registry.tools.push(Box::new(RunSkillTool));
+        if !matches!(crate::permissions::decide(session, crate::permissions::Operation::ExternalTool), crate::permissions::Decision::Deny(_)) {
+            registry.tools.push(Box::new(super::external::ExecTool)); registry.tools.push(Box::new(BrowserTool));
         }
-
         registry
     }
 
@@ -74,7 +69,7 @@ impl ToolRegistry {
         if tools.is_empty() {
             return Self::for_subagent();
         }
-        Self { tools }
+        Self { tools, subagent: true, manage_files: true }
     }
 
     /** 将当前注册工具转换成 OpenAI-compatible tools schema。 */
@@ -82,7 +77,32 @@ impl ToolRegistry {
         Value::Array(
             self.tools
                 .iter()
-                .map(|tool| function_tool(tool.name(), tool.description(), tool.parameters()))
+                .map(|tool| {
+                    let mut parameters=tool.parameters();
+                    // IM 保留文本草稿，schema 也不能宣称可移动、删除或创建目录。
+                    if !self.manage_files {
+                        let properties = &mut parameters["properties"];
+                        if tool.name() == "edit" {
+                            properties["operation"]["enum"] = json!(["replace", "append", "multi_replace"]);
+                            if let Some(properties) = properties.as_object_mut() {
+                                properties.remove("destination"); properties.remove("destinationKnowledgeBaseId");
+                            }
+                        } else if tool.name() == "write" {
+                            properties["kind"]["enum"] = json!(["file"]);
+                            properties["fileType"]["enum"] = json!(["markdown", "txt"]);
+                            parameters["required"] = json!(["targetPath", "content"]);
+                            parameters.as_object_mut().unwrap().remove("anyOf");
+                        }
+                    }
+                    let external=self.tools.iter().any(|t|t.name()=="exec");
+                    if !external {
+                        if let Some(properties)=parameters.get_mut("properties").and_then(Value::as_object_mut) {
+                            properties.remove("url");
+                            if let Some(target)=properties.get_mut("target").and_then(|v|v.get_mut("enum")).and_then(Value::as_array_mut) { target.retain(|v|v!="web" && v!="url"); }
+                        }
+                    }
+                    function_tool(tool.name(),tool.description(),parameters)
+                })
                 .collect(),
         )
     }
@@ -100,7 +120,12 @@ impl ToolRegistry {
         name: &str,
         args: Value,
     ) -> ToolOutcome {
-        // 兼容已经持久化的旧模型调用；schema 只暴露闭集短名，不再引导模型使用别名。
+        self.execute_with_permit(context, name, args, None)
+    }
+
+    pub fn execute_with_permit(&self, context: &mut AgentToolContext<'_>, name: &str, args: Value,
+        permit: Option<&crate::operation_approval::Permit>) -> ToolOutcome {
+        // 所有同步分支必须重新执行策略检查，不能依赖 schema 是否隐藏。
         let (canonical_name, canonical_args) = remap_tool_call(name, args);
         if let Some(message) = retired_host_tool_message(canonical_name) {
             return tool_outcome(
@@ -108,6 +133,25 @@ impl ToolRegistry {
                 canonical_args,
                 ToolExecutionResult::failed(message),
             );
+        }
+        let session = &context.snapshot.sessions[context.session_index];
+        if self.subagent && crate::permissions::tool_operation(canonical_name,&canonical_args) == crate::permissions::Operation::ExternalTool {
+            return tool_outcome(canonical_name,canonical_args,ToolExecutionResult::failed("子 Agent 不提供外部服务、命令、浏览器或 MCP。"));
+        }
+        if let Some(app) = context.app {
+            if let Err(e) = crate::operation_approval::check_current(app,session) { return tool_outcome(canonical_name,canonical_args,ToolExecutionResult::failed(&e)); }
+        }
+        let gate = super::external::decision(context.snapshot,context.session_index,canonical_name,&canonical_args);
+        let rejection = match gate {
+            Err(e) => Some(e),
+            Ok(crate::permissions::Decision::Deny(e)) => Some(e.to_owned()),
+            Ok(crate::permissions::Decision::RequireApproval) if !permit.is_some_and(|p|p.matches(session,canonical_name,&canonical_args)) => Some("此操作需要一次性审批，请通过 Runtime 派发。".into()),
+            _ => None,
+        };
+        if let Some(e) = rejection { return tool_outcome(canonical_name,canonical_args,ToolExecutionResult::failed(&e)); }
+        if matches!(canonical_name, "edit" | "write") && context.app.is_some() && session.im_identity.is_none() && self.tools.iter().any(|t| t.name() == canonical_name) {
+            let result = crate::file_changes::propose(context,canonical_name,&canonical_args);
+            return tool_outcome(canonical_name,canonical_args,result);
         }
         let result = self
             .tools
@@ -148,7 +192,7 @@ pub(crate) fn remap_tool_call(name: &str, args: Value) -> (&str, Value) {
         "create_folder" => ("write", remap_write_folder_args(args)),
         "list_path" => ("list", args),
         "read_path" => ("read", args),
-        "run_skill" => ("run", args),
+        "run" if args["kind"] == "browser" => ("browser", args),
         _ => (name, args),
     }
 }
@@ -156,6 +200,7 @@ pub(crate) fn remap_tool_call(name: &str, args: Value) -> (&str, Value) {
 /** 已降级为宿主注入的工具：旧名调用返回结构化失败，避免旧模型缓存空转。 */
 pub(crate) fn retired_host_tool_message(name: &str) -> Option<&'static str> {
     match name {
+        "run_skill" | "run" => Some("Skill 专用运行已停用。请用 read target=skill 加载资源，脚本通过 exec 运行并重新审批。"),
         "get_session_summary" | "get_knowledge_base_memory" | "search_session_messages"
         | "read_session_context" => Some(
             "该信息已由宿主注入当前上下文，请直接使用 system 中的工作记忆、待确认变更或跨会话记忆，不要再调用此工具。",

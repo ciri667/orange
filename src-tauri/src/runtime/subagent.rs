@@ -83,6 +83,8 @@ struct ParsedTask {
     task_id: String,
     resume: bool,
     background: bool,
+    parent_session_id: String,
+    permission_version: u64,
 }
 
 /** 只读、前台、非续跑写作的 task 可以和同一批兄弟并行。 */
@@ -119,11 +121,24 @@ pub(super) fn parallel_window_size(args_list: &[Value]) -> usize {
 
 /** 启动一次性或续跑子 Agent，失败以工具结果返回，不打爆父级回合。 */
 pub(super) async fn run_one_shot(mut params: SubagentRunParams<'_>) -> ToolOutcome {
-    let parsed = match parse_task_args(params.args) {
+    let mut parsed = match parse_task_args(params.args) {
         Ok(parsed) => parsed,
         Err(message) => return failed_outcome(params.args, &message, None),
     };
 
+    let parent=&params.snapshot.sessions[params.session_index];
+    parsed.parent_session_id=parent.id.clone(); parsed.permission_version=parent.permission_version;
+    if let Err(e)=crate::operation_approval::check_current(params.app,parent) { return failed_outcome(params.args,&e,Some(&parsed.task_id)); }
+    if parsed.agent.writable() {
+        if parent.im_identity.is_some() { return failed_outcome(params.args,"IM 不开放 writer 变更集；请使用原身份绑定的工作区文本草稿流程。",Some(&parsed.task_id)); }
+        if let Err(e)=crate::permissions::ensure(parent,crate::permissions::Operation::ProposeText) { return failed_outcome(params.args,&e,Some(&parsed.task_id)); }
+    }
+    if parsed.resume {
+        let meta=storage::load_agent_session_transcript(params.app,&format!("{}{META_SUFFIX}",parsed.task_id)).ok().flatten();
+        let valid=meta.as_ref().and_then(|v|v.first()).and_then(|v|v.as_array()).and_then(|v|v.first()).is_some_and(|m|
+            m["parentSessionId"]==parent.id && m["permissionVersion"]==parent.permission_version && m["agent"]==parsed.agent.name);
+        if !valid { return failed_outcome(params.args,"子任务所属会话、权限版本或角色已变化，不能复用旧上下文。",Some(&parsed.task_id)); }
+    }
     if params.parent_depth >= MAX_SUBAGENT_DEPTH {
         return failed_outcome(
             params.args,
@@ -326,7 +341,8 @@ async fn run_nested_loop(
         model_messages.push(json!({ "role": "user", "content": parsed.prompt }));
     }
 
-    let registry = ToolRegistry::for_subagent_tools(&parsed.agent.tools);
+    let allowed=parsed.agent.tools.iter().filter(|name| !matches!(name.as_str(),"edit"|"write") || crate::permissions::ensure(&params.snapshot.sessions[params.session_index],crate::permissions::Operation::ProposeText).is_ok()).collect::<Vec<_>>();
+    let registry = ToolRegistry::for_subagent_tools(&allowed);
     let tool_schemas = registry.schemas();
     let endpoint = model_provider::chat_completions_endpoint(&params.provider.api_base);
     let mut citations: Vec<Citation> = Vec::new();
@@ -341,7 +357,7 @@ async fn run_nested_loop(
     }
 
     for _ in 0..MAX_INNER_TOOL_ROUNDS {
-        if params.cancel.is_aborted() {
+        if params.cancel.is_aborted() || crate::operation_approval::check_current(params.app,&params.snapshot.sessions[params.session_index]).is_err() {
             persist_child(params.app, parsed, &model_messages);
             return Ok(aborted_outcome(params.args, Some(&parsed.task_id)));
         }
@@ -475,7 +491,18 @@ async fn run_nested_loop(
                     trace_app,
                 )
             });
-            let tool_outcome = {
+            let (canonical,canonical_args)=crate::agent_tools::remap_tool_call(&tool_name,parse_tool_args(&model_tool_call));
+            let gate=if crate::permissions::tool_operation(canonical,&canonical_args)==crate::permissions::Operation::ExternalTool {
+                Ok(crate::permissions::Decision::Deny("子 Agent 不提供外部服务、命令、浏览器或 MCP。"))
+            } else { crate::agent_tools::external::decision(params.snapshot,params.session_index,canonical,&canonical_args) };
+            let permission=match gate {
+                Ok(decision)=>crate::operation_approval::authorize(params.app,&params.snapshot.sessions[params.session_index],canonical,&canonical_args,decision,params.cancel).await,
+                Err(e)=>Err(e),
+            };
+            let previous=params.snapshot.sessions[params.session_index].pending_change_set.as_ref().map(|s|s.operations.iter().map(|o|o.id.clone()).collect::<Vec<_>>()).unwrap_or_default();
+            let mut tool_outcome = if let Err(e)=&permission {
+                super::external_dispatch::failed(canonical,&canonical_args,e)
+            } else {
                 let mut tool_context = AgentToolContext {
                     app: Some(params.app),
                     snapshot: params.snapshot,
@@ -483,8 +510,15 @@ async fn run_nested_loop(
                     request: params.request,
                     web_override: None,
                 };
-                registry.execute_model_tool_call(&mut tool_context, &model_tool_call)
+                registry.execute_with_permit(&mut tool_context, canonical, canonical_args.clone(), permission.as_ref().ok())
             };
+            if !params.cancel.is_aborted() && matches!(canonical,"edit"|"write") && tool_outcome.call.status=="completed" {
+                match crate::file_changes::auto_apply_new(params.app,params.snapshot,params.session_index,&previous) {
+                    Ok(Some(ids))=> { tool_outcome.payload=json!({"status":"applied","operationIds":ids}); tool_outcome.call.summary="本次新文件变更已自动应用。".into(); },
+                    Err(e)=> { tool_outcome.payload["autoApplyError"]=json!(e); },
+                    _=>{},
+                }
+            }
             nested_steps = nested_steps.saturating_add(1);
             let tool_result_text = super::context::truncate_tool_result_for_model(
                 &tool_outcome.payload.to_string(),
@@ -582,6 +616,7 @@ fn parse_task_args(args: &Value) -> Result<ParsedTask, String> {
         task_id,
         resume,
         background,
+        parent_session_id: String::new(), permission_version: 0,
     })
 }
 
@@ -597,6 +632,8 @@ fn persist_child(app: &AppHandle, parsed: &ParsedTask, messages: &[Value]) {
     let meta = json!([{
         "agent": parsed.agent.name,
         "description": parsed.description,
+        "parentSessionId": parsed.parent_session_id,
+        "permissionVersion": parsed.permission_version,
     }]);
     if let Err(error) = storage::save_agent_session_transcript(
         app,
@@ -677,6 +714,7 @@ fn pending_change_to_operation(change: &ProposedChange) -> ProposedFileOperation
         binary: false,
         byte_size: change.next.len(),
         staged_path: None,
+        status: "pending".into(), error: None, affected_files: 1,
     }
 }
 
@@ -1032,6 +1070,7 @@ mod tests {
             pending_change_set: None,
             pending_execution: None,
             security_level: "basic".to_owned(),
+            permission_version: 0,
             plan_mode: false,
             context_summary: None,
             created_at: "刚刚".to_owned(),
@@ -1105,6 +1144,7 @@ mod tests {
                 pending_change_set: None,
                 pending_execution: None,
                 security_level: "basic".to_owned(),
+            permission_version: 0,
                 plan_mode: false,
                 context_summary: None,
                 created_at: "刚刚".to_owned(),
