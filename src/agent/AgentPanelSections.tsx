@@ -192,7 +192,8 @@ export function AgentSecurityLevelControl({
               >
                 <span className="grid min-w-0 flex-1 gap-0.5 text-left">
                   <span className={cn("font-medium", active && "text-accent")}>{copy.label}</span>
-                  <span className="text-[11px] leading-snug font-normal text-ink-muted">{hint}</span>
+                  {/* 短说明均衡换行，避免固定宽度下末行只剩一个汉字。 */}
+                  <span className="text-balance text-[11px] leading-snug font-normal text-ink-muted">{hint}</span>
                 </span>
                 {active ? <Check size={14} className="mt-0.5 shrink-0 text-accent" /> : <span className="size-3.5 shrink-0" aria-hidden="true" />}
               </MenuItem>
