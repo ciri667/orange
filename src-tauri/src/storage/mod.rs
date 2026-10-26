@@ -176,7 +176,7 @@ mod tests {
         load_document_preview, load_keyring_password_after_cache_miss_with,
         load_latest_document_history_hash, load_model_api_key_from_cache,
         model_keyring_persists_until_delete, normalize_audit_log_created_at, normalize_im_settings,
-        normalize_knowledge_base_memory, normalize_session_created_at,
+        normalize_knowledge_base_memory, normalize_session_timestamps,
         normalize_workspace_editor_state, parse_im_settings_payload,
         persist_agent_session_transcript, persist_session_in_transaction,
         persist_session_records_in_transaction, persist_sessions_in_transaction,
@@ -834,15 +834,16 @@ mod tests {
 
     /** 旧版会话如果把创建时间保存成“刚刚”，应优先从前端会话 ID 的时间戳恢复。 */
     #[test]
-    fn normalize_session_created_at_uses_timestamp_from_frontend_id() {
+    fn normalize_session_timestamps_uses_timestamp_from_frontend_id() {
         let timestamp_millis = 1_700_000_000_000;
         let mut session =
             test_agent_session(&format!("session-task-{timestamp_millis}-abc123"), "刚刚");
         let expected_created_at = format_local_datetime_from_millis(timestamp_millis).unwrap();
 
-        normalize_session_created_at(&mut session);
+        normalize_session_timestamps(&mut session);
 
         assert_eq!(session.created_at, expected_created_at);
+        assert_eq!(session.updated_at, expected_created_at);
     }
 
     /** 会话历史按“最后使用时间”倒序排列，最近发过消息的会话排在前面。 */

@@ -1156,7 +1156,7 @@ pub async fn reject_proposed_change(
             status: "rejected".to_owned(),
             ..change
         });
-        snapshot.sessions[session_index].updated_at = "刚刚".to_owned();
+        snapshot.sessions[session_index].updated_at = storage::format_local_datetime();
         runtime::update_agent_context_summary_deterministic(
             &mut snapshot,
             session_index,

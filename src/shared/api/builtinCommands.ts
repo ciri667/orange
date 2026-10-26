@@ -1,4 +1,5 @@
 import { invokeLogged, isTauriRuntime } from "./runtime";
+import { formatLocalDateTime } from "../id";
 import { cloneWorkspaceSnapshot } from "../mock/workspace";
 import { buildMockContextSummary, normalizeMockSnapshotSessions } from "../mock/browser";
 import { buildAgentSession } from "../../workspace/sessionUtils";
@@ -156,7 +157,7 @@ function runMockBuiltinCommand(
       const nextSnapshot = cloneWorkspaceSnapshot(snapshot);
       nextSnapshot.sessions = nextSnapshot.sessions.map((session) =>
         session.id === nextSnapshot.activeSessionId
-          ? ({ ...session, title, titleCustomized: true, updatedAt: "刚刚" } as AgentSession)
+          ? ({ ...session, title, titleCustomized: true, updatedAt: formatLocalDateTime() } as AgentSession)
           : session,
       );
 

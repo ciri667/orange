@@ -180,7 +180,7 @@ export function groupSessionsForList(sessions: AgentSession[], now: Date) {
   });
 }
 
-/** 把 updatedAt 收成列表分组。认「刚刚」、`今天 HH:MM` 和 `YYYY/MM/DD HH:MM`。 */
+/** 把 updatedAt 收成列表分组；无法恢复的旧时间归到「更早」。 */
 export function sessionTimeGroup(value: string, now: Date): Exclude<SessionTimeGroupId, "pinned"> {
   const parsed = sessionUpdatedAtDate(value, now);
   if (!parsed) {
@@ -318,7 +318,7 @@ function clipSnippet(text: string, needle: string) {
 
 function sessionUpdatedAtDate(value: string, now: Date) {
   const trimmed = value.trim();
-  if (trimmed === "刚刚" || trimmed === "未保存") {
+  if (trimmed === "未保存") {
     return now;
   }
 

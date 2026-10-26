@@ -1,4 +1,5 @@
 import { invokeLogged, isTauriRuntime } from "./runtime";
+import { formatLocalDateTime } from "../id";
 import { cloneWorkspaceSnapshot } from "../mock/workspace";
 import {
   getFallbackDocumentId,
@@ -67,8 +68,9 @@ export async function deleteSession(snapshot: WorkspaceSnapshot, sessionId: stri
       return normalizeMockSnapshotSessions(nextSnapshot);
     }
 
-    deletedSession.deletedAt = "刚刚";
-    deletedSession.updatedAt = "刚刚";
+    const deletedAt = formatLocalDateTime();
+    deletedSession.deletedAt = deletedAt;
+    deletedSession.updatedAt = deletedAt;
     nextSnapshot.sessions = nextSnapshot.sessions.filter((session) => !session.deletedAt);
 
     if (!nextSnapshot.sessions.some((session) => session.id === nextSnapshot.activeSessionId)) {
@@ -100,7 +102,7 @@ export async function updateSessionScope(
         ? {
             ...session,
             knowledgeBaseIds: orderValidKnowledgeBaseIds(Array.from(selectedIds), nextSnapshot.knowledgeBases),
-            updatedAt: "刚刚",
+            updatedAt: formatLocalDateTime(),
           }
         : session,
     );

@@ -3273,7 +3273,7 @@ fn model_error_turn(
             turn_duration_ms: tracer.map(|tracer| tracer.duration_ms()),
             interrupted: false,
         });
-    snapshot.sessions[session_index].updated_at = "刚刚".to_owned();
+    snapshot.sessions[session_index].updated_at = format_local_datetime();
     update_agent_context_summary_deterministic(
         &mut snapshot,
         session_index,
@@ -3352,7 +3352,7 @@ fn skill_activation_error_turn(
             turn_duration_ms: None,
             interrupted: false,
         });
-    snapshot.sessions[session_index].updated_at = "刚刚".to_owned();
+    snapshot.sessions[session_index].updated_at = format_local_datetime();
     update_agent_context_summary_deterministic(
         &mut snapshot,
         session_index,
@@ -3469,7 +3469,7 @@ fn push_assistant_message(
             turn_duration_ms: Some(tracer.duration_ms()),
             interrupted,
         });
-    snapshot.sessions[session_index].updated_at = "刚刚".to_owned();
+    snapshot.sessions[session_index].updated_at = format_local_datetime();
 }
 
 /** 为尚未 execute 的 tool_calls 写入合成 aborted 结果，保持协议成对。 */

@@ -1070,7 +1070,7 @@ export function runMockAgentTurn(
       contextLength: 128000,
       recordedAt: formatLocalDateTime(),
     };
-    session.updatedAt = "刚刚";
+    session.updatedAt = formatLocalDateTime();
     return nextSnapshot;
   } else {
     content = explicitSkillIdList.length
@@ -1116,7 +1116,7 @@ export function runMockAgentTurn(
     contextLength: 128000,
     recordedAt: formatLocalDateTime(),
   };
-  session.updatedAt = "刚刚";
+  session.updatedAt = formatLocalDateTime();
 
   return nextSnapshot;
 }

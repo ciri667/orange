@@ -526,6 +526,10 @@ function getPendingSessionLabel(session: AgentSession, sessions: AgentSession[])
  */
 function formatSessionListTime(value: string) {
   const trimmed = value.trim();
+  // 旧时间无法恢复时明确标为未知，避免永久显示“刚刚”。
+  if (!trimmed || trimmed === "刚刚") {
+    return "时间未知";
+  }
   const todayClock = trimmed.match(/^今天\s+(\d{1,2}:\d{2})$/);
   if (todayClock) {
     return todayClock[1];

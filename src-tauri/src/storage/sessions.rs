@@ -3,10 +3,10 @@ use super::*;
 pub(crate) fn is_created_at_placeholder(created_at: &str) -> bool {
     let trimmed_created_at = created_at.trim();
 
-    trimmed_created_at.is_empty() || trimmed_created_at == "刚刚"
+    matches!(trimmed_created_at, "" | "刚刚" | "未保存")
 }
 
-/** 从前端 createLocalId 生成的 session ID 中提取 Date.now 毫秒时间戳。 */
+/** 从前端 createLocalId 生成的会话或消息 ID 中提取 Date.now 毫秒时间戳。 */
 pub(crate) fn timestamp_millis_from_session_id(session_id: &str) -> Option<i64> {
     session_id
         .split('-')
@@ -22,30 +22,93 @@ pub(crate) fn created_at_from_session_id(session_id: &str) -> Option<String> {
     timestamp_millis_from_session_id(session_id).and_then(format_local_datetime_from_millis)
 }
 
-/** 归一化会话创建时间，避免历史列表永久显示旧版“刚刚”占位值。 */
-pub(crate) fn normalize_session_created_at(session: &mut AgentSession) {
-    if !is_created_at_placeholder(&session.created_at) {
+/** 恢复旧会话的真实时间；展示、分组、排序和后续持久化统一使用恢复后的值。 */
+pub(crate) fn normalize_session_timestamps(session: &mut AgentSession) {
+    let missing_created_at = is_created_at_placeholder(&session.created_at);
+    let missing_updated_at = is_created_at_placeholder(&session.updated_at);
+    if !missing_created_at && !missing_updated_at {
         return;
     }
 
-    session.created_at = created_at_from_session_id(&session.id)
-        .or_else(|| {
-            // 如果 updated_at 已经是明确时间，用它作为旧记录迁移的次优来源。
-            (!is_created_at_placeholder(&session.updated_at)).then(|| session.updated_at.clone())
-        })
-        .unwrap_or_else(format_local_datetime);
+    // 旧版甚至持久化过 __draft-session__，不能只依赖会话 ID，消息和嵌套轨迹也要参与恢复。
+    let mut message_times = Vec::new();
+    for message in &session.messages {
+        message_times.extend(timestamp_millis_from_session_id(&message.id));
+        let mut steps: Vec<_> = message.trace.iter().collect();
+        while let Some(step) = steps.pop() {
+            message_times.extend(parse_local_datetime_millis(&step.timestamp));
+            steps.extend(&step.children);
+        }
+    }
+    let activity_times: Vec<_> = [
+        session
+            .context_summary
+            .as_ref()
+            .map(|summary| summary.updated_at.as_str()),
+        session
+            .context_usage
+            .as_ref()
+            .map(|usage| usage.recorded_at.as_str()),
+        session
+            .pending_change_set
+            .as_ref()
+            .map(|change| change.created_at.as_str()),
+        session
+            .pending_execution
+            .as_ref()
+            .map(|execution| execution.created_at.as_str()),
+    ]
+    .into_iter()
+    .flatten()
+    .filter_map(parse_local_datetime_millis)
+    .collect();
+
+    if missing_created_at {
+        session.created_at = created_at_from_session_id(&session.id)
+            .or_else(|| {
+                message_times
+                    .iter()
+                    .min()
+                    .copied()
+                    .and_then(format_local_datetime_from_millis)
+            })
+            .or_else(|| {
+                parse_local_datetime_millis(&session.updated_at)
+                    .or_else(|| activity_times.iter().min().copied())
+                    .and_then(format_local_datetime_from_millis)
+            })
+            // 没有历史证据时保持未知，不能把每次加载时间伪装成创建时间。
+            .unwrap_or_default();
+    }
+    if missing_updated_at {
+        session.updated_at = message_times
+            .into_iter()
+            .chain(activity_times)
+            .chain(parse_local_datetime_millis(&session.created_at))
+            .chain(timestamp_millis_from_session_id(&session.id))
+            .max()
+            .and_then(format_local_datetime_from_millis)
+            .unwrap_or_default();
+    }
 }
 
-/** 将本地展示时间字符串（%Y/%m/%d %H:%M）解析为毫秒时间戳，无法解析时返回 None。 */
+/** 兼容历史本地展示时间及带时区的上下文时间，无法解析时返回 None。 */
 pub(crate) fn parse_local_datetime_millis(value: &str) -> Option<i64> {
-    NaiveDateTime::parse_from_str(value.trim(), "%Y/%m/%d %H:%M")
+    let value = value.trim();
+    chrono::DateTime::parse_from_rfc3339(value)
         .ok()
-        .and_then(|naive| {
-            // 按本地时区解释 UI 展示时间，保证与 format_local_datetime 的来源一致。
-            Local
-                .from_local_datetime(&naive)
-                .single()
-                .map(|datetime| datetime.timestamp_millis())
+        .map(|datetime| datetime.timestamp_millis())
+        .or_else(|| {
+            ["%Y/%m/%d %H:%M", "%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M"]
+                .iter()
+                .find_map(|format| {
+                    let naive = NaiveDateTime::parse_from_str(value, format).ok()?;
+                    // 按本地时区解释 UI 展示时间，与 format_local_datetime 保持一致。
+                    Local
+                        .from_local_datetime(&naive)
+                        .single()
+                        .map(|datetime| datetime.timestamp_millis())
+                })
         })
 }
 
@@ -94,7 +157,7 @@ pub(crate) fn load_deleted_sessions_in_transaction(
         let mut session: AgentSession = serde_json::from_str(&payload_json)
             .map_err(|error| format!("无法解析已删除会话记录：{error}"))?;
 
-        normalize_session_created_at(&mut session);
+        normalize_session_timestamps(&mut session);
 
         if session.deleted_at.is_some() {
             sessions.push(session);
@@ -111,7 +174,7 @@ pub(crate) fn persist_session_in_transaction(
 ) -> Result<(), String> {
     let mut session = session.clone();
 
-    normalize_session_created_at(&mut session);
+    normalize_session_timestamps(&mut session);
 
     let payload_json =
         serde_json::to_string(&session).map_err(|error| format!("无法序列化会话：{error}"))?;
@@ -475,7 +538,13 @@ pub(crate) fn load_persisted_session(
 
     payload
         .map(|payload| {
-            serde_json::from_str::<AgentSession>(&payload).map(|mut session| { migrate_session_authority(&mut session); session }).map_err(|error| format!("无法解析持久化会话：{error}"))
+            serde_json::from_str::<AgentSession>(&payload)
+                .map(|mut session| {
+                    normalize_session_timestamps(&mut session);
+                    migrate_session_authority(&mut session);
+                    session
+                })
+                .map_err(|error| format!("无法解析持久化会话：{error}"))
         })
         .transpose()
 }
@@ -494,8 +563,9 @@ pub fn delete_session(
         .ok_or_else(|| "找不到要删除的会话".to_owned())?;
     let mut deleted_session = snapshot.sessions.remove(session_index);
 
-    deleted_session.deleted_at = Some("刚刚".to_owned());
-    deleted_session.updated_at = "刚刚".to_owned();
+    let deleted_at = format_local_datetime();
+    deleted_session.deleted_at = Some(deleted_at.clone());
+    deleted_session.updated_at = deleted_at;
 
     if snapshot.active_session_id == session_id
         || !snapshot
@@ -546,7 +616,7 @@ pub fn load_sessions_for_snapshot(
         let mut session: AgentSession = serde_json::from_str(&payload_json)
             .map_err(|error| format!("无法解析会话记录：{error}"))?;
 
-        normalize_session_created_at(&mut session);
+        normalize_session_timestamps(&mut session);
 
         if session.deleted_at.is_some() {
             continue;
@@ -657,7 +727,7 @@ pub fn update_session_scope(
         invalidate_authority(session);
         session.knowledge_base_ids = next_ids;
     }
-    session.updated_at = "刚刚".to_owned();
+    session.updated_at = format_local_datetime();
     let session_id = session.id.clone();
     normalize_sessions_for_snapshot(&mut snapshot);
     let changed=snapshot.sessions.iter().find(|s|s.id==session_id).ok_or("会话不存在")?;
@@ -833,7 +903,7 @@ pub fn normalize_session_for_snapshot(
     session: &mut AgentSession,
     snapshot: &WorkspaceSnapshot,
 ) -> bool {
-    normalize_session_created_at(session);
+    normalize_session_timestamps(session);
 
     migrate_session_authority(session);
     crate::file_changes::migrate_legacy_pending(session, &snapshot.knowledge_bases);
@@ -899,7 +969,10 @@ pub(crate) fn ordered_valid_scope_ids(
 
 #[cfg(test)]
 mod tests {
-    use super::{migrate_session_authority, normalize_session_for_snapshot, retain_viewer_session_id};
+    use super::{
+        migrate_session_authority, normalize_session_for_snapshot, normalize_session_timestamps,
+        persist_session_in_transaction, retain_viewer_session_id,
+    };
     use crate::domain::{AgentSession, WorkspaceSnapshot};
 
     fn test_session(id: &str) -> AgentSession {
@@ -930,6 +1003,155 @@ mod tests {
             pinned_at: None,
             archived_at: None,
         }
+    }
+
+    /** 有真实更新时间的会话不能因历史消息或重新加载被改写。 */
+    #[test]
+    fn timestamp_migration_preserves_explicit_session_times() {
+        let mut session = test_session("session-old");
+        session.created_at = "2026/08/19 22:39".to_owned();
+        session.updated_at = "2026/10/24 18:51".to_owned();
+        let before = serde_json::to_value(&session).unwrap();
+
+        normalize_session_timestamps(&mut session);
+
+        assert_eq!(serde_json::to_value(&session).unwrap(), before);
+    }
+
+    /** 对应截图中“刚刚”的会话：最后活动晚于创建时间，迁移必须保留该差异。 */
+    #[test]
+    fn timestamp_migration_recovers_latest_activity_instead_of_creation_time() {
+        let created_millis = super::parse_local_datetime_millis("2026/10/24 16:59").unwrap();
+        let mut session = test_session(&format!("session-knowledge-base-{created_millis}-legacy"));
+        session.created_at = "2026/10/24 16:59".to_owned();
+        session.updated_at = "刚刚".to_owned();
+        session.context_summary = Some(crate::domain::AgentContextSummary {
+            updated_at: "2026/10/24 18:51".to_owned(),
+            ..Default::default()
+        });
+
+        normalize_session_timestamps(&mut session);
+
+        assert_eq!(session.created_at, "2026/10/24 16:59");
+        assert_eq!(session.updated_at, "2026/10/24 18:51");
+    }
+
+    /** 旧版误存的草稿没有会话时间戳，仍应从首条消息及上下文恢复。 */
+    #[test]
+    fn timestamp_migration_recovers_persisted_draft_and_is_idempotent() {
+        let mut session = test_session("__draft-session__");
+        session.created_at = "未保存".to_owned();
+        session.updated_at = "刚刚".to_owned();
+        session.messages = serde_json::from_value(serde_json::json!([
+            {"id": "user-1787150386036-4346qi", "role": "user", "content": "旧消息"}
+        ]))
+        .unwrap();
+        session.context_summary = Some(crate::domain::AgentContextSummary {
+            updated_at: "2026/08/19 22:41".to_owned(),
+            ..Default::default()
+        });
+
+        normalize_session_timestamps(&mut session);
+
+        assert_eq!(
+            session.created_at,
+            super::format_local_datetime_from_millis(1_787_150_386_036).unwrap()
+        );
+        assert_eq!(session.updated_at, "2026/08/19 22:41");
+        let migrated = serde_json::to_value(&session).unwrap();
+        normalize_session_timestamps(&mut session);
+        assert_eq!(serde_json::to_value(&session).unwrap(), migrated);
+    }
+
+    /** 嵌套工具轨迹和带时区的记账时间都属于可恢复的最后活动证据。 */
+    #[test]
+    fn timestamp_migration_uses_latest_nested_trace_and_context_usage() {
+        let mut session = test_session("session-old-uuid");
+        session.created_at = "2026/10/24 16:59".to_owned();
+        session.updated_at = "刚刚".to_owned();
+        session.messages = serde_json::from_value(serde_json::json!([
+            {"id": "assistant-uuid", "role": "assistant", "content": "旧消息", "trace": [
+                {"id": "task", "type": "tool", "timestamp": "2026/10/24 17:00", "children": [
+                    {"id": "child", "type": "tool", "timestamp": "2026/10/24 18:51"}
+                ]}
+            ]}
+        ]))
+        .unwrap();
+        session.context_summary = Some(crate::domain::AgentContextSummary {
+            updated_at: "2026-10-24T09:30:00+08:00".to_owned(),
+            ..Default::default()
+        });
+        normalize_session_timestamps(&mut session);
+        assert_eq!(session.updated_at, "2026/10/24 18:51");
+
+        session.updated_at.clear();
+        // 先构造本地 20:00 对应的 RFC3339，避免测试依赖运行机器恰好处于东八区。
+        let recorded_millis = super::parse_local_datetime_millis("2026/10/24 20:00").unwrap();
+        let recorded_at = chrono::DateTime::from_timestamp_millis(recorded_millis)
+            .unwrap()
+            .to_rfc3339();
+        session.context_usage = Some(
+            serde_json::from_value(serde_json::json!({
+                "modelId": "test", "promptTokens": 1, "completionTokens": 1,
+                "totalTokens": 2, "recordedAt": recorded_at
+            }))
+            .unwrap(),
+        );
+        normalize_session_timestamps(&mut session);
+        assert_eq!(session.updated_at, "2026/10/24 20:00");
+    }
+
+    /** 无消息时回退到已知创建时间；完全无证据时不能伪造为今天。 */
+    #[test]
+    fn timestamp_migration_falls_back_to_known_time_and_keeps_unknown_time_empty() {
+        let mut session = test_session("session-old-uuid");
+        session.created_at = "2026/08/19 22:39".to_owned();
+        session.updated_at = "刚刚".to_owned();
+        normalize_session_timestamps(&mut session);
+        assert_eq!(session.updated_at, session.created_at);
+
+        session.created_at = "未保存".to_owned();
+        session.updated_at = "刚刚".to_owned();
+        normalize_session_timestamps(&mut session);
+        assert!(session.created_at.is_empty());
+        assert!(session.updated_at.is_empty());
+    }
+
+    /** 恢复后的列值与完整 payload 一起落库，重新读取后无需依赖加载时刻。 */
+    #[test]
+    fn session_persistence_writes_recovered_times_to_columns_and_payload() {
+        let directory = tempfile::tempdir().unwrap();
+        let database_path = directory.path().join("session-timestamps.sqlite3");
+        let mut connection = rusqlite::Connection::open(&database_path).unwrap();
+        super::ensure_database_schema(&connection, &database_path).unwrap();
+        let transaction = connection.transaction().unwrap();
+        let created_millis = super::parse_local_datetime_millis("2026/10/24 16:59").unwrap();
+        let mut session = test_session(&format!("session-knowledge-base-{created_millis}-legacy"));
+        session.created_at = "刚刚".to_owned();
+        session.updated_at = "刚刚".to_owned();
+        session.context_summary = Some(crate::domain::AgentContextSummary {
+            updated_at: "2026/10/24 18:51".to_owned(),
+            ..Default::default()
+        });
+
+        persist_session_in_transaction(&transaction, &session).unwrap();
+        transaction.commit().unwrap();
+        let (created_at, updated_at, payload): (String, String, String) = connection
+            .query_row(
+                "SELECT created_at, updated_at, payload_json FROM agent_sessions WHERE id = ?1",
+                [&session.id],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
+        let stored: AgentSession = serde_json::from_str(&payload).unwrap();
+        assert_eq!(updated_at, "2026/10/24 18:51");
+        assert_eq!(stored.created_at, created_at);
+        assert_eq!(stored.updated_at, updated_at);
+        assert_eq!(
+            created_at,
+            super::created_at_from_session_id(&session.id).unwrap()
+        );
+        assert_eq!(stored.title, session.title);
     }
 
     #[test]
