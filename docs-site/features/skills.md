@@ -1,54 +1,31 @@
 # Skills
 
-Skills 是给 Agent 的**工作流说明**：告诉它在某类任务里应该按什么顺序、用什么工具。
+Skill 提供任务指令与资源；Tool 提供动作；会话权限决定动作是否允许以及如何审批。Skill 自身没有“可执行权限等级”。
 
-## 内置 Skills
+## 内置与自定义
 
-| Skill | 名称 | 作用 |
-| --- | --- | --- |
-| `note-research` | 知识库研究 | 基于已选知识库发现文档、检索和阅读 Markdown，给出带引用的回答 |
-| `note-rewrite` | 笔记改写 | 改写指定的 Markdown / TXT，通过待确认 diff 交给你决定是否写入 |
-| `draft-from-context` | 上下文草稿 | 基于已选范围创建新的 Markdown 草稿，写入前仍需确认 |
-| `organize-knowledge` | 知识整理 | 给出标签、标题、目录、关联笔记建议，**不直接移动或改写文件** |
+| Skill | 用途 |
+| --- | --- |
+| note-research | 检索、阅读知识库并给出引用 |
+| note-rewrite | 为指定 Markdown/TXT 生成文件变更 |
+| draft-from-context | 根据已选范围提出新草稿 |
+| organize-knowledge | 组织标题、标签、目录与关联建议 |
 
-内置 Skill 是纯指令型工作流，不携带脚本或外部命令。
+内置 Skill 可启停，自定义 Skill 可安装、发现、编辑、删除。自定义主文件放在用户 Skills 目录的包内 SKILL.md，参考、模板和脚本随包保存。安装仅复制资源，不触发脚本。
 
-::: info 内置 Skill 只能启用或禁用
-内置 Skill 不能编辑，也不能删除，只能开关。
-:::
+## 渐进加载
 
-## 启用与注入
+1. 初始上下文仅提供已启用 Skill 的名称、描述和 skill:资源标识，不注入所有正文。
+2. 模型按需用 read target=skill、skillId 加载主指令，指定 path 读取 references、模板或 scripts 内的文本资源。
+3. 用户显式选择与模型主动读取使用相同解析、来源标记和权限校验。内置指令由宿主返回，不伪造本机文件路径。
+4. 基础只读权限可读取启用包的资源；相对路径逃逸、符号链接和 Windows 目录联接点均拒绝。读取脚本不代表允许执行。
+5. 同回合重复资源按版本去重，压缩后恢复已加载指令；禁用或更新后不再复用旧内容。
 
-- 在 **设置 → Skills 能力** 里启用 / 禁用 Skill。
-- 启用的 Skill 会把「名称 + 描述」注入给 Agent，由 Agent 自主判断是否使用。
-- 注入有字符上限（8000 字符），避免装了很多 Skill 后挤占上下文。
-- 没有启用任何 Skill 时，Agent 不会收到 Skill 目录。
+## 脚本与历史包
 
-## 自定义 Skills
+脚本通过通用 exec 执行，无需专用运行清单。只有两种完全权限档可使用 exec；需审批档每次展示准确命令、cwd 与超时，无需审批档自动执行。Plan、IM、定时任务及子 Agent 不开放 exec。
 
-在橘记的用户目录下放置自定义 Skill：
-
-```
-~/.orange/skills/<skill-name>/SKILL.md
-```
-
-`SKILL.md` 是主说明文件，沿用 Codex 的目录化体验。
-
-## 可执行 Skill
-
-需要执行脚本的 Skill 用 `orange-runtime.yaml` 声明入口。执行走 `run` 工具，**可能需要你审批**。
-
-可执行 Skill 需要：
-
-- 会话安全级别为「进阶」及以上。
-- 设置里开启了进阶执行。
-- 完全级别还需要额外开启自主模式。
-
-::: warning IM 会话不能执行 Skill
-`run` 只对本地桌面会话注册，从 IM 发起的会话无法运行 Skill 脚本。
-:::
-
-## 下一步
+旧 agents/orange-runtime.yaml 保留作参考，不赋予能力或触发运行。Skill 包 hash、短时信任授权、执行布尔开关和未接通的域名白名单不再影响运行权限。旧运行与产物待应用记录标记过期并保留副本，请用新工具重新提出操作。
 
 - [Agent 工具](/features/agent-tools)
-- [MCP 服务](/features/mcp)
+- [文件变更与操作审批](/guide/write-safety)

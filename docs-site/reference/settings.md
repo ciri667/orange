@@ -14,7 +14,7 @@
 | [语义检索](/features/semantic-search) | 本地或云端 embedding 与混合检索 |
 | [联网搜索](/features/web-search) | 搜索供应商与密钥 |
 | [内嵌浏览器](/features/browser) | 启用受控 Chromium，下载浏览器内核 |
-| [Agent 权限](/guide/session-and-agent#安全级别) | 安全级别、进阶执行、自主模式等 |
+| [Agent 权限](/guide/session-and-agent#安全级别) | 本地新会话默认四档权限与命令超时；旧执行开关不再授权 |
 | [即时通讯](/features/im) | IM provider 配置、白名单、默认知识库范围 |
 | [Skills 能力](/features/skills) | 启用 / 禁用内置与自定义 Skill |
 | [MCP 服务](/features/mcp) | 外部 MCP 工具服务 |

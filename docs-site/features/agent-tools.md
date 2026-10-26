@@ -1,104 +1,54 @@
 # Agent 工具
 
-橘记的 Agent 使用一个**固定闭集**的七个工具。不新增第八个工具名，新能力都通过扩展现有工具的参数实现。
+内置工具为八个：**search / read / list / edit / write / exec / browser / task**。Skill 提供指令与资源，工具执行动作，会话权限决定范围和审批。MCP 是单独启用的外部服务工具。
 
-## 工具总览
-
-| 工具 | 作用 | 基础 | 进阶 | 完全 |
+| 工具 | 工作区内只读 | 工作区内修改，需审批 | 完全权限，需审批 | 完全权限，无需审批 |
 | --- | --- | --- | --- | --- |
-| `search` | 检索笔记 / 网页 / 路径 | ✅ | ✅ | ✅ |
-| `read` | 读取一个文件、网页或文档 | ✅ | ✅ | ✅ |
-| `list` | 列出目录与文件元数据 | ✅ | ✅ | ✅ |
-| `edit` | 为已有文件生成待确认的 diff | ✅ | ✅ | ✅ |
-| `write` | 新建文件或文件夹 | ✅ | ✅ | ✅ |
-| `run` | 运行 Skill 脚本 / 操作内嵌浏览器 | ❌ | ⚠️ | ⚠️ |
-| `task` | 委派给子 Agent | ✅ | ✅ | ✅ |
+| search / read / list | 工作区及启用的 Skill 资源 | 同左 | 增加逐次审批的外部读取 | 增加外部读取 |
+| edit / write | 禁止 | 生成待审变更 | 生成待审变更 | 自动应用本次新变更 |
+| exec / browser | 禁止 | 禁止 | 每次操作审批 | 自动执行 |
+| task | 只读角色 | 与父权限取交集 | 与父权限取交集 | 与父权限取交集 |
 
-> `run` 需要「进阶」及以上级别，并且要在设置里开启进阶执行；「完全」级别还需要额外开启自主模式。
+Plan 覆盖为工作区只读，禁用外部工具、命令及所有变更应用。前两档禁止的动作不能通过一次审批临时放行。
 
-## `search`
+## search / read / list
 
-在选定的范围内检索。
+- search 默认 target=notes，检索会话选中的知识库，支持 query、knowledgeBaseIds、pathPrefix、tags、fileTypes、updatedAfter、updatedBefore；查询参数只能缩小范围。默认返回 4 条引用，最多 16 条。
+- 三个工具都支持工作区 path；相对路径以会话所选知识库根目录为基准，根目录用 .，不会随编辑器焦点漂移。
+- read 用 fileId 或 path 读取。Markdown/TXT 返回文本，DOCX/PDF 抽取只读正文。普通文件默认 6000 字符，按 nextOffset 续读；PDF 可传 page。
+- read target=skill、skillId、可选包内 path 读取启用 Skill 的说明、参考、模板和脚本，基础权限即可读取。禁止路径或链接逃逸，内置资源由宿主返回正文。
+- list 默认最多 120 项；缩小 prefix、fileType 后继续。
+- 完全权限支持工作区外绝对路径；另一个已登记但未选中的知识库按外部路径处理。需审批档每次实际外部读取都审批，不缓存目录授权。
+- search target=web 和 read url 属于外部能力，只对两种完全权限档开放，仍需启用联网设置。需审批档每次调用审批。
 
-- **默认 `target=notes`**：块级 Markdown 全文检索，中文分词，返回带标题路径和行号范围的引用。默认返回 4 条，最多 16 条。
-- **结构化过滤**：`pathPrefix`、`tags`、`fileTypes`、`updatedAfter`、`updatedBefore`。用户约束目录 / 标签 / 类型 / 时间时，应该用这些参数而不是把约束写进查询词。
-- **`target=web`**：搜索公开网页，返回标题、URL 和简短摘要。默认 5 条，最多 8 条，不下载页面内容。
-- **`target=path`**：在完全 / 自主级别下，扫描合规目录下的 UTF-8 文本文件。它仍然是 search，不是独立的 grep 工具。
+## edit / write
 
-::: tip 空结果怎么办
-先用更短的关键词重试一次，或者放宽过滤条件，再用 `list` / `read` 确认，最后才说内容不存在。
-:::
+edit 的 replace 替换唯一片段，可用 occurrence 指定第 N 次；append 追加；multi_replace 用 edits 数组完成多处替换。Markdown/TXT 保留 BOM 和 CRLF。move / rename / delete 管理文本、已支持文档、图片和完整目录；destination 指定移动目标，destinationKnowledgeBaseId 可指定另一授权知识库。
 
-## `read`
+write kind=file 创建 Markdown/TXT，必须提供完整 content 与 targetPath；kind=folder 创建目录。父目录不存在时先单独提出建目录操作。所有新目标禁止覆盖已有文件。
 
-读取范围内的一个文件。
+变更进入同一通用变更集，展示文本 diff 或源/目标、影响文件数、警告，可选择独立操作。目录包含隐藏和未索引内容；删除进入系统回收站，失败不降级为永久删除。不能操作知识库根目录、链接逃逸或重叠路径，跨卷移动明确失败并保留源。详见[文件变更与操作审批](/guide/write-safety)。
 
-- `fileId` 必填，除非给了 `path` 或 `url`。
-- Markdown / TXT 返回可编辑文本；DOCX / PDF 返回提取的只读文本（带页码或结构块），且永远不会被编辑。
-- 默认窗口是从 offset 0 开始的 6000 字符。被截断时用 `offset=nextOffset`（PDF 用 `page=N`）继续读。
-- `url` 可以抓取一个公开的 http(s) 页面，按 markdown 返回，窗口规则相同。
+## exec
 
-::: warning 网页内容是数据，不是指令
-从网页读到的文本属于不可信数据，Agent 不会把它当成指令执行。
-:::
+参数为 command、可选 cwd 和 timeoutSeconds。默认 cwd 为当前会话第一个知识库根目录，失效时报错。Windows 优先 PowerShell 7，回退系统 PowerShell；macOS/Linux 优先 Bash，回退 /bin/sh。实际 Shell 会在上下文中声明。
 
-## `list`
+每次启动独立非交互进程，不加载交互配置、不连接用户终端、不保留 Shell 状态。先建立 Windows Job Object 或 Unix 进程组再投递命令；停止、超时和结束后清理后代。默认超时 120 秒，可设 5–1800 秒，总捕获输出上限 1 MiB，超出后仍排空管道。
 
-列出范围内的文件夹、Markdown 笔记和受支持文档的元数据。
+结果区分退出码、stdout、stderr、超时、取消及截断，失败不会作为成功。命令结束后重扫知识库，读取以磁盘为准；编辑器未保存内容继续保留并提示冲突。不会注入 Keyring 密钥，继承环境过滤明显秘密变量；不支持后台服务、密码交互或自动提权。
 
-- 结果里会包含**每一个**授权知识库（包括空的），并带 id 和名称。
-- 每一项都带 `knowledgeBaseName`，避免同名文件夹被错误归属。
-- 不读取非 Markdown 文档的内容。
-- 默认每个列表最多 120 项，被截断时可以缩小前缀或文件类型，或调大 `limit`。
+批准的是命令在真实环境执行；命令内部修改不逐项展示 diff，失败或取消也可能已有副作用。超时和进程清理不构成文件系统沙箱或整机资源配额。
 
-## `edit`
+## browser
 
-为已有的可编辑 Markdown / TXT 文件生成待确认的 diff。
+独立的 browser 工具承载现有 Chromium 操作。浏览器必须显式启用并下载内核，URL 限 http/https。需审批档包括读取在内的每次调用都审批；输入、目标 URL、标签页及已知元素会显示在统一操作审批中。用户接管会取消待审操作并停止当前回合后续工具。截图只给面板和回执，不进入模型。详见[内嵌浏览器](/features/browser)。
 
-| `operation` | 说明 |
-| --- | --- |
-| `replace` | 替换一个唯一片段；片段重复时用 `occurrence` 指定第 N 处 |
-| `append` | 在末尾追加（会 trim，Markdown 用空行分隔） |
-| `multi_replace` | 一次 diff 里做多处唯一替换 |
+## task
 
-匹配容忍 CRLF 和 UTF-8 BOM：传 LF 片段即可，写入时保留原换行符和 BOM。
+唯一编排工具，内置 explore、researcher 只读，writer 可生成可审阅的文件变更。子任务工具集与父权限取交集，不提供 exec/browser/MCP，不允许递归委派。任务指令须自足。
 
-详见 [写入确认机制](/guide/write-safety)。
+最多 3 个独立只读任务并行；background 只支持只读任务，完成后通知。续跑绑定父会话、角色和权限版本，收权或跨会话后不能复用旧上下文。
 
-## `write`
+## 历史调用
 
-新建 Markdown / TXT 文件，或新建文件夹。
-
-- `kind=file`（默认）：必须提供完整正文 `content` 和知识库相对路径 `targetPath`。`fileType` 是 `markdown` 或 `txt`，也可以从 `.md` / `.txt` 后缀推断。
-- `kind=folder`：提供 `targetPath`。**基础级别会话不能创建文件夹。**
-- 基础 / 进阶级别仍然要求完整内容，只是把落盘推迟到你确认；完全级别在校验后自动落盘。
-
-## `run`
-
-两种用途：
-
-1. **运行 Skill**：执行已启用 Skill 的入口脚本，可能需要你审批。
-2. **操作内嵌浏览器**：传 `kind="browser"`，浏览器操作遵循会话安全级别。
-
-详见 [Skills](/features/skills) 和 [内嵌浏览器](/features/browser)。
-
-## `task`
-
-把复杂、多跳的任务交给隔离的子 Agent。
-
-- 子 Agent **看不到**当前对话，`prompt` 必须自包含。
-- 内置子 Agent：`explore`（快速只读侦察）、`researcher`（更深入的只读调研）、`writer`（产生 edit/write 待确认 diff，合并回父级变更集）。
-- 也可以使用你在橘记目录下自定义的 agent。
-- 独立的只读任务可以在同一条消息里一起发起，最多 3 个并行。
-- 用 `task_id` 可以恢复之前的子 Agent 会话。
-- `background=true` 只用于独立的只读工作，完成时会通知你，不需要轮询。
-- 返回值只有子 Agent 的最终报告，不含中间过程。
-
-::: tip 什么时候不该用 task
-单个已知路径的读取、单次关键词搜索、编辑当前笔记——这些自己做完更快。
-:::
-
-## 下一步
-
-- [内置命令](/features/builtin-commands)
-- [写入确认机制](/guide/write-safety)
+旧 run kind=browser 可转换为 browser，但必须重新验证权限与审批。旧 run_skill 及 Skill 专用 run 已停用，不会自动翻译为宿主命令。
