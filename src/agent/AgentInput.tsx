@@ -19,6 +19,7 @@ import { logDebug } from "../shared/logger";
 import { getProviderModelSelectionLabel } from "../shared/modelSelection";
 import { ModelCascadeSelector } from "../shared/ModelCascadeSelector";
 import { OverflowTooltipText } from "../shared/OverflowTooltipText";
+import { useDismissable } from "../shared/useDismissable";
 import type {
   AgentSecuritySettings,
   AgentSession,
@@ -369,6 +370,14 @@ export function AgentInput({
   /** 记录高亮已为其重置的查询文本，避免方向键触发的 caret 同步把高亮打回第一项。 */
   const lastSkillPickerQueryRef = useRef<string | null>(null);
 
+  /**
+   * 用户主动关掉弹窗（Esc / 点击输入区以外）时，记录当时的输入文本。
+   *
+   * 关闭后 `/`、`@` token 仍留在输入框里，随后的 caret 同步会判定「可以打开」并把弹窗立刻弹回来；
+   * 记住关闭时的文本即可只在正文真的变了之后才允许重新自动弹出。
+   */
+  const dismissedPickerPromptRef = useRef<{ slash: string | null; mention: string | null }>({ slash: null, mention: null });
+
   /** 打开或关闭 slash picker，并记录不含 prompt/instructions 的可观测日志。 */
   function updateSkillPickerOpen(nextOpen: boolean, source: string, matchCount = slashPickerItems.length) {
     setIsSkillPickerOpen(nextOpen);
@@ -393,7 +402,14 @@ export function AgentInput({
     const nextQuery = resolveSlashSkillQuery(value, cursorIndex);
     const canOpen = Boolean(nextQuery) && selectedSkillIds.length < MAX_EXPLICIT_SKILLS;
 
-    if (canOpen && !isSkillPickerOpen) {
+    // 正文一改（继续输入或删除）就解除「刚被用户关掉」的抑制，允许弹窗正常弹出。
+    if (dismissedPickerPromptRef.current.slash !== null && dismissedPickerPromptRef.current.slash !== value) {
+      dismissedPickerPromptRef.current.slash = null;
+    }
+
+    const isDismissed = dismissedPickerPromptRef.current.slash === value;
+
+    if (canOpen && !isDismissed && !isSkillPickerOpen) {
       updateSkillPickerOpen(true, source);
       lastSkillPickerQueryRef.current = nextQuery?.query ?? "";
       return;
@@ -436,7 +452,14 @@ export function AgentInput({
     const nextQuery = resolveMentionFileQuery(value, cursorIndex);
     const canOpen = Boolean(nextQuery) && selectedMentionedFileIds.length < MAX_MENTIONED_FILES;
 
-    if (canOpen && !isMentionFilePickerOpen) {
+    // 与 `/` 弹窗一致：正文变化后解除抑制，光标同步不再把弹窗立刻弹回来。
+    if (dismissedPickerPromptRef.current.mention !== null && dismissedPickerPromptRef.current.mention !== value) {
+      dismissedPickerPromptRef.current.mention = null;
+    }
+
+    const isDismissed = dismissedPickerPromptRef.current.mention === value;
+
+    if (canOpen && !isDismissed && !isMentionFilePickerOpen) {
       setIsSkillPickerOpen(false);
       updateMentionFilePickerOpen(true, source);
       lastMentionFileQueryRef.current = nextQuery?.query ?? "";
@@ -458,6 +481,30 @@ export function AgentInput({
       }
     }
   }
+
+  /**
+   * 关闭 `/` 与 `@` 弹窗（Esc 或点击输入区以外）。
+   *
+   * 两个弹窗都是无遮罩浮层，此前只能靠「选中候选」或删掉 `/`、`@` token 关闭，
+   * 焦点不在输入框时按 Esc 也收不掉；这里统一收口，并记住关闭时的输入文本（见 dismissedPickerPromptRef）。
+   */
+  function dismissOpenPickers(source: string) {
+    if (isSkillPickerOpen) {
+      dismissedPickerPromptRef.current.slash = prompt;
+      updateSkillPickerOpen(false, source);
+    }
+
+    if (isMentionFilePickerOpen) {
+      dismissedPickerPromptRef.current.mention = prompt;
+      updateMentionFilePickerOpen(false, source);
+    }
+  }
+
+  /** 输入区外壳既是弹窗的定位容器，也是「点击外部关闭 + Esc 关闭」的判定边界。 */
+  const composerRef = useDismissable<HTMLElement>(
+    shouldShowSkillPicker || shouldShowMentionFilePicker,
+    () => dismissOpenPickers("dismiss"),
+  );
 
   /** Agent 输入框变更处理；只根据光标行的 slash token 打开 picker，不记录正文。 */
   const handlePromptChange: ChangeEventHandler<HTMLTextAreaElement> = (event) => {
@@ -659,10 +706,10 @@ export function AgentInput({
       return;
     }
 
+    // 弹窗可见时 Esc 已由 useDismissable 的捕获监听收掉；这里兜住「状态仍标记为打开但未展示」的边缘情况。
     if ((isSkillPickerOpen || isMentionFilePickerOpen) && event.key === "Escape") {
       event.preventDefault();
-      updateSkillPickerOpen(false, "escape");
-      updateMentionFilePickerOpen(false, "escape");
+      dismissOpenPickers("escape");
       return;
     }
 
@@ -827,6 +874,7 @@ export function AgentInput({
   return (
     <footer
       className="agent-composer flex min-w-0 shrink-0 flex-col gap-2 rounded-panel border border-border-strong bg-surface p-3"
+      ref={composerRef}
       onDragOver={handleComposerDragOver}
       onDrop={handleComposerDrop}
     >
