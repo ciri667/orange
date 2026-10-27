@@ -1,4 +1,5 @@
 mod catalog;
+mod builtin;
 pub mod resources;
 mod discover;
 pub mod execution;

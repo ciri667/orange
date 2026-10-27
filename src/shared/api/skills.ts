@@ -19,7 +19,7 @@ import {
   SearchOnlineSkillsPayload,
 } from "../types";
 
-/** 读取 Agent skills，桌面端来自 SQLite，浏览器开发态来自内存模拟状态。 */
+/** 读取 Agent Skills，桌面端从 ~/.orange/skills 扫描，SQLite 只覆盖启停状态。 */
 export async function loadAgentSkills(): Promise<AgentSkill[]> {
   if (!isTauriRuntime()) {
     return cloneAgentSkills(browserMock.agentSkills);

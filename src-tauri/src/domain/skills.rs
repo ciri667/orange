@@ -38,7 +38,7 @@ pub enum SkillInstallConflictStrategy {
     Replace,
 }
 
-/** Agent skill 是可启停的指令型工作流包，首版不携带脚本或外部命令。 */
+/** Agent Skill 是可启停的指令与资源包；脚本资源本身不获得执行权限。 */
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AgentSkill {
@@ -61,49 +61,6 @@ pub struct AgentSkill {
     pub relative_path: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub metadata: Option<HashMap<String, String>>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub runtime_manifest: Option<SkillRuntimeManifest>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub compatibility: Option<SkillCompatibilityReport>,
-}
-
-/** 可执行 Skill 的跨平台运行声明。 */
-#[derive(Clone, Debug, Default, Deserialize, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct SkillRuntimeManifest {
-    pub runtime: String,
-    pub entry: String,
-    #[serde(default)]
-    pub args: Vec<String>,
-    #[serde(default)]
-    pub network_domains: Vec<String>,
-    #[serde(default)]
-    pub credential_aliases: Vec<String>,
-    #[serde(default)]
-    pub artifact_patterns: Vec<String>,
-}
-
-#[derive(Clone, Debug, Deserialize, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct SkillRuntimeStatus {
-    pub runtime: String,
-    pub available: bool,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub executable_path: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub version: Option<String>,
-    pub message: String,
-}
-
-#[derive(Clone, Debug, Deserialize, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct SkillCompatibilityReport {
-    pub status: String,
-    pub package_hash: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub runtime: Option<SkillRuntimeStatus>,
-    #[serde(default)]
-    pub warnings: Vec<String>,
 }
 
 /** skills.sh 目录中的一条可发现 Skill，供设置页「发现」列表展示。 */

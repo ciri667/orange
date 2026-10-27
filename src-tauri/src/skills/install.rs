@@ -378,6 +378,7 @@ fn validate_install_conflict(
     conflict_strategy: &str,
 ) -> Result<(), String> {
     let target_dir = skills_root.join(target_folder_name);
+    crate::file_changes::reject_links(&target_dir)?;
 
     if !target_dir.exists() {
         return Ok(());
@@ -405,6 +406,7 @@ fn install_discovered_skill(
     installed_at: &str,
 ) -> Result<InstalledSkillFiles, String> {
     let target_dir = skills_root.join(&discovered_skill.target_folder_name);
+    crate::file_changes::reject_links(&target_dir)?;
     let staging_dir = skills_root.join(format!(
         ".installing-{}-{}",
         discovered_skill.target_folder_name,

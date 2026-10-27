@@ -167,45 +167,12 @@ export interface AgentSkill {
   source: AgentSkillSource;
   createdAt: string;
   updatedAt: string;
-  /** 自定义 skill 的 SKILL.md 绝对路径，内置 skill 为空。 */
+  /** Skill 的 SKILL.md 绝对路径；内置与自定义都位于 ~/.orange/skills。 */
   path?: string;
   /** 自定义 skill 相对用户 skills 根目录的路径，用于列表展示和排序。 */
   relativePath?: string;
-  /** 自定义 skill 的解析元数据，首版只记录覆盖来源等轻量信息。 */
+  /** SKILL.md 的解析元数据，首版只记录覆盖来源等轻量信息。 */
   metadata?: Record<string, string>;
-  /** 历史运行声明，只作为包内参考，不赋予权限。 */
-  runtimeManifest?: SkillRuntimeManifest;
-  /** 安装包和本机运行时共同决定的兼容性结果。 */
-  compatibility?: SkillCompatibilityReport;
-}
-
-export type SkillRuntimeKind = "python" | "node" | "powershell" | "bash" | "executable";
-
-/** agents/orange-runtime.yaml 的稳定运行声明。 */
-export interface SkillRuntimeManifest {
-  runtime: SkillRuntimeKind;
-  entry: string;
-  args: string[];
-  networkDomains: string[];
-  credentialAliases: string[];
-  artifactPatterns: string[];
-}
-
-export interface SkillRuntimeStatus {
-  runtime: SkillRuntimeKind;
-  available: boolean;
-  executablePath?: string;
-  version?: string;
-  message: string;
-}
-
-export type SkillCompatibilityStatus = "instruction-only" | "ready" | "missing-runtime" | "approval-required" | "partial" | "unsupported";
-
-export interface SkillCompatibilityReport {
-  status: SkillCompatibilityStatus;
-  packageHash: string;
-  runtime?: SkillRuntimeStatus;
-  warnings: string[];
 }
 
 /** 第三方 skill 安装请求；本地来源 source 为空时桌面端会打开系统选择器。 */

@@ -760,7 +760,7 @@ export function SkillsModal({
                     <OverflowTooltipText
                       as="small"
                       className="mt-[3px] block truncate text-xs text-ink-muted"
-                      text={`${sourceLabel(skill.source)} · ${skillCompatibilityLabel(skill)}`}
+                      text={`${sourceLabel(skill.source)} · ${skillResourceLabel(skill)}`}
                       logArea="skills_modal_row_source"
                     />
                   </span>
@@ -937,7 +937,7 @@ function SkillDetail({
         </div>
       </div>
       <p className="m-0 text-sm leading-[1.6] text-[#24323c]">{skill.description}</p>
-      {skill.source === "custom" && (
+      {skill.path && (
         <section className="grid gap-2 rounded-[7px] border border-border-translucent bg-warm-panel p-2.5">
           <h4 className="m-0 text-[13px] text-ink-strong">SKILL.md 路径</h4>
           <OverflowTooltipText as="code" className="[overflow-wrap:anywhere] font-mono text-xs leading-[1.45] text-ink-muted [word-break:break-word]" text={skill.path ?? skill.relativePath ?? "未返回路径"} logArea="skills_modal_detail_path" />
@@ -949,7 +949,6 @@ function SkillDetail({
         <ul className="m-0 max-h-40 overflow-auto pl-5 font-mono text-xs text-ink-muted">
           {(skill.resources?.length ? skill.resources : ["SKILL.md"]).map((resource) => <li key={resource}>{resource}</li>)}
         </ul>
-        {skill.runtimeManifest && <p className="m-0 text-xs text-ink-muted">包内保留旧运行清单，仅作参考资料，不触发运行或赋予权限。</p>}
       </section>
       <div className="flex flex-wrap items-center gap-2">
         <ToggleRow checked={skill.enabled} disabled={isBusy} onChange={(checked) => onToggleSkill(skill.id, checked)}>
@@ -979,8 +978,8 @@ function sourceLabel(source: AgentSkillSource) {
   return labels[source];
 }
 
-/** 将后端兼容性状态转换为简短、可操作的中文标签。 */
-function skillCompatibilityLabel(skill: AgentSkill) {
+/** 根据 Skill 是否带有可按需读取的资源显示简短标签。 */
+function skillResourceLabel(skill: AgentSkill) {
   return skill.resources?.some((path) => path.startsWith("scripts/")) ? "含脚本资源" : "指令与资源";
 }
 

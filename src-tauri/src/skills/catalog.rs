@@ -1,6 +1,4 @@
-use crate::domain::{
-    AgentSkill, SkillCompatibilityReport, SkillRuntimeManifest,
-};
+use crate::domain::AgentSkill;
 use crate::storage::{format_local_datetime, lock_database_writer};
 use rusqlite::{params, Connection};
 use sha2::{Digest, Sha256};
@@ -22,55 +20,17 @@ const ORANGE_HOME_DIRECTORY_NAME: &str = ".orange";
 /** 自定义 skill 的主说明文件名，沿用 Codex 的目录化体验。 */
 pub(super) const SKILL_MARKDOWN_FILE_NAME: &str = "SKILL.md";
 
+/** 内置 Skill 在用户目录中的保留子目录；所有 Skill 最终都从 ~/.orange/skills 读取。 */
+const BUILT_IN_SKILLS_DIRECTORY_NAME: &str = super::builtin::BUILTIN_DIRECTORY;
+
 /** 预留记忆目录名，首版只创建但不读取、不注入 Runtime。 */
 const MEMORY_DIRECTORY_NAME: &str = "memory";
 
 /** Skill 摘要目录注入模型的最大字符数，避免用户安装大量 skill 后挤占上下文。 */
 const MAX_SKILL_CATALOG_PROMPT_CHARS: usize = 8_000;
 
-/** 可执行 Skill 的稳定声明文件；与安装来源元数据分离，便于独立审阅和签名。 */
-pub const ORANGE_RUNTIME_MANIFEST_FILE_NAME: &str = "orange-runtime.yaml";
-
 /** 第三方 skill 安装时保存在 agents 目录中的橘记元数据文件。 */
 pub(super) const ORANGE_INSTALL_METADATA_FILE_NAME: &str = "orange.yaml";
-
-/** 读取全部内置 skill，首版固定为指令型工作流，不携带脚本或外部命令。 */
-pub fn built_in_skills() -> Vec<AgentSkill> {
-    vec![
-        built_in_skill(
-            "skill-note-research",
-            "note-research",
-            "知识库研究",
-            "基于已选知识库发现支持文档、检索和阅读 Markdown 笔记，并给出带引用的回答。",
-            "当用户要求查找、总结、对比或引用本地知识库时，先调用 list、search 或 read 获取依据。search 只覆盖 Markdown；read 可读取授权范围内的 Markdown/TXT，必须提供 fileId；TXT 不产生知识库引用。DOCX/PDF 也用 read 只读抽取。",
-            &["研究", "检索", "引用"],
-        ),
-        built_in_skill(
-            "skill-note-rewrite",
-            "note-rewrite",
-            "笔记改写",
-            "改写用户指定的 Markdown 或 TXT，并通过待确认 diff 交给用户决定是否写入。",
-            "当用户要求润色、改写、压缩、扩写、多处编辑或文末追加 Markdown/TXT 时，先用 read 读取目标，fileId 来自用户本轮 @ 或 search、list 的结果。只能调用 edit 生成待确认 diff；TXT 必须保持纯文本。局部改写用 replace，追加用 append，多处编辑用 multi_replace 和 edits。",
-            &["写作", "改写", "diff"],
-        ),
-        built_in_skill(
-            "skill-draft-from-context",
-            "draft-from-context",
-            "上下文草稿",
-            "基于已选 scope 创建新的 Markdown 草稿，写入前仍需用户确认。",
-            "当用户要求生成新笔记、TXT、清单、总结稿或草稿时，可以先检索或读取相关文件，再调用 write。目标路径必须在当前会话允许的知识库内，fileType 必须为 markdown 或 txt 且扩展名匹配；TXT 正文是纯文本。",
-            &["草稿", "生成", "Markdown"],
-        ),
-        built_in_skill(
-            "skill-organize-knowledge",
-            "organize-knowledge",
-            "知识整理",
-            "给出标签、标题、目录、支持文档和关联笔记建议，不直接移动或改写文件。",
-            "当用户要求整理知识库、补标签、规划目录或建立关联时，优先调用 list 获取目录、Markdown 笔记和已支持普通文档结构；需要正文依据时再调用 search 或 read 读取 Markdown 笔记，然后直接在回复中给出建议。该 skill 不执行文件移动或直接写入；若要落盘请调用 edit 或 write。",
-            &["整理", "标签", "目录"],
-        ),
-    ]
-}
 
 /** 获取用户自定义 skills 根目录，并创建预留 memory 目录。 */
 pub fn user_skills_root(app: &AppHandle) -> Result<PathBuf, String> {
@@ -78,6 +38,7 @@ pub fn user_skills_root(app: &AppHandle) -> Result<PathBuf, String> {
     let skills_root = orange_home.join("skills");
     let memory_root = orange_home.join(MEMORY_DIRECTORY_NAME);
 
+    crate::file_changes::reject_links(&skills_root)?;
     fs::create_dir_all(&skills_root).map_err(|error| {
         format!(
             "无法创建用户 Skills 目录 {}：{error}",
@@ -94,6 +55,14 @@ pub fn user_skills_root(app: &AppHandle) -> Result<PathBuf, String> {
     Ok(skills_root)
 }
 
+/** 从发布资源目录读取 Skill，供单元测试和无 AppHandle 的 prompt 测试复用。 */
+#[cfg(test)]
+pub fn built_in_skills() -> Vec<AgentSkill> {
+    let root = super::builtin::source_root();
+    let mut persisted = HashMap::new();
+    scan_skill_root(&root, &mut persisted, BUILT_IN_SKILL_SOURCE)
+}
+
 /** 从 SQLite 状态覆盖和用户目录读取 skill，并按内置、自定义顺序合并。 */
 pub fn load_agent_skills(
     app: &AppHandle,
@@ -101,33 +70,31 @@ pub fn load_agent_skills(
 ) -> Result<Vec<AgentSkill>, String> {
     let skills_root = user_skills_root(app)?;
 
+    super::builtin::sync(app, &skills_root)?;
+
     load_agent_skills_from_roots(connection, &[skills_root])
 }
 
 /** 从指定目录读取 skill，测试可传入临时根目录模拟 ~/.orange/skills。 */
 pub fn load_agent_skills_from_roots(
     connection: &Connection,
-    custom_skill_roots: &[PathBuf],
+    skill_roots: &[PathBuf],
 ) -> Result<Vec<AgentSkill>, String> {
     let mut persisted_skills = read_persisted_skills(connection)?;
-    let mut skills = built_in_skills()
-        .into_iter()
-        .map(|mut skill| {
-            if let Some(saved_skill) = persisted_skills.remove(&skill.id) {
-                // 内置 skill 的说明始终以代码版本为准，只继承用户启停状态。
-                skill.enabled = saved_skill.enabled;
-                skill.updated_at = saved_skill.updated_at;
-            }
-
-            skill
-        })
-        .collect::<Vec<_>>();
-
-    let mut custom_skills = scan_custom_skills(custom_skill_roots, &mut persisted_skills);
-
+    let mut skills = Vec::new();
+    for root in skill_roots {
+        skills.extend(scan_skill_root(
+            &root.join(BUILT_IN_SKILLS_DIRECTORY_NAME),
+            &mut persisted_skills,
+            BUILT_IN_SKILL_SOURCE,
+        ));
+    }
+    skills.sort_by(|left, right| left.name.cmp(&right.name));
+    let mut custom_skills = scan_custom_skills(skill_roots, &mut persisted_skills);
     custom_skills.sort_by(|left, right| left.relative_path.cmp(&right.relative_path));
     skills.extend(custom_skills);
-
+    let mut seen = HashSet::new();
+    skills.retain(|skill| seen.insert(skill.id.clone()));
     Ok(skills)
 }
 
@@ -148,13 +115,23 @@ pub fn save_user_skill_to_root(
     skills_root: &Path,
     skill: AgentSkill,
 ) -> Result<AgentSkill, String> {
-    if skill.source == BUILT_IN_SKILL_SOURCE || is_built_in_skill_id(&skill.id) {
+    if skill.source == BUILT_IN_SKILL_SOURCE {
         return Err("内置 skill 不能编辑，只能启用或禁用。".to_owned());
     }
 
     let normalized_skill = normalize_custom_skill_input(skill)?;
     let previous_skill_markdown_path =
         resolve_existing_skill_markdown_path(skills_root, &normalized_skill)?;
+    // 不能通过伪造 custom 来源和路径改写内置目录。
+    if let Some(previous) = previous_skill_markdown_path.as_ref() {
+        let relative = previous.strip_prefix(skills_root).map_err(|_| "Skill 路径越界")?;
+        if relative.components().next().is_some_and(|part| {
+            part.as_os_str().to_string_lossy().eq_ignore_ascii_case(BUILT_IN_SKILLS_DIRECTORY_NAME)
+        }) {
+            return Err("内置 Skill 目录不能通过自定义入口编辑。".into());
+        }
+        crate::file_changes::reject_links(previous)?;
+    }
     let previous_skill_id = previous_skill_markdown_path
         .as_ref()
         .map(|path| create_custom_skill_id(&stable_absolute_path(path)));
@@ -214,10 +191,6 @@ pub fn delete_user_skill_from_root(
     skills_root: &Path,
     skill_id: &str,
 ) -> Result<(), String> {
-    if is_built_in_skill_id(skill_id) {
-        return Err("内置 skill 不能删除，请改为禁用。".to_owned());
-    }
-
     let mut persisted_skills = read_persisted_skills(connection)?;
     let custom_skill = scan_custom_skills(&[skills_root.to_path_buf()], &mut persisted_skills)
         .into_iter()
@@ -231,24 +204,6 @@ pub fn delete_user_skill_from_root(
     }
 
     Err("找不到可删除的用户 skill。".to_owned())
-}
-
-/** 启用 Skill 的 location：优先 path，其次 relative_path，内置无路径时用 built-in。 */
-pub fn skill_location(skill: &AgentSkill) -> String {
-    skill
-        .path
-        .as_deref()
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .or_else(|| {
-            skill
-                .relative_path
-                .as_deref()
-                .map(str::trim)
-                .filter(|value| !value.is_empty())
-        })
-        .unwrap_or("built-in")
-        .to_owned()
 }
 
 /** 生成注入模型 system 的启用 skill 目录；无启用项返回空字符串，由调用方整段省略。 */
@@ -346,71 +301,56 @@ pub fn explicit_skill_summary(skills: &[AgentSkill]) -> String {
     )
 }
 
-/** 创建一条内置 skill，统一填充稳定元数据。 */
-fn built_in_skill(
-    id: &str,
-    name: &str,
-    display_name: &str,
-    description: &str,
-    instructions: &str,
-    tags: &[&str],
-) -> AgentSkill {
-    AgentSkill {
-        id: id.to_owned(),
-        name: name.to_owned(),
-        display_name: display_name.to_owned(),
-        description: description.to_owned(),
-        instructions: instructions.to_owned(),
-        resources: vec!["SKILL.md".into()],
-        tags: tags.iter().map(|tag| (*tag).to_owned()).collect(),
-        enabled: true,
-        source: BUILT_IN_SKILL_SOURCE.to_owned(),
-        created_at: "内置".to_owned(),
-        updated_at: "内置".to_owned(),
-        path: None,
-        relative_path: None,
-        metadata: None,
-        runtime_manifest: None,
-        compatibility: None,
-    }
-}
-
 /** 解析用户目录中的自定义 skills；无效 SKILL.md 只跳过并写日志，不阻塞其他 skill。 */
 fn scan_custom_skills(
     roots: &[PathBuf],
     persisted_skills: &mut HashMap<String, AgentSkill>,
 ) -> Vec<AgentSkill> {
-    let mut skills = Vec::new();
+    roots
+        .iter()
+        .flat_map(|root| scan_skill_root(root, persisted_skills, CUSTOM_SKILL_SOURCE))
+        .collect()
+}
 
-    for root in roots {
-        if !root.exists() {
+/** 扫描一个 Skill 根目录；source 由根目录的宿主归属决定，不从用户 payload 推断。 */
+fn scan_skill_root(
+    root: &Path,
+    persisted_skills: &mut HashMap<String, AgentSkill>,
+    source: &str,
+) -> Vec<AgentSkill> {
+    if !root.exists() {
+        return Vec::new();
+    }
+
+    let mut skills = Vec::new();
+    for entry in WalkDir::new(root)
+        .follow_links(false)
+        .into_iter()
+        .filter_entry(|entry| {
+            if source == CUSTOM_SKILL_SOURCE
+                && entry.depth() == 1
+                && entry.file_name().to_string_lossy().eq_ignore_ascii_case(BUILT_IN_SKILLS_DIRECTORY_NAME)
+            {
+                return false;
+            }
+            should_walk_skill_entry(entry)
+        })
+        .filter_map(Result::ok)
+    {
+        if !entry.file_type().is_file() || entry.file_name() != SKILL_MARKDOWN_FILE_NAME {
             continue;
         }
 
-        for entry in WalkDir::new(root)
-            .follow_links(false)
-            .into_iter()
-            .filter_entry(|entry| should_walk_skill_entry(entry))
-            .filter_map(Result::ok)
-        {
-            if !entry.file_type().is_file() || entry.file_name() != SKILL_MARKDOWN_FILE_NAME {
-                continue;
-            }
-
-            // 单个 SKILL.md 解析失败不能影响同目录下其他自定义 skill 的加载。
-            match load_custom_skill(root, entry.path(), persisted_skills) {
-                Ok(skill) => skills.push(skill),
-                Err(error) => {
-                    log::warn!(
-                        target: "skill",
-                        "跳过无效自定义 skill {}：{error}",
-                        entry.path().display()
-                    );
-                }
-            }
+        match load_skill(root, entry.path(), persisted_skills, source) {
+            Ok(skill) => skills.push(skill),
+            Err(error) => log::warn!(
+                target: "skill",
+                "跳过无效 {} Skill {}：{error}",
+                source,
+                entry.path().display()
+            ),
         }
     }
-
     skills
 }
 
@@ -438,14 +378,19 @@ fn portable_path_string(path: &Path) -> String {
     }
 }
 
-/** 从单个 SKILL.md 读取自定义 skill，并合并 SQLite 中的启停覆盖。 */
-pub(super) fn load_custom_skill(
+/** 从单个 SKILL.md 读取指令与资源，并合并 SQLite 中的启停覆盖。 */
+fn load_skill(
     root: &Path,
     skill_markdown_path: &Path,
     persisted_skills: &mut HashMap<String, AgentSkill>,
+    source: &str,
 ) -> Result<AgentSkill, String> {
+    crate::file_changes::reject_links(skill_markdown_path)?;
     let absolute_root = stable_absolute_path(root);
     let absolute_path = stable_absolute_path(skill_markdown_path);
+    if !absolute_path.starts_with(&absolute_root) {
+        return Err("Skill 主文件不在指定目录内。".into());
+    }
     let content = fs::read_to_string(skill_markdown_path)
         .map_err(|error| format!("无法读取 SKILL.md：{error}"))?;
     let parsed_skill = parse_skill_markdown(&content)?;
@@ -477,12 +422,15 @@ pub(super) fn load_custom_skill(
     let skill_dir = skill_markdown_path
         .parent()
         .ok_or_else(|| "无法解析 skill 目录。".to_owned())?;
-    // 旧运行清单只保留为资源元数据，不赋予能力，也不要求本机安装对应运行时。
-    let runtime_manifest = fs::read_to_string(skill_dir.join("agents").join(ORANGE_RUNTIME_MANIFEST_FILE_NAME)).ok().and_then(|raw| serde_yaml::from_str::<SkillRuntimeManifest>(&raw).ok());
-    let compatibility = SkillCompatibilityReport { status: "instruction-only".into(), package_hash: String::new(), runtime: None, warnings: vec![] };
+    let normalized_name = normalize_skill_name(&parsed_skill.name);
+    let id = if source == BUILT_IN_SKILL_SOURCE {
+        format!("skill-{normalized_name}")
+    } else {
+        create_custom_skill_id(&absolute_path)
+    };
     let mut skill = AgentSkill {
-        id: create_custom_skill_id(&absolute_path),
-        name: normalize_skill_name(&parsed_skill.name),
+        id,
+        name: normalized_name,
         display_name: metadata
             .display_name_override
             .or(parsed_skill.display_name)
@@ -492,14 +440,12 @@ pub(super) fn load_custom_skill(
         resources: skill_resource_paths(skill_dir),
         tags: normalize_terms(parsed_skill.tags),
         enabled: true,
-        source: CUSTOM_SKILL_SOURCE.to_owned(),
-        created_at: "自定义".to_owned(),
+        source: source.to_owned(),
+        created_at: if source == BUILT_IN_SKILL_SOURCE { "内置".to_owned() } else { "自定义".to_owned() },
         updated_at: format_local_datetime(),
         path: Some(absolute_path.to_string_lossy().to_string()),
         relative_path: Some(relative_path),
         metadata: Some(metadata_map),
-        runtime_manifest,
-        compatibility: Some(compatibility),
     };
 
     if skill.name.is_empty() {
@@ -507,12 +453,21 @@ pub(super) fn load_custom_skill(
     }
 
     if let Some(saved_skill) = persisted_skills.remove(&skill.id) {
-        // 自定义 skill 正文永远以磁盘为准，只继承用户在 UI 中保存的状态覆盖。
+        // Skill 正文永远以磁盘为准，只继承用户在 UI 中保存的启停状态覆盖。
         skill.enabled = saved_skill.enabled;
         skill.updated_at = saved_skill.updated_at;
     }
 
     Ok(skill)
+}
+
+/** 测试和安装流程仍需要直接读取一个自定义包。 */
+pub(super) fn load_custom_skill(
+    root: &Path,
+    skill_markdown_path: &Path,
+    persisted_skills: &mut HashMap<String, AgentSkill>,
+) -> Result<AgentSkill, String> {
+    load_skill(root, skill_markdown_path, persisted_skills, CUSTOM_SKILL_SOURCE)
 }
 
 /** 自定义 skill 的 frontmatter 解析结果，正文即完整执行说明。 */
@@ -733,6 +688,8 @@ fn write_skill_files(
     let skill_dir = skills_root.join(safe_skill_folder_name(&skill.name)?);
     let skill_markdown_path = skill_dir.join(SKILL_MARKDOWN_FILE_NAME);
 
+    crate::file_changes::reject_links(&skill_markdown_path)?;
+
     move_previous_skill_directory_if_needed(skills_root, previous_skill_markdown_path, &skill_dir)?;
     fs::create_dir_all(&skill_dir)
         .map_err(|error| format!("无法创建 skill 目录 {}：{error}", skill_dir.display()))?;
@@ -802,6 +759,9 @@ fn resolve_existing_skill_markdown_path(
 
 /** 根据 name 生成单级 skill 目录名；name 本身就是目录名，不再从旧路径继承。 */
 pub(super) fn safe_skill_folder_name(name: &str) -> Result<String, String> {
+    if name.eq_ignore_ascii_case(BUILT_IN_SKILLS_DIRECTORY_NAME) {
+        return Err("builtin 是内置 Skill 保留目录，不能作为自定义 Skill 名称。".into());
+    }
     let path = Path::new(name);
 
     if path.components().count() != 1 {
@@ -840,7 +800,7 @@ fn move_previous_skill_directory_if_needed(
     }
 
     if previous_skill_dir.exists() {
-        // 目录迁移保留用户放在 skill 文件夹中的附加资料；是否可执行由运行清单和权限级别决定。
+        // 目录迁移保留用户放在 Skill 文件夹中的附加资料；是否执行由通用 exec 权限决定。
         fs::rename(previous_skill_dir, next_skill_dir).map_err(|error| {
             format!(
                 "无法迁移 skill 目录 {} 到 {}：{error}",
@@ -1069,7 +1029,7 @@ fn stable_absolute_path(path: &Path) -> PathBuf {
     })
 }
 
-/** 获取橘记用户目录，优先 ~/.orange，无法读取 home 时回退 app data。 */
+/** 获取橘记用户目录，优先 ~/.orange，无法读取 home 时回退 app data/.orange。 */
 fn user_orange_home(app: &AppHandle) -> Result<PathBuf, String> {
     if let Some(home_dir) = home_dir() {
         return Ok(home_dir.join(ORANGE_HOME_DIRECTORY_NAME));
@@ -1077,6 +1037,7 @@ fn user_orange_home(app: &AppHandle) -> Result<PathBuf, String> {
 
     app.path()
         .app_data_dir()
+        .map(|path| path.join(ORANGE_HOME_DIRECTORY_NAME))
         .map_err(|error| format!("无法获取应用数据目录：{error}"))
 }
 
@@ -1293,8 +1254,6 @@ fn skill_state_override_payload(skill: &AgentSkill) -> AgentSkill {
         path: None,
         relative_path: None,
         metadata: None,
-        runtime_manifest: None,
-        compatibility: None,
     }
 }
 
@@ -1328,11 +1287,6 @@ fn normalize_terms(terms: Vec<String>) -> Vec<String> {
         .filter(|term| seen_terms.insert(term.to_lowercase()))
         .take(16)
         .collect()
-}
-
-/** 判断 ID 是否属于内置 skill，防止用户通过 payload 伪装覆盖内置定义。 */
-fn is_built_in_skill_id(skill_id: &str) -> bool {
-    built_in_skills().iter().any(|skill| skill.id == skill_id)
 }
 
 #[cfg(test)]
@@ -1383,15 +1337,6 @@ mod tests {
         fs::write(metadata_dir.join("openai.yaml"), yaml).expect("write openai.yaml");
     }
 
-    /** 写入橘记可执行 Skill 运行清单。 */
-    fn write_orange_runtime_yaml(root: &Path, folder: &str, yaml: &str) {
-        let metadata_dir = root.join(folder).join("agents");
-
-        fs::create_dir_all(&metadata_dir).expect("create agents directory");
-        fs::write(metadata_dir.join(ORANGE_RUNTIME_MANIFEST_FILE_NAME), yaml)
-            .expect("write orange runtime manifest");
-    }
-
     /** 从合并列表中过滤自定义 skill，便于测试关注扫描结果。 */
     fn custom_skills(skills: &[AgentSkill]) -> Vec<AgentSkill> {
         skills
@@ -1436,48 +1381,6 @@ mod tests {
         assert!(explicit_skill_prompt(&[]).is_empty());
     }
 
-    /** 缺少运行清单的自定义 Skill 保持纯指令兼容状态。 */
-    #[test]
-    fn custom_skill_without_runtime_manifest_is_instruction_only() {
-        let temp_dir = tempdir().expect("create tempdir");
-        let root = temp_dir.path().join("skills");
-        let connection = test_connection();
-        write_skill_markdown(
-            &root,
-            "plain",
-            &valid_skill_markdown("plain", "纯指令", "只提供说明。"),
-        );
-
-        let skill = custom_skills(&load_agent_skills_from_roots(&connection, &[root]).unwrap())
-            .pop()
-            .unwrap();
-
-        assert!(skill.runtime_manifest.is_none());
-        assert_eq!(skill.compatibility.unwrap().status, "instruction-only");
-    }
-
-    /** 运行清单必须拒绝包外入口路径，防止 Skill 借声明越过安装目录。 */
-    #[test]
-    fn legacy_runtime_manifest_does_not_grant_or_block_instruction_loading() {
-        let temp_dir = tempdir().expect("create tempdir");
-        let root = temp_dir.path().join("skills");
-        let connection = test_connection();
-        write_skill_markdown(
-            &root,
-            "unsafe",
-            &valid_skill_markdown("unsafe", "越界入口", "执行脚本。"),
-        );
-        write_orange_runtime_yaml(
-            &root,
-            "unsafe",
-            "runtime: powershell\nentry: ../outside.ps1\n",
-        );
-
-        let skills = load_agent_skills_from_roots(&connection, &[root]).unwrap();
-
-        assert_eq!(custom_skills(&skills).len(), 1);
-    }
-
     /** 从临时目录加载单个自定义 skill，便于验证扫描后的领域模型。 */
     fn load_custom_skill_from_markdown(name: &str, description: &str) -> AgentSkill {
         let temp_dir = tempdir().expect("create tempdir");
@@ -1512,8 +1415,6 @@ mod tests {
             path: None,
             relative_path: None,
             metadata: None,
-            runtime_manifest: None,
-            compatibility: None,
         }
     }
 
@@ -1715,7 +1616,6 @@ tags:
             .warnings
             .iter()
             .any(|warning| warning.contains("exec") && warning.contains("操作审批")));
-        assert!(!result.warnings.iter().any(|warning| warning.contains("orange-runtime.yaml")));
     }
 
     /** 同名 skill 默认拒绝覆盖；replace 策略才会替换已有目录。 */

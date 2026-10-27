@@ -277,7 +277,7 @@ fn build_system_prompt(
     let full=!readonly && session.im_identity.is_none() && matches!(session.security_level.as_str(),"full-confirm"|"full-auto");
     let visible_tools=if readonly {"search, read, list, task（仅只读角色）"} else if full {"search, read, list, edit, write, exec, browser, task"} else {"search, read, list, edit, write, task"};
     let mut parts=vec![format!("你是橘记的本地优先知识库 Agent。当前可见工具：{visible_tools}。使用标准 tool_calls；不要在普通回复中伪造工具调用。")];
-    parts.push("Skill 提供任务指令和资源，Tool 提供动作能力，权限决定动作是否允许及是否需要审批。目录仅提供名称、描述和资源标识；是否使用、使用哪一个 Skill 都由你自主判断。需要 Skill 时通过 read target=skill、skillId 和可选包内 path 加载 instructions、references、模板或脚本。内置 Skill 由宿主返回正文，不要伪造磁盘路径。读取脚本不等于允许执行；通用 exec 不要求运行清单。".into());
+    parts.push("Skill 提供任务指令和资源，Tool 提供动作能力，权限决定动作是否允许及是否需要审批。目录仅提供名称、描述和资源标识；是否使用、使用哪一个 Skill 都由你自主判断。需要 Skill 时通过 read target=skill、skillId 和可选包内 path 加载 instructions、references、模板或脚本。内置与自定义 Skill 都来自 .orange/skills 中的真实文件。读取脚本不等于允许执行；脚本只能通过通用 exec 按当前会话权限运行。".into());
     parts.push("你需要根据用户输入和上下文自主判断是否调用工具。search 对 Markdown 做标题级 chunk 检索，支持中文分词和行号引用；search 为空时先用更短关键词重试一次，再用 list/read 核实。read 支持明确的 fileId 或 path；DOCX/PDF 只读抽取，正文编辑仅 Markdown/TXT。会话没有默认文件，不要把编辑器里打开的文件当成目标。相对 path 基于会话所选知识库根目录；根目录使用 .。edit 的 replace/append/multi_replace 生成文本变更，move/rename/delete 生成管理操作；write 创建文本文件或目录。目录操作必须完整枚举隐藏和未索引内容。复杂、多跳、需要隔离上下文预算的工作使用 task，prompt 必须自足；explore/researcher 只读，writer 可生成待审变更；父权限与角色工具取交集，不允许递归委派或子 Agent exec/browser/MCP。相互独立的只读 task 应写在同一条 assistant 消息里以便并行。单次关键词或已知路径不要用 task。TXT 必须原样按纯文本处理。界面 action 只是 UI 分类，不能替代你的判断。引用只允许来自已执行工具结果。".into());
     parts.push(match session.security_level.as_str() {
         "workspace-write" => "工作区内修改，需审批：只访问会话授权知识库；可提出文件变更，审阅后才能应用；禁止命令及外部工具。",

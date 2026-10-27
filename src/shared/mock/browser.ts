@@ -395,65 +395,43 @@ export function sortSessionsByCreatedAtDesc(sessions: AgentSession[]) {
   });
 }
 
-/** 浏览器开发态内置 skills，与 Rust 内置定义保持同名同 ID，便于前后端切换验证。 */
-export const browserBuiltInSkills: AgentSkill[] = [
-  {
-    id: "skill-note-research",
-    name: "note-research",
-    displayName: "知识库研究",
-    description: "基于已选知识库发现支持文档、检索和阅读 Markdown 笔记，并给出带引用的回答。",
-    instructions:
-      "当用户要求查找、总结、对比或引用本地知识库时，先调用 list、search 或 read 获取依据。search 只覆盖 Markdown；read 可读取授权范围内的 Markdown/TXT，必须提供 fileId；TXT 不产生知识库引用。DOCX/PDF 也用 read 只读抽取。",
-    tags: ["研究", "检索", "引用"],
+/** 浏览器开发态读取与桌面端相同的 SKILL.md 资源，避免维护第二份 Skill 定义。 */
+const browserBuiltinSkillSources = import.meta.glob<string>("../skills/builtin/**/SKILL.md", {
+  query: "?raw",
+  import: "default",
+  eager: true,
+});
+
+/** 这里只解析发布资源使用的简单标量与标签列表，完整 YAML 解析由桌面后端负责。 */
+function parseBrowserBuiltinSkill(source: string): AgentSkill {
+  const match = source.match(/^---\s*\n([\s\S]*?)\n---\s*\n([\s\S]*)$/);
+  if (!match) throw new Error("内置 Skill 资源缺少 frontmatter");
+  const fields = Object.fromEntries(
+    match[1].split(/\r?\n/).map((line) => {
+      const separator = line.indexOf(":");
+      return [line.slice(0, separator).trim(), line.slice(separator + 1).trim()];
+    }),
+  );
+  const name = fields.name;
+  const tags = (fields.tags?.replace(/^\[|\]$/g, "").split(",") ?? []).map((tag) => tag.trim()).filter(Boolean);
+  return {
+    id: `skill-${name}`,
+    name,
+    displayName: fields.display_name,
+    description: fields.description,
+    instructions: match[2].trim(),
+    resources: ["SKILL.md"],
+    tags,
     enabled: true,
     source: "built-in",
     createdAt: "内置",
     updatedAt: "内置",
-  },
+    path: `~/.orange/skills/builtin/${name}/SKILL.md`,
+    relativePath: `builtin/${name}/SKILL.md`,
+  };
+}
 
-  {
-    id: "skill-note-rewrite",
-    name: "note-rewrite",
-    displayName: "笔记改写",
-    description: "改写用户指定的 Markdown 或 TXT，并通过待确认 diff 交给用户决定是否写入。",
-    instructions:
-      "当用户要求润色、改写、压缩、扩写、多处编辑或文末追加 Markdown/TXT 时，先用 read 读取目标，fileId 来自用户本轮 @ 或 search、list 的结果。只能调用 edit 生成待确认 diff；TXT 必须保持纯文本。局部改写用 replace，追加用 append，多处编辑用 multi_replace 和 edits。",
-    tags: ["写作", "改写", "diff"],
-    enabled: true,
-    source: "built-in",
-    createdAt: "内置",
-    updatedAt: "内置",
-  },
-
-  {
-    id: "skill-draft-from-context",
-    name: "draft-from-context",
-    displayName: "上下文草稿",
-    description: "基于已选 scope 创建新的 Markdown 草稿，写入前仍需用户确认。",
-    instructions:
-      "当用户要求生成新笔记、TXT、清单、总结稿或草稿时，可以先检索或读取相关文件，再调用 write。目标路径必须在当前会话允许的知识库内，fileType 必须为 markdown 或 txt 且扩展名匹配；TXT 正文是纯文本。",
-    tags: ["草稿", "生成", "Markdown"],
-    enabled: true,
-    source: "built-in",
-    createdAt: "内置",
-    updatedAt: "内置",
-  },
-
-  {
-    id: "skill-organize-knowledge",
-    name: "organize-knowledge",
-    displayName: "知识整理",
-    description: "给出标签、标题、目录、支持文档和关联笔记建议，不直接移动或改写文件。",
-    instructions:
-      "当用户要求整理知识库、补标签、规划目录或建立关联时，优先调用 list 获取目录、Markdown 笔记和已支持普通文档结构；需要正文依据时再调用 search 或 read 读取 Markdown 笔记，然后直接在回复中给出建议。该 skill 不执行文件移动或直接写入；若要落盘请调用 edit 或 write。",
-    tags: ["整理", "标签", "目录"],
-    enabled: true,
-    source: "built-in",
-    createdAt: "内置",
-    updatedAt: "内置",
-  },
-
-];
+export const browserBuiltInSkills: AgentSkill[] = Object.values(browserBuiltinSkillSources).map(parseBrowserBuiltinSkill);
 
 /** 浏览器开发态模拟的自定义 skill，验证 UI 能展示 SKILL.md 来源和路径。 */
 export const browserCustomSkills: AgentSkill[] = [

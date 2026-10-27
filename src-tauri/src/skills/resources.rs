@@ -3,7 +3,7 @@ use crate::{domain::AgentSkill, agent_tools::{AgentToolContext, ToolExecutionRes
 use serde_json::{json, Value};
 use std::{fs, path::{Component, Path}};
 
-/** 显式选择与主动 read 共用解析；不为内置 Skill 伪造本机路径。 */
+/** 显式选择与主动 read 共用解析；所有 Skill 都从 ~/.orange/skills 下的包读取。 */
 pub fn read_resource(skills: &[AgentSkill], id: &str, relative: Option<&str>) -> Result<Value, String> {
     let skill = skills.iter().find(|s| s.id == id && s.enabled).ok_or("Skill 不存在或已禁用")?;
     let relative = relative.unwrap_or("SKILL.md");
@@ -11,10 +11,7 @@ pub fn read_resource(skills: &[AgentSkill], id: &str, relative: Option<&str>) ->
     if path.is_absolute() || path.components().any(|c| !matches!(c, Component::Normal(_) | Component::CurDir)) {
         return Err("Skill 资源必须是包内相对路径，禁止路径逃逸。".into());
     }
-    let content = if skill.source == super::BUILT_IN_SKILL_SOURCE {
-        if relative != "SKILL.md" { return Err("该内置 Skill 没有此随附资源。".into()); }
-        skill.instructions.clone()
-    } else {
+    let content = {
         let main = Path::new(skill.path.as_deref().ok_or("Skill 缺少主文件")?);
         let root = main.parent().ok_or("Skill 缺少包目录")?;
         crate::file_changes::reject_links(root)?;

@@ -41,7 +41,8 @@
     "active": true,
     "targets": ["dmg", "app"],
     "resources": {
-      "sidecars/bin/": ""
+      "sidecars/bin/": "",
+      "../src/shared/skills/": "skills/"
     },
     "icon": ["icons/macos-icon.icns"]
   }
