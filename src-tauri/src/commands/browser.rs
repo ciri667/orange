@@ -1,11 +1,12 @@
-//! 浏览器面板的 Tauri 命令：状态、启用/禁用、下载、用户导航、接管与审批。
+//! 浏览器面板的 Tauri 命令：状态、启用/禁用、下载、用户导航与接管。
+//!
+//! 模型侧操作审批走统一的 operation_approval，不再有浏览器专属审批 IPC。
 
 use tauri::{AppHandle, Emitter};
 
 use crate::browser::{
-    self, decide_browser_operation, user_navigate as browser_navigate, user_take_over, BrowserState,
+    self, user_navigate as browser_navigate, user_take_over, BrowserState,
 };
-use crate::domain::BrowserApprovalDecision;
 
 /** 读取浏览器整体状态；面板和设置页共用。 */
 #[tauri::command]
@@ -114,13 +115,4 @@ pub async fn browser_clear_site_data(app: AppHandle) -> Result<(), String> {
 #[tauri::command]
 pub async fn browser_set_screencast(app: AppHandle, enabled: bool) -> Result<(), String> {
     browser::set_screencast_enabled(&app, enabled).await
-}
-
-/** 审批弹窗的裁决入口。 */
-#[tauri::command]
-pub async fn decide_browser_operation_approval(
-    app: AppHandle,
-    decision: BrowserApprovalDecision,
-) -> Result<(), String> {
-    decide_browser_operation(&app, &decision.approval_id, decision.approved).await
 }

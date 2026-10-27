@@ -2,8 +2,6 @@ import { listen } from "@tauri-apps/api/event";
 import { invokeLogged, isTauriRuntime } from "./runtime";
 import { loadMockChromiumStatus, loadMockEmbeddedBrowserStatus, createMockBrowserTab, showMockBrowserTab, closeMockBrowserTab, navigateMockBrowserTab } from "../mock/embeddedBrowser";
 import type {
-  BrowserApprovalDecision,
-  BrowserApprovalRequest,
   BrowserActivity,
   BrowserFrame,
   BrowserReceipt,
@@ -17,7 +15,6 @@ const BROWSER_STATE_EVENT = "browser-state-changed";
 const BROWSER_FRAME_EVENT = "browser-frame";
 const BROWSER_ACTIVITY_EVENT = "browser-activity";
 const BROWSER_RECEIPT_EVENT = "browser-receipt";
-const BROWSER_APPROVAL_EVENT = "browser-operation-approval";
 const BROWSER_DOWNLOAD_PROGRESS_EVENT = "browser-download-progress";
 
 /** 读取浏览器整体状态；面板和设置页共用。 */
@@ -120,14 +117,6 @@ export async function browserSetScreencast(enabled: boolean): Promise<void> {
   return invokeLogged<void>("browser_set_screencast", { enabled });
 }
 
-/** 审批弹窗的裁决入口。 */
-export async function decideBrowserOperation(decision: BrowserApprovalDecision): Promise<void> {
-  if (!isTauriRuntime()) {
-    return;
-  }
-  return invokeLogged<void>("decide_browser_operation_approval", { decision });
-}
-
 /** 订阅浏览器状态变化。 */
 export async function subscribeBrowserState(
   onState: (state: BrowserState) => void,
@@ -166,18 +155,6 @@ export async function subscribeBrowserReceipts(
     return () => undefined;
   }
   return listen<BrowserReceipt>(BROWSER_RECEIPT_EVENT, (event) => onReceipt(event.payload));
-}
-
-/** 订阅进阶级别下的操作审批请求。 */
-export async function subscribeBrowserApprovals(
-  onRequest: (request: BrowserApprovalRequest) => void,
-): Promise<() => void> {
-  if (!isTauriRuntime()) {
-    return () => undefined;
-  }
-  return listen<BrowserApprovalRequest>(BROWSER_APPROVAL_EVENT, (event) =>
-    onRequest(event.payload),
-  );
 }
 
 /** 订阅 Chromium 下载完整状态，包括连接、解压以及成功或失败结果。 */

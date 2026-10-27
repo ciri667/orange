@@ -81,11 +81,6 @@ impl McpManager {
         }
     }
 
-    pub fn decide(&self, approval_id: &str, approved: bool) -> bool {
-        let _ = (approval_id, approved);
-        false // 旧审批 IPC 已停用，统一操作审批拥有唯一授权记录。
-    }
-
     pub async fn wait_initial(&self) {
         let deadline = tokio::time::Instant::now() + Duration::from_secs(TURN_WAIT_SECONDS);
         while tokio::time::Instant::now() < deadline {

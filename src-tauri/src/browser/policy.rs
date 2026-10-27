@@ -106,11 +106,6 @@ pub fn operation_kind(operation: &str) -> Option<BrowserOperationKind> {
     }
 }
 
-/** 进阶级别下非只读操作等待用户确认；完全级自动执行。 */
-pub fn operation_requires_approval(security_level: &str, operation: &str) -> bool {
-    operation_kind(operation).is_some() && security_level == "full-confirm"
-}
-
 /** 浏览器功能只对本机交互会话的进阶/完全级别可见；IM、定时、规划模式一律拒绝。 */
 pub fn session_allows_browser(
     has_im_identity: bool,
@@ -170,12 +165,14 @@ pub fn snapshot_reference_matches(reference: &str, snapshot_id: &str) -> bool {
         .is_some_and(|rest| rest.starts_with('-'))
 }
 
-/** 审计条目的 approval 字段取值。 */
+/**
+ * 审计条目的 approval 字段取值。
+ * 超时/中止不再单独成值：统一操作审批只会在执行前放行或拒绝，
+ * 等待期间的超时与取消一律记 denied。
+ */
 pub const APPROVAL_NOT_REQUIRED: &str = "not-required";
 pub const APPROVAL_GRANTED: &str = "granted";
 pub const APPROVAL_DENIED: &str = "denied";
-pub const APPROVAL_TIMEOUT: &str = "timeout";
-pub const APPROVAL_ABORTED: &str = "aborted";
 
 #[cfg(test)]
 mod tests {

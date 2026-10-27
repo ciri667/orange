@@ -1,14 +1,13 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import type { BrowserActivity, BrowserApprovalRequest, BrowserFrame, BrowserReceipt, BrowserState } from "../shared/types";
-import { browserSetScreencast, browserShowTab, loadBrowserStatus, subscribeBrowserActivity, subscribeBrowserApprovals, subscribeBrowserFrames, subscribeBrowserReceipts, subscribeBrowserState } from "../shared/tauriApi";
+import type { BrowserActivity, BrowserFrame, BrowserReceipt, BrowserState } from "../shared/types";
+import { browserSetScreencast, browserShowTab, loadBrowserStatus, subscribeBrowserActivity, subscribeBrowserFrames, subscribeBrowserReceipts, subscribeBrowserState } from "../shared/tauriApi";
 
-/** 常驻浏览器状态层；切换到会话或终端后仍接收新网页和审批。 */
+/** 常驻浏览器状态层；切换到会话或终端后仍接收新网页、画面、活动提示和操作凭证。 */
 export function useBrowserWorkspace(selectedTabId: string | null, visible: boolean) {
   const [state, setState] = useState<BrowserState | null>(null);
   const [frame, setFrame] = useState<BrowserFrame | null>(null);
   const [activity, setActivity] = useState<BrowserActivity | null>(null);
   const [receipt, setReceipt] = useState<BrowserReceipt | null>(null);
-  const [approval, setApproval] = useState<BrowserApprovalRequest | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [screencast, setScreencast] = useState(true);
@@ -31,7 +30,6 @@ export function useBrowserWorkspace(selectedTabId: string | null, visible: boole
     track(subscribeBrowserState((next) => { if (!disposed) setState(next); }));
     track(subscribeBrowserFrames((next) => { if (!disposed) setFrame(next); }));
     track(subscribeBrowserReceipts((next) => { if (!disposed) setReceipt(next); }));
-    track(subscribeBrowserApprovals((next) => { if (!disposed) setApproval(next); }));
     track(subscribeBrowserActivity((next) => {
       if (disposed) return;
       setActivity(next);
@@ -60,6 +58,6 @@ export function useBrowserWorkspace(selectedTabId: string | null, visible: boole
     return () => { disposed = true; };
   }, [selectedTabId, visible, state?.available, screencast]);
 
-  return { state, frame, activity, receipt, approval, setApproval, error, busy, screencast, setScreencast, runAction };
+  return { state, frame, activity, receipt, error, busy, screencast, setScreencast, runAction };
 }
 export type BrowserWorkspace = ReturnType<typeof useBrowserWorkspace>;

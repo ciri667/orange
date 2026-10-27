@@ -480,11 +480,6 @@ async fn refresh_screencast(app: &AppHandle) -> Result<(), String> {
     Ok(())
 }
 
-/** 历史审批入口不再拥有执行权。 */
-pub async fn decide_browser_operation(_: &AppHandle, _: &str, _: bool) -> Result<(),String> {
-    Err("旧浏览器审批已结束，请使用当前操作审批。".into())
-}
-
 /** 只读已发布的本地缓存，审批之前不发起 CDP 或网络访问。 */
 pub async fn prepare_operation_approval(app: &AppHandle, session: &AgentSession, args: &Value) -> Result<Value,String> {
     crate::permissions::ensure(session,crate::permissions::Operation::ExternalTool)?;

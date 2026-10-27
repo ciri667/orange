@@ -1238,21 +1238,6 @@ export interface McpProbeResult {
   toolNames: string[];
 }
 
-/** 回合中等待用户确认的一次 MCP 调用。 */
-export interface McpApprovalRequest {
-  approvalId: string;
-  sessionId: string;
-  serverName: string;
-  toolName: string;
-  argumentsPreview: string;
-}
-
-/** 前端对确认弹窗的决定。 */
-export interface McpApprovalDecision {
-  approvalId: string;
-  approved: boolean;
-}
-
 /** 浏览器功能设置；默认关闭，启用后需下载固定版本 Chromium。 */
 export interface BrowserFeatureSettings {
   enabled: boolean;
@@ -1318,22 +1303,6 @@ export interface BrowserReceipt {
   y: number;
   url: string;
   createdAt: number;
-}
-
-/** 进阶级别下等待用户确认的浏览器操作请求。 */
-export interface BrowserApprovalRequest {
-  approvalId: string;
-  sessionId: string;
-  operation: string;
-  tabId?: string | null;
-  url?: string | null;
-  elementSummary?: string | null;
-}
-
-/** 前端对浏览器操作确认弹窗的决定。 */
-export interface BrowserApprovalDecision {
-  approvalId: string;
-  approved: boolean;
 }
 
 /** Chromium 安装状态，供设置页展示。 */

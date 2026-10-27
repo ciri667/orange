@@ -36,11 +36,6 @@ pub fn session_exposes_mcp(local_interactive: bool, security_level: &str, plan_m
     !plan_mode && local_interactive && matches!(security_level, "full-confirm" | "full-auto")
 }
 
-/** 完全级别不再打断。其余级别只放行显式标注只读的工具。 */
-pub fn needs_user_approval(security_level: &str, _read_only: bool) -> bool {
-    security_level == "full-confirm"
-}
-
 /** 补齐供应商要求的 object schema，并去掉不会被调用的元字段。 */
 pub fn normalize_input_schema(schema: Value) -> Value {
     let mut object = match schema {
@@ -106,18 +101,6 @@ pub fn project_call(is_error: bool, pieces: &[ContentPiece]) -> ProjectedCall {
     }
 }
 
-/** 确认弹窗里展示的参数预览，避免把超大 JSON 铺满对话框。 */
-pub fn arguments_preview(arguments: &Value) -> String {
-    let text = arguments.to_string();
-    let mut chars = text.chars();
-    let preview: String = chars.by_ref().take(500).collect();
-    if chars.next().is_some() {
-        format!("{preview}…")
-    } else {
-        preview
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -136,13 +119,6 @@ mod tests {
     fn plan_mode_hides_mcp() {
         assert!(!session_exposes_mcp(true, "full-confirm", true));
         assert!(!session_exposes_mcp(true, "full-auto", true));
-    }
-
-    #[test]
-    fn approval_skips_readonly_and_autonomous() {
-        assert!(needs_user_approval("full-confirm", false));
-        assert!(needs_user_approval("full-confirm", true));
-        assert!(!needs_user_approval("full-auto", false));
     }
 
     #[test]

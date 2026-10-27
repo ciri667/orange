@@ -389,7 +389,6 @@ pub fn run() {
             commands::mcp::set_mcp_server_enabled,
             commands::mcp::reload_mcp_servers,
             commands::mcp::test_mcp_server,
-            commands::mcp::decide_mcp_tool_call,
             commands::browser::browser_status,
             commands::terminal::terminal_create,
             commands::terminal::terminal_input,
@@ -407,8 +406,7 @@ pub fn run() {
             commands::browser::browser_user_take_over,
             commands::browser::browser_close_tab,
             commands::browser::browser_clear_site_data,
-            commands::browser::browser_set_screencast,
-            commands::browser::decide_browser_operation_approval
+            commands::browser::browser_set_screencast
         ])
         .build(tauri::generate_context!())
         .expect("failed to build Orange desktop app")

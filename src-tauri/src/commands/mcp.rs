@@ -1,7 +1,7 @@
 use tauri::AppHandle;
 
-use crate::domain::{McpApprovalDecision, McpOverview, McpProbeResult, McpServerDraft};
-use crate::mcp::{self, manager};
+use crate::domain::{McpOverview, McpProbeResult, McpServerDraft};
+use crate::mcp;
 
 /** 读取 MCP 服务器、连接状态和配置错误。 */
 #[tauri::command]
@@ -50,19 +50,4 @@ pub async fn reload_mcp_servers(app: AppHandle) -> Result<McpOverview, String> {
 pub async fn test_mcp_server(app: AppHandle, name: String) -> Result<McpProbeResult, String> {
     let manager = mcp::install(&app).await?;
     manager.probe(&name).await
-}
-
-/** 把进阶级别弹窗的选择送回正在等待的回合。 */
-#[tauri::command]
-pub async fn decide_mcp_tool_call(
-    app: AppHandle,
-    decision: McpApprovalDecision,
-) -> Result<(), String> {
-    let Some(manager) = manager(&app) else {
-        return Err("MCP 还没有启动。".to_owned());
-    };
-    if !manager.decide(&decision.approval_id, decision.approved) {
-        return Err("这次确认已经结束。".to_owned());
-    }
-    Ok(())
 }

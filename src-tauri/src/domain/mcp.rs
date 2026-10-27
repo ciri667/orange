@@ -77,30 +77,3 @@ pub struct McpProbeResult {
     pub message: String,
     pub tool_names: Vec<String>,
 }
-
-/** 回合中等待用户确认的一次 MCP 调用。 */
-#[derive(Clone, Debug, Deserialize, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct McpApprovalRequest {
-    pub approval_id: String,
-    pub session_id: String,
-    pub server_name: String,
-    pub tool_name: String,
-    pub arguments_preview: String,
-}
-
-/** 前端对确认弹窗的决定。 */
-#[derive(Clone, Debug, Deserialize, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct McpApprovalDecision {
-    pub approval_id: String,
-    pub approved: bool,
-}
-
-/** 前端对浏览器操作确认弹窗的决定。 */
-#[derive(Clone, Debug, Deserialize, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct BrowserApprovalDecision {
-    pub approval_id: String,
-    pub approved: bool,
-}

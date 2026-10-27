@@ -46,7 +46,7 @@ export function BrowserPanel({ browser, tabId, active, onRetry }: { browser: Bro
     {browser.receipt?.tabId === tabId && <div className="px-3 py-1 text-xs text-ink-soft">最近操作 {browser.receipt.operation}</div>}
     <footer className="browser-panel-footer">
       <span className="browser-status" aria-live="polite">{activity ? `活动：${activity.activity}` : controlling ? "Agent 正在操作浏览器" : "浏览器空闲"}</span>
-      <Button variant="primary" size="compact" disabled={busy || !state?.available} onClick={() => action(async () => { const next = await browserUserTakeOver(state?.control.sessionId); browser.setApproval(null); return next; })}><Hand size={14} />我来接管</Button>
+      <Button variant="primary" size="compact" disabled={busy || !state?.available} onClick={() => action(() => browserUserTakeOver(state?.control.sessionId))}><Hand size={14} />我来接管</Button>
     </footer>
     {confirmClear && <ConfirmDialog title="清除浏览器站点数据" message="将关闭所有浏览器网页并清除登录状态、Cookie 和缓存。" confirmLabel="清除数据" tone="danger" isBusy={busy} onCancel={() => setConfirmClear(false)} onConfirm={() => action(async () => { await browserClearSiteData(); setConfirmClear(false); return loadBrowserStatus(); })} />}
   </section>;

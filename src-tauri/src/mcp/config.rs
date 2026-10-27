@@ -13,9 +13,6 @@ pub const MAX_TIMEOUT_SECONDS: u64 = 300;
 /** 启动握手和 tools/list 的等待上限。 */
 pub const STARTUP_TIMEOUT_SECONDS: u64 = 30;
 
-/** 进阶级别等待用户确认的上限。 */
-pub const APPROVAL_TIMEOUT_SECONDS: u64 = 300;
-
 /** 回合开始时最多再等首次连接这么久。 */
 pub const TURN_WAIT_SECONDS: u64 = 3;
 

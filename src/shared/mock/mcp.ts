@@ -1,4 +1,4 @@
-import type { McpApprovalRequest, McpOverview, McpProbeResult, McpServerDraft, McpServerView } from "../types";
+import type { McpOverview, McpProbeResult, McpServerDraft, McpServerView } from "../types";
 
 /** 深拷贝，避免调用方拿到 mock 内部引用后绕过命令直接改状态。 */
 function clone<T>(value: T): T {
@@ -203,35 +203,4 @@ export function mockTestMcpServer(name: string): McpProbeResult {
     message: `已连接，发现 ${server.tools.length} 个工具。`,
     toolNames: server.tools.map((tool) => tool.rawName),
   };
-}
-
-/* ---------- 确认事件的浏览器模拟通道 ---------- */
-
-const approvalListeners = new Set<(request: McpApprovalRequest) => void>();
-
-/** 注册确认请求回调；返回取消注册函数。 */
-export function subscribeBrowserMockMcpApproval(listener: (request: McpApprovalRequest) => void): () => void {
-  approvalListeners.add(listener);
-  return () => {
-    approvalListeners.delete(listener);
-  };
-}
-
-/**
- * 触发一次模拟确认请求。
- * 浏览器开发态没有 Tauri 事件，可在 devtools 里执行
- * `window.dispatchEvent(new CustomEvent("orange-mock-mcp-approval", { detail: { approvalId: "demo-1", sessionId: "s1", serverName: "fs-demo", toolName: "write_file", argumentsPreview: '{"path":"a.md"}' } }))`
- * 来验证弹窗流程。
- */
-export function emitBrowserMockMcpApproval(request: McpApprovalRequest): void {
-  approvalListeners.forEach((listener) => listener(request));
-}
-
-if (typeof window !== "undefined") {
-  window.addEventListener("orange-mock-mcp-approval", (event) => {
-    const detail = (event as CustomEvent<McpApprovalRequest>).detail;
-    if (detail && typeof detail.approvalId === "string") {
-      emitBrowserMockMcpApproval(detail);
-    }
-  });
 }

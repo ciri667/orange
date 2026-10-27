@@ -79,21 +79,6 @@ pub struct BrowserReceipt {
     pub created_at: u64,
 }
 
-/** 进阶级别下等待用户确认的浏览器操作请求。 */
-#[derive(Clone, Debug, Deserialize, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct BrowserApprovalRequest {
-    pub approval_id: String,
-    pub session_id: String,
-    pub operation: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub tab_id: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub url: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub element_summary: Option<String>,
-}
-
 /** 审计日志条目：只含 operation、tabId、origin、审批结果、耗时和错误码。 */
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]

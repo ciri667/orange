@@ -2,7 +2,6 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { AgentPanel } from "../agent/AgentPanel";
 import { OperationApprovalDialog } from "../agent/OperationApprovalDialog";
 import { BrowserPanel } from "../browser/BrowserPanel";
-import { BrowserApprovalDialog } from "../browser/BrowserApprovalDialog";
 import { useBrowserWorkspace } from "../browser/useBrowserWorkspace";
 import { TerminalPanel } from "../terminal/TerminalPanel";
 import { useTerminals } from "../terminal/useTerminals";
@@ -1183,7 +1182,6 @@ export function WorkspaceShell() {
           <BrowserPanel browser={browserWorkspace} tabId={selectedRightTab?.kind === "browser" ? selectedRightTab.id : null} active={selectedRightTab?.kind === "browser"} onRetry={() => selectedRightTab?.kind === "browser" && rightActions.retryBrowser(selectedRightTab.id)} />
         </RightPanel>
       </main>
-      <BrowserApprovalDialog browser={browserWorkspace} />
       {isSettingsOpen && (
         <SettingsDrawer
           knowledgeBases={currentSnapshot.knowledgeBases}
