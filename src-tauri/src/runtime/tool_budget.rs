@@ -145,15 +145,8 @@ mod tests {
     }
 
     #[test]
-    fn denied_browser_calls_and_skill_runs_keep_the_default_limit() {
-        for call in [
-            browser_call("failed"),
-            AgentToolCall {
-                name: "run_skill".into(),
-                args: json!({ "skillId": "test-skill" }),
-                ..browser_call("completed")
-            },
-        ] {
+    fn denied_browser_calls_keep_the_default_limit() {
+        for call in [browser_call("failed")] {
             let mut budget = ToolRoundBudget::default();
             for _ in 0..DEFAULT_TOOL_ROUND_LIMIT {
                 assert_eq!(budget.next_phase(), Some(ModelLoopPhase::Tools));

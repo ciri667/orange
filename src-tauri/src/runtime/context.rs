@@ -604,16 +604,6 @@ pub(super) fn render_pending_live_prompt(session: &AgentSession) -> Option<Strin
             change_set.summary
         ));
     }
-    if let Some(execution) = session
-        .pending_execution
-        .as_ref()
-        .filter(|execution| execution.status == "pending")
-    {
-        sections.push(format!(
-            "【当前待确认 Skill 执行】\n以下执行尚未落盘。\n- skill={}\n- command={}",
-            execution.skill_name, execution.command_preview
-        ));
-    }
     (!sections.is_empty()).then(|| sections.join("\n\n"))
 }
 

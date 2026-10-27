@@ -245,55 +245,7 @@ export async function rejectProposedChange(snapshot: WorkspaceSnapshot): Promise
   return invokeLogged<WorkspaceSnapshot>("reject_proposed_change", { payload: { snapshot } });
 }
 
-/** 批准当前会话的 Skill 执行请求；浏览器开发态不模拟系统进程执行。 */
-export async function approveSkillExecution(snapshot: WorkspaceSnapshot): Promise<WorkspaceSnapshot> {
-  if (!isTauriRuntime()) {
-    throw new Error("Skill 隔离执行仅在橘记桌面端可用。");
-  }
-
-  return invokeLogged<WorkspaceSnapshot>("approve_skill_execution", { payload: { snapshot } });
-}
-
-/** 拒绝当前会话的 Skill 执行请求，不启动任何进程。 */
-export async function rejectSkillExecution(snapshot: WorkspaceSnapshot): Promise<WorkspaceSnapshot> {
-  if (!isTauriRuntime()) {
-    return {
-      ...snapshot,
-      sessions: snapshot.sessions.map((session) =>
-        session.id === snapshot.activeSessionId && session.pendingExecution
-          ? { ...session, pendingExecution: { ...session.pendingExecution, status: "rejected" } }
-          : session,
-      ),
-    };
-  }
-
-  return invokeLogged<WorkspaceSnapshot>("reject_skill_execution", { payload: { snapshot } });
-}
-
-/** 应用 Skill 生成的多文件变更集。 */
-export async function applySkillChangeSet(snapshot: WorkspaceSnapshot): Promise<WorkspaceSnapshot> {
-  if (!isTauriRuntime()) {
-    throw new Error("Skill 文件变更集仅在橘记桌面端可用。");
-  }
-  return invokeLogged<WorkspaceSnapshot>("apply_skill_change_set", { payload: { snapshot } });
-}
-
-/** 拒绝 Skill 生成的多文件变更集并清理隔离副本。 */
-export async function rejectSkillChangeSet(snapshot: WorkspaceSnapshot): Promise<WorkspaceSnapshot> {
-  if (!isTauriRuntime()) {
-    return {
-      ...snapshot,
-      sessions: snapshot.sessions.map((session) =>
-        session.id === snapshot.activeSessionId && session.pendingChangeSet
-          ? { ...session, pendingChangeSet: { ...session.pendingChangeSet, status: "rejected" } }
-          : session,
-      ),
-    };
-  }
-  return invokeLogged<WorkspaceSnapshot>("reject_skill_change_set", { payload: { snapshot } });
-}
-
-/** 应用 Agent 直接产出的多文件变更集（如 create_folder），无 Skill 隔离区。 */
+/** 应用 Agent 工具生成的多文件变更集。 */
 export async function applyAgentChangeSet(snapshot: WorkspaceSnapshot): Promise<WorkspaceSnapshot> {
   if (!isTauriRuntime()) {
     throw new Error("Agent 文件变更集仅在橘记桌面端可用。");

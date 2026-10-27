@@ -4,8 +4,6 @@ import { logInfo } from "../shared/logger";
 import { getActiveKnowledgeBase } from "../shared/selectors";
 import {
   applyAgentChangeSet,
-  applySkillChangeSet,
-  approveSkillExecution,
   abortAgentTurn,
   clearAgentTurnPlaceholder,
   listenAgentTurnProgress,
@@ -14,8 +12,6 @@ import {
   loadAppEventLogs,
   loadRequestAuditLogs,
   rejectAgentChangeSet,
-  rejectSkillChangeSet,
-  rejectSkillExecution,
   loadSessions,
   rewindAgentSession,
   runAgentTurn,
@@ -312,10 +308,8 @@ export function useAgentTurn(options: AgentTurnOptions) {
       handlePrepareSessionForDelete: noopAsync,
       handleSubmitPrompt: noopAsync,
       handleEditUserMessageAndRerun: noopAsync,
-      handleApproveSkillExecution: noopAsync,
-      handleRejectSkillExecution: noopAsync,
-      handleApplySkillChangeSet: noopAsync,
-      handleRejectSkillChangeSet: noopAsync,
+      handleApplyChangeSet: noopAsync,
+      handleRejectChangeSet: noopAsync,
       handleToggleSkillChangeOperation: noopAsync,
     };
   }
@@ -953,7 +947,7 @@ export function useAgentTurn(options: AgentTurnOptions) {
     }
 
     const removedCount = session.messages.length - messageIndex - 1;
-    const hasPending = Boolean(session.pendingChange || session.pendingChangeSet || session.pendingExecution);
+    const hasPending = Boolean(session.pendingChange || session.pendingChangeSet);
     const isTurnRunning = inFlightSessionIdsRef.current.has(session.id);
     const runRewind = () => void executeEditUserMessageAndRerun(session.id, target, nextPrompt);
 
@@ -1017,41 +1011,11 @@ export function useAgentTurn(options: AgentTurnOptions) {
     }
   }
 
-  /** 打开设置抽屉时刷新非阻塞诊断信息，避免展示过旧的日志列表。 */
-  async function handleApproveSkillExecution() {
-    beginBusy("正在隔离区运行 Skill...");
+  /** 应用 Agent 工具生成的多文件变更集，完成后使用后端重扫结果替换当前快照。 */
+  async function handleApplyChangeSet() {
+    beginBusy("正在应用文件变更...");
     try {
-      const nextSnapshot = await approveSkillExecution(currentSnapshot);
-      commitTurnSnapshot(nextSnapshot);
-      setNotice(nextSnapshot.sessions.find((session) => session.id === nextSnapshot.activeSessionId)?.pendingChangeSet?.summary ?? "Skill 执行完成。");
-    } catch (error) {
-      setNotice(error instanceof Error ? error.message : String(error));
-    } finally {
-      endBusy();
-    }
-  }
-
-  /** 拒绝待审批执行，明确不创建工作区、不启动进程。 */
-  async function handleRejectSkillExecution() {
-    beginBusy("正在拒绝 Skill 执行...");
-    try {
-      commitTurnSnapshot(await rejectSkillExecution(currentSnapshot));
-      setNotice("已拒绝 Skill 执行。");
-    } catch (error) {
-      setNotice(error instanceof Error ? error.message : String(error));
-    } finally {
-      endBusy();
-    }
-  }
-
-  /** 应用 Skill 多文件变更集，完成后使用后端重扫结果替换当前快照。 */
-  async function handleApplySkillChangeSet() {
-    const isAgentChangeSet = activeSession.pendingChangeSet?.executionId === "agent-direct";
-    beginBusy(isAgentChangeSet ? "正在应用 Agent 文件变更..." : "正在应用 Skill 文件变更...");
-    try {
-      const nextSnapshot = isAgentChangeSet
-        ? await applyAgentChangeSet(currentSnapshot)
-        : await applySkillChangeSet(currentSnapshot);
+      const nextSnapshot = await applyAgentChangeSet(currentSnapshot);
       const touched = collectTouchedFileIds(currentSnapshot, nextSnapshot);
       commitTurnSnapshot(mergeSessionTurn(snapshotRef.current ?? currentSnapshot, nextSnapshot, activeSession.id, {
         dirtyNoteIds: dirtyNoteIdsRef.current, dirtyDocumentIds: dirtyDocumentIdsRef.current,
@@ -1065,16 +1029,13 @@ export function useAgentTurn(options: AgentTurnOptions) {
     }
   }
 
-  /** 拒绝 Skill 或 Agent 多文件变更集；Agent 变更集只清空待确认状态，不触碰 Skill 隔离目录。 */
-  async function handleRejectSkillChangeSet() {
-    const isAgentChangeSet = activeSession.pendingChangeSet?.executionId === "agent-direct";
-    beginBusy(isAgentChangeSet ? "正在拒绝 Agent 文件变更..." : "正在拒绝 Skill 文件变更...");
+  /** 拒绝当前多文件变更集。 */
+  async function handleRejectChangeSet() {
+    beginBusy("正在拒绝文件变更...");
     try {
-      const nextSnapshot = isAgentChangeSet
-        ? await rejectAgentChangeSet(currentSnapshot)
-        : await rejectSkillChangeSet(currentSnapshot);
+      const nextSnapshot = await rejectAgentChangeSet(currentSnapshot);
       commitTurnSnapshot(nextSnapshot);
-      setNotice(isAgentChangeSet ? "已拒绝 Agent 文件变更集。" : "已拒绝 Skill 文件变更集。");
+      setNotice("已拒绝文件变更集。");
     } catch (error) {
       setNotice(error instanceof Error ? error.message : String(error));
     } finally {
@@ -1141,10 +1102,8 @@ export function useAgentTurn(options: AgentTurnOptions) {
     handlePrepareSessionForDelete,
     handleSubmitPrompt,
     handleEditUserMessageAndRerun,
-    handleApproveSkillExecution,
-    handleRejectSkillExecution,
-    handleApplySkillChangeSet,
-    handleRejectSkillChangeSet,
+    handleApplyChangeSet,
+    handleRejectChangeSet,
     handleToggleSkillChangeOperation,
   };
 }

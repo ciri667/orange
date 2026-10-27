@@ -420,7 +420,6 @@ export function rewindSessionToUserMessage(session: AgentSession, messageId: str
     messages,
     pendingChange: undefined,
     pendingChangeSet: undefined,
-    pendingExecution: undefined,
     contextSummary,
     updatedAt: formatLocalDateTime(),
   };

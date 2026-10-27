@@ -239,7 +239,6 @@ pub fn build_schedule_agent_session(job: &ScheduledJob) -> AgentSession {
         messages: Vec::new(),
         pending_change: None,
         pending_change_set: None,
-        pending_execution: None,
         security_level: "workspace-readonly".to_owned(),
             permission_version: 0,
         plan_mode: false,

@@ -16,7 +16,7 @@ Plan 覆盖为工作区只读，禁用外部工具、命令及所有变更应用
 - search 默认 target=notes，检索会话选中的知识库，支持 query、knowledgeBaseIds、pathPrefix、tags、fileTypes、updatedAfter、updatedBefore；查询参数只能缩小范围。默认返回 4 条引用，最多 16 条。
 - 三个工具都支持工作区 path；相对路径以会话所选知识库根目录为基准，根目录用 .，不会随编辑器焦点漂移。
 - read 用 fileId 或 path 读取。Markdown/TXT 返回文本，DOCX/PDF 抽取只读正文。普通文件默认 6000 字符，按 nextOffset 续读；PDF 可传 page。
-- read target=skill、skillId、可选包内 path 读取启用 Skill 的说明、参考、模板和脚本，基础权限即可读取。禁止路径或链接逃逸，内置资源由宿主返回正文。
+- read target=skill、skillId、可选包内 path 读取启用 Skill 的说明、参考、模板和脚本，基础权限即可读取。内置与自定义都读取 `.orange/skills` 中的真实文件，禁止路径或链接逃逸。
 - list 默认最多 120 项；缩小 prefix、fileType 后继续。
 - 完全权限支持工作区外绝对路径；另一个已登记但未选中的知识库按外部路径处理。需审批档每次实际外部读取都审批，不缓存目录授权。
 - search target=web 和 read url 属于外部能力，只对两种完全权限档开放，仍需启用联网设置。需审批档每次调用审批。
@@ -49,6 +49,3 @@ write kind=file 创建 Markdown/TXT，必须提供完整 content 与 targetPath�
 
 最多 3 个独立只读任务并行；background 只支持只读任务，完成后通知。续跑绑定父会话、角色和权限版本，收权或跨会话后不能复用旧上下文。
 
-## 历史调用
-
-旧 run kind=browser 可转换为 browser，但必须重新验证权限与审批。旧 run_skill 及 Skill 专用 run 已停用，不会自动翻译为宿主命令。

@@ -72,8 +72,6 @@ export function AgentPanel({
   onCompactAgentContext,
   contextCompaction,
   onOpenProjectInstruction,
-  onApproveExecution,
-  onRejectExecution,
   onApplyChangeSet,
   onRejectChangeSet,
   onSecurityLevelChange,
@@ -143,8 +141,6 @@ export function AgentPanel({
   /** 最近一次手动整理上下文的回执；只在上下文浮层里展示。 */
   contextCompaction?: AgentContextCompactionReport | null;
   onOpenProjectInstruction: (noteId: string) => void;
-  onApproveExecution: () => void;
-  onRejectExecution: () => void;
   onApplyChangeSet: () => void;
   onRejectChangeSet: () => void;
   onSecurityLevelChange: (level: AgentSession["securityLevel"]) => void;
@@ -224,7 +220,6 @@ export function AgentPanel({
         }}
       />
 
-      {activeSession.pendingExecution && <p className="mx-3 text-xs text-ink-muted">旧 Skill 请求已过期：{activeSession.pendingExecution.skillName}。副本保留，请按新工具流程重新提出操作。</p>}
       <FileChangeSetReview session={activeSession} busy={isComposerBusy} onToggle={onToggleChangeOperation} onApply={onApplyChangeSet} onReject={onRejectChangeSet} />
 
       <AgentInput

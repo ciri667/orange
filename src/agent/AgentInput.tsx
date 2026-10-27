@@ -810,11 +810,7 @@ export function AgentInput({
   /** 权限设置缺失时仍展示基础档，避免输入条因旧设置结构崩溃。 */
   const resolvedAgentSecurity = agentSecurity ?? {
     defaultLevel: "workspace-readonly" as const,
-    advancedExecutionEnabled: false,
-    autonomousModeEnabled: false,
-    resourceLimits: { timeoutSeconds: 120, maxMemoryMb: 512, maxProcesses: 20, maxArtifactMb: 100 },
-    trustedSkillGrants: [],
-    allowedNetworkDomains: [],
+    resourceLimits: { timeoutSeconds: 120 },
   };
 
   const promptPlaceholder = queuedFollowUp

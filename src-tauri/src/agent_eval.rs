@@ -203,7 +203,6 @@ fn eval_snapshot(note_content: String) -> WorkspaceSnapshot {
             messages: Vec::new(),
             pending_change: None,
             pending_change_set: None,
-            pending_execution: None,
             security_level: "workspace-write".to_owned(),
             permission_version: 0,
             plan_mode: false,
@@ -229,7 +228,6 @@ fn eval_snapshot(note_content: String) -> WorkspaceSnapshot {
 mod tests {
     use super::*;
     use crate::agent_tools::MAX_READ_NOTE_CHARS;
-    use crate::domain::AgentSecuritySettings;
 
     /** 检索引用：必须 read（无 AppHandle 时 search 不可用），回复含引用，无写入。 */
     #[test]
@@ -388,46 +386,6 @@ mod tests {
         assert_eq!(result.tool_names, vec!["read".to_owned()]);
         assert_eq!(result.tool_statuses, vec!["failed".to_owned()]);
         assert!(snapshot.sessions[0].pending_change.is_none());
-    }
-
-    /** 基础级别 schema 无 run；进阶 run 在无沙箱时失败且不改知识库。 */
-    #[test]
-    fn harness_basic_schema_has_no_run_and_advanced_run_does_not_write_kb() {
-        let mut snapshot = eval_snapshot("授权正文".to_owned());
-        let original_hash = snapshot.notes[0].content_hash.clone();
-        let mut settings = AgentSecuritySettings::default();
-        settings.advanced_execution_enabled = true;
-        let basic = ToolRegistry::for_session(&snapshot.sessions[0], &settings);
-        assert!(!basic.tool_names().contains(&"run"));
-
-        snapshot.sessions[0].security_level = "full-confirm".to_owned();
-        let advanced = ToolRegistry::for_session(&snapshot.sessions[0], &settings);
-        assert!(advanced.tool_names().contains(&"exec"));
-        assert!(!advanced.tool_names().contains(&"run"));
-
-        let request = eval_request("ask", "跑 skill");
-        let result = run_scripted_tool_loop(
-            &mut snapshot,
-            &request,
-            &advanced,
-            &[
-                scripted_response(
-                    "stop",
-                    "",
-                    vec![scripted_tool_call(
-                        "call-run",
-                        "run",
-                        json!({ "skillId": "skill-note-research" }),
-                    )],
-                ),
-                scripted_response("stop", "需要确认后才能执行 Skill。", vec![]),
-            ],
-        );
-
-        assert_eq!(result.tool_names, vec!["run".to_owned()]);
-        assert_eq!(result.tool_statuses, vec!["failed".to_owned()]);
-        assert!(snapshot.sessions[0].pending_execution.is_none());
-        assert_eq!(snapshot.notes[0].content_hash, original_hash);
     }
 
     /** length 截断的残缺 edit 不得执行，文件系统和 pending 不变。 */

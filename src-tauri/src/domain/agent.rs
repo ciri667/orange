@@ -243,26 +243,6 @@ pub struct ProposedChangeSet {
     pub created_at: String,
 }
 
-/** Skill 命令在真正运行前持久化的审批请求。 */
-#[derive(Clone, Debug, Deserialize, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct SkillExecutionRequest {
-    pub id: String,
-    pub skill_id: String,
-    pub skill_name: String,
-    pub package_hash: String,
-    pub runtime: String,
-    pub command_preview: String,
-    pub args: Vec<String>,
-    pub knowledge_base_ids: Vec<String>,
-    #[serde(default)]
-    pub network_domains: Vec<String>,
-    #[serde(default)]
-    pub credential_aliases: Vec<String>,
-    pub status: String,
-    pub created_at: String,
-}
-
 /** 审阅评论绑定到 diff 的一侧和行号，正文只随会话 payload 传递。 */
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -408,8 +388,6 @@ pub struct AgentSession {
     pub pending_change: Option<ProposedChange>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pending_change_set: Option<ProposedChangeSet>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub pending_execution: Option<SkillExecutionRequest>,
     /** 安全级别按会话固化；IM 仅保留工作区文本草稿及身份绑定确认。 */
     #[serde(default = "default_agent_security_level")]
     pub security_level: String,
@@ -512,9 +490,6 @@ fn default_agent_security_level() -> String { "workspace-readonly".to_owned() }
 fn default_agent_resource_limits() -> AgentResourceLimits {
     AgentResourceLimits {
         timeout_seconds: 120,
-        max_memory_mb: 512,
-        max_processes: 20,
-        max_artifact_mb: 100,
     }
 }
 
@@ -522,9 +497,6 @@ fn default_agent_resource_limits() -> AgentResourceLimits {
 #[serde(rename_all = "camelCase")]
 pub struct AgentResourceLimits {
     pub timeout_seconds: u64,
-    pub max_memory_mb: u64,
-    pub max_processes: u32,
-    pub max_artifact_mb: u64,
 }
 
 impl Default for AgentResourceLimits {
@@ -535,39 +507,18 @@ impl Default for AgentResourceLimits {
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub struct TrustedSkillGrant {
-    pub skill_id: String,
-    pub package_hash: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub expires_at: Option<String>,
-}
-
-#[derive(Clone, Debug, Deserialize, Serialize)]
-#[serde(rename_all = "camelCase")]
 pub struct AgentSecuritySettings {
     #[serde(default = "default_agent_security_level")]
     pub default_level: String,
-    #[serde(default)]
-    pub advanced_execution_enabled: bool,
-    #[serde(default)]
-    pub autonomous_mode_enabled: bool,
     #[serde(default = "default_agent_resource_limits")]
     pub resource_limits: AgentResourceLimits,
-    #[serde(default)]
-    pub trusted_skill_grants: Vec<TrustedSkillGrant>,
-    #[serde(default)]
-    pub allowed_network_domains: Vec<String>,
 }
 
 impl Default for AgentSecuritySettings {
     fn default() -> Self {
         Self {
             default_level: default_agent_security_level(),
-            advanced_execution_enabled: false,
-            autonomous_mode_enabled: false,
             resource_limits: default_agent_resource_limits(),
-            trusted_skill_grants: Vec::new(),
-            allowed_network_domains: Vec::new(),
         }
     }
 }

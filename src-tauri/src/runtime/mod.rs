@@ -1480,7 +1480,7 @@ async fn run_model_loop(
                 model_tool_result_text(&tool_outcome.call, &tool_outcome.payload);
             // 只自动应用本次写工具新生成的操作；read、切档、新回合不能触碰旧 pending。
             if !cancel.is_aborted() && matches!(tool_name.as_str(), "edit" | "write") && tool_outcome.call.status == "completed"
-                && crate::agent_writes::allows_autonomous_auto_apply(&snapshot.sessions[session_index],&agent_security) {
+                && crate::agent_writes::allows_autonomous_auto_apply(&snapshot.sessions[session_index]) {
                 match crate::file_changes::auto_apply_new(app,&mut snapshot,session_index,&previous_operation_ids) {
                     Ok(Some(selected))=> {tool_result_text=json!({"status":"applied","autoApproved":true,"operationIds":selected}).to_string();},
                     Err(error)=> {tool_result_text=json!({"status":"pending_review","reason":error}).to_string();},
@@ -3765,7 +3765,6 @@ mod tests {
                 messages: Vec::new(),
                 pending_change: None,
                 pending_change_set: None,
-                pending_execution: None,
                 security_level: "basic".to_owned(),
             permission_version: 0,
                 plan_mode: false,
@@ -5604,7 +5603,11 @@ mod tests {
         assert_eq!(selection.skills[1].id, "skill-note-rewrite");
         assert!(selection.truncated);
 
-        available_skills[0].enabled = false;
+        available_skills
+            .iter_mut()
+            .find(|skill| skill.id == "skill-note-research")
+            .expect("内置研究 Skill")
+            .enabled = false;
         let error = resolve_explicit_skills(&["skill-note-research".to_owned()], &available_skills)
             .unwrap_err();
 

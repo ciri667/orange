@@ -20,11 +20,11 @@ mod permissions;
 mod operation_approval;
 mod command_exec;
 mod file_changes;
+mod change_sets;
 mod retrieval;
 mod runtime;
 mod scheduler;
 mod skills;
-pub(crate) use skills::execution as skill_execution;
 mod storage;
 mod text_edit;
 mod voice;
@@ -374,10 +374,6 @@ pub fn run() {
             commands::agent::list_active_agent_session_ids,
             commands::agent::clear_agent_turn_placeholder,
             commands::agent::compact_agent_context,
-            commands::agent::approve_skill_execution,
-            commands::agent::reject_skill_execution,
-            commands::agent::apply_skill_change_set,
-            commands::agent::reject_skill_change_set,
             commands::agent::apply_agent_change_set,
             commands::agent::reject_agent_change_set,
             commands::agent::apply_proposed_change,

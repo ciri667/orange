@@ -157,9 +157,6 @@ pub fn save_user_settings(
 ) -> Result<UserSettings, String> {
     let mut normalized_settings = settings.clone();
     if let Ok(persisted_settings) = load_user_settings(app) {
-        // 短时 Skill 信任授权只允许后端执行器写入，普通设置 payload 不能伪造或延长授权。
-        normalized_settings.agent_security.trusted_skill_grants =
-            persisted_settings.agent_security.trusted_skill_grants;
         // 探测状态只由搜索和探测命令写入；切换供应商后旧探测结果必须失效。
         if normalized_settings.web_search.provider == persisted_settings.web_search.provider {
             normalized_settings.web_search.credential_status =
@@ -251,25 +248,8 @@ pub(crate) fn normalize_agent_security_settings(
     settings: &mut crate::domain::AgentSecuritySettings,
 ) {
     settings.default_level = crate::permissions::migrate_level(&settings.default_level);
-    settings.advanced_execution_enabled = false;
-    settings.autonomous_mode_enabled = false;
-    settings.trusted_skill_grants.clear();
-    settings.allowed_network_domains.clear();
-
     settings.resource_limits.timeout_seconds =
         settings.resource_limits.timeout_seconds.clamp(5, 1800);
-    settings.resource_limits.max_memory_mb = settings.resource_limits.max_memory_mb.clamp(64, 4096);
-    settings.resource_limits.max_processes = settings.resource_limits.max_processes.clamp(1, 64);
-    settings.resource_limits.max_artifact_mb =
-        settings.resource_limits.max_artifact_mb.clamp(1, 1024);
-    settings.allowed_network_domains = settings
-        .allowed_network_domains
-        .iter()
-        .map(|domain| domain.trim().to_lowercase())
-        .filter(|domain| !domain.is_empty() && !domain.contains('/') && !domain.contains(':'))
-        .collect::<HashSet<_>>()
-        .into_iter()
-        .collect();
 }
 
 /** 跨会话记忆单条内容允许的最大字符数，避免用户写入过长偏好挤占上下文预算。 */

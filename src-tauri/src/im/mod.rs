@@ -304,7 +304,6 @@ pub(crate) fn build_im_agent_session(
         messages: Vec::new(),
         pending_change: None,
         pending_change_set: None,
-        pending_execution: None,
         security_level: "workspace-write".to_owned(),
             permission_version: 0,
         plan_mode: false,

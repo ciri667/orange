@@ -1193,140 +1193,7 @@ pub async fn reject_proposed_change(
     Ok(snapshot)
 }
 
-/** 批准待执行 Skill；命令在线程池中完成隔离副本、沙箱执行和变更集生成。 */
-#[tauri::command]
-pub async fn approve_skill_execution(
-    app: AppHandle,
-    payload: ChangePayload,
-) -> Result<WorkspaceSnapshot, String> {
-    let execution_app = app.clone();
-    let started_at = Instant::now();
-    let session_id = payload.snapshot.active_session_id.clone();
-    let result = run_blocking("执行已批准 Skill", move || {
-        skill_execution::approve_and_execute(&execution_app, payload.snapshot)
-    })
-    .await;
-
-    logging::write_app_event_best_effort(
-        &app,
-        AppEventBuilder::new(
-            if result.is_ok() {
-                AppLogLevel::Info
-            } else {
-                AppLogLevel::Warn
-            },
-            AppLogCategory::Agent,
-            "approve_skill_execution",
-            if result.is_ok() {
-                "completed"
-            } else {
-                "failed"
-            },
-            if result.is_ok() {
-                "Skill 隔离执行完成。"
-            } else {
-                "Skill 隔离执行失败。"
-            },
-        )
-        .session_id(session_id)
-        .duration(started_at.elapsed()),
-    );
-    result
-}
-
-/** 拒绝待执行 Skill；不创建隔离副本，也不启动进程。 */
-#[tauri::command]
-pub async fn reject_skill_execution(
-    app: AppHandle,
-    payload: ChangePayload,
-) -> Result<WorkspaceSnapshot, String> {
-    let rejection_app = app.clone();
-    let session_id = payload.snapshot.active_session_id.clone();
-    let result = run_blocking("拒绝 Skill 执行", move || {
-        skill_execution::reject_execution(&rejection_app, payload.snapshot)
-    })
-    .await;
-
-    logging::write_app_event_best_effort(
-        &app,
-        AppEventBuilder::new(
-            if result.is_ok() {
-                AppLogLevel::Info
-            } else {
-                AppLogLevel::Warn
-            },
-            AppLogCategory::Agent,
-            "reject_skill_execution",
-            if result.is_ok() {
-                "completed"
-            } else {
-                "failed"
-            },
-            if result.is_ok() {
-                "已拒绝 Skill 执行。"
-            } else {
-                "拒绝 Skill 执行失败。"
-            },
-        )
-        .session_id(session_id),
-    );
-    result
-}
-
-/** 应用当前 Skill 变更集；后端负责全量预检、原子写入与失败回滚。 */
-#[tauri::command]
-pub async fn apply_skill_change_set(
-    app: AppHandle,
-    payload: ChangePayload,
-) -> Result<WorkspaceSnapshot, String> {
-    let change_app = app.clone();
-    let started_at = Instant::now();
-    let session_id = payload.snapshot.active_session_id.clone();
-    let result = run_blocking("应用 Skill 变更集", move || {
-        skill_execution::apply_change_set(&change_app, payload.snapshot)
-    })
-    .await;
-    logging::write_app_event_best_effort(
-        &app,
-        AppEventBuilder::new(
-            if result.is_ok() {
-                AppLogLevel::Info
-            } else {
-                AppLogLevel::Warn
-            },
-            AppLogCategory::Agent,
-            "apply_skill_change_set",
-            if result.is_ok() {
-                "completed"
-            } else {
-                "failed"
-            },
-            if result.is_ok() {
-                "已应用 Skill 文件变更集。"
-            } else {
-                "应用 Skill 文件变更集失败。"
-            },
-        )
-        .session_id(session_id)
-        .duration(started_at.elapsed()),
-    );
-    result
-}
-
-/** 拒绝当前 Skill 变更集并清理隔离副本。 */
-#[tauri::command]
-pub async fn reject_skill_change_set(
-    app: AppHandle,
-    payload: ChangePayload,
-) -> Result<WorkspaceSnapshot, String> {
-    let change_app = app.clone();
-    run_blocking("拒绝 Skill 变更集", move || {
-        skill_execution::reject_change_set(&change_app, payload.snapshot)
-    })
-    .await
-}
-
-/** 应用当前 Agent 直接产出的变更集（无 Skill 执行隔离区）；同样走全量预检、原子写入与回滚。 */
+/** 应用当前 Agent 变更集，按持久化版本逐项校验并写入。 */
 #[tauri::command]
 pub async fn apply_agent_change_set(
     app: AppHandle,
@@ -1336,7 +1203,7 @@ pub async fn apply_agent_change_set(
     let started_at = Instant::now();
     let session_id = payload.snapshot.active_session_id.clone();
     let result = run_blocking("应用 Agent 变更集", move || {
-        skill_execution::apply_agent_change_set(&change_app, payload.snapshot)
+        change_sets::apply_agent_change_set(&change_app, payload.snapshot)
     })
     .await;
     logging::write_app_event_best_effort(
@@ -1366,7 +1233,7 @@ pub async fn apply_agent_change_set(
     result
 }
 
-/** 拒绝当前 Agent 变更集；只清空待确认状态，不触碰 Skill 隔离目录。 */
+/** 拒绝当前 Agent 变更集并保存状态。 */
 #[tauri::command]
 pub async fn reject_agent_change_set(
     app: AppHandle,
@@ -1374,7 +1241,7 @@ pub async fn reject_agent_change_set(
 ) -> Result<WorkspaceSnapshot, String> {
     let change_app = app.clone();
     run_blocking("拒绝 Agent 变更集", move || {
-        skill_execution::reject_agent_change_set(&change_app, payload.snapshot)
+        change_sets::reject_agent_change_set(&change_app, payload.snapshot)
     })
     .await
 }

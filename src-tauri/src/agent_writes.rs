@@ -1,5 +1,5 @@
 use crate::domain::{
-    AgentSecurityLevel, AgentSecuritySettings, AgentSession, Note, ProposedChange,
+    AgentSecurityLevel, AgentSession, Note, ProposedChange,
     WorkspaceDocument, WorkspaceSnapshot,
 };
 use crate::logging::{self, AppEventBuilder, AppLogCategory, AppLogLevel};
@@ -58,26 +58,10 @@ pub fn with_write_paths<T>(
 /** 本地完全级别会话才允许自动落盘；IM 入口永远需要人工确认。 */
 pub fn allows_autonomous_auto_apply(
     session: &AgentSession,
-    _settings: &AgentSecuritySettings,
 ) -> bool {
     !session.plan_mode && session.schedule_identity.is_none() && session.im_identity.is_none()
         && AgentSecurityLevel::parse(&session.security_level).allows_auto_apply()
 
-}
-
-/** 自主模式可对 Agent 直接产出的单文件 pendingChange 自动应用。 */
-pub fn can_auto_apply_pending_change(
-    session: &AgentSession,
-    settings: &AgentSecuritySettings,
-) -> bool {
-    if !allows_autonomous_auto_apply(session, settings) {
-        return false;
-    }
-
-    session
-        .pending_change
-        .as_ref()
-        .is_some_and(|change| change.status == "pending")
 }
 
 /** 确认待写入 diff：校验知识库边界和内容 hash 后原子写回 Markdown/TXT。 */
@@ -546,7 +530,7 @@ fn rewrite_occurrence_apply_error_message(error: OccurrenceReplacementError) -> 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::domain::{AgentSecuritySettings, ImSessionIdentity, ProposedChange};
+    use crate::domain::{ImSessionIdentity, ProposedChange};
 
     fn session_with(level: &str, im: bool, pending: bool) -> AgentSession {
         AgentSession {
@@ -586,7 +570,6 @@ mod tests {
                 diff_stats: None,
             }),
             pending_change_set: None,
-            pending_execution: None,
             security_level: level.to_owned(),
             permission_version: 0,
             plan_mode: false,
@@ -603,38 +586,17 @@ mod tests {
         }
     }
 
-    /** 单文件 pendingChange 只在本地完全级别且总开关打开时自动落盘。 */
+    /** 只有本地完全自动会话可落盘，Plan 与远程身份不能自动写入。 */
     #[test]
-    fn can_auto_apply_pending_change_gate() {
-        let mut settings = AgentSecuritySettings::default();
-        settings.autonomous_mode_enabled = true;
-
-        assert!(can_auto_apply_pending_change(
-            &session_with("full-auto", false, true),
-            &settings
-        ));
-        assert!(!can_auto_apply_pending_change(
-            &session_with("workspace-write", false, true),
-            &settings
-        ));
-        assert!(!can_auto_apply_pending_change(
-            &session_with("workspace-write", false, true),
-            &settings
-        ));
-        assert!(!can_auto_apply_pending_change(
-            &session_with("full-auto", true, true),
-            &settings
-        ));
-        assert!(!can_auto_apply_pending_change(
-            &session_with("full-auto", false, false),
-            &settings
-        ));
-
-        settings.autonomous_mode_enabled = false;
-        assert!(can_auto_apply_pending_change(
-            &session_with("full-auto", false, true),
-            &settings
-        ));
+    fn auto_apply_requires_local_full_auto_session() {
+        assert!(allows_autonomous_auto_apply(&session_with("full-auto", false, true)));
+        for level in ["workspace-readonly", "workspace-write", "full-confirm"] {
+            assert!(!allows_autonomous_auto_apply(&session_with(level, false, true)));
+        }
+        assert!(!allows_autonomous_auto_apply(&session_with("full-auto", true, true)));
+        let mut planning = session_with("full-auto", false, true);
+        planning.plan_mode = true;
+        assert!(!allows_autonomous_auto_apply(&planning));
     }
 
     /** 构造可直接喂给 apply_rewrite_change 的待确认改写。

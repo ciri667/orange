@@ -163,7 +163,8 @@ impl ToolRegistry {
         tool_outcome(canonical_name, canonical_args, result)
     }
 
-    /** 执行模型返回的 tool_call，负责解析 arguments 并复用命名工具分发。 */
+    /** 执行模型返回的 tool_call，负责解析 arguments 并复用命名工具分发；仅脚本化回放测试使用。 */
+    #[cfg(test)]
     pub fn execute_model_tool_call(
         &self,
         context: &mut AgentToolContext<'_>,
@@ -200,7 +201,6 @@ pub(crate) fn remap_tool_call(name: &str, args: Value) -> (&str, Value) {
 /** 已降级为宿主注入的工具：旧名调用返回结构化失败，避免旧模型缓存空转。 */
 pub(crate) fn retired_host_tool_message(name: &str) -> Option<&'static str> {
     match name {
-        "run_skill" | "run" => Some("Skill 专用运行已停用。请用 read target=skill 加载资源，脚本通过 exec 运行并重新审批。"),
         "get_session_summary" | "get_knowledge_base_memory" | "search_session_messages"
         | "read_session_context" => Some(
             "该信息已由宿主注入当前上下文，请直接使用 system 中的工作记忆、待确认变更或跨会话记忆，不要再调用此工具。",

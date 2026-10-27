@@ -679,7 +679,6 @@ fn canonical_running_tool_name(name: &str) -> &str {
         "list_tree" | "list_path" => "list",
         "propose_file_change" | "propose_note_change" => "edit",
         "create_file_draft" | "create_note_draft" | "create_folder" => "write",
-        "run_skill" => "run",
         other => other,
     }
 }

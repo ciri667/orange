@@ -370,7 +370,7 @@ fn update_references(app: &AppHandle, snapshot: &mut WorkspaceSnapshot, source: 
 
 /** 仅在一次成功的 edit/write 后调用，旧 pending 不会随读取、切档或 task 启动被应用。 */
 pub(crate) fn auto_apply_new(app: &AppHandle, snapshot: &mut WorkspaceSnapshot, index: usize, previous: &[String]) -> Result<Option<Vec<String>>,String> {
-    if !crate::agent_writes::allows_autonomous_auto_apply(&snapshot.sessions[index],&AgentSecuritySettings::default()) { return Ok(None); }
+    if !crate::agent_writes::allows_autonomous_auto_apply(&snapshot.sessions[index]) { return Ok(None); }
     let session_id=snapshot.sessions[index].id.clone();
     let Some(set)=snapshot.sessions[index].pending_change_set.as_ref() else {return Ok(None)};
     let set_id=set.id.clone();

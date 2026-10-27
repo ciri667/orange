@@ -35,7 +35,6 @@ pub fn rewind_session_to_user_message(
     session.messages[message_index].content = prompt.to_owned();
     session.pending_change = None;
     session.pending_change_set = None;
-    session.pending_execution = None;
     reconcile_context_summary_after_rewind(session);
 
     if !session.title_customized
@@ -105,7 +104,7 @@ mod tests {
     use super::*;
     use crate::domain::{
         AgentContextSummary, AgentMessage, AgentSession, ImSessionIdentity, ProposedChangeSet,
-        SkillExecutionRequest, WorkspaceSnapshot,
+        WorkspaceSnapshot,
     };
 
     fn test_message(id: &str, role: &str, content: &str) -> AgentMessage {
@@ -137,7 +136,6 @@ mod tests {
             messages,
             pending_change: None,
             pending_change_set: None,
-            pending_execution: None,
             security_level: "basic".to_owned(),
             permission_version: 0,
             plan_mode: false,
@@ -223,7 +221,7 @@ mod tests {
     }
 
     #[test]
-    fn rewind_drops_pending_writes_and_skill_approval() {
+    fn rewind_drops_pending_writes() {
         let mut session = two_turn_session();
         session.pending_change_set = Some(ProposedChangeSet {
             id: "change-set-a".to_owned(),
@@ -235,26 +233,10 @@ mod tests {
             warnings: Vec::new(),
             created_at: "2026/01/01 10:00".to_owned(),
         });
-        session.pending_execution = Some(SkillExecutionRequest {
-            id: "exec-a".to_owned(),
-            skill_id: "skill-a".to_owned(),
-            skill_name: "测试 Skill".to_owned(),
-            package_hash: "hash".to_owned(),
-            runtime: "python".to_owned(),
-            command_preview: "python main.py".to_owned(),
-            args: Vec::new(),
-            knowledge_base_ids: vec!["kb-a".to_owned()],
-            network_domains: Vec::new(),
-            credential_aliases: Vec::new(),
-            status: "pending".to_owned(),
-            created_at: "2026/01/01 10:00".to_owned(),
-        });
-
         rewind_session_to_user_message(&mut session, "user-1", "改过的第一句").unwrap();
 
         assert!(session.pending_change.is_none());
         assert!(session.pending_change_set.is_none());
-        assert!(session.pending_execution.is_none());
     }
 
     #[test]

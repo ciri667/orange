@@ -74,11 +74,7 @@ export const defaultBrowserUserSettings: UserSettings = {
   writeConfirmationRequired: true,
   agentSecurity: {
     defaultLevel: "workspace-readonly",
-    advancedExecutionEnabled: false,
-    autonomousModeEnabled: false,
-    resourceLimits: { timeoutSeconds: 120, maxMemoryMb: 512, maxProcesses: 20, maxArtifactMb: 100 },
-    trustedSkillGrants: [],
-    allowedNetworkDomains: [],
+    resourceLimits: { timeoutSeconds: 120 },
   },
   semanticSearch: { ...defaultSemanticSearchSettings },
   webSearch: {
@@ -723,8 +719,6 @@ export function cloneUserSettings(settings: UserSettings): UserSettings {
     agentSecurity: {
       ...settings.agentSecurity,
       resourceLimits: { ...settings.agentSecurity.resourceLimits },
-      trustedSkillGrants: settings.agentSecurity.trustedSkillGrants.map((grant) => ({ ...grant })),
-      allowedNetworkDomains: [...settings.agentSecurity.allowedNetworkDomains],
     },
     webSearch: { ...settings.webSearch },
     semanticSearch: { ...defaultSemanticSearchSettings, ...settings.semanticSearch },

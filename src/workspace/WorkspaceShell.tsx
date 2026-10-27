@@ -457,10 +457,8 @@ export function WorkspaceShell() {
     handlePrepareSessionForDelete,
     handleSubmitPrompt,
     handleEditUserMessageAndRerun,
-    handleApproveSkillExecution,
-    handleRejectSkillExecution,
-    handleApplySkillChangeSet,
-    handleRejectSkillChangeSet,
+    handleApplyChangeSet,
+    handleRejectChangeSet,
     handleToggleSkillChangeOperation,
   } = useAgentTurn({
     snapshot,
@@ -892,10 +890,8 @@ export function WorkspaceShell() {
         onCompactAgentContext={handleCompactAgentContext}
         contextCompaction={contextCompaction}
         onOpenProjectInstruction={handleSelectNote}
-        onApproveExecution={handleApproveSkillExecution}
-        onRejectExecution={handleRejectSkillExecution}
-        onApplyChangeSet={handleApplySkillChangeSet}
-        onRejectChangeSet={handleRejectSkillChangeSet}
+        onApplyChangeSet={handleApplyChangeSet}
+        onRejectChangeSet={handleRejectChangeSet}
         onSecurityLevelChange={handleSessionSecurityLevelChange}
         onPlanModeChange={handleSessionPlanModeChange}
         onExecutePlan={() =>
@@ -1170,7 +1166,7 @@ export function WorkspaceShell() {
           items={rightTabs.tabs.map<RightPanelTabItem>((tab) => {
             if (tab.kind === "session") {
               const session = currentSnapshot.sessions.find((item) => item.id === tab.id);
-              return { tab, title: session?.title ?? "会话", status: inFlightSessionIds.includes(tab.id) || queuedSessionIds.includes(tab.id) ? "运行中" : session?.pendingChange?.status === "pending" || session?.pendingChangeSet?.status === "pending" || session?.pendingExecution?.status === "pending" ? "待确认" : session?.messages.at(-1)?.role === "assistant" ? "已完成" : undefined };
+              return { tab, title: session?.title ?? "会话", status: inFlightSessionIds.includes(tab.id) || queuedSessionIds.includes(tab.id) ? "运行中" : session?.pendingChange?.status === "pending" || session?.pendingChangeSet?.status === "pending" ? "待确认" : session?.messages.at(-1)?.role === "assistant" ? "已完成" : undefined };
             }
             if (tab.kind === "terminal") {
               const terminal = terminals.get(tab.id);

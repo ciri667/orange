@@ -31,7 +31,7 @@ pub(super) use crate::domain::{
 pub(super) use crate::logging::{self, AppEventBuilder, AppLogCategory, AppLogLevel};
 pub(super) use crate::model_provider::{self, ProviderTemplate};
 pub(super) use crate::runtime;
-pub(super) use crate::skill_execution;
+pub(super) use crate::change_sets;
 pub(super) use crate::skills;
 pub(super) use crate::storage;
 

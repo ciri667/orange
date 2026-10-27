@@ -13,7 +13,7 @@ export type AgentSecurityLevel = "workspace-readonly" | "workspace-write" | "ful
 /** Markdown 编辑器视图模式，控制编辑、预览和分屏布局。 */
 export type MarkdownViewMode = "edit" | "preview" | "split";
 
-/** Agent 工具名称。闭集短名是 schema 对外名；旧名保留以便历史会话轨迹仍能展示。 */
+/** Agent 工具名称；运行时只允许这组闭集工具。 */
 export type AgentToolName =
   | "activate_skill"
   | "skill_context"
@@ -27,7 +27,6 @@ export type AgentToolName =
   | "write"
   | "exec"
   | "browser"
-  | "run"
   | "task"
   | "search_notes"
   | "read_file"
@@ -37,7 +36,6 @@ export type AgentToolName =
   | "get_session_summary"
   | "search_session_messages"
   | "read_session_context"
-  | "run_skill"
   | "create_folder"
   | "list_path"
   | "read_path"
@@ -607,44 +605,13 @@ export interface ProposedChangeSet {
   createdAt: string;
 }
 
-export type SkillExecutionStatus = "pending" | "running" | "completed" | "failed" | "rejected" | "expired";
-
-/** 历史 Skill 执行请求，仅用于显示过期记录，不再执行。 */
-export interface SkillExecutionRequest {
-  id: string;
-  skillId: string;
-  skillName: string;
-  packageHash: string;
-  runtime: SkillRuntimeKind;
-  commandPreview: string;
-  args: string[];
-  knowledgeBaseIds: string[];
-  networkDomains: string[];
-  credentialAliases: string[];
-  status: SkillExecutionStatus;
-  createdAt: string;
-}
-
 export interface AgentResourceLimits {
   timeoutSeconds: number;
-  maxMemoryMb: number;
-  maxProcesses: number;
-  maxArtifactMb: number;
-}
-
-export interface TrustedSkillGrant {
-  skillId: string;
-  packageHash: string;
-  expiresAt?: string;
 }
 
 export interface AgentSecuritySettings {
   defaultLevel: AgentSecurityLevel;
-  advancedExecutionEnabled: boolean;
-  autonomousModeEnabled: boolean;
   resourceLimits: AgentResourceLimits;
-  trustedSkillGrants: TrustedSkillGrant[];
-  allowedNetworkDomains: string[];
 }
 
 /** Agent 会话是上下文容器，绑定知识库范围、笔记、消息和待确认写入。 */
@@ -667,9 +634,8 @@ export interface AgentSession {
   pinnedNoteIds: string[];
   messages: AgentMessage[];
   pendingChange?: ProposedChange;
-  /** 新执行链使用批量变更集；旧 pendingChange 保留兼容单文件审阅。 */
+  /** Agent 工具生成的批量变更集，等待用户审阅。 */
   pendingChangeSet?: ProposedChangeSet;
-  pendingExecution?: SkillExecutionRequest;
   securityLevel: AgentSecurityLevel;
   permissionVersion?: number;
   /** 规划模式开关：开启后 Agent 只用只读工具先出执行计划，用户确认后才执行。IM/定时会话恒为 false。 */

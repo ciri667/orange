@@ -53,10 +53,6 @@ pub(crate) fn normalize_session_timestamps(session: &mut AgentSession) {
             .pending_change_set
             .as_ref()
             .map(|change| change.created_at.as_str()),
-        session
-            .pending_execution
-            .as_ref()
-            .map(|execution| execution.created_at.as_str()),
     ]
     .into_iter()
     .flatten()
@@ -474,7 +470,6 @@ pub fn save_session(
         };
         session.knowledge_base_ids = existing.knowledge_base_ids;
         session.im_identity = existing.im_identity;
-        session.pending_execution = existing.pending_execution;
         session.pending_change_set = match (existing.pending_change_set, session.pending_change_set)
         {
             (Some(mut trusted), Some(draft)) if trusted.id == draft.id => {
@@ -501,7 +496,6 @@ pub fn save_session(
         session.schedule_identity = None;
         session.pending_change = None;
         session.pending_change_set = None;
-        session.pending_execution = None;
     }
 
     if let Some(index) = snapshot
@@ -988,7 +982,6 @@ mod tests {
             messages: Vec::new(),
             pending_change: None,
             pending_change_set: None,
-            pending_execution: None,
             security_level: "basic".to_owned(),
             permission_version: 0,
             plan_mode: false,
@@ -1155,21 +1148,15 @@ mod tests {
     }
 
     #[test]
-    fn legacy_execution_and_artifacts_expire_idempotently_without_losing_records() {
+    fn legacy_change_set_expires_idempotently_without_losing_records() {
         for status in ["pending", "partial"] {
             let mut session = test_session("legacy-migration");
-            session.pending_execution = Some(serde_json::from_value(serde_json::json!({
-                "id":"exec-old", "skillId":"old", "skillName":"旧 Skill", "packageHash":"hash",
-                "runtime":"python", "commandPreview":"old.py", "args":[], "knowledgeBaseIds":["kb-a"],
-                "status":"running", "createdAt":"t"
-            })).unwrap());
             session.pending_change_set = Some(serde_json::from_value(serde_json::json!({
-                "id":"artifacts-old", "executionId":"exec-old", "skillId":"old", "status":status,
+                "id":"artifacts-old", "executionId":"legacy", "skillId":"agent", "status":status,
                 "summary":"保留副本", "operations":[], "createdAt":"t"
             })).unwrap());
             migrate_session_authority(&mut session);
             assert_eq!(session.security_level,"workspace-write");
-            assert_eq!(session.pending_execution.as_ref().unwrap().status,"expired");
             assert_eq!(session.pending_change_set.as_ref().unwrap().status,"expired");
             assert_eq!(session.pending_change_set.as_ref().unwrap().id,"artifacts-old");
             let migrated = serde_json::to_value(&session).unwrap();
@@ -1282,13 +1269,10 @@ pub(crate) fn migrate_session_authority(session: &mut AgentSession) {
     session.security_level = crate::permissions::migrate_level(&session.security_level);
     if session.im_identity.is_some() { session.security_level = "workspace-write".into(); session.plan_mode = false; }
     if session.schedule_identity.is_some() { session.security_level = "workspace-readonly".into(); session.plan_mode = false; }
-    if let Some(execution) = session.pending_execution.as_mut() {
-        if matches!(execution.status.as_str(), "pending" | "running") { execution.status = "expired".into(); }
-    }
     if let Some(set) = session.pending_change_set.as_mut() {
         if set.execution_id != crate::domain::AGENT_DIRECT_EXECUTION_ID && matches!(set.status.as_str(), "pending" | "partial") {
             set.status = "expired".into();
-            set.warnings.push("旧 Skill 运行链路已停用；副本保留，请用新工具重新提出操作。".into());
+            set.warnings.push("历史来源的变更集已失效；副本保留，请重新提出操作。".into());
         }
     }
 }

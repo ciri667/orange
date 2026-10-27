@@ -24,7 +24,6 @@ const CANONICAL_TOOL_NAMES: Partial<Record<string, AgentToolName>> = {
   create_folder: "write",
   list_path: "list",
   read_path: "read",
-  run_skill: "run",
 };
 
 /** 把持久化轨迹里的旧工具名收成闭集短名。 */
@@ -54,7 +53,6 @@ const TOOL_LABELS: Partial<Record<string, string>> = {
   exec: "执行命令",
   browser: "操作浏览器",
   run: "历史运行记录",
-  run_skill: "旧 Skill 运行（已停用）",
   create_folder: "创建文件夹",
   edit: "编辑了文件",
   propose_file_change: "编辑了文件",
@@ -272,7 +270,6 @@ const TOOL_KIND_LABELS: Partial<Record<string, string>> = {
   search_session_messages: "会话",
   read_session_context: "会话",
   run: "Skill",
-  run_skill: "Skill",
   create_folder: "建夹",
   edit: "编辑",
   propose_file_change: "编辑",

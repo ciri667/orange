@@ -100,7 +100,6 @@ mod tests {
                 messages: Vec::new(),
                 pending_change: None,
                 pending_change_set: None,
-                pending_execution: None,
                 security_level: "workspace-write".to_owned(),
             permission_version: 0,
                 plan_mode: false,
@@ -247,9 +246,7 @@ mod tests {
     #[test]
     fn plan_mode_session_omits_write_and_skill_tools() {
         let mut snapshot = tool_test_snapshot("正文内容足够用于测试。".to_owned());
-        let mut settings = AgentSecuritySettings::default();
-        settings.advanced_execution_enabled = true;
-        settings.autonomous_mode_enabled = true;
+        let settings = AgentSecuritySettings::default();
         snapshot.sessions[0].plan_mode = true;
 
         for level in ["workspace-write", "workspace-write", "full-auto"] {
@@ -329,9 +326,7 @@ mod tests {
     #[test]
     fn closed_set_schema_never_exposes_split_tool_names() {
         let mut snapshot = tool_test_snapshot("正文内容足够用于测试。".to_owned());
-        let mut settings = AgentSecuritySettings::default();
-        settings.advanced_execution_enabled = true;
-        settings.autonomous_mode_enabled = true;
+        let settings = AgentSecuritySettings::default();
         for level in ["workspace-write", "workspace-write", "full-auto"] {
             snapshot.sessions[0].security_level = level.to_owned();
             let names = ToolRegistry::for_session(&snapshot.sessions[0], &settings).tool_names();
@@ -339,7 +334,6 @@ mod tests {
                 "create_folder",
                 "list_path",
                 "read_path",
-                "run_skill",
                 "search_notes",
                 "read_file",
                 "propose_file_change",
@@ -360,8 +354,7 @@ mod tests {
         let mut snapshot = tool_test_snapshot("正文内容足够用于测试。".to_owned());
         snapshot.knowledge_bases[0].path = kb_root.path().to_string_lossy().into_owned();
         snapshot.sessions[0].security_level = "workspace-write".to_owned();
-        let mut settings = AgentSecuritySettings::default();
-        settings.advanced_execution_enabled = true;
+        let settings = AgentSecuritySettings::default();
         let registry = ToolRegistry::for_session(&snapshot.sessions[0], &settings);
         let request = tool_test_request("create", "建文件夹");
         let mut context = tool_test_context(&mut snapshot, &request);
@@ -392,8 +385,7 @@ mod tests {
         let mut snapshot = tool_test_snapshot("正文内容足够用于测试。".to_owned());
         snapshot.knowledge_bases[0].path = kb_root.path().to_string_lossy().into_owned();
         snapshot.sessions[0].security_level = "workspace-write".to_owned();
-        let mut settings = AgentSecuritySettings::default();
-        settings.advanced_execution_enabled = true;
+        let settings = AgentSecuritySettings::default();
         let registry = ToolRegistry::for_session(&snapshot.sessions[0], &settings);
         let request = tool_test_request("create", "建文件夹");
         let mut context = tool_test_context(&mut snapshot, &request);
@@ -422,8 +414,7 @@ mod tests {
     fn create_folder_rejects_unsafe_paths_and_outside_scope() {
         let mut snapshot = tool_test_snapshot("正文内容足够用于测试。".to_owned());
         snapshot.sessions[0].security_level = "workspace-write".to_owned();
-        let mut settings = AgentSecuritySettings::default();
-        settings.advanced_execution_enabled = true;
+        let settings = AgentSecuritySettings::default();
         let registry = ToolRegistry::for_session(&snapshot.sessions[0], &settings);
         let request = tool_test_request("create", "建文件夹");
         let mut context = tool_test_context(&mut snapshot, &request);
@@ -460,9 +451,7 @@ mod tests {
         let mut snapshot = tool_test_snapshot("正文内容足够用于测试。".to_owned());
         snapshot.knowledge_bases[0].path = kb_root.path().to_string_lossy().into_owned();
         snapshot.sessions[0].security_level = "full-auto".to_owned();
-        let mut settings = AgentSecuritySettings::default();
-        settings.advanced_execution_enabled = true;
-        settings.autonomous_mode_enabled = true;
+        let settings = AgentSecuritySettings::default();
         let registry = ToolRegistry::for_session(&snapshot.sessions[0], &settings);
         let request = tool_test_request("create", "建外部文件夹");
         let mut context = tool_test_context(&mut snapshot, &request);
@@ -491,9 +480,7 @@ mod tests {
         let mut snapshot = tool_test_snapshot("正文内容足够用于测试。".to_owned());
         snapshot.knowledge_bases[0].path = kb_root.path().to_string_lossy().into_owned();
         snapshot.sessions[0].security_level = "full-auto".to_owned();
-        let mut settings = AgentSecuritySettings::default();
-        settings.advanced_execution_enabled = true;
-        settings.autonomous_mode_enabled = true;
+        let settings = AgentSecuritySettings::default();
         let registry = ToolRegistry::for_session(&snapshot.sessions[0], &settings);
         let request = tool_test_request("create", "建知识库文件夹");
         let mut context = tool_test_context(&mut snapshot, &request);
@@ -523,9 +510,7 @@ mod tests {
         let mut snapshot = tool_test_snapshot("正文内容足够用于测试。".to_owned());
         snapshot.knowledge_bases[0].path = kb_root.path().to_string_lossy().into_owned();
         snapshot.sessions[0].security_level = "full-auto".to_owned();
-        let mut settings = AgentSecuritySettings::default();
-        settings.advanced_execution_enabled = true;
-        settings.autonomous_mode_enabled = true;
+        let settings = AgentSecuritySettings::default();
         let registry = ToolRegistry::for_session(&snapshot.sessions[0], &settings);
         let request = tool_test_request("ask", "看外部目录");
         let mut context = tool_test_context(&mut snapshot, &request);
@@ -581,9 +566,7 @@ mod tests {
         assert_eq!(basic_outcome.call.status, "failed");
 
         snapshot.sessions[0].security_level = "full-auto".to_owned();
-        let mut settings = AgentSecuritySettings::default();
-        settings.advanced_execution_enabled = true;
-        settings.autonomous_mode_enabled = true;
+        let settings = AgentSecuritySettings::default();
         let full_registry = ToolRegistry::for_session(&snapshot.sessions[0], &settings);
         let mut full_context = tool_test_context(&mut snapshot, &request);
         let full_outcome = full_registry.execute_named(
