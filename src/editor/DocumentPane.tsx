@@ -247,9 +247,17 @@ function DocumentPreviewView({
 
   if (document.fileType === "pdf") {
     const assetUrl = createDocumentAssetUrl(preview?.assetPath);
+    const pageCount = preview?.pageCount ?? preview?.blocks?.length ?? 0;
 
     return (
       <div className="grid min-h-0 gap-3" aria-label="PDF 预览">
+        {!!preview?.warnings?.length && (
+          <div className="rounded-lg border border-[rgba(var(--danger-rgb),0.28)] bg-danger-soft px-3 py-2 text-[12px] leading-[1.55] text-danger" role="status">
+            {preview.warnings.map((warning) => (
+              <p className="m-0" key={warning}>{warning}</p>
+            ))}
+          </div>
+        )}
         {assetUrl ? (
           <iframe className="h-full min-h-0 w-full min-w-0 overflow-hidden rounded-none border-0 bg-surface" title={document.title} src={assetUrl} />
         ) : (
@@ -257,7 +265,7 @@ function DocumentPreviewView({
         )}
         {!!preview?.blocks?.length && (
           <details className="max-h-[280px] overflow-auto rounded-lg border border-border bg-surface-muted p-3">
-            <summary className="cursor-pointer font-semibold">查看可提取文本（{preview.blocks.length} 页）</summary>
+            <summary className="cursor-pointer font-semibold">查看可提取文本（{pageCount} 页）</summary>
             {preview.blocks.map((block, index) => (
               <section className="mt-3" key={`pdf-${index}`}>
                 <strong>{block.page ? `第 ${block.page} 页` : `片段 ${index + 1}`}</strong>

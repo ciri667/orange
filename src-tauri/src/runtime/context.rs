@@ -1423,10 +1423,16 @@ pub(super) fn render_mentioned_files_prompt(materials: &[MentionedFileMaterial])
             );
             if let Some(content) = &material.content {
                 format!("{metadata}\n正文：\n{content}")
+            } else if matches!(material.file_type.as_str(), "docx" | "pdf") {
+                format!(
+                    "{metadata}\n该文件为只读 {} 文档，已授权；请调用 read(fileId=\"{}\") 获取抽取正文，原始二进制不会上传。",
+                    material.file_type.to_ascii_uppercase(),
+                    material.id
+                )
             } else if let Some(markdown_path) = &material.image_markdown_path {
                 format!("{metadata}\n可插入本轮 @ 的 Markdown 的安全引用：![]({markdown_path})")
             } else {
-                format!("{metadata}\n仅提供元数据；不要读取或上传二进制内容。")
+                format!("{metadata}\n该文件仅提供元数据；不要读取或上传原始二进制内容。")
             }
         })
         .collect::<Vec<_>>()

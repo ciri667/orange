@@ -115,6 +115,8 @@ pub struct DocumentTextExtraction {
     pub content_hash: String,
     pub blocks: Vec<DocumentTextBlock>,
     pub content_chars: usize,
+    pub page_count: usize,
+    pub status: String,
     pub warnings: Vec<String>,
 }
 
@@ -132,6 +134,12 @@ pub struct DocumentPreview {
     pub asset_path: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub blocks: Option<Vec<DocumentPreviewBlock>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub page_count: Option<usize>,
+    #[serde(default)]
+    pub warnings: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub status: Option<String>,
 }
 
 /** 本地知识库中的真实目录，用于让空文件夹也能出现在目录树中。 */

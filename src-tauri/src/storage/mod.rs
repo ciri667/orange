@@ -497,6 +497,38 @@ mod tests {
         archive.finish().unwrap();
     }
 
+    /** 写入一个最小两页 PDF，覆盖真实页边界而不是依赖 pdf-extract 的换页符猜测。 */
+    fn write_minimal_two_page_pdf(path: &Path) {
+        let page_one_stream = "BT /F1 18 Tf 72 720 Td (Page one) Tj ET";
+        let page_two_stream = "BT /F1 18 Tf 72 720 Td (Page two) Tj ET";
+        let objects = vec![
+            "<< /Type /Catalog /Pages 2 0 R >>".to_owned(),
+            "<< /Type /Pages /Kids [3 0 R 5 0 R] /Count 2 >>".to_owned(),
+            "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 4 0 R >> >> /Contents 6 0 R >>".to_owned(),
+            "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>".to_owned(),
+            "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 4 0 R >> >> /Contents 7 0 R >>".to_owned(),
+            format!("<< /Length {} >>\nstream\n{}\nendstream", page_one_stream.len(), page_one_stream),
+            format!("<< /Length {} >>\nstream\n{}\nendstream", page_two_stream.len(), page_two_stream),
+        ];
+
+        let mut pdf = String::from("%PDF-1.4\n");
+        let mut offsets = Vec::with_capacity(objects.len());
+        for (index, object) in objects.iter().enumerate() {
+            offsets.push(pdf.len());
+            pdf.push_str(&format!("{} 0 obj\n{}\nendobj\n", index + 1, object));
+        }
+        let xref_offset = pdf.len();
+        pdf.push_str(&format!("xref\n0 {}\n0000000000 65535 f \n", objects.len() + 1));
+        for offset in offsets {
+            pdf.push_str(&format!("{offset:010} 00000 n \n"));
+        }
+        pdf.push_str(&format!(
+            "trailer\n<< /Size {} /Root 1 0 R >>\nstartxref\n{xref_offset}\n%%EOF\n",
+            objects.len() + 1
+        ));
+        fs::write(path, pdf).unwrap();
+    }
+
     /** 构造预览测试所需的普通文档元数据，避免每个用例重复无关字段。 */
     fn test_workspace_document(file_type: &str, path: &str) -> WorkspaceDocument {
         WorkspaceDocument {
@@ -1679,6 +1711,47 @@ mod tests {
         assert!(extract_docx_preview_blocks(&corrupt_path).is_err());
     }
 
+    /** 文本框内的嵌套段落不能覆盖父段落正文。 */
+    #[test]
+    fn docx_preview_preserves_outer_paragraph_around_text_box() {
+        let dir = tempdir().unwrap();
+        let docx_path = dir.path().join("text-box.docx");
+        write_minimal_docx(
+            &docx_path,
+            r#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:p><w:r><w:t>文本框前：</w:t></w:r><w:r><w:drawing><w:txbxContent><w:p><w:r><w:t>内部第一行</w:t></w:r></w:p><w:p><w:r><w:t>内部第二行</w:t></w:r></w:p></w:txbxContent></w:drawing></w:r><w:r><w:t>：文本框后</w:t></w:r></w:p></w:body></w:document>"#,
+        );
+
+        let blocks = extract_docx_preview_blocks(&docx_path).unwrap();
+
+        assert_eq!(blocks.len(), 1);
+        assert!(blocks[0].text.contains("文本框前："));
+        assert!(blocks[0].text.contains("内部第一行"));
+        assert!(blocks[0].text.contains("内部第二行"));
+        assert!(blocks[0].text.contains("：文本框后"));
+    }
+
+    /** PDF 抽取必须保留真实页码，不能把多页 PDF 合并成第 1 页。 */
+    #[test]
+    fn document_text_extraction_preserves_pdf_pages() {
+        let dir = tempdir().unwrap();
+        let pdf_path = dir.path().join("two-pages.pdf");
+        write_minimal_two_page_pdf(&pdf_path);
+
+        let extraction = extract_document_text(
+            dir.path(),
+            &test_workspace_document("pdf", "two-pages.pdf"),
+        )
+        .unwrap();
+
+        assert_eq!(extraction.page_count, 2);
+        assert_eq!(extraction.status, "ok");
+        assert_eq!(extraction.blocks.len(), 2);
+        assert_eq!(extraction.blocks[0].page, Some(1));
+        assert_eq!(extraction.blocks[1].page, Some(2));
+        assert!(extraction.blocks[0].text.contains("Page one"));
+        assert!(extraction.blocks[1].text.contains("Page two"));
+    }
+
     /** DOCX 读取应复用预览解析结果，并保留表格来源及结构块序号。 */
     #[test]
     fn document_text_extraction_reads_docx_blocks() {
@@ -1718,6 +1791,11 @@ mod tests {
             Some(canonical_pdf_path.to_string_lossy().to_string())
         );
         assert_eq!(preview.content_hash, hash_bytes(b"%PDF-1.4\n"));
+        assert_eq!(preview.status.as_deref(), Some("error"));
+        assert!(preview
+            .warnings
+            .iter()
+            .any(|warning| warning.contains("PDF 文本层解析失败")));
         assert!(load_document_preview(
             dir.path(),
             &test_workspace_document("pdf", "../outside.pdf")

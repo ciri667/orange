@@ -1271,9 +1271,10 @@ pub fn load_document_preview(
             let bytes = fs::read(&target_path)
                 .map_err(|error| format!("无法读取 PDF 文件 {}：{error}", target_path.display()))?;
             // 预览同步返回本地文本层；iframe 继续负责保留 PDF 的原始版式。
-            // 文本层解析失败不应阻断原始 PDF iframe 预览；Agent 读取时才返回明确失败原因。
-            let blocks = extract_document_text(root, document)
-                .map(|extraction| {
+            // 文本层解析失败不应阻断原始 PDF iframe 预览，但必须把失败原因带回前端，不能静默伪装为空文档。
+            let (blocks, page_count, status, warnings) = match extract_document_text(root, document)
+            {
+                Ok(extraction) => (
                     extraction
                         .blocks
                         .into_iter()
@@ -1282,9 +1283,18 @@ pub fn load_document_preview(
                             text: block.text,
                             page: block.page,
                         })
-                        .collect()
-                })
-                .unwrap_or_default();
+                        .collect(),
+                    Some(extraction.page_count),
+                    Some(extraction.status),
+                    extraction.warnings,
+                ),
+                Err(error) => (
+                    Vec::new(),
+                    None,
+                    Some("error".to_owned()),
+                    vec![format!("PDF 文本层解析失败：{error}")],
+                ),
+            };
 
             Ok(DocumentPreview {
                 document_id: document.id.clone(),
@@ -1295,6 +1305,9 @@ pub fn load_document_preview(
                 content_hash: hash_bytes(&bytes),
                 asset_path: Some(target_path.to_string_lossy().to_string()),
                 blocks: Some(blocks),
+                page_count,
+                warnings,
+                status,
             })
         }
         "docx" => {
@@ -1316,6 +1329,9 @@ pub fn load_document_preview(
                 content_hash: hash_bytes(&bytes),
                 asset_path: None,
                 blocks: Some(blocks),
+                page_count: None,
+                warnings: Vec::new(),
+                status: None,
             })
         }
         "image" => {
@@ -1335,6 +1351,9 @@ pub fn load_document_preview(
                 content_hash: hash_bytes(&bytes),
                 asset_path: Some(target_path.to_string_lossy().to_string()),
                 blocks: None,
+                page_count: None,
+                warnings: Vec::new(),
+                status: None,
             })
         }
         _ => Err("该文档类型不支持只读预览。".to_owned()),
@@ -1357,19 +1376,24 @@ pub fn extract_docx_preview_blocks(path: &Path) -> Result<Vec<DocumentPreviewBlo
     parse_docx_document_xml(&document_xml)
 }
 
-/** 解析 WordprocessingML 正文；todo: 后续补充表格、图片、批注和样式的高保真还原。 */
+/** 解析 WordprocessingML 正文；todo: 后续补充图片、批注和样式的高保真还原。 */
 pub(crate) fn parse_docx_document_xml(
     document_xml: &str,
 ) -> Result<Vec<DocumentPreviewBlock>, String> {
+    #[derive(Default)]
+    struct ParagraphState {
+        text: String,
+        style: String,
+        in_text: bool,
+    }
+
     let mut reader = Reader::from_str(document_xml);
     let mut blocks = Vec::new();
     let mut buffer = Vec::new();
-    let mut in_paragraph = false;
+    // 文本框内部可能有嵌套的 w:p；用栈保存父段落，避免内层段落覆盖父段落正文。
+    let mut paragraphs: Vec<ParagraphState> = Vec::new();
     // 表格单元格内的段落仍按顺序保留，但以 table 类型交给预览和 Agent 说明其来源。
     let mut table_depth = 0usize;
-    let mut in_text = false;
-    let mut paragraph_text = String::new();
-    let mut paragraph_style = String::new();
 
     reader.config_mut().trim_text(true);
 
@@ -1380,16 +1404,18 @@ pub(crate) fn parse_docx_document_xml(
                 let name_bytes = name.as_ref();
 
                 if xml_name_matches(name_bytes, b"p") {
-                    in_paragraph = true;
-                    paragraph_text.clear();
-                    paragraph_style.clear();
+                    paragraphs.push(ParagraphState::default());
                 } else if xml_name_matches(name_bytes, b"tbl") {
                     table_depth = table_depth.saturating_add(1);
-                } else if in_paragraph && xml_name_matches(name_bytes, b"t") {
-                    in_text = true;
-                } else if in_paragraph && xml_name_matches(name_bytes, b"pStyle") {
-                    if let Some(style) = read_xml_attribute(&element, b"val") {
-                        paragraph_style = style;
+                } else if xml_name_matches(name_bytes, b"t") {
+                    if let Some(paragraph) = paragraphs.last_mut() {
+                        paragraph.in_text = true;
+                    }
+                } else if xml_name_matches(name_bytes, b"pStyle") {
+                    if let Some(paragraph) = paragraphs.last_mut() {
+                        if let Some(style) = read_xml_attribute(&element, b"val") {
+                            paragraph.style = style;
+                        }
                     }
                 }
             }
@@ -1397,24 +1423,32 @@ pub(crate) fn parse_docx_document_xml(
                 let name = element.name();
                 let name_bytes = name.as_ref();
 
-                if in_paragraph && xml_name_matches(name_bytes, b"pStyle") {
-                    if let Some(style) = read_xml_attribute(&element, b"val") {
-                        paragraph_style = style;
+                if xml_name_matches(name_bytes, b"pStyle") {
+                    if let Some(paragraph) = paragraphs.last_mut() {
+                        if let Some(style) = read_xml_attribute(&element, b"val") {
+                            paragraph.style = style;
+                        }
                     }
-                } else if in_paragraph && xml_name_matches(name_bytes, b"tab") {
-                    paragraph_text.push('\t');
-                } else if in_paragraph && xml_name_matches(name_bytes, b"br") {
-                    paragraph_text.push('\n');
+                } else if xml_name_matches(name_bytes, b"tab") {
+                    if let Some(paragraph) = paragraphs.last_mut() {
+                        paragraph.text.push('\t');
+                    }
+                } else if xml_name_matches(name_bytes, b"br") {
+                    if let Some(paragraph) = paragraphs.last_mut() {
+                        paragraph.text.push('\n');
+                    }
                 }
             }
             Ok(Event::Text(text)) => {
-                if in_text {
-                    let raw_text = std::str::from_utf8(text.as_ref())
-                        .map_err(|error| format!("DOCX 文本编码无效：{error}"))?;
-                    let unescaped_text = quick_xml::escape::unescape(raw_text)
-                        .map_err(|error| format!("DOCX 文本转义无效：{error}"))?;
+                if let Some(paragraph) = paragraphs.last_mut() {
+                    if paragraph.in_text {
+                        let raw_text = std::str::from_utf8(text.as_ref())
+                            .map_err(|error| format!("DOCX 文本编码无效：{error}"))?;
+                        let unescaped_text = quick_xml::escape::unescape(raw_text)
+                            .map_err(|error| format!("DOCX 文本转义无效：{error}"))?;
 
-                    paragraph_text.push_str(&unescaped_text);
+                        paragraph.text.push_str(&unescaped_text);
+                    }
                 }
             }
             Ok(Event::End(element)) => {
@@ -1422,28 +1456,35 @@ pub(crate) fn parse_docx_document_xml(
                 let name_bytes = name.as_ref();
 
                 if xml_name_matches(name_bytes, b"t") {
-                    in_text = false;
-                } else if xml_name_matches(name_bytes, b"p") {
-                    let trimmed_text = paragraph_text.trim();
-
-                    if !trimmed_text.is_empty() {
-                        blocks.push(DocumentPreviewBlock {
-                            r#type: if table_depth > 0 {
-                                "table".to_owned()
-                            } else if is_docx_heading_style(&paragraph_style) {
-                                "heading".to_owned()
-                            } else {
-                                "paragraph".to_owned()
-                            },
-                            text: trimmed_text.to_owned(),
-                            page: None,
-                        });
+                    if let Some(paragraph) = paragraphs.last_mut() {
+                        paragraph.in_text = false;
                     }
+                } else if xml_name_matches(name_bytes, b"p") {
+                    if let Some(paragraph) = paragraphs.pop() {
+                        let trimmed_text = paragraph.text.trim();
 
-                    in_paragraph = false;
-                    in_text = false;
-                    paragraph_text.clear();
-                    paragraph_style.clear();
+                        if !trimmed_text.is_empty() {
+                            if let Some(parent) = paragraphs.last_mut() {
+                                // 文本框等嵌套段落属于父段落的一部分，内联回父段落而不是丢弃父段落。
+                                if !parent.text.is_empty() && !parent.text.ends_with('\n') {
+                                    parent.text.push('\n');
+                                }
+                                parent.text.push_str(trimmed_text);
+                            } else {
+                                blocks.push(DocumentPreviewBlock {
+                                    r#type: if table_depth > 0 {
+                                        "table".to_owned()
+                                    } else if is_docx_heading_style(&paragraph.style) {
+                                        "heading".to_owned()
+                                    } else {
+                                        "paragraph".to_owned()
+                                    },
+                                    text: trimmed_text.to_owned(),
+                                    page: None,
+                                });
+                            }
+                        }
+                    }
                 } else if xml_name_matches(name_bytes, b"tbl") {
                     table_depth = table_depth.saturating_sub(1);
                 }
@@ -1480,7 +1521,7 @@ pub fn extract_document_text(
     let bytes = fs::read(&target_path).map_err(|error| format!("无法读取文档内容：{error}"))?;
     let content_hash = hash_bytes(&bytes);
 
-    let (blocks, warnings) = match document.file_type.as_str() {
+    let (blocks, page_count, status, warnings) = match document.file_type.as_str() {
         "docx" => {
             if !is_docx_document_file(&target_path) {
                 return Err("只能读取 DOCX 文件。".to_owned());
@@ -1502,6 +1543,7 @@ pub fn extract_document_text(
                     })
                     .collect()
             };
+            let status = if blocks.is_empty() { "no_text" } else { "ok" }.to_owned();
             let warnings = if blocks.is_empty() {
                 vec!["未从 DOCX 正文提取到可读文本；图片、文本框和批注不会自动识别。".to_owned()]
             } else {
@@ -1510,17 +1552,19 @@ pub fn extract_document_text(
                         .to_owned(),
                 ]
             };
-            (blocks, warnings)
+            (blocks, 0, status, warnings)
         }
         "pdf" => {
             if !is_pdf_document_file(&target_path) {
                 return Err("只能读取 PDF 文件。".to_owned());
             }
-            let extracted = pdf_extract::extract_text_from_mem(&bytes)
+            // 使用按页 API，避免把整篇 PDF 当成一个无页码 block。
+            // 该 API 在某一页失败时会停止返回后续页；page_count 仍需作为独立元数据保留。
+            let pages = pdf_extract::extract_text_from_mem_by_pages(&bytes)
                 .map_err(|error| format!("PDF 文本提取失败：{error}"))?;
-            // pdf-extract 通常用换页符分隔页面；缺失时仍把结果作为第一页，避免丢失文本。
-            let blocks: Vec<DocumentTextBlock> = extracted
-                .split('\u{c}')
+            let page_count = pages.len();
+            let blocks: Vec<DocumentTextBlock> = pages
+                .into_iter()
                 .enumerate()
                 .filter_map(|(index, page_text)| {
                     let text = page_text.trim();
@@ -1532,12 +1576,18 @@ pub fn extract_document_text(
                     })
                 })
                 .collect();
+            let status = if blocks.is_empty() {
+                "no_text_layer"
+            } else {
+                "ok"
+            }
+            .to_owned();
             let warnings = if blocks.is_empty() {
-                vec!["未从 PDF 提取到文本；这可能是扫描件或受保护文档。可在对话中明确要求读取页面图片。".to_owned()]
+                vec!["未从 PDF 提取到文本；这可能是扫描件或受保护文档。没有视觉模型时无法读取页面内容。".to_owned()]
             } else {
                 Vec::new()
             };
-            (blocks, warnings)
+            (blocks, page_count, status, warnings)
         }
         _ => return Err("该文档类型不支持内容读取。".to_owned()),
     };
@@ -1558,6 +1608,8 @@ pub fn extract_document_text(
         content_hash,
         blocks,
         content_chars,
+        page_count,
+        status,
         warnings,
     })
 }

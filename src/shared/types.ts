@@ -278,6 +278,9 @@ export interface DocumentPreview {
   contentHash: string;
   assetPath?: string;
   blocks?: DocumentPreviewBlock[];
+  pageCount?: number;
+  warnings?: string[];
+  status?: string;
 }
 
 /** 单条文档历史记录摘要；正文内容只在打开详情时按需读取。 */

@@ -152,6 +152,37 @@ mod tests {
         }
     }
 
+    /** 写入最小两页 PDF，供 read(page/citation) 工具测试使用。 */
+    fn write_two_page_pdf(path: &std::path::Path) {
+        let page_one_stream = "BT /F1 18 Tf 72 720 Td (Page one) Tj ET";
+        let page_two_stream = "BT /F1 18 Tf 72 720 Td (Page two) Tj ET";
+        let objects = vec![
+            "<< /Type /Catalog /Pages 2 0 R >>".to_owned(),
+            "<< /Type /Pages /Kids [3 0 R 5 0 R] /Count 2 >>".to_owned(),
+            "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 4 0 R >> >> /Contents 6 0 R >>".to_owned(),
+            "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>".to_owned(),
+            "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 4 0 R >> >> /Contents 7 0 R >>".to_owned(),
+            format!("<< /Length {} >>\nstream\n{}\nendstream", page_one_stream.len(), page_one_stream),
+            format!("<< /Length {} >>\nstream\n{}\nendstream", page_two_stream.len(), page_two_stream),
+        ];
+        let mut pdf = String::from("%PDF-1.4\n");
+        let mut offsets = Vec::with_capacity(objects.len());
+        for (index, object) in objects.iter().enumerate() {
+            offsets.push(pdf.len());
+            pdf.push_str(&format!("{} 0 obj\n{}\nendobj\n", index + 1, object));
+        }
+        let xref_offset = pdf.len();
+        pdf.push_str(&format!("xref\n0 {}\n0000000000 65535 f \n", objects.len() + 1));
+        for offset in offsets {
+            pdf.push_str(&format!("{offset:010} 00000 n \n"));
+        }
+        pdf.push_str(&format!(
+            "trailer\n<< /Size {} /Root 1 0 R >>\nstartxref\n{xref_offset}\n%%EOF\n",
+            objects.len() + 1
+        ));
+        std::fs::write(path, pdf).unwrap();
+    }
+
     /** 构造工具层普通文档条目，测试 list_tree 元数据时不需要真实文件系统。 */
     fn tool_test_document(
         id: &str,
@@ -176,6 +207,61 @@ mod tests {
             content: (file_type == "txt").then(|| "纯文本正文不会通过 list_tree 返回。".to_owned()),
             preview_available,
         }
+    }
+
+    /** PDF read(page) 必须返回真实页内容，citation 也必须指向同一页。 */
+    #[test]
+    fn read_pdf_page_returns_matching_content_and_citation() {
+        let dir = tempfile::tempdir().unwrap();
+        let pdf_path = dir.path().join("spec.pdf");
+        write_two_page_pdf(&pdf_path);
+
+        let mut snapshot = tool_test_snapshot("pdf page test".to_owned());
+        snapshot.knowledge_bases[0].path = dir.path().to_string_lossy().to_string();
+        snapshot.documents.push(WorkspaceDocument {
+            id: "document-pdf".to_owned(),
+            knowledge_base_id: "kb-a".to_owned(),
+            title: "spec".to_owned(),
+            path: "spec.pdf".to_owned(),
+            file_type: "pdf".to_owned(),
+            updated_at: "刚刚".to_owned(),
+            content_hash: String::new(),
+            content: None,
+            preview_available: true,
+        });
+
+        let page_two = execute::execute_read_document(
+            &snapshot,
+            0,
+            &json!({"documentId": "document-pdf", "page": 2}),
+        );
+        assert!(page_two.success, "{:?}", page_two.payload);
+        assert_eq!(page_two.payload["pageCount"], 2);
+        assert_eq!(page_two.payload["document"]["blocks"][0]["page"], 2);
+        assert!(page_two.payload["document"]["blocks"][0]["text"]
+            .as_str()
+            .unwrap()
+            .contains("Page two"));
+        assert_eq!(page_two.citations[0].location.as_deref(), Some("第 2 页"));
+        assert!(page_two.citations[0].snippet.contains("Page two"));
+
+        let out_of_range = execute::execute_read_document(
+            &snapshot,
+            0,
+            &json!({"documentId": "document-pdf", "page": 3}),
+        );
+        assert!(!out_of_range.success);
+        assert!(out_of_range.summary.contains("页码超出范围"));
+
+        let mut snapshot = snapshot;
+        let request = tool_test_request("ask", "read pdf by path");
+        let mut context = tool_test_context(&mut snapshot, &request);
+        let path_read = execute::execute_read(&mut context, &json!({"path": "spec.pdf"}));
+        assert!(path_read.success, "{:?}", path_read.payload);
+        assert!(path_read.payload["document"]["blocks"][0]["text"]
+            .as_str()
+            .unwrap()
+            .contains("Page one"));
     }
 
     /** 默认 registry 只暴露闭集五个短名。 */
