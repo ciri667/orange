@@ -7,6 +7,7 @@ import { logInfo, logWarn } from "../shared/logger";
 import type { AgentSession, DocumentFileType, DocumentPreview, ExportFormat, KnowledgeBase, WorkspaceDocument } from "../shared/types";
 import { RelatedSessionsButton } from "../agent/RelatedSessionsButton";
 import { DocxLayoutPreview } from "./DocxLayoutPreview";
+import { PdfCanvasViewer } from "./PdfCanvasViewer";
 import { EditorEmptyHeader, EditorFileHeader, EditorMetaStrip, EditorMoreActionMenu } from "./EditorFileChrome";
 import { LineNumberedTextarea } from "./LineNumberedTextarea";
 import { countLogicalLines } from "./lineNumberUtils";
@@ -274,10 +275,6 @@ function DocumentPreviewView({
   if (document.fileType === "pdf") {
     const assetUrl = createDocumentAssetUrl(preview?.assetPath);
     const pageCount = preview?.pageCount ?? preview?.blocks?.length ?? 0;
-    // PDF 原生阅读器支持 #page= 定位；引用跳转不需要额外渲染引擎。
-    const iframeSrc = assetUrl && focus?.page
-      ? `${assetUrl}#page=${focus.page}&zoom=page-width`
-      : assetUrl;
 
     return (
       <div className="grid min-h-0 gap-3" aria-label="PDF 预览">
@@ -289,12 +286,17 @@ function DocumentPreviewView({
           </div>
         )}
         {assetUrl ? (
-          <iframe className="h-full min-h-0 w-full min-w-0 overflow-hidden rounded-none border-0 bg-surface" title={document.title} src={iframeSrc} />
+          <PdfCanvasViewer
+            src={assetUrl}
+            page={focus?.page}
+            pageCount={pageCount}
+            blocks={preview?.blocks}
+          />
         ) : (
           <div className="grid min-h-0 min-w-0 place-items-center rounded-panel border border-dashed border-border-strong bg-surface p-6 text-center text-[13px] leading-[1.55] text-ink-muted">当前环境无法内嵌 PDF 预览。</div>
         )}
         {!!preview?.blocks?.length && (
-          <details className="max-h-[280px] overflow-auto rounded-lg border border-border bg-surface-muted p-3" open={Boolean(focus?.page)}>
+          <details className="max-h-[280px] overflow-auto rounded-lg border border-border bg-surface-muted p-3">
             <summary className="cursor-pointer font-semibold">查看可提取文本（{pageCount} 页）</summary>
             {preview.blocks.map((block, index) => {
               const active = Boolean(focus?.page && block.page === focus.page);
