@@ -1749,6 +1749,135 @@ mod tests {
             .any(|warning| warning.contains("宏")));
     }
 
+    /** 构造指定页数、每页指定重复字符数的 PDF，供性能基线使用。 */
+    fn write_many_page_pdf(path: &Path, pages: usize, chars_per_page: usize) {
+        let text = "Document reading baseline. ".repeat(chars_per_page / 27 + 1);
+        let mut objects = vec![
+            "<< /Type /Catalog /Pages 2 0 R >>".to_owned(),
+            String::new(),
+            "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>".to_owned(),
+        ];
+        let mut kids = Vec::new();
+        let mut contents = Vec::new();
+        // 页面对象与内容流分两段编号，避免 /Contents 指到相邻页面对象。
+        let page_base = objects.len() + 1;
+        let stream_base = page_base + pages;
+        for index in 0..pages {
+            kids.push(format!("{} 0 R", page_base + index));
+            objects.push(format!(
+                "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 3 0 R >> >> /Contents {} 0 R >>",
+                stream_base + index
+            ));
+            let stream = format!(
+                "BT /F1 10 Tf 40 760 Td ({}) Tj ET",
+                text.replace('(', " ").replace(')', " ")
+            );
+            contents.push(stream);
+        }
+        objects[1] = format!(
+            "<< /Type /Pages /Kids [{}] /Count {pages} >>",
+            kids.join(" ")
+        );
+        for stream in contents {
+            objects.push(format!("<< /Length {} >>\nstream\n{}\nendstream", stream.len(), stream));
+        }
+        let mut pdf = String::from("%PDF-1.4\n");
+        let mut offsets = Vec::new();
+        for (index, object) in objects.iter().enumerate() {
+            offsets.push(pdf.len());
+            pdf.push_str(&format!("{} 0 obj\n{}\nendobj\n", index + 1, object));
+        }
+        let xref_offset = pdf.len();
+        pdf.push_str(&format!("xref\n0 {}\n0000000000 65535 f \n", objects.len() + 1));
+        for offset in offsets {
+            pdf.push_str(&format!("{offset:010} 00000 n \n"));
+        }
+        pdf.push_str(&format!(
+            "trailer\n<< /Size {} /Root 1 0 R >>\nstartxref\n{xref_offset}\n%%EOF\n",
+            objects.len() + 1
+        ));
+        fs::write(path, pdf).unwrap();
+    }
+
+    /** 性能基线：30 页/约 10 MB PDF 与复杂 DOCX 的首次解析与缓存命中耗时。 */
+    #[test]
+    #[ignore = "performance baseline; run with --ignored --nocapture"]
+    fn document_reading_performance_baseline() {
+        let dir = tempdir().unwrap();
+        let small_pdf = dir.path().join("pages-30.pdf");
+        let large_pdf = dir.path().join("pages-30-large.pdf");
+        write_many_page_pdf(&small_pdf, 30, 1_500);
+        write_many_page_pdf(&large_pdf, 30, 250_000);
+        let docx_path = dir.path().join("complex.docx");
+        let mut document_xml = String::from(
+            r#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body>"#,
+        );
+        for section in 0..40 {
+            document_xml.push_str(&format!(
+                r#"<w:p><w:pPr><w:pStyle w:val="Heading1"/></w:pPr><w:r><w:t>章节 {section}</w:t></w:r></w:p>"#
+            ));
+            for paragraph in 0..8 {
+                document_xml.push_str(&format!(
+                    r#"<w:p><w:r><w:t>第 {section}-{paragraph} 段：本地写入必须先做冲突处理，然后再合并索引。</w:t></w:r></w:p>"#
+                ));
+            }
+        }
+        document_xml.push_str("</w:body></w:document>");
+        write_docx_with_parts(
+            &docx_path,
+            &document_xml,
+            &[(
+                "word/styles.xml",
+                r#"<w:styles xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:style w:styleId="Heading1"><w:name w:val="heading 1"/><w:pPr><w:outlineLvl w:val="0"/></w:pPr></w:style></w:styles>"#,
+            )],
+        );
+
+        for (label, file_type, path) in [
+            ("30页PDF", "pdf", &small_pdf),
+            ("10MB PDF", "pdf", &large_pdf),
+            ("复杂DOCX", "docx", &docx_path),
+        ] {
+            let mut cold = Vec::new();
+            let mut last_copy = None;
+            for _ in 0..3 {
+                // 每次换一份副本，绕开进程内缓存，测真实首次解析。
+                let copy = dir.path().join(format!("cold-{}.{}", uuid::Uuid::new_v4(), file_type));
+                fs::copy(path, &copy).unwrap();
+                let copy_document = test_workspace_document(file_type, copy.file_name().unwrap().to_str().unwrap());
+                let started = std::time::Instant::now();
+                let extraction = extract_document_text(dir.path(), &copy_document).unwrap();
+                cold.push((started.elapsed().as_millis(), extraction.blocks.len(), extraction.page_count));
+                if let Some(previous) = last_copy.take() {
+                    let _ = fs::remove_file(previous);
+                }
+                last_copy = Some(copy);
+            }
+            // 同一份副本再读一次：命中进程内缓存，代表“第二次读取”的下限。
+            let warm_started = std::time::Instant::now();
+            let warm = last_copy
+                .as_ref()
+                .map(|copy| {
+                    let copy_document =
+                        test_workspace_document(file_type, copy.file_name().unwrap().to_str().unwrap());
+                    extract_document_text(dir.path(), &copy_document).unwrap()
+                })
+                .expect("至少有一份 cold 副本");
+            let warm_ms = warm_started.elapsed().as_millis();
+            let size = fs::metadata(path).unwrap().len();
+            println!(
+                "{label}: size={size}B cold_ms={:?} warm_ms={} blocks={} pages={}",
+                cold.iter().map(|item| item.0).collect::<Vec<_>>(),
+                warm_ms,
+                warm.blocks.len(),
+                warm.page_count
+            );
+            assert!(!warm.blocks.is_empty());
+            if let Some(copy) = last_copy {
+                let _ = fs::remove_file(copy);
+            }
+        }
+    }
+
     /** 扫描应返回没有 Markdown 文件的空目录，让前端目录树能显示真实空文件夹。 */
     #[test]
     fn scan_returns_empty_folder_nodes() {
