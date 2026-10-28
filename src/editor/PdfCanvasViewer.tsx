@@ -1,6 +1,6 @@
 import type { PDFDocumentProxy, RenderTask } from "pdfjs-dist";
 import workerUrl from "pdfjs-dist/build/pdf.worker.min.mjs?url";
-import { ChevronLeft, ChevronRight, Search } from "lucide-react";
+import { ChevronLeft, ChevronRight, Minus, Plus, Search } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Button } from "../shared/Button";
 import type { DocumentPreviewBlock } from "../shared/types";
@@ -20,14 +20,35 @@ function loadPdfModule(): Promise<PdfModule> {
   return pdfModulePromise;
 }
 
-/** 单页画布渲染的 PDF 阅读器：页码导航、页内文本搜索、引用跳页。 */
+/** 上次阅读位置存在 localStorage：文档重开时直接回到那一页。 */
+const LAST_PAGE_PREFIX = "orange.pdf.lastPage.";
+
+function readLastPage(documentId: string): number {
+  try {
+    const value = Number(window.localStorage.getItem(`${LAST_PAGE_PREFIX}${documentId}`));
+    return Number.isFinite(value) && value >= 1 ? Math.floor(value) : 1;
+  } catch {
+    return 1;
+  }
+}
+
+function writeLastPage(documentId: string, page: number) {
+  try {
+    window.localStorage.setItem(`${LAST_PAGE_PREFIX}${documentId}`, String(page));
+  } catch {
+    // 隐私模式或存储配额不足时忽略，阅读位置只是便利功能。
+  }
+}
 export function PdfCanvasViewer({
   src,
+  documentId,
   page,
   pageCount,
   blocks,
 }: {
   src: string;
+  /** 用于记住上次阅读位置。 */
+  documentId: string;
   /** 外部（引用）要求跳转的页码，1-based。 */
   page?: number;
   /** 后端已知页数；pdf.js 加载完成前先用它显示总数。 */
@@ -38,12 +59,15 @@ export function PdfCanvasViewer({
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const renderTaskRef = useRef<RenderTask | null>(null);
   const [document, setDocument] = useState<PDFDocumentProxy | null>(null);
-  const [currentPage, setCurrentPage] = useState(page && page > 0 ? page : 1);
+  const [currentPage, setCurrentPage] = useState(() => page && page > 0 ? page : readLastPage(documentId));
   const [totalPages, setTotalPages] = useState(pageCount ?? 0);
   const [status, setStatus] = useState<"loading" | "ready" | "error">("loading");
   const [errorMessage, setErrorMessage] = useState("");
   const [query, setQuery] = useState("");
-  const [pageInput, setPageInput] = useState(String(page ?? 1));
+  const [pageInput, setPageInput] = useState(() =>
+    String(page && page > 0 ? page : readLastPage(documentId)),
+  );
+  const [zoom, setZoom] = useState(1);
 
   useEffect(() => {
     let cancelled = false;
@@ -88,8 +112,9 @@ export function PdfCanvasViewer({
     if (page && page > 0) {
       setCurrentPage(page);
       setPageInput(String(page));
+      writeLastPage(documentId, page);
     }
-  }, [page]);
+  }, [documentId, page]);
 
   useEffect(() => {
     if (status !== "ready" || !document) {
@@ -112,7 +137,8 @@ export function PdfCanvasViewer({
       }
       const containerWidth = canvas.parentElement?.clientWidth ?? 900;
       const baseViewport = pdfPage.getViewport({ scale: 1 });
-      const scale = Math.min(2.5, Math.max(0.6, containerWidth / baseViewport.width));
+      const fitScale = Math.min(2.5, Math.max(0.6, containerWidth / baseViewport.width));
+      const scale = Math.min(4, Math.max(0.3, fitScale * zoom));
       const viewport = pdfPage.getViewport({ scale });
       const ratio = window.devicePixelRatio || 1;
       canvas.width = Math.floor(viewport.width * ratio);
@@ -143,7 +169,7 @@ export function PdfCanvasViewer({
       cancelled = true;
       renderTaskRef.current?.cancel();
     };
-  }, [currentPage, document, status]);
+  }, [currentPage, document, status, zoom]);
 
   /** 搜索走后端文本层，命中后直接跳页，避免额外依赖 pdf.js 文本层。 */
   const searchHits = useMemo(() => {
@@ -160,6 +186,7 @@ export function PdfCanvasViewer({
     const bounded = Math.min(Math.max(1, nextPage), Math.max(1, totalPages));
     setCurrentPage(bounded);
     setPageInput(String(bounded));
+    writeLastPage(documentId, bounded);
   }
 
   if (status === "error") {
@@ -217,6 +244,37 @@ export function PdfCanvasViewer({
         >
           <ChevronRight size={16} />
         </Button>
+
+        <span className="ml-2 flex items-center gap-1">
+          <Button
+            size="compact"
+            variant="icon"
+            aria-label="缩小"
+            title="缩小"
+            disabled={zoom <= 0.4}
+            onClick={() => setZoom((value) => Math.max(0.4, Number((value - 0.2).toFixed(2))))}
+          >
+            <Minus size={15} />
+          </Button>
+          <button
+            type="button"
+            className="min-w-12 rounded px-1 text-[11px] text-ink-soft hover:text-ink"
+            title="恢复适应宽度"
+            onClick={() => setZoom(1)}
+          >
+            {Math.round(zoom * 100)}%
+          </button>
+          <Button
+            size="compact"
+            variant="icon"
+            aria-label="放大"
+            title="放大"
+            disabled={zoom >= 2.5}
+            onClick={() => setZoom((value) => Math.min(2.5, Number((value + 0.2).toFixed(2))))}
+          >
+            <Plus size={15} />
+          </Button>
+        </span>
 
         <label className="ml-2 flex items-center gap-1 rounded-md border border-border bg-surface px-2 py-1">
           <Search size={13} className="text-ink-soft" />

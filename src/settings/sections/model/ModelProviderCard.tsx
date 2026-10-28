@@ -26,6 +26,16 @@ type ModelProviderCardProps = ComponentProps<typeof ProviderModelsPanel> & {
   onSaveApiKey: () => void | Promise<void>;
 };
 
+/** 本机回环地址不发图片给外部；用于决定是否需要在开启视觉前提示。 */
+function isLoopbackProvider(apiBase: string) {
+  try {
+    const host = new URL(apiBase).hostname.toLowerCase();
+    return host === "localhost" || host === "127.0.0.1" || host === "::1" || host === "[::1]";
+  } catch {
+    return false;
+  }
+}
+
 /** 将连接信息与模型列表分区，折叠时仍保留服务商状态和默认模型摘要。 */
 export function ModelProviderCard({
   provider, isDefault, canRemove, keyStatus, apiKeyDraft, isApiKeyVisible, revealedApiKey,
@@ -134,7 +144,25 @@ export function ModelProviderCard({
           )}
           <div className="flex flex-wrap items-center gap-x-6 gap-y-3 pt-1">
             <ToggleRow compact className="text-ink-muted" checked={provider.supportsTools} onChange={(value) => onFieldChange("supportsTools", value)}>支持工具调用</ToggleRow>
-            <ToggleRow compact className="text-ink-muted" checked={Boolean(provider.supportsVision)} onChange={(value) => onFieldChange("supportsVision", value)}>支持视觉（读文档图片）</ToggleRow>
+            <ToggleRow
+              compact
+              className="text-ink-muted"
+              checked={Boolean(provider.supportsVision)}
+              onChange={(value) => {
+                // 云端 Provider 打开视觉后，文档页面图会随对话发出；开启前先明确告知一次。
+                if (value && !isLoopbackProvider(provider.apiBase)) {
+                  const confirmed = window.confirm(
+                    "开启「支持视觉」后，Agent 读取文档时会把 PDF 页面渲染图和 DOCX 内嵌图片发送给这个 Provider。\n\n当前地址不是本机回环地址，图片可能包含签名、印章或手写内容。确认开启吗？",
+                  );
+                  if (!confirmed) {
+                    return;
+                  }
+                }
+                onFieldChange("supportsVision", value);
+              }}
+            >
+              支持视觉（读文档图片）
+            </ToggleRow>
             <ToggleRow compact className="text-ink-muted" checked={provider.requiresApiKey} onChange={(value) => onFieldChange("requiresApiKey", value)}>使用 API 密钥</ToggleRow>
             {!provider.requiresApiKey && <span className="text-[11px] text-ink-soft">适用于本地免鉴权服务</span>}
           </div>

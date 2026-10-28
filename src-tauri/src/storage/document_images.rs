@@ -155,6 +155,8 @@ fn vello_white() -> hayro::vello_cpu::color::AlphaColor<hayro::vello_cpu::color:
 /// DOCX 内嵌图片：图片字节、关系 id 和原始 part 名。
 #[derive(Clone, Debug)]
 pub(crate) struct DocxMedia {
+    /// 关系 id 只用于把图片对回 `a:blip` 顺序，抽取完成后不再读取，保留便于排错。
+    #[allow(dead_code)]
     pub relationship_id: String,
     pub part_name: String,
     pub bytes: Vec<u8>,

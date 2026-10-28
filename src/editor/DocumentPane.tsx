@@ -288,6 +288,7 @@ function DocumentPreviewView({
         {assetUrl ? (
           <PdfCanvasViewer
             src={assetUrl}
+            documentId={document.id}
             page={focus?.page}
             pageCount={pageCount}
             blocks={preview?.blocks}
