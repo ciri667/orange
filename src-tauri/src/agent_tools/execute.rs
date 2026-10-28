@@ -42,7 +42,7 @@ impl AgentTool for BrowserTool {
                 "tabId": { "type": "string", "description": "Browser tab id; defaults to the active tab." },
                 "url": { "type": "string", "description": "Required for tab.navigate; optional initial URL for browser.create_tab (http/https only). Omit to create a blank tab." },
                 "query": { "type": "string", "description": "Search query for tab.search." },
-                "text": { "type": "string", "description": "Text for page.element.fill/type_text or page.wait_for." },
+                "text": { "type": "string", "description": "Text for page.element.fill/type_text, page.wait_for, or the prompt input of page.dialog.accept." },
                 "key": { "type": "string", "description": "Key name for page.element.press_key, e.g. Enter." },
                 "value": { "type": "string", "description": "Option value for page.element.select_option." },
                 "checked": { "type": "boolean", "description": "Target state for page.element.set_checked." },
@@ -51,7 +51,7 @@ impl AgentTool for BrowserTool {
                 "elementOffset": { "type": "integer", "minimum": 0, "description": "Pass snapshot.nextElementOffset to continue page.elements.snapshot (20 elements per page)." }
             },
             "required": ["operation"],
-            "description": "Start with browser.get_state to discover tabs. A clicked link may open a new tab: check state and activate it before continuing. Text and element snapshots support paged offsets. Take page.elements.snapshot before interactions; SNAPSHOT_EXPIRED requires a new snapshot. BROWSER_USER_TAKEOVER ends this turn's tools: summarize and wait for the user; never retry or bypass takeover."
+            "description": "Start with browser.get_state to discover tabs; its dialogs field lists open page dialogs. A clicked link may open a new tab: check state and activate it before continuing. Text and element snapshots support paged offsets. Take page.elements.snapshot before interactions; SNAPSHOT_EXPIRED requires a new snapshot. An open alert/confirm/prompt blocks other calls: clear it with page.dialog.accept or page.dialog.dismiss first. BROWSER_USER_TAKEOVER ends this turn's tools: summarize and wait for the user; never retry or bypass takeover."
         })
     }
 

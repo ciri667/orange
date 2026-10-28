@@ -94,6 +94,8 @@ pub const MUTATE_OPERATIONS: &[&str] = &[
     "page.element.select_option",
     "page.element.set_checked",
     "page.element.scroll_into_view",
+    "page.dialog.accept",
+    "page.dialog.dismiss",
 ];
 
 pub fn operation_kind(operation: &str) -> Option<BrowserOperationKind> {
@@ -244,5 +246,19 @@ mod tests {
         assert!(snapshot_reference_matches("snap-1-gen-3", "snap-1-gen"));
         assert!(!snapshot_reference_matches("snap-1-gen-3", "snap-2-gen"));
         assert!(!snapshot_reference_matches("snap-1-gen", "snap-1-gen"));
+    }
+
+    /** 处理弹窗会改变页面状态，必须和点击同档走审批，不能当成只读操作。 */
+    #[test]
+    fn dialog_operations_are_mutations() {
+        assert_eq!(
+            operation_kind("page.dialog.accept"),
+            Some(BrowserOperationKind::Mutate)
+        );
+        assert_eq!(
+            operation_kind("page.dialog.dismiss"),
+            Some(BrowserOperationKind::Mutate)
+        );
+        assert_eq!(operation_kind("page.dialog.hover"), None);
     }
 }

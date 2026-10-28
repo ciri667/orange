@@ -9,6 +9,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+use chromiumoxide::cdp::browser_protocol::page::HandleJavaScriptDialogParams;
 use chromiumoxide::element::Element;
 use serde_json::{json, Value};
 use tauri::{AppHandle, Emitter, Manager};
@@ -871,6 +872,35 @@ fn operation_timeout(operation: &str) -> Duration {
     }
 }
 
+/** 超时/被弹窗阻塞时给模型的自救说明；没有弹窗返回 None。 */
+fn dialog_hint(dialogs: &[BrowserDialog]) -> Option<String> {
+    let dialog = dialogs.first()?;
+    let kind = match dialog.dialog_type.as_str() {
+        "confirm" => "确认框",
+        "prompt" => "输入框",
+        "beforeunload" => "离开确认框",
+        _ => "提示框",
+    };
+    let prompt_hint = if dialog.dialog_type == "prompt" {
+        "（可带 text 指定输入内容）"
+    } else {
+        ""
+    };
+    Some(format!(
+        "页面弹出{kind}「{}」（tabId {}），它会阻塞后续调用：请先 page.dialog.accept{prompt_hint} 或 page.dialog.dismiss 处理掉它，再重试。",
+        dialog.message, dialog.tab_id
+    ))
+}
+
+/** 读一次本地弹窗事件缓存（不发起 CDP），供超时提示使用。 */
+async fn open_dialog_hint() -> Option<String> {
+    let manager = browser_manager().await;
+    let mut state = manager.state.lock().await;
+    let session = state.as_mut()?;
+    let dialogs = session.open_dialogs().await;
+    dialog_hint(&dialogs)
+}
+
 /**
  * `browser` 的主入口：校验权限 → 控制租约 → 审批 → 分发。
  * 用户接管后返回 BROWSER_USER_TAKEOVER，模型在本回合内不能再重试。
@@ -971,7 +1001,7 @@ pub async fn execute_run_request(
                 Err(_) => Err((
                     "OPERATION_TIMEOUT".to_owned(),
                     format!(
-                        "浏览器操作 {operation} 超过 {} 秒没有响应：页面可能被模态对话框或脚本阻塞，或该标签页不在前台。请先用 browser.activate_tab 切到目标页、重新获取快照后再试。",
+                        "浏览器操作 {operation} 超过 {} 秒没有响应：页面可能被脚本阻塞，或该标签页不在前台。请先用 browser.activate_tab 切到目标页、重新获取快照后再试。",
                         budget.as_secs()
                     ),
                 )),
@@ -979,6 +1009,14 @@ pub async fn execute_run_request(
         }
     };
     end_control(&manager, &session_id).await;
+    // 超时最常见的真因是页面弹窗；状态锁此时已释放，可以安全读一次本地事件缓存。
+    let result = match result {
+        Err((code, message)) if code == "OPERATION_TIMEOUT" => match open_dialog_hint().await {
+            Some(hint) => Err((code, format!("{hint}（原错误：{message}）"))),
+            None => Err((code, message)),
+        },
+        other => other,
+    };
     if let Err(error) = refresh_screencast(app).await {
         log::warn!("浏览器画面恢复失败：{error}");
     }
@@ -1099,11 +1137,13 @@ async fn dispatch_operation(
             for id in session.tabs.keys() {
                 tabs.push(tab_view(session, id).await?);
             }
+            // 弹窗会阻塞后续调用，必须在状态里显式暴露，模型才知道先解弹窗。
+            let dialogs = session.open_dialogs().await;
             return Ok(ToolExecutionOutcome {
                 result: ToolExecutionResultPayload {
                     success: true,
                     summary: format!("已读取 {} 个浏览器标签页。", tabs.len()),
-                    payload: json!({ "ok": true, "operation": operation, "tabs": tabs, "activeTabId": session.active_tab_id, "visibleTabId": session.visible_tab_id }),
+                    payload: json!({ "ok": true, "operation": operation, "tabs": tabs, "activeTabId": session.active_tab_id, "visibleTabId": session.visible_tab_id, "dialogs": dialogs }),
                     citations: Vec::new(),
                     audit_fragment: None,
                 },
@@ -1152,11 +1192,13 @@ async fn dispatch_operation(
         .clone()
         .unwrap_or_else(|| session.active_tab_id.clone());
     // 弹窗本身就阻塞渲染进程，切前台这类调用也可能一起吊住；解弹窗时不做前台切换。
-    // 后台标签页不产生渲染帧，布局类 CDP 调用会一直不返回；动手前先把目标页切到前台。
-    session
-        .ensure_front(&tab_id)
-        .await
-        .map_err(|error| ("CDP_ERROR".to_owned(), error))?;
+    if !operation.starts_with("page.dialog.") {
+        // 后台标签页不产生渲染帧，布局类 CDP 调用会一直不返回；动手前先把目标页切到前台。
+        session
+            .ensure_front(&tab_id)
+            .await
+            .map_err(|error| ("CDP_ERROR".to_owned(), error))?;
+    }
     let tab = session.tabs.get_mut(&tab_id).ok_or_else(|| {
         (
             "TAB_NOT_FOUND".to_owned(),
@@ -1168,6 +1210,28 @@ async fn dispatch_operation(
     set_activity(app, operation, Some(tab_id.clone())).await;
 
     match operation {
+        "page.dialog.accept" | "page.dialog.dismiss" => {
+            // 只发 handleJavaScriptDialog：弹窗打开时其它 CDP 调用都可能被阻塞。
+            let accept = operation == "page.dialog.accept";
+            let prompt_text = params
+                .get("text")
+                .and_then(Value::as_str)
+                .map(str::to_owned);
+            page.execute(HandleJavaScriptDialogParams { accept, prompt_text })
+                .await
+                .map_err(|error| {
+                    (
+                        "CDP_ERROR".to_owned(),
+                        format!("处理页面弹窗失败（可能已经没有弹窗了）：{error}"),
+                    )
+                })?;
+            session.forget_dialog(&tab_id).await;
+            // 确认弹窗可能触发跳转，旧元素引用一律作废；取消弹窗不动页面，保留引用。
+            if accept {
+                bump_generation(session, &tab_id);
+            }
+            result.tab = Some(tab_view(session, &tab_id).await?);
+        }
         "tab.navigate" => {
             let url = params
                 .get("url")
@@ -1493,6 +1557,31 @@ mod tests {
         assert!(control.session_id.is_none());
         assert_eq!(control.revision, 1);
         assert!(control.blocked_sessions.contains("session-a"));
+    }
+
+    /** 超时提示必须把弹窗类型和自救操作说清楚，模型才能自己解开。 */
+    #[test]
+    fn dialog_hint_names_the_dialog_and_the_escape_hatch() {
+        let confirm = BrowserDialog {
+            tab_id: "tab-1".to_owned(),
+            dialog_type: "confirm".to_owned(),
+            message: "确定要离开吗？".to_owned(),
+            default_prompt: None,
+        };
+        let hint = dialog_hint(std::slice::from_ref(&confirm)).unwrap();
+        assert!(hint.contains("确认框"), "{hint}");
+        assert!(hint.contains("确定要离开吗？"), "{hint}");
+        assert!(hint.contains("page.dialog.accept"), "{hint}");
+        assert!(hint.contains("page.dialog.dismiss"), "{hint}");
+
+        let prompt = BrowserDialog {
+            dialog_type: "prompt".to_owned(),
+            default_prompt: Some("默认值".to_owned()),
+            ..confirm.clone()
+        };
+        let hint = dialog_hint(&[prompt]).unwrap();
+        assert!(hint.contains("输入框") && hint.contains("text"), "{hint}");
+        assert_eq!(dialog_hint(&[]), None);
     }
 
     /** 导航/等待类给足时间，元素操作必须尽早失败：卡住的 CDP 不能拖住整轮对话。 */

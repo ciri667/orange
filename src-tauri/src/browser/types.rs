@@ -79,6 +79,22 @@ pub struct BrowserReceipt {
     pub created_at: u64,
 }
 
+/**
+ * 页面弹窗（alert / confirm / prompt / beforeunload）。
+ *
+ * 弹窗会阻塞渲染进程，绝大多数 CDP 调用会一起吊住；
+ * 模型必须先看到它、再用 page.dialog.accept / dismiss 解开。
+ */
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BrowserDialog {
+    pub tab_id: String,
+    pub dialog_type: String,
+    pub message: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default_prompt: Option<String>,
+}
+
 /** 审计日志条目：只含 operation、tabId、origin、审批结果、耗时和错误码。 */
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]

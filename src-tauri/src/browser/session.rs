@@ -1,6 +1,6 @@
 //! Chromium 进程、真实标签页和画面流的生命周期；不涉及 Agent 权限或模型输入。
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -8,14 +8,17 @@ use std::time::Duration;
 
 use chromiumoxide::browser::{Browser, BrowserConfig};
 use chromiumoxide::cdp::browser_protocol::page::{
-    CaptureScreenshotFormat, CaptureScreenshotParams, EventScreencastFrame,
-    ScreencastFrameAckParams, StartScreencastFormat, StartScreencastParams, StopScreencastParams,
+    CaptureScreenshotFormat, CaptureScreenshotParams, EventJavascriptDialogClosed,
+    EventJavascriptDialogOpening, EventScreencastFrame, ScreencastFrameAckParams,
+    StartScreencastFormat, StartScreencastParams, StopScreencastParams,
 };
 use chromiumoxide::handler::viewport::Viewport;
 use chromiumoxide::handler::{Handler, HandlerConfig};
 use futures_util::StreamExt;
+use tokio::sync::Mutex;
 
-use super::types::BrowserFrame;
+use super::policy::MAX_ELEMENT_TEXT_CHARS;
+use super::types::{BrowserDialog, BrowserFrame};
 use crate::terminal::process_guard::{attach_owned_child, ProcessGuard};
 
 pub(super) const VIEWPORT_WIDTH: u32 = 1280;
@@ -39,6 +42,10 @@ pub(super) struct BrowserSessionState {
     frame_tab_id: Option<String>,
     /// Chromium 真正切到前台的页；后台页不产生渲染帧，元素操作前必须对齐它。
     front_tab_id: String,
+    /// 页面弹窗由事件泵写入；模型据此决定 accept 还是 dismiss。
+    pub dialogs: Arc<Mutex<HashMap<String, BrowserDialog>>>,
+    dialog_watched: HashSet<String>,
+    dialog_tasks: Vec<tokio::task::JoinHandle<()>>,
     /// 只有自己启动的实例才挂 Job；接管来的实例由它原本的进程归属决定。
     process_guard: Option<ProcessGuard>,
 }
@@ -197,6 +204,9 @@ impl BrowserSessionState {
             frame_task: None,
             frame_tab_id: None,
             front_tab_id: String::new(),
+            dialogs: Arc::new(Mutex::new(HashMap::new())),
+            dialog_watched: HashSet::new(),
+            dialog_tasks: Vec::new(),
             process_guard,
         };
         if import_existing_targets {
@@ -234,6 +244,7 @@ impl BrowserSessionState {
         if create_if_empty && self.tabs.is_empty() {
             self.create_tab().await?;
         }
+        self.watch_unwatched_dialogs();
         // 两个选中标识必须指向存活标签；按需补建空白页后同步选择。
         if !self.tabs.contains_key(&self.active_tab_id) {
             self.active_tab_id = self.tabs.keys().min().cloned().unwrap_or_default();
@@ -250,6 +261,7 @@ impl BrowserSessionState {
             .await
             .map_err(|error| error.to_string())?;
         let id = page.target_id().as_ref().to_owned();
+        self.watch_dialogs(id.clone(), page.clone());
         self.tabs.insert(
             id.clone(),
             BrowserTab {
@@ -259,6 +271,70 @@ impl BrowserSessionState {
         );
         self.activate_tab(&id).await?;
         Ok(id)
+    }
+
+    /** 给尚未订阅的标签页挂弹窗监听；sync_tabs 每次都会调用，靠 dialog_watched 去重。 */
+    fn watch_unwatched_dialogs(&mut self) {
+        let pending: Vec<(String, chromiumoxide::Page)> = self
+            .tabs
+            .iter()
+            .filter(|(id, _)| !self.dialog_watched.contains(*id))
+            .map(|(id, tab)| (id.clone(), tab.page.clone()))
+            .collect();
+        for (tab_id, page) in pending {
+            self.watch_dialogs(tab_id, page);
+        }
+    }
+
+    /**
+     * 订阅 JavaScript 弹窗事件。
+     *
+     * alert / confirm / prompt 会阻塞渲染进程，绝大多数 CDP 调用一起吊住；
+     * 事件缓存让模型先知道「有弹窗、是哪种、说了什么」，再用页面操作解开。
+     */
+    fn watch_dialogs(&mut self, tab_id: String, page: chromiumoxide::Page) {
+        if !self.dialog_watched.insert(tab_id.clone()) {
+            return;
+        }
+        let dialogs = self.dialogs.clone();
+        let handle = tokio::spawn(async move {
+            let (Ok(mut opened), Ok(mut closed)) = (
+                page.event_listener::<EventJavascriptDialogOpening>().await,
+                page.event_listener::<EventJavascriptDialogClosed>().await,
+            ) else {
+                return;
+            };
+            loop {
+                tokio::select! {
+                    event = opened.next() => {
+                        let Some(event) = event else { break };
+                        let dialog = BrowserDialog {
+                            tab_id: tab_id.clone(),
+                            // 事件里的 enum 直接取 Debug 名再归一，避免依赖生成代码的变体拼写。
+                            dialog_type: format!("{:?}", event.r#type).to_lowercase(),
+                            message: event.message.chars().take(MAX_ELEMENT_TEXT_CHARS).collect(),
+                            default_prompt: event.default_prompt.clone(),
+                        };
+                        dialogs.lock().await.insert(tab_id.clone(), dialog);
+                    }
+                    event = closed.next() => {
+                        if event.is_none() { break }
+                        dialogs.lock().await.remove(&tab_id);
+                    }
+                }
+            }
+        });
+        self.dialog_tasks.push(handle);
+    }
+
+    /** 当前已知的页面弹窗；模型据此决定 accept 还是 dismiss。 */
+    pub async fn open_dialogs(&self) -> Vec<BrowserDialog> {
+        self.dialogs.lock().await.values().cloned().collect()
+    }
+
+    /** 处理完弹窗就清掉本地记录，不必等 dialogClosed 事件。 */
+    pub async fn forget_dialog(&self, tab_id: &str) {
+        self.dialogs.lock().await.remove(tab_id);
     }
 
     /** Agent 创建标签时先校验可选地址，再导航；非法地址不得留下空白标签。 */
@@ -361,6 +437,8 @@ impl BrowserSessionState {
             .clone();
         page.close().await.map_err(|error| error.to_string())?;
         self.tabs.remove(tab_id);
+        self.dialog_watched.remove(tab_id);
+        self.dialogs.lock().await.remove(tab_id);
         if !self.tabs.contains_key(&self.active_tab_id) { self.active_tab_id = self.tabs.keys().min().cloned().unwrap_or_default(); }
         if !self.tabs.contains_key(&self.visible_tab_id) { self.visible_tab_id.clear(); }
         if !self.tabs.contains_key(&self.front_tab_id) { self.front_tab_id.clear(); }
@@ -478,6 +556,12 @@ impl BrowserSessionState {
         if let Some(guard) = self.process_guard.take() {
             guard.terminate();
         }
+        // 弹窗监听任务随会话一起停，别在浏览器已经关掉后继续等事件。
+        for task in self.dialog_tasks.drain(..) {
+            task.abort();
+        }
+        self.dialog_watched.clear();
+        self.dialogs.lock().await.clear();
         self.tabs.clear();
         self.handler_task.abort();
     }
@@ -486,6 +570,9 @@ impl BrowserSessionState {
 impl Drop for BrowserSessionState {
     fn drop(&mut self) {
         if let Some(task) = self.frame_task.take() {
+            task.abort();
+        }
+        for task in self.dialog_tasks.drain(..) {
             task.abort();
         }
         self.handler_task.abort();
