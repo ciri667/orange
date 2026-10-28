@@ -413,6 +413,7 @@ fn parse_openai_compatible_models(models: &[Value], fetched_at: &str) -> Vec<Llm
                 context_length: read_model_context_length(model),
                 created: read_i64_field(model, &["created"]),
                 updated_at: fetched_at.to_owned(),
+                supports_vision: false,
             })
         })
         .collect()
@@ -434,6 +435,7 @@ fn parse_ollama_tags_models(models: &[Value], fetched_at: &str) -> Vec<LlmProvid
                 context_length: None,
                 created: None,
                 updated_at: fetched_at.to_owned(),
+                supports_vision: false,
             })
         })
         .collect()
@@ -534,6 +536,7 @@ fn ensure_manual_model(provider: &mut LlmProviderConfig, model_id: &str, enabled
         context_length: None,
         created: None,
         updated_at: provider.updated_at.clone(),
+        supports_vision: false,
     });
 }
 
@@ -660,6 +663,7 @@ fn migrate_legacy_user_settings(legacy: LegacyUserSettings, now: &str) -> UserSe
         key_reference: key_reference_for_provider(MIGRATED_DEFAULT_PROVIDER_ID),
         enabled: legacy.model_config.enabled,
         supports_tools: true,
+        supports_vision: false,
         requires_api_key: true,
         models: Vec::new(),
         models_fetched_at: None,
@@ -698,6 +702,7 @@ mod tests {
             key_reference: key_reference_for_provider(id),
             enabled,
             supports_tools: true,
+            supports_vision: false,
             requires_api_key: true,
             models: Vec::new(),
             models_fetched_at: None,
@@ -717,6 +722,7 @@ mod tests {
             context_length: None,
             created: None,
             updated_at: "之前".to_owned(),
+            supports_vision: false,
         }
     }
 

@@ -20,6 +20,7 @@ pub fn default_user_settings() -> UserSettings {
                 key_reference: MODEL_KEY_REFERENCE.to_owned(),
                 enabled: false,
                 supports_tools: true,
+                supports_vision: false,
                 requires_api_key: true,
                 models: Vec::new(),
                 models_fetched_at: None,

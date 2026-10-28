@@ -124,6 +124,7 @@ static COMPLETED_INDEX_SIGNATURE: OnceLock<Mutex<Option<String>>> = OnceLock::ne
 mod attachments;
 mod config;
 mod db;
+mod document_images;
 mod files;
 mod file_references;
 pub use file_references::*;
@@ -142,6 +143,7 @@ mod sessions;
 mod workspace;
 
 pub use attachments::*;
+pub(crate) use document_images::*;
 pub use config::*;
 pub use db::*;
 pub use files::*;
@@ -817,6 +819,7 @@ mod tests {
             key_reference: crate::model_provider::key_reference_for_provider(id),
             enabled: true,
             supports_tools: true,
+            supports_vision: false,
             requires_api_key: true,
             models: Vec::new(),
             models_fetched_at: None,

@@ -148,6 +148,7 @@ mod tests {
             snapshot,
             session_index: 0,
             request,
+            supports_vision: false,
             web_override: None,
         }
     }
@@ -323,6 +324,46 @@ mod tests {
         );
         assert!(!bad_block.success);
         assert!(bad_block.summary.contains("结构块 99"));
+    }
+
+    /** 模型不支持视觉时必须明确说明跳过图片，不能静默假装成功。 */
+    #[test]
+    fn read_document_reports_vision_unavailable_instead_of_silent_success() {
+        let dir = tempfile::tempdir().unwrap();
+        write_two_page_pdf(&dir.path().join("spec.pdf"));
+        let mut snapshot = tool_test_snapshot("正文内容足够用于测试。".to_owned());
+        snapshot.knowledge_bases[0].path = dir.path().to_string_lossy().to_string();
+        snapshot.documents.push(WorkspaceDocument {
+            id: "document-vision".to_owned(),
+            knowledge_base_id: "kb-a".to_owned(),
+            title: "spec".to_owned(),
+            path: "spec.pdf".to_owned(),
+            file_type: "pdf".to_owned(),
+            updated_at: "刚刚".to_owned(),
+            content_hash: String::new(),
+            content: None,
+            preview_available: true,
+        });
+
+        let request = tool_test_request("ask", "读第二页");
+        let mut context = tool_test_context(&mut snapshot, &request);
+        let auto = execute::execute_read(
+            &mut context,
+            &json!({ "fileId": "document-vision", "page": 2 }),
+        );
+        assert!(auto.success, "{:?}", auto.payload);
+        assert_eq!(auto.payload["visionUnavailable"], json!(true));
+        assert!(auto.payload["includeImagesHint"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("支持视觉"));
+
+        let none = execute::execute_read(
+            &mut context,
+            &json!({ "fileId": "document-vision", "page": 2, "includeImages": "none" }),
+        );
+        assert!(none.success);
+        assert!(none.payload.get("visionUnavailable").is_none());
     }
 
     /** 默认 registry 只暴露闭集五个短名。 */

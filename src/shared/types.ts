@@ -690,6 +690,8 @@ export interface LlmProviderModel {
   contextLength?: number;
   created?: number;
   updatedAt: string;
+  /** 该模型是否支持图片输入；决定能否把 PDF/DOCX 页面图交给它读。 */
+  supportsVision?: boolean;
 }
 
 /** 单个 LLM Provider 实例配置；用户可以配置多个 provider 并按需切换。 */
@@ -702,6 +704,8 @@ export interface LlmProviderConfig {
   keyReference: string;
   enabled: boolean;
   supportsTools: boolean;
+  /** Provider 级视觉能力开关：开启后 read 才会把文档页面图发给模型。 */
+  supportsVision?: boolean;
   /** 是否需要配置 API key；本地免鉴权服务（如 Ollama）可以关闭 key 校验。 */
   requiresApiKey: boolean;
   /** 自动发现或手动保留的模型列表；为空时仍使用 model 字段兼容旧配置。 */

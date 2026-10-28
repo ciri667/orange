@@ -916,6 +916,7 @@ export function SettingsDrawer({
       keyReference: `orange-llm-provider-${providerId}-api-key`,
       enabled: true,
       supportsTools: true,
+      supportsVision: false,
       requiresApiKey: template.requiresApiKey,
       models: template.model
         ? [

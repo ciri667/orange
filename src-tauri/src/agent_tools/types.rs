@@ -63,6 +63,8 @@ pub struct AgentToolContext<'a> {
     pub session_index: usize,
     /** 用户本轮请求，提供知识库范围、prompt 和显式 @ 文件。 */
     pub request: &'a AgentTurnRequest,
+    /** 当前模型是否支持图片输入；false 时 read 不渲染文档页面，避免无效开销。 */
+    pub supports_vision: bool,
     /** 测试注入的联网替身。生产调用保持 None。 */
     pub web_override: Option<std::sync::Arc<crate::web::WebOverride>>,
 }

@@ -111,6 +111,7 @@ fn execute_local_tool(
         snapshot,
         session_index,
         request,
+        supports_vision: false,
         web_override: None,
     };
 

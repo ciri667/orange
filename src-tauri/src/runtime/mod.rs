@@ -872,6 +872,13 @@ async fn run_model_loop(
         .iter()
         .find(|model| model.id == selected_model_id)
         .and_then(|model| model.context_length);
+    // Plan/只读子角色同样按当前模型能力决定是否把文档页面图交给模型。
+    let supports_vision = provider.supports_vision
+        || provider
+            .models
+            .iter()
+            .find(|model| model.id == selected_model_id)
+            .is_some_and(|model| model.supports_vision);
     let session_id = snapshot.sessions[session_index].id.clone();
     let previous_transcript = match crate::storage::load_agent_session_transcript(app, &session_id)
     {
@@ -1333,6 +1340,7 @@ async fn run_model_loop(
                         shared.clone(),
                         provider.clone(),
                         selected_model_id.clone(),
+                        supports_vision,
                         api_key.clone(),
                         client.clone(),
                     )
@@ -1444,6 +1452,7 @@ async fn run_model_loop(
                     parent_trace_step_id: trace_step_id.clone(),
                     provider: &provider,
                     selected_model_id: &selected_model_id,
+                    supports_vision,
                     api_key: &api_key,
                     client: &client,
                     emit_progress: true,
@@ -1465,6 +1474,7 @@ async fn run_model_loop(
                     snapshot: &mut snapshot,
                     session_index,
                     request: &request,
+                    supports_vision,
                     web_override: None,
                 };
 
@@ -1519,6 +1529,22 @@ async fn run_model_loop(
                 "tool_call_id": model_tool_call.get("id").and_then(Value::as_str).unwrap_or("tool-call"),
                 "content": tool_result_text
             }));
+            // 文档页面/内嵌图片以独立 user 消息附在工具结果之后；tool 角色不能带图，
+            // 且 hydrate_model_images 会在发送前把 orange_image 展开成 image_url。
+            if let Some(images) = tool_outcome.payload.get("documentImages").and_then(Value::as_array) {
+                let mut parts = vec![json!({
+                    "type": "text",
+                    "text": "以下是本次 read 返回的文档图片（按页码顺序）。请直接读图，回答时引用对应页码或图注。"
+                })];
+                for image in images {
+                    if let Some(id) = image.get("id").and_then(Value::as_str) {
+                        parts.push(json!({ "type": crate::storage::MODEL_IMAGE_REF_TYPE, "id": id }));
+                    }
+                }
+                if parts.len() > 1 {
+                    model_messages.push(json!({ "role": "user", "content": parts }));
+                }
+            }
         }
     }
 

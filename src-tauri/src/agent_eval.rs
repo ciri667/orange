@@ -71,6 +71,7 @@ fn run_scripted_tool_loop(
                 snapshot,
                 session_index: 0,
                 request,
+                supports_vision: false,
                 web_override: None,
             };
             let outcome = registry.execute_model_tool_call(&mut context, &model_tool_call);
@@ -336,6 +337,7 @@ mod tests {
             snapshot: &mut snapshot,
             session_index: 0,
             request: &request,
+            supports_vision: false,
             web_override: None,
         };
         let first_outcome =

@@ -108,7 +108,7 @@ fn web_target_variants_cannot_bypass_readonly_or_per_call_approval() {
             let mut snapshot = snapshot(); snapshot.sessions[0].security_level = level.into();
             let registry = ToolRegistry::for_session(&snapshot.sessions[0], &Default::default());
             let mut context = AgentToolContext { app:None, snapshot:&mut snapshot, session_index:0,
-                request:&request, web_override:Some(gateway(true,true,None)) };
+                request:&request, supports_vision:false, web_override:Some(gateway(true,true,None)) };
             let outcome = registry.execute_named(&mut context,"search",json!({"target":target,"query":"orange"}));
             assert_eq!(outcome.call.status == "completed", level == "full-auto", "{level} {target}: {:?}", outcome.call);
             if level != "full-auto" { assert!(outcome.citations.is_empty()); }
@@ -129,6 +129,7 @@ fn web_search_fails_when_disabled_and_returns_citations_when_enabled() {
         snapshot: &mut snapshot,
         session_index: 0,
         request: &request,
+        supports_vision: false,
         web_override: Some(gateway(false, true, None)),
     };
     let disabled = registry.execute_named(
@@ -182,6 +183,7 @@ fn web_read_windows_long_pages_and_fifth_search_is_rejected() {
         snapshot: &mut snapshot,
         session_index: 0,
         request: &request,
+        supports_vision: false,
         web_override: Some(Arc::clone(&shared)),
     };
 

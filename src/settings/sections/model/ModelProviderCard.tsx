@@ -134,6 +134,7 @@ export function ModelProviderCard({
           )}
           <div className="flex flex-wrap items-center gap-x-6 gap-y-3 pt-1">
             <ToggleRow compact className="text-ink-muted" checked={provider.supportsTools} onChange={(value) => onFieldChange("supportsTools", value)}>支持工具调用</ToggleRow>
+            <ToggleRow compact className="text-ink-muted" checked={Boolean(provider.supportsVision)} onChange={(value) => onFieldChange("supportsVision", value)}>支持视觉（读文档图片）</ToggleRow>
             <ToggleRow compact className="text-ink-muted" checked={provider.requiresApiKey} onChange={(value) => onFieldChange("requiresApiKey", value)}>使用 API 密钥</ToggleRow>
             {!provider.requiresApiKey && <span className="text-[11px] text-ink-soft">适用于本地免鉴权服务</span>}
           </div>

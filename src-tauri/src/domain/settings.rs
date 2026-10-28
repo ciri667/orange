@@ -30,6 +30,9 @@ pub struct LlmProviderModel {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub created: Option<i64>,
     pub updated_at: String,
+    /** 该模型是否支持图片输入；用于决定能否把 PDF/DOCX 页面图交给它读。 */
+    #[serde(default)]
+    pub supports_vision: bool,
 }
 
 /** 单个 LLM Provider 实例配置；用户可以配置多个 provider 并按需切换。 */
@@ -44,6 +47,9 @@ pub struct LlmProviderConfig {
     pub key_reference: String,
     pub enabled: bool,
     pub supports_tools: bool,
+    /** Provider 级视觉能力开关；用户与模型都必须支持才会发送文档图片。 */
+    #[serde(default)]
+    pub supports_vision: bool,
     /** 是否需要配置 API key；本地免鉴权服务可以标记为 false 跳过 key 校验。 */
     #[serde(default = "default_requires_api_key")]
     pub requires_api_key: bool,

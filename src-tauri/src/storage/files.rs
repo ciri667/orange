@@ -3,7 +3,7 @@ use super::*;
 /** 单个文档的硬上限；避免恶意压缩包/超大 PDF 把进程内存打满。 */
 const MAX_DOCUMENT_BYTES: u64 = 128 * 1024 * 1024;
 /** DOCX 单个 XML part 解压后的上限。 */
-const MAX_DOCX_PART_BYTES: u64 = 64 * 1024 * 1024;
+pub(crate) const MAX_DOCX_PART_BYTES: u64 = 64 * 1024 * 1024;
 /** 单次抽取允许的最大文本字符数，超过时返回可诊断错误而不是无限占用上下文。 */
 const MAX_EXTRACTED_CHARS: usize = 10_000_000;
 /** PDF 页数上限；防止超长文档拖垮解析和后续视觉读图。 */
@@ -1380,7 +1380,7 @@ pub fn load_document_preview(
 }
 
 /** 读取 DOCX ZIP 内的 UTF-8 XML part，并执行解压大小上限。 */
-fn read_docx_part(
+pub(crate) fn read_docx_part(
     archive: &mut ZipArchive<fs::File>,
     name: &str,
 ) -> Result<Option<String>, String> {

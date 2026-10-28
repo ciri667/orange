@@ -52,6 +52,8 @@ pub(super) struct SubagentRunParams<'a> {
     pub parent_trace_step_id: Option<String>,
     pub provider: &'a LlmProviderConfig,
     pub selected_model_id: &'a str,
+    /// 父回合模型是否支持图片输入；子 Agent 沿用同一能力，避免重复探测。
+    pub supports_vision: bool,
     pub api_key: &'a str,
     pub client: &'a Client,
     pub emit_progress: bool,
@@ -208,6 +210,7 @@ fn spawn_background(params: &SubagentRunParams<'_>, parsed: ParsedTask) -> ToolO
     let client = params.client.clone();
     let tracer = params.tracer.clone();
     let emit_progress = params.emit_progress;
+    let supports_vision = params.supports_vision;
     let parent_trace_step_id = params.parent_trace_step_id.clone();
     let session_index = params.session_index;
     let parent_depth = params.parent_depth;
@@ -231,6 +234,7 @@ fn spawn_background(params: &SubagentRunParams<'_>, parsed: ParsedTask) -> ToolO
             parent_trace_step_id,
             provider: &provider,
             selected_model_id: &selected_model_id,
+            supports_vision,
             api_key: &api_key,
             client: &client,
             emit_progress,
@@ -265,6 +269,7 @@ pub(super) async fn run_parallel_readonly(
     tracer: Arc<Mutex<AgentTurnTracer>>,
     provider: LlmProviderConfig,
     selected_model_id: String,
+    supports_vision: bool,
     api_key: String,
     client: Client,
 ) -> Vec<ToolOutcome> {
@@ -293,6 +298,7 @@ pub(super) async fn run_parallel_readonly(
                 parent_trace_step_id: step_id,
                 provider: &provider,
                 selected_model_id: &selected_model_id,
+                supports_vision,
                 api_key: &api_key,
                 client: &client,
                 emit_progress: true,
@@ -508,6 +514,7 @@ async fn run_nested_loop(
                     snapshot: params.snapshot,
                     session_index: params.session_index,
                     request: params.request,
+                    supports_vision: params.supports_vision,
                     web_override: None,
                 };
                 registry.execute_with_permit(&mut tool_context, canonical, canonical_args.clone(), permission.as_ref().ok())
