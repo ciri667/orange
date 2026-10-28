@@ -16,7 +16,7 @@ Plan 覆盖为工作区只读，禁用外部工具、命令及所有变更应用
 - search 默认 target=notes，检索会话选中的知识库，支持 query、knowledgeBaseIds、pathPrefix、tags、fileTypes、updatedAfter、updatedBefore；查询参数只能缩小范围。`fileTypes` 支持 markdown、txt、docx、pdf：前两者查笔记 chunk，后两者查文档 chunk 并返回页码/结构块引用。默认返回 4 条引用，最多 16 条。
 - 三个工具都支持工作区 path；相对路径以会话所选知识库根目录为基准，根目录用 .，不会随编辑器焦点漂移。
 - read 用 fileId 或 path 读取。Markdown/TXT 返回文本；DOCX 返回结构块，PDF 返回按页文本和 `pageCount`。普通文件默认 6000 字符，按 nextOffset 续读；PDF 可传 page，或用 page=N&pageEnd=M 读页区间；DOCX/PDF 都可用 block=N 读单个结构块，DOCX 还可用 heading 读标题到下一个同级标题之间的正文。越界页码或结构块会明确失败。DOCX/PDF 的 path 必须对应已扫描且在当前会话授权范围内的文件，否则请使用 fileId。
-- read 的 includeImages=auto（默认）会在 PDF 无文本层或指定了 page/block 时返回 documentImages，并在后续图片消息里把页面或 DOCX 内嵌图片交给视觉模型；payload 只含 id、页码、图注和尺寸，不内联 base64。Provider 未打开「支持视觉」时返回 `visionUnavailable` 并说明原因。图片按 8 张/消息、4 MB/张、长边 2048 px 预算处理，长扫描件请按 1–4 页分批读。
+- read 的 includeImages=auto（默认）会在 PDF 无文本层或指定了 page/block 时返回 documentImages，并在后续图片消息里把页面或 DOCX 内嵌图片交给视觉模型；always 会在有文本层时也渲染最多 4 页（或指定页区间）和 DOCX 图片，适合双栏、扫描或文本顺序错乱的 PDF；none 跳过图片。payload 只含 id、页码、图注和尺寸，不内联 base64。Provider 未打开「支持视觉」时返回 `visionUnavailable` 并说明原因。图片按 8 张/消息、4 MB/张、长边 2048 px 预算处理，长扫描件请按 1–4 页分批读。
 - read target=skill、skillId、可选包内 path 读取启用 Skill 的说明、参考、模板和脚本，基础权限即可读取。内置与自定义都读取 `.orange/skills` 中的真实文件，禁止路径或链接逃逸。
 - list 默认最多 120 项；可用 query 按文件名/路径子串定位文档，再用 prefix、fileType 缩小范围。
 - 完全权限支持工作区外绝对路径；另一个已登记但未选中的知识库按外部路径处理。需审批档每次实际外部读取都审批，不缓存目录授权。

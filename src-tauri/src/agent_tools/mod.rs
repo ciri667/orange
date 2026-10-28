@@ -370,6 +370,14 @@ mod tests {
         );
         assert!(none.success);
         assert!(none.payload.get("visionUnavailable").is_none());
+
+        // always 也必须显式报告视觉不可用，不能因为没有文本层问题就静默跳过。
+        let always = execute::execute_read(
+            &mut context,
+            &json!({ "fileId": "document-vision", "includeImages": "always" }),
+        );
+        assert!(always.success, "{:?}", always.payload);
+        assert_eq!(always.payload["visionUnavailable"], json!(true));
     }
 
     /** 默认 registry 只暴露闭集五个短名。 */
