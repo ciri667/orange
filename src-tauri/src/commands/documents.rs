@@ -492,8 +492,14 @@ pub async fn load_document_preview(
 
     allow_asset_protocol_directory(&app, &root_path)?;
 
-    run_blocking("加载文档预览", move || {
+    let mut preview = run_blocking("加载文档预览", move || {
         storage::load_document_preview(&root_path, &document)
     })
-    .await
+    .await?;
+    // 索引计数只是展示信息，查询失败不应让预览失败。
+    preview.indexed_chunk_count =
+        storage::document_indexed_chunk_count(&app, &preview.document_id)
+            .ok()
+            .filter(|count| *count > 0);
+    Ok(preview)
 }

@@ -733,6 +733,27 @@ fn upsert_document_index(
     Ok(())
 }
 
+/** 读取单篇文档已建立的检索 chunk 数，供预览界面显示索引状态。 */
+pub fn document_indexed_chunk_count(app: &AppHandle, document_id: &str) -> Result<usize, String> {
+    let connection = open_database(app)?;
+    document_indexed_chunk_count_with_connection(&connection, document_id)
+}
+
+/** 连接级实现，便于在测试里直接断言索引计数。 */
+pub(crate) fn document_indexed_chunk_count_with_connection(
+    connection: &Connection,
+    document_id: &str,
+) -> Result<usize, String> {
+    let count: i64 = connection
+        .query_row(
+            "SELECT count(*) FROM document_chunks WHERE document_id = ?1",
+            params![document_id],
+            |row| row.get(0),
+        )
+        .map_err(|error| format!("无法读取文档索引状态：{error}"))?;
+    Ok(count.max(0) as usize)
+}
+
 /** 在当前授权 scope 内检索已索引的 DOCX/PDF chunk，返回带页码/块号的引用。 */
 pub(crate) fn search_documents(
     app: &AppHandle,
@@ -2128,6 +2149,11 @@ mod tests {
             .query_row("SELECT count(*) FROM document_chunks", [], |row| row.get(0))
             .unwrap();
         assert!(chunk_count >= 1, "DOCX 正文应写入 document_chunks");
+        assert_eq!(
+            super::document_indexed_chunk_count_with_connection(&connection, "doc-a").unwrap(),
+            chunk_count as usize,
+            "预览用的索引计数应与 chunk 表一致"
+        );
 
         let citations = super::search_documents_with_connection(
             &connection,

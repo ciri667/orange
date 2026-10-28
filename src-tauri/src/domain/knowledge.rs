@@ -162,6 +162,9 @@ pub struct DocumentPreview {
     pub warnings: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub status: Option<String>,
+    /// 该文档已写入的检索 chunk 数；None 表示没查（例如离线测试）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub indexed_chunk_count: Option<usize>,
 }
 
 /** 本地知识库中的真实目录，用于让空文件夹也能出现在目录树中。 */

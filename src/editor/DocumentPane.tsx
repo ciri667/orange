@@ -249,6 +249,9 @@ function DocumentPreviewView({
   const [docxView, setDocxView] = useState<"layout" | "text">("layout");
   const [docxLayoutError, setDocxLayoutError] = useState("");
   const docxLayoutUrl = createDocumentAssetUrl(preview?.assetPath);
+  const indexStatus = preview?.indexedChunkCount
+    ? `已建立检索索引：${preview.indexedChunkCount} 块`
+    : "尚未建立检索索引：重扫知识库后可用 search 检索本文档";
 
   useEffect(() => {
     // 引用跳转依赖结构块索引，自动切回文本视图，避免在看版式时找不到位置。
@@ -278,6 +281,7 @@ function DocumentPreviewView({
 
     return (
       <div className="grid min-h-0 gap-3" aria-label="PDF 预览">
+        <span className="px-1 text-[11px] text-ink-soft">{indexStatus}</span>
         {!!preview?.warnings?.length && (
           <div className="rounded-lg border border-[rgba(var(--danger-rgb),0.28)] bg-danger-soft px-3 py-2 text-[12px] leading-[1.55] text-danger" role="status">
             {preview.warnings.map((warning) => (
@@ -381,6 +385,7 @@ function DocumentPreviewView({
           </Button>
           {docxLayoutError ? <span className="text-[11px] text-warning">版式渲染失败，已回退文本视图：{docxLayoutError}</span> : null}
           {!focus?.blockIndex ? null : <span className="text-[11px] text-ink-soft">已定位结构块 {focus.blockIndex}</span>}
+          <span className="text-[11px] text-ink-soft">{indexStatus}</span>
         </div>
 
         {showLayout ? (

@@ -1348,6 +1348,7 @@ pub fn load_document_preview(
                 page_count,
                 warnings,
                 status,
+                indexed_chunk_count: None,
             })
         }
         "docx" => {
@@ -1373,6 +1374,7 @@ pub fn load_document_preview(
                 page_count: None,
                 warnings: Vec::new(),
                 status: None,
+                indexed_chunk_count: None,
             })
         }
         "image" => {
@@ -1395,6 +1397,7 @@ pub fn load_document_preview(
                 page_count: None,
                 warnings: Vec::new(),
                 status: None,
+                indexed_chunk_count: None,
             })
         }
         _ => Err("该文档类型不支持只读预览。".to_owned()),

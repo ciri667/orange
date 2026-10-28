@@ -144,6 +144,7 @@ mod sessions;
 mod workspace;
 
 pub use attachments::*;
+pub use workspace::document_indexed_chunk_count;
 pub(crate) use document_cache::*;
 pub(crate) use document_images::*;
 pub use config::*;
