@@ -1542,7 +1542,12 @@ async fn run_model_loop(
                     }
                 }
                 if parts.len() > 1 {
-                    model_messages.push(json!({ "role": "user", "content": parts }));
+                    model_messages.push(json!({
+                        "role": "user",
+                        "content": parts,
+                        // 仅本轮有效；persist_turn_transcript 会丢弃带该标记的消息。
+                        "ephemeral": true
+                    }));
                 }
             }
         }
@@ -1758,7 +1763,10 @@ fn persist_turn_transcript(
     model_context_length: Option<u64>,
     rewrite_compacted: bool,
 ) {
-    let mut conversation = conversation_from_model_messages(model_messages, prefix_len);
+    // 文档页面图只在注入的那一轮有意义；落到 transcript 会把图片 token 带进后续每一轮。
+    // ephemeral 消息只在本轮工具结果之后出现，因此不会影响前缀长度。
+    let persistent_messages = persistent_model_messages(model_messages);
+    let mut conversation = conversation_from_model_messages(&persistent_messages, prefix_len);
     if rewrite_compacted {
         if let Some(summary) = context_summary {
             conversation = compact_transcript(
@@ -1779,6 +1787,15 @@ fn persist_turn_transcript(
             model_provider::redact_model_error_text(&error)
         );
     }
+}
+
+/** 落盘前剔除只在本轮有效的消息（例如注入的文档页面图）。 */
+fn persistent_model_messages(model_messages: &[Value]) -> Vec<Value> {
+    model_messages
+        .iter()
+        .filter(|message| message.get("ephemeral").and_then(Value::as_bool) != Some(true))
+        .cloned()
+        .collect()
 }
 
 /** 手动/自动 compact 成功后把已落盘 transcript 改写成检查点 + legal tail。 */
@@ -4005,6 +4022,30 @@ mod tests {
                 next_char_count: 9,
             }),
         }
+    }
+
+    /** 只在本轮有效的文档图片消息不得写入 transcript。 */
+    #[test]
+    fn persistent_model_messages_drop_ephemeral_image_turns() {
+        let messages = vec![
+            json!({ "role": "user", "content": "读一下扫描件" }),
+            json!({
+                "role": "user",
+                "content": [
+                    { "type": "text", "text": "以下是文档图片" },
+                    { "type": "orange_image", "id": "image-1" }
+                ],
+                "ephemeral": true
+            }),
+            json!({ "role": "assistant", "content": "第 1 页是扫描页。" }),
+        ];
+
+        let persisted = persistent_model_messages(&messages);
+        assert_eq!(persisted.len(), 2);
+        assert!(persisted.iter().all(|message| message.get("ephemeral").is_none()));
+        assert!(persisted
+            .iter()
+            .all(|message| !message.to_string().contains("orange_image")));
     }
 
     /** System prompt 应把工具选择权交给模型，而不是由宿主分支决定。 */
