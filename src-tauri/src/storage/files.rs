@@ -294,7 +294,7 @@ pub(crate) fn supported_document_kind(path: &Path) -> Option<SupportedDocumentKi
     {
         Some("md") | Some("markdown") => Some(SupportedDocumentKind::Markdown),
         Some("txt") => Some(SupportedDocumentKind::Txt),
-        Some("docx") => Some(SupportedDocumentKind::Docx),
+        Some("docx") | Some("docm") => Some(SupportedDocumentKind::Docx),
         Some("pdf") => Some(SupportedDocumentKind::Pdf),
         Some("png") | Some("jpg") | Some("jpeg") | Some("webp") | Some("gif") | Some("svg") => {
             Some(SupportedDocumentKind::Image)
@@ -346,6 +346,7 @@ pub fn scan_supported_documents_directory(
     let mut errors = Vec::new();
     let mut scanned_by_type = create_scanned_by_type_counter();
     let mut skipped_directory_set = HashSet::new();
+    let mut unsupported_files: Vec<String> = Vec::new();
     let root_for_filter = root.clone();
 
     for entry in WalkDir::new(&root).into_iter().filter_entry(|entry| {
@@ -401,6 +402,20 @@ pub fn scan_supported_documents_directory(
             .then(|| supported_document_kind(path))
             .flatten()
         else {
+            // 旧版 .doc 明确不支持：记录到扫描报告，提示用户另存为 .docx，而不是静默跳过。
+            if path.is_file()
+                && path
+                    .extension()
+                    .and_then(|extension| extension.to_str())
+                    .is_some_and(|extension| extension.eq_ignore_ascii_case("doc"))
+            {
+                let relative_path = path
+                    .strip_prefix(&root)
+                    .unwrap_or(path)
+                    .to_string_lossy()
+                    .replace('\\', "/");
+                unsupported_files.push(relative_path);
+            }
             continue;
         };
         let relative_path = path
@@ -513,6 +528,7 @@ pub fn scan_supported_documents_directory(
         failed_file_count: errors.len(),
         skipped_directories,
         errors,
+        unsupported_files,
     };
 
     let knowledge_base = KnowledgeBase {
@@ -1296,6 +1312,7 @@ pub fn load_document_preview(
                         .map(|block| DocumentPreviewBlock {
                             r#type: "paragraph".to_owned(),
                             text: block.text,
+                            index: Some(block.index),
                             page: block.page,
                             heading_level: None,
                             role: Some("body".to_owned()),
@@ -1310,7 +1327,11 @@ pub fn load_document_preview(
                 Err(error) => (
                     Vec::new(),
                     None,
-                    Some("error".to_owned()),
+                    Some(if error.contains("加密") {
+                        "encrypted".to_owned()
+                    } else {
+                        "error".to_owned()
+                    }),
                     vec![format!("PDF 文本层解析失败：{error}")],
                 ),
             };
@@ -1376,6 +1397,36 @@ pub fn load_document_preview(
             })
         }
         _ => Err("该文档类型不支持只读预览。".to_owned()),
+    }
+}
+
+/** 识别加密或旧版 OLE 容器，返回面向用户的明确原因，避免笼统的“格式无效”。 */
+fn document_encryption_hint(bytes: &[u8], file_type: &str) -> Option<String> {
+    // Office 加密文档（含旧版 .doc）是 OLE 复合文档，不是 ZIP；先于 zip 解析识别。
+    if bytes.starts_with(&[0xD0, 0xCF, 0x11, 0xE0]) {
+        return Some(
+            "该 Office 文档已加密或为旧版 .doc（OLE 容器）；请用 Word 另存为未加密 .docx 后再读取。"
+                .to_owned(),
+        );
+    }
+    if file_type == "pdf" && bytes.windows(8).any(|window| window == b"/Encrypt") {
+        return Some(
+            "该 PDF 已加密，暂不支持输入密码；请先解密或提供未加密副本后再读取。".to_owned(),
+        );
+    }
+    None
+}
+
+/** 按扩展名返回格式提示；.docm 读取正文但不执行宏。 */
+fn document_format_warnings(path: &Path) -> Vec<String> {
+    let is_docm = path
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| extension.eq_ignore_ascii_case("docm"));
+    if is_docm {
+        vec!["该文档为 .docm（含宏），橘记只读取正文与图片，不会执行宏。".to_owned()]
+    } else {
+        Vec::new()
     }
 }
 
@@ -1653,6 +1704,14 @@ pub fn extract_docx_preview_blocks(path: &Path) -> Result<Vec<DocumentPreviewBlo
 }
 
 fn extract_docx_preview_blocks_inner(path: &Path) -> Result<Vec<DocumentPreviewBlock>, String> {
+    // 先看文件头：加密 Office 文档是 OLE 容器，直接给“已加密”而不是“ZIP 结构无效”。
+    let mut header = [0u8; 8];
+    let mut probe = fs::File::open(path).map_err(|error| format!("无法打开 DOCX 文件：{error}"))?;
+    let read = probe.read(&mut header).unwrap_or(0);
+    if let Some(hint) = document_encryption_hint(&header[..read], "docx") {
+        return Err(hint);
+    }
+    drop(probe);
     let file = fs::File::open(path).map_err(|error| format!("无法打开 DOCX 文件：{error}"))?;
     let mut archive =
         ZipArchive::new(file).map_err(|error| format!("DOCX 文件结构无效：{error}"))?;
@@ -1711,6 +1770,11 @@ fn extract_docx_preview_blocks_inner(path: &Path) -> Result<Vec<DocumentPreviewB
             let mut part_blocks = parse_docx_annotation_xml(&xml, role, role)?;
             blocks.append(&mut part_blocks);
         }
+    }
+
+    // block index 与 read/search 的 blockIndex 对齐：正文在前，注释/页眉页脚按附加顺序编号。
+    for (index, block) in blocks.iter_mut().enumerate() {
+        block.index = Some(index + 1);
     }
 
     Ok(blocks)
@@ -1905,6 +1969,7 @@ fn parse_docx_document_xml_with_context(
                                         "paragraph".to_owned()
                                     },
                                     text,
+                                    index: None,
                                     page: None,
                                     heading_level,
                                     role: Some("body".to_owned()),
@@ -1930,6 +1995,7 @@ fn parse_docx_document_xml_with_context(
         blocks.push(DocumentPreviewBlock {
             r#type: "paragraph".to_owned(),
             text: "该 DOCX 暂无可预览正文。".to_owned(),
+            index: None,
             page: None,
             heading_level: None,
             role: Some("body".to_owned()),
@@ -1997,6 +2063,9 @@ pub fn extract_document_text(
         ));
     }
     let bytes = fs::read(&target_path).map_err(|error| format!("无法读取文档内容：{error}"))?;
+    if let Some(hint) = document_encryption_hint(&bytes, &document.file_type) {
+        return Err(hint);
+    }
     let content_hash = hash_bytes(&bytes);
     let cache_key = format!(
         "{}:{}:{}",
@@ -2039,7 +2108,7 @@ pub fn extract_document_text(
                     .collect()
             };
             let status = if blocks.is_empty() { "no_text" } else { "ok" }.to_owned();
-            let warnings = if blocks.is_empty() {
+            let mut warnings = if blocks.is_empty() {
                 vec!["未从 DOCX 正文提取到可读文本；图片和图表需要视觉模型读取。".to_owned()]
             } else {
                 vec![
@@ -2047,6 +2116,7 @@ pub fn extract_document_text(
                         .to_owned(),
                 ]
             };
+            warnings.extend(document_format_warnings(&target_path));
             (blocks, 0, status, warnings)
         }
         "pdf" => {

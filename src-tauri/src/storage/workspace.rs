@@ -1097,6 +1097,7 @@ pub fn load_workspace_snapshot(app: &AppHandle) -> Result<WorkspaceSnapshot, Str
                         failed_file_count: 1,
                         skipped_directories: Vec::new(),
                         errors: vec![error_message],
+                        unsupported_files: Vec::new(),
                     }),
                 });
             }

@@ -12,6 +12,7 @@ import type {
   AgentSkill,
   AgentTurnProgressEvent,
   BuiltinCommandDescriptor,
+  Citation,
   KnowledgeBase,
   ModelConfig,
   Note,
@@ -65,6 +66,7 @@ export function AgentPanel({
   onRunBuiltinCommand,
   onDismissBuiltinCommandNotice,
   onEditUserMessage,
+  onOpenCitation,
   onAbortTurn,
   onClearQueuedFollowUp,
   onTurnModelSelectionChange,
@@ -131,6 +133,8 @@ export function AgentPanel({
   onDismissBuiltinCommandNotice?: () => void;
   /** 编辑已发送的用户消息并截断其后历史重跑。 */
   onEditUserMessage?: (messageId: string, prompt: string) => void;
+  /** 点击引用打开对应文件并跳到页码/结构块。 */
+  onOpenCitation?: (citation: Citation) => void;
   /** 中断当前正在跑的 Agent 回合。 */
   onAbortTurn?: () => void;
   /** 取消尚未进入模型的排队指令。 */
@@ -208,6 +212,7 @@ export function AgentPanel({
         notes={notes}
         queuedFollowUp={queuedFollowUpInList}
         onEditUserMessage={onEditUserMessage}
+        onOpenCitation={onOpenCitation}
         readingNote={readingNote && mentionedFiles.some((file) => file.id === readingNote.id) ? readingNote : undefined}
         knowledgeBaseName={getSessionKnowledgeBaseLabel(activeSession, knowledgeBases)}
         onChoosePrompt={(nextPrompt, noteId) => {

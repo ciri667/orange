@@ -1,6 +1,6 @@
 import { convertFileSrc } from "@tauri-apps/api/core";
 import { Clock3, Eye, FilePenLine, FileText, Save } from "lucide-react";
-import { createElement, useRef } from "react";
+import { createElement, useEffect, useRef } from "react";
 import { Button } from "../shared/Button";
 import { VoiceDictationButton } from "../shared/VoiceDictationButton";
 import { logInfo, logWarn } from "../shared/logger";
@@ -79,6 +79,7 @@ export function DocumentPane({
   onNotice,
   sessions = [],
   onSelectSession,
+  focus,
 }: {
   document?: WorkspaceDocument;
   knowledgeBase: KnowledgeBase;
@@ -96,6 +97,8 @@ export function DocumentPane({
   onNotice?: (message: string) => void;
   sessions?: AgentSession[];
   onSelectSession?: (sessionId: string) => void;
+  /** 点击 Agent 引用后要定位的页码/结构块；切换引用时滚动并高亮。 */
+  focus?: { page?: number; blockIndex?: number };
 }) {
   const textAreaRef = useRef<HTMLTextAreaElement | null>(null);
 
@@ -218,6 +221,7 @@ export function DocumentPane({
             preview={preview}
             previewError={previewError}
             isPreviewLoading={isPreviewLoading}
+            focus={focus}
           />
         )}
       </div>
@@ -231,12 +235,23 @@ function DocumentPreviewView({
   preview,
   previewError,
   isPreviewLoading,
+  focus,
 }: {
   document: WorkspaceDocument;
   preview?: DocumentPreview;
   previewError: string;
   isPreviewLoading: boolean;
+  focus?: { page?: number; blockIndex?: number };
 }) {
+  const docxRef = useRef<HTMLDivElement | null>(null);
+
+  useEffect(() => {
+    if (document.fileType !== "docx" || !focus?.blockIndex) {
+      return;
+    }
+    const target = docxRef.current?.querySelector<HTMLElement>(`[data-block-index="${focus.blockIndex}"]`);
+    target?.scrollIntoView({ block: "center" });
+  }, [document.fileType, focus?.blockIndex, preview?.blocks?.length]);
   if (isPreviewLoading) {
     return <div className="grid min-h-0 min-w-0 place-items-center rounded-panel border border-dashed border-border-strong bg-surface p-6 text-center text-[13px] leading-[1.55] text-ink-muted">正在加载预览...</div>;
   }
@@ -248,6 +263,10 @@ function DocumentPreviewView({
   if (document.fileType === "pdf") {
     const assetUrl = createDocumentAssetUrl(preview?.assetPath);
     const pageCount = preview?.pageCount ?? preview?.blocks?.length ?? 0;
+    // PDF 原生阅读器支持 #page= 定位；引用跳转不需要额外渲染引擎。
+    const iframeSrc = assetUrl && focus?.page
+      ? `${assetUrl}#page=${focus.page}&zoom=page-width`
+      : assetUrl;
 
     return (
       <div className="grid min-h-0 gap-3" aria-label="PDF 预览">
@@ -259,19 +278,26 @@ function DocumentPreviewView({
           </div>
         )}
         {assetUrl ? (
-          <iframe className="h-full min-h-0 w-full min-w-0 overflow-hidden rounded-none border-0 bg-surface" title={document.title} src={assetUrl} />
+          <iframe className="h-full min-h-0 w-full min-w-0 overflow-hidden rounded-none border-0 bg-surface" title={document.title} src={iframeSrc} />
         ) : (
           <div className="grid min-h-0 min-w-0 place-items-center rounded-panel border border-dashed border-border-strong bg-surface p-6 text-center text-[13px] leading-[1.55] text-ink-muted">当前环境无法内嵌 PDF 预览。</div>
         )}
         {!!preview?.blocks?.length && (
-          <details className="max-h-[280px] overflow-auto rounded-lg border border-border bg-surface-muted p-3">
+          <details className="max-h-[280px] overflow-auto rounded-lg border border-border bg-surface-muted p-3" open={Boolean(focus?.page)}>
             <summary className="cursor-pointer font-semibold">查看可提取文本（{pageCount} 页）</summary>
-            {preview.blocks.map((block, index) => (
-              <section className="mt-3" key={`pdf-${index}`}>
-                <strong>{block.page ? `第 ${block.page} 页` : `片段 ${index + 1}`}</strong>
-                <p className="whitespace-pre-wrap">{block.text}</p>
-              </section>
-            ))}
+            {preview.blocks.map((block, index) => {
+              const active = Boolean(focus?.page && block.page === focus.page);
+              return (
+                <section
+                  className={active ? "mt-3 rounded-md bg-surface p-2 ring-2 ring-accent/40" : "mt-3"}
+                  data-page={block.page}
+                  key={`pdf-${index}`}
+                >
+                  <strong>{block.page ? `第 ${block.page} 页` : `片段 ${index + 1}`}</strong>
+                  <p className="whitespace-pre-wrap">{block.text}</p>
+                </section>
+              );
+            })}
           </details>
         )}
       </div>
@@ -323,16 +349,23 @@ function DocumentPreviewView({
     const blocks = preview?.blocks ?? [];
 
     return (
-      <div className="min-h-0 min-w-0 overflow-auto rounded-none border-0 bg-surface py-4 text-body leading-[1.75] text-ink [scrollbar-gutter:stable] [&>:last-child]:mb-0" aria-label="DOCX 预览">
-        {blocks.map((block, index) =>
-          block.type === "heading" ? (
-            <DocxHeading key={`${block.type}-${index}`} level={block.headingLevel} text={block.text} />
+      <div className="min-h-0 min-w-0 overflow-auto rounded-none border-0 bg-surface py-4 text-body leading-[1.75] text-ink [scrollbar-gutter:stable] [&>:last-child]:mb-0" aria-label="DOCX 预览" ref={docxRef}>
+        {blocks.map((block, index) => {
+          const blockIndex = block.index ?? index + 1;
+          const active = focus?.blockIndex === blockIndex;
+          const commonProps = {
+            "data-block-index": blockIndex,
+            className: active ? "rounded-md bg-surface-muted px-2 ring-2 ring-accent/40" : undefined,
+          } as const;
+
+          return block.type === "heading" ? (
+            <DocxHeading key={`${block.type}-${index}`} level={block.headingLevel} text={block.text} {...commonProps} />
           ) : block.type === "table" ? (
-            <pre className="whitespace-pre-wrap font-[inherit]" key={`${block.type}-${index}`}>{block.text}</pre>
+            <pre className={`whitespace-pre-wrap font-[inherit] ${commonProps.className ?? ""}`} data-block-index={blockIndex} key={`${block.type}-${index}`}>{block.text}</pre>
           ) : (
-            <p className="mb-3 mt-0 whitespace-pre-wrap" key={`${block.type}-${index}`}>{block.text}</p>
-          ),
-        )}
+            <p className={`mb-3 mt-0 whitespace-pre-wrap ${commonProps.className ?? ""}`} data-block-index={blockIndex} key={`${block.type}-${index}`}>{block.text}</p>
+          );
+        })}
       </div>
     );
   }
@@ -341,7 +374,17 @@ function DocumentPreviewView({
 }
 
 /** 按 DOCX 标题级别渲染，缺失级别时沿用旧版的 h3。 */
-function DocxHeading({ level, text }: { level?: number; text: string }) {
+function DocxHeading({
+  level,
+  text,
+  className,
+  ...rest
+}: {
+  level?: number;
+  text: string;
+  className?: string;
+  "data-block-index"?: number;
+}) {
   const normalizedLevel = Math.min(6, Math.max(1, level ?? 3));
   const tag = `h${normalizedLevel}` as "h1" | "h2" | "h3" | "h4" | "h5" | "h6";
   const sizeClass =
@@ -355,7 +398,7 @@ function DocxHeading({ level, text }: { level?: number; text: string }) {
 
   return createElement(
     tag,
-    { className: `mb-3 mt-0 ${sizeClass} font-semibold leading-[1.35] text-ink-strong` },
+    { className: `mb-3 mt-0 ${sizeClass} font-semibold leading-[1.35] text-ink-strong ${className ?? ""}`, ...rest },
     text,
   );
 }

@@ -996,6 +996,7 @@ mod tests {
             DocumentPreviewBlock {
                 r#type: "heading".to_owned(),
                 text: "标题".to_owned(),
+                index: Some(1),
                 page: None,
                 heading_level: Some(1),
                 role: Some("body".to_owned()),
@@ -1005,6 +1006,7 @@ mod tests {
             DocumentPreviewBlock {
                 r#type: "paragraph".to_owned(),
                 text: "正文".to_owned(),
+                index: Some(2),
                 page: None,
                 heading_level: None,
                 role: Some("body".to_owned()),

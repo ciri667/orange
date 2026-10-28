@@ -163,6 +163,7 @@ pub async fn rescan_knowledge_base(
                     failed_file_count: 1,
                     skipped_directories: Vec::new(),
                     errors: vec![error_message.clone()],
+                    unsupported_files: Vec::new(),
                 });
                 snapshot.knowledge_bases[knowledge_base_index] = failed_knowledge_base;
                 snapshot

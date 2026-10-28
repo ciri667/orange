@@ -31,6 +31,7 @@ import { listenScheduledJobUpdated, loadSessions, restoreSessionContext, saveWor
 import { SchedulesView } from "../schedules/SchedulesView";
 import type {
   AgentContextCompactionReport,
+  Citation,
   DocumentHistoryTargetKind,
   EditorFileTab,
   MarkdownViewMode,
@@ -101,6 +102,12 @@ export function WorkspaceShell() {
   const [notice, setNotice] = useState("");
   /** 最近一次手动整理上下文的回执；只在上下文浮层里就地展示，不占用全局 notice。 */
   const [contextCompaction, setContextCompaction] = useState<AgentContextCompactionReport | null>(null);
+  /** 点击 Agent 引用后要跳转到的文档位置；DocumentPane 消费后滚动/高亮对应块。 */
+  const [documentFocus, setDocumentFocus] = useState<{
+    documentId: string;
+    page?: number;
+    blockIndex?: number;
+  } | null>(null);
   /** 编辑草稿 hook 维护 dirty 集合和保存基准 hash，文件写入仍由原有 Tauri API 执行。 */
   const {
     editingBaseHashes,
@@ -440,6 +447,35 @@ export function WorkspaceShell() {
     isBusy,
     expandFolderPaths,
   });
+
+  /**
+   * 点击 Agent 引用：资料库引用打开对应笔记/文档，并把页码或结构块交给 DocumentPane 定位。
+   * 文件已删除或不在当前快照时退回轻量提示，不静默失败。
+   */
+  function handleOpenCitation(citation: Citation) {
+    const document = currentSnapshot.documents.find((item) => item.id === citation.noteId);
+    if (document) {
+      compactView.showPane("editor");
+      setIsSchedulesOpen(false);
+      setDocumentFocus({
+        documentId: document.id,
+        page: citation.page,
+        blockIndex: citation.blockIndex,
+      });
+      handleSelectDocument(document.id);
+      return;
+    }
+
+    const note = currentSnapshot.notes.find((item) => item.id === citation.noteId);
+    if (note) {
+      compactView.showPane("editor");
+      setIsSchedulesOpen(false);
+      handleSelectNote(note.id);
+      return;
+    }
+
+    setNotice("引用对应的文件已不在当前工作区，可能已被删除或重命名。");
+  }
   const {
     liveTurn,
     queuedFollowUp,
@@ -882,6 +918,7 @@ export function WorkspaceShell() {
         onRunBuiltinCommand={(command) => void runBuiltinCommand?.(command, "")}
         onDismissBuiltinCommandNotice={dismissBuiltinCommandNotice}
         onEditUserMessage={(messageId, prompt) => void handleEditUserMessageAndRerun(messageId, prompt)}
+        onOpenCitation={handleOpenCitation}
         onAbortTurn={() => void handleAbortTurn()}
         onClearQueuedFollowUp={handleClearQueuedFollowUp}
         onTurnModelSelectionChange={setTurnModelSelection}
@@ -926,6 +963,7 @@ export function WorkspaceShell() {
         onRenameDocument={() => openRenameDocumentDialog()}
         onDeleteDocument={() => handleDeleteDocument()}
         onNotice={setNotice}
+        focus={documentFocus?.documentId === activeDocument.id ? documentFocus : undefined}
         sessions={currentSnapshot.sessions}
         onSelectSession={(sessionId) => {
           setIsSchedulesOpen(false);

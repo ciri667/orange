@@ -129,6 +129,11 @@ function ScanReportDetails({ knowledgeBase }: { knowledgeBase: KnowledgeBase }) 
         扫描 {report.scannedFileCount} 篇，失败 {report.failedFileCount} 个
       </span>
       {report.skippedDirectories.length > 0 && <span>跳过：{report.skippedDirectories.slice(0, 4).join(" / ")}</span>}
+      {report.unsupportedFiles && report.unsupportedFiles.length > 0 && (
+        <span className="text-warning">
+          不支持 .doc：{report.unsupportedFiles.slice(0, 4).join(" / ")}，请用 Word 另存为 .docx 后重新扫描。
+        </span>
+      )}
       {report.errors.length > 0 && <span className="text-danger">{report.errors[0]}</span>}
     </div>
   );

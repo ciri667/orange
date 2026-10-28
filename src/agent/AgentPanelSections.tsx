@@ -51,6 +51,7 @@ import type {
   AgentSecuritySettings,
   AgentSession,
   AgentTurnProgressEvent,
+  Citation,
   KnowledgeBase,
   ModelConfig,
   Note,
@@ -635,6 +636,7 @@ export function AgentMessageList({
   readingNote,
   knowledgeBaseName = "当前授权知识库",
   onChoosePrompt,
+  onOpenCitation,
 }: {
   scrollPositions?: Map<string, { top: number; stickToBottom: boolean }>;
   activeSession: AgentSession;
@@ -648,6 +650,8 @@ export function AgentMessageList({
   readingNote?: Note;
   knowledgeBaseName?: string;
   onChoosePrompt?: (prompt: string, noteId?: string) => void;
+  /** 点击引用打开文件并定位。 */
+  onOpenCitation?: (citation: Citation) => void;
 }) {
   const persistedIds = new Set(activeSession.messages.map((message) => message.id));
   const showLiveTurn =
@@ -707,6 +711,7 @@ export function AgentMessageList({
           message={message}
           notes={notes}
           onEditUserMessage={onEditUserMessage}
+          onOpenCitation={onOpenCitation}
           planInitiallyExpanded={activeSession.planMode && index === activeSession.messages.length - 1}
         />
       ))}
@@ -751,6 +756,7 @@ function AgentMessageItem({
   queued = false,
   canEdit = false,
   onEditUserMessage,
+  onOpenCitation,
   planInitiallyExpanded = false,
 }: {
   message: AgentMessage;
@@ -763,6 +769,8 @@ function AgentMessageItem({
   queued?: boolean;
   canEdit?: boolean;
   onEditUserMessage?: (messageId: string, prompt: string) => void;
+  /** 点击资料库引用时打开文件并跳到页码/结构块。 */
+  onOpenCitation?: (citation: Citation) => void;
   /** 仍在规划模式里、且是最新一条时，计划卡片默认展开，方便确认前通读。 */
   planInitiallyExpanded?: boolean;
 }) {
@@ -913,7 +921,7 @@ function AgentMessageItem({
       {/* 2026-08-22 之前落盘的消息没有 trace / turnDurationMs，仍走扁平「运行信息」。
           旧会话不再需要兼容时，连同 ToolCallList 一起删除。 */}
       {!usesTurnTrace ? <ToolCallList toolCalls={message.toolCalls} /> : null}
-      <CitationList citations={message.citations} />
+      <CitationList citations={message.citations} onOpenCitation={onOpenCitation} />
       {lightbox}
     </article>
   );

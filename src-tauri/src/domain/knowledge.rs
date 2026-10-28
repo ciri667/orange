@@ -52,6 +52,9 @@ pub struct ScanReport {
     pub failed_file_count: usize,
     pub skipped_directories: Vec<String>,
     pub errors: Vec<String>,
+    /// 明确不支持、因此未纳入索引的旧格式文件（如 .doc），供用户改存为 .docx。
+    #[serde(default)]
+    pub unsupported_files: Vec<String>,
 }
 
 /** 单篇 Markdown 笔记，真实内容来自本地文件。 */
@@ -91,6 +94,9 @@ pub struct WorkspaceDocument {
 pub struct DocumentPreviewBlock {
     pub r#type: String,
     pub text: String,
+    /// 1-based 结构块序号，与 read/search 的 blockIndex 对齐，供引用跳转定位。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub index: Option<usize>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub page: Option<usize>,
     #[serde(default, skip_serializing_if = "Option::is_none")]

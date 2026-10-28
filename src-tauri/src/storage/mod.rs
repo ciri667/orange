@@ -1661,6 +1661,92 @@ mod tests {
                 && document.preview_available));
     }
 
+    /** .docm 按 DOCX 读取并提示宏不会运行；.doc 明确进入 unsupportedFiles。 */
+    #[test]
+    fn scan_reports_docm_as_docx_and_doc_as_unsupported() {
+        let dir = tempdir().unwrap();
+        let docm_path = dir.path().join("brief.docm");
+        write_minimal_docx(
+            &docm_path,
+            r#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:p><w:r><w:t>宏文档正文</w:t></w:r></w:p></w:body></w:document>"#,
+        );
+        fs::write(dir.path().join("legacy.doc"), b"legacy binary").unwrap();
+
+        let selection = KnowledgeBaseSelection {
+            id: "kb-docm".to_owned(),
+            name: "格式测试库".to_owned(),
+            path: dir.path().to_string_lossy().to_string(),
+            note_count: 0,
+        };
+        let (knowledge_base, _folders, _notes, documents) =
+            scan_supported_documents_directory(&selection).unwrap();
+        let report = knowledge_base.scan_report.unwrap();
+
+        assert!(documents
+            .iter()
+            .any(|document| document.file_type == "docx" && document.path == "brief.docm"));
+        assert_eq!(report.scanned_by_type.get("docx"), Some(&1));
+        assert_eq!(report.unsupported_files, vec!["legacy.doc".to_owned()]);
+        assert_eq!(report.failed_file_count, 0);
+    }
+
+    /** 加密 PDF/OLE 容器必须给出明确原因，而不是“格式无效”。 */
+    #[test]
+    fn encrypted_documents_report_actionable_errors() {
+        let dir = tempdir().unwrap();
+        let pdf_path = dir.path().join("secret.pdf");
+        fs::write(&pdf_path, b"%PDF-1.4\ntrailer << /Encrypt 9 0 R >>\n%%EOF\n").unwrap();
+        let pdf_error = extract_document_text(
+            dir.path(),
+            &test_workspace_document("pdf", "secret.pdf"),
+        )
+        .unwrap_err();
+        assert!(pdf_error.contains("加密"), "{pdf_error}");
+        let preview =
+            load_document_preview(dir.path(), &test_workspace_document("pdf", "secret.pdf"))
+                .unwrap();
+        assert_eq!(preview.status.as_deref(), Some("encrypted"));
+        assert!(preview
+            .warnings
+            .iter()
+            .any(|warning| warning.contains("加密")));
+
+        let ole_path = dir.path().join("legacy.docx");
+        fs::write(
+            &ole_path,
+            [&[0xD0_u8, 0xCF, 0x11, 0xE0], &[0_u8; 64][..]].concat(),
+        )
+        .unwrap();
+        let docx_error = extract_document_text(
+            dir.path(),
+            &test_workspace_document("docx", "legacy.docx"),
+        )
+        .unwrap_err();
+        assert!(docx_error.contains("加密") || docx_error.contains(".doc"), "{docx_error}");
+        assert!(extract_docx_preview_blocks(&ole_path).is_err());
+    }
+
+    /** .docm 正文可读，但必须提示宏不会运行。 */
+    #[test]
+    fn docm_extraction_warns_about_macros() {
+        let dir = tempdir().unwrap();
+        write_minimal_docx(
+            &dir.path().join("brief.docm"),
+            r#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:p><w:r><w:t>宏文档正文</w:t></w:r></w:p></w:body></w:document>"#,
+        );
+        let extraction = extract_document_text(
+            dir.path(),
+            &test_workspace_document("docx", "brief.docm"),
+        )
+        .unwrap();
+
+        assert_eq!(extraction.blocks[0].text, "宏文档正文");
+        assert!(extraction
+            .warnings
+            .iter()
+            .any(|warning| warning.contains("宏")));
+    }
+
     /** 扫描应返回没有 Markdown 文件的空目录，让前端目录树能显示真实空文件夹。 */
     #[test]
     fn scan_returns_empty_folder_nodes() {

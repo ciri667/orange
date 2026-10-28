@@ -233,6 +233,8 @@ export interface ScanReport {
   failedFileCount: number;
   skippedDirectories: string[];
   errors: string[];
+  /** 明确不支持、因此未索引的旧格式文件（如 .doc）。 */
+  unsupportedFiles?: string[];
 }
 
 /** 单篇 Markdown 笔记的数据模型，正式桌面版应映射到本地文件。 */
@@ -265,6 +267,8 @@ export interface WorkspaceDocument {
 export interface DocumentPreviewBlock {
   type: DocumentPreviewBlockType;
   text: string;
+  /** 1-based 结构块序号，与引用里的 blockIndex 对齐，用于点击引用后定位。 */
+  index?: number;
   page?: number;
   headingLevel?: number;
   role?: string;
