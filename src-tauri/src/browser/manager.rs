@@ -174,8 +174,13 @@ pub async fn browser_status(app: &AppHandle) -> BrowserState {
 
 /** 尽力读取标签页 URL 和标题；CDP 短暂不可达时返回空串而不是报错。 */
 async fn tab_identity(page: &chromiumoxide::Page) -> (String, String) {
-    let url = page.url().await.ok().flatten().unwrap_or_default();
-    // 网页脚本卡住时标题查询可能等到 CDP 超时；面板状态读取不能因此阻塞用户操作。
+    // 后台页或卡住的渲染进程会让 URL / 标题查询一直不返回；状态读取不能因此阻塞。
+    let url = tokio::time::timeout(Duration::from_millis(500), page.url())
+        .await
+        .ok()
+        .and_then(Result::ok)
+        .flatten()
+        .unwrap_or_default();
     let title = tokio::time::timeout(Duration::from_millis(500), page.get_title())
         .await
         .ok()
@@ -704,6 +709,39 @@ async fn find_element_by_reference(
     })
 }
 
+/**
+ * 同步滚动元素到视口中央。
+ *
+ * 不用 chromiumoxide 的 `Element::scroll_into_view()`：它内部是一段 await `IntersectionObserver`
+ * 的 JS，而后台（非前台）标签页不产生渲染帧，那段 Promise 可能永远不 resolve，
+ * CDP 请求只能等到请求超时——线上表现为一次点击卡住 80 秒。
+ */
+async fn scroll_into_view_sync(element: &Element) -> Result<(), (String, String)> {
+    element
+        .call_js_fn(
+            "function() { this.scrollIntoView({ block: 'center', inline: 'center', behavior: 'instant' }); }",
+            false,
+        )
+        .await
+        .map_err(cdp_error)?;
+    Ok(())
+}
+
+/** 先同步滚动，再按视口坐标点击；坐标复用面板手动点击那条输入通道。 */
+async fn click_element(
+    page: &chromiumoxide::Page,
+    element: &Element,
+) -> Result<(), (String, String)> {
+    scroll_into_view_sync(element).await?;
+    let point = element.clickable_point().await.map_err(cdp_error)?;
+    // 贴边元素夹到画面内：输入通道只接受视口坐标。
+    let x = point.x.clamp(1.0, (super::session::VIEWPORT_WIDTH - 1) as f64);
+    let y = point.y.clamp(1.0, (super::session::VIEWPORT_HEIGHT - 1) as f64);
+    super::input::send_input(page, super::BrowserUserInput::Click { x, y })
+        .await
+        .map_err(|error| ("CDP_ERROR".to_owned(), error))
+}
+
 /** 动作前保存目标区域截图与归一化坐标作为操作凭证；只发面板事件。 */
 async fn record_receipt(
     app: &AppHandle,
@@ -717,7 +755,14 @@ async fn record_receipt(
         Some(rect) => (rect.x + rect.width / 2.0, rect.y + rect.height / 2.0),
         None => (0.0, 0.0),
     };
-    let url = page.url().await.ok().flatten().unwrap_or_default();
+    // 动作前的目标区域截图只作为凭证存档，不进入模型上下文；
+    // 第一版仅记录坐标与 URL，避免面板外出现第二份图像数据流。
+    let url = tokio::time::timeout(Duration::from_secs(2), page.url())
+        .await
+        .ok()
+        .and_then(Result::ok)
+        .flatten()
+        .unwrap_or_default();
     let receipt = BrowserReceipt {
         receipt_id: crate::storage::create_id("receipt"),
         tab_id: tab_id.to_owned(),
@@ -727,8 +772,6 @@ async fn record_receipt(
         url,
         created_at: now_ms(),
     };
-    // 动作前的目标区域截图只作为凭证存档，不进入模型上下文；
-    // 第一版仅记录坐标与 URL，避免面板外出现第二份图像数据流。
     let mut receipts = manager.receipts.lock().await;
     if receipts.len() >= 20 {
         receipts.pop_front();
@@ -810,6 +853,22 @@ type OperationResult = Result<ToolExecutionOutcome, (String, String)>;
 
 fn cdp_error(error: chromiumoxide::error::CdpError) -> (String, String) {
     ("CDP_ERROR".to_owned(), error.to_string())
+}
+
+/** 单个浏览器操作的硬上限：任何一次 CDP 调用吊住，都不能再拖住整个回合。 */
+fn operation_timeout(operation: &str) -> Duration {
+    match operation {
+        // 导航和等待类操作本身就要占用十几秒，留出足够空间。
+        "tab.navigate"
+        | "tab.search"
+        | "tab.reload"
+        | "tab.go_back"
+        | "tab.go_forward"
+        | "tab.wait_for_load"
+        | "browser.create_tab" => Duration::from_secs(30),
+        "page.wait_for" => Duration::from_secs(20),
+        _ => Duration::from_secs(15),
+    }
 }
 
 /**
@@ -901,11 +960,22 @@ pub async fn execute_run_request(
             return failed_run("PERMISSION_DENIED",&e);
         }
         // 接管和 Stop 能释放正在等待 CDP 的状态锁，用户不必等导航或加载超时。
+        // 操作级超时兜底：卡住的 CDP 调用只让本次操作失败，不能把整轮对话挂在那里。
+        let budget = operation_timeout(operation);
         tokio::select! {
             biased;
             _ = takeover.changed() => Err((BROWSER_USER_TAKEOVER.to_owned(), "用户已接管浏览器，本轮不能再重试。".to_owned())),
             _ = cancel.cancelled() => Err(("OPERATION_ABORTED".to_owned(), "用户已停止本轮。".to_owned())),
-            result = dispatch_operation(app, &request, cancel) => result,
+            result = tokio::time::timeout(budget, dispatch_operation(app, &request, cancel)) => match result {
+                Ok(result) => result,
+                Err(_) => Err((
+                    "OPERATION_TIMEOUT".to_owned(),
+                    format!(
+                        "浏览器操作 {operation} 超过 {} 秒没有响应：页面可能被模态对话框或脚本阻塞，或该标签页不在前台。请先用 browser.activate_tab 切到目标页、重新获取快照后再试。",
+                        budget.as_secs()
+                    ),
+                )),
+            },
         }
     };
     end_control(&manager, &session_id).await;
@@ -1055,6 +1125,7 @@ async fn dispatch_operation(
             }
             session
                 .activate_agent_tab(&tab_id)
+                .await
                 .map_err(|error| ("CDP_ERROR".to_owned(), error))?;
             result.tab = Some(tab_view(session, &tab_id).await?);
             return finish_operation(result, operation);
@@ -1080,6 +1151,12 @@ async fn dispatch_operation(
     let tab_id = requested_tab
         .clone()
         .unwrap_or_else(|| session.active_tab_id.clone());
+    // 弹窗本身就阻塞渲染进程，切前台这类调用也可能一起吊住；解弹窗时不做前台切换。
+    // 后台标签页不产生渲染帧，布局类 CDP 调用会一直不返回；动手前先把目标页切到前台。
+    session
+        .ensure_front(&tab_id)
+        .await
+        .map_err(|error| ("CDP_ERROR".to_owned(), error))?;
     let tab = session.tabs.get_mut(&tab_id).ok_or_else(|| {
         (
             "TAB_NOT_FOUND".to_owned(),
@@ -1172,22 +1249,20 @@ async fn dispatch_operation(
                 "缺少元素 reference。".to_owned(),
             ))?;
             let element = find_element_by_reference(&page, reference).await?;
-            let rect = element
-                .bounding_box()
-                .await
-                .ok()
-                .map(|box_point| BrowserRect {
+            // 凭证只要大致位置：布局查询在异常页面上可能吊住，取不到就只记坐标零点。
+            let rect = match tokio::time::timeout(Duration::from_secs(2), element.bounding_box()).await
+            {
+                Ok(Ok(box_point)) => Some(BrowserRect {
                     x: box_point.x,
                     y: box_point.y,
                     width: box_point.width,
                     height: box_point.height,
-                });
+                }),
+                _ => None,
+            };
             record_receipt(app, &tab_id, operation, &page, rect.as_ref()).await;
             match operation {
-                "page.element.click" => {
-                    element.scroll_into_view().await.map_err(cdp_error)?;
-                    element.click().await.map_err(cdp_error)?;
-                }
+                "page.element.click" => click_element(&page, &element).await?,
                 "page.element.fill" | "page.element.type_text" => {
                     let text = params
                         .get("text")
@@ -1248,7 +1323,7 @@ async fn dispatch_operation(
                         .map_err(cdp_error)?;
                 }
                 "page.element.scroll_into_view" => {
-                    element.scroll_into_view().await.map_err(cdp_error)?;
+                    scroll_into_view_sync(&element).await?;
                 }
                 _ => {}
             }
@@ -1418,6 +1493,16 @@ mod tests {
         assert!(control.session_id.is_none());
         assert_eq!(control.revision, 1);
         assert!(control.blocked_sessions.contains("session-a"));
+    }
+
+    /** 导航/等待类给足时间，元素操作必须尽早失败：卡住的 CDP 不能拖住整轮对话。 */
+    #[test]
+    fn operation_timeout_limits_element_actions_more_tightly_than_navigation() {
+        assert_eq!(operation_timeout("tab.navigate"), Duration::from_secs(30));
+        assert_eq!(operation_timeout("browser.create_tab"), Duration::from_secs(30));
+        assert_eq!(operation_timeout("page.wait_for"), Duration::from_secs(20));
+        assert_eq!(operation_timeout("page.element.click"), Duration::from_secs(15));
+        assert_eq!(operation_timeout("browser.get_state"), Duration::from_secs(15));
     }
 
     #[test]

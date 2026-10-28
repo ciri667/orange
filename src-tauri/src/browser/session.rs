@@ -1,7 +1,8 @@
 //! Chromium 进程、真实标签页和画面流的生命周期；不涉及 Agent 权限或模型输入。
 
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::net::SocketAddr;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -11,9 +12,11 @@ use chromiumoxide::cdp::browser_protocol::page::{
     ScreencastFrameAckParams, StartScreencastFormat, StartScreencastParams, StopScreencastParams,
 };
 use chromiumoxide::handler::viewport::Viewport;
+use chromiumoxide::handler::{Handler, HandlerConfig};
 use futures_util::StreamExt;
 
 use super::types::BrowserFrame;
+use crate::terminal::process_guard::{attach_owned_child, ProcessGuard};
 
 pub(super) const VIEWPORT_WIDTH: u32 = 1280;
 pub(super) const VIEWPORT_HEIGHT: u32 = 860;
@@ -34,6 +37,110 @@ pub(super) struct BrowserSessionState {
     pub visible_tab_id: String,
     frame_task: Option<tokio::task::JoinHandle<()>>,
     frame_tab_id: Option<String>,
+    /// Chromium 真正切到前台的页；后台页不产生渲染帧，元素操作前必须对齐它。
+    front_tab_id: String,
+    /// 只有自己启动的实例才挂 Job；接管来的实例由它原本的进程归属决定。
+    process_guard: Option<ProcessGuard>,
+}
+
+/** 读 profile 里的 DevToolsActivePort 端口；文件缺失说明上次是正常退出，没有残留实例。 */
+async fn active_port(profile: &Path) -> Option<u16> {
+    let contents = tokio::fs::read_to_string(profile.join("DevToolsActivePort"))
+        .await
+        .ok()?;
+    parse_active_port(&contents)
+}
+
+/** DevToolsActivePort 第一行是调试端口；0 或非数字都表示没有可用端点。 */
+fn parse_active_port(contents: &str) -> Option<u16> {
+    let port = contents.lines().next()?.trim().parse::<u16>().ok()?;
+    (port > 0).then_some(port)
+}
+
+/** 端口上的调试端点是否仍在应答；只探测连通性，不建立 CDP 会话。 */
+async fn devtools_endpoint_alive(port: u16) -> bool {
+    let address = SocketAddr::from(([127, 0, 0, 1], port));
+    tokio::task::spawn_blocking(move || {
+        std::net::TcpStream::connect_timeout(&address, Duration::from_millis(300)).is_ok()
+    })
+    .await
+    .unwrap_or(false)
+}
+
+/** 接管上次遗留的实例：连不上说明端口已随进程消失，按正常流程重新启动。 */
+async fn attach_running(profile: &Path) -> Option<(Browser, Handler)> {
+    let port = active_port(profile).await?;
+    let url = format!("http://127.0.0.1:{port}");
+    // 视口和超时沿用自启实例的配置，接管后画面尺寸与超时行为保持一致。
+    let config = HandlerConfig {
+        viewport: Some(Viewport {
+            width: VIEWPORT_WIDTH,
+            height: VIEWPORT_HEIGHT,
+            ..Viewport::default()
+        }),
+        request_timeout: Duration::from_secs(15),
+        ..HandlerConfig::default()
+    };
+    match tokio::time::timeout(
+        Duration::from_secs(5),
+        Browser::connect_with_config(url, config),
+    )
+    .await
+    {
+        Ok(Ok(pair)) => Some(pair),
+        Ok(Err(error)) => {
+            log::info!("浏览器接管残留实例失败，改为重新启动：{error}");
+            None
+        }
+        Err(_) => {
+            log::warn!("浏览器接管残留实例超时，改为重新启动");
+            None
+        }
+    }
+}
+
+/** 启动失败说明：端口还有实例应答时给出可操作下一步，而不是把 CDP 原文甩给用户和模型。 */
+async fn describe_launch_failure(profile: &Path, detail: &str) -> String {
+    if let Some(port) = active_port(profile).await {
+        if devtools_endpoint_alive(port).await {
+            return format!(
+                "内置浏览器内核仍被另一个 Chromium 实例占用：profile 目录被锁住，调试端口 {port} 仍在应答。\
+                 请先结束残留的 chrome.exe（路径含 app.orange.desktop/browser/chromium），再点「重试打开」；\
+                 刚结束过的话等一两秒让它彻底退出。原始错误：{detail}"
+            );
+        }
+    }
+    format!("无法启动独立 Chromium：{detail}")
+}
+
+/** 独立 Chromium 的启动配置：new headless、固定视口，禁止隐式开窗。 */
+fn build_config(executable: PathBuf, profile: PathBuf) -> Result<BrowserConfig, String> {
+    BrowserConfig::builder()
+        .chrome_executable(executable)
+        .user_data_dir(profile)
+        .new_headless_mode()
+        .respect_https_errors()
+        .window_size(VIEWPORT_WIDTH, VIEWPORT_HEIGHT)
+        .viewport(Viewport {
+            width: VIEWPORT_WIDTH,
+            height: VIEWPORT_HEIGHT,
+            ..Viewport::default()
+        })
+        .request_timeout(Duration::from_secs(15))
+        // chromiumoxide 自动添加 `--`，带值参数用键值对传入；否则启动开关会失效。
+        .arg("disable-extensions")
+        .arg("disable-sync")
+        .arg((
+            "disable-features",
+            "Translate,MediaRouter,PasswordLeakDetection",
+        ))
+        .arg("no-first-run")
+        .arg("no-default-browser-check")
+        // 首次点击只由 create_tab 建页，禁止 Chromium 额外打开默认 New Tab。
+        .arg("no-startup-window")
+        .arg("mute-audio")
+        .build()
+        .map_err(|error| format!("浏览器配置无效：{error}"))
 }
 
 impl BrowserSessionState {
@@ -45,35 +152,33 @@ impl BrowserSessionState {
         tokio::fs::create_dir_all(&profile)
             .await
             .map_err(|error| format!("无法创建浏览器数据目录：{error}"))?;
-        let config = BrowserConfig::builder()
-            .chrome_executable(executable)
-            .user_data_dir(profile)
-            .new_headless_mode()
-            .respect_https_errors()
-            .window_size(VIEWPORT_WIDTH, VIEWPORT_HEIGHT)
-            .viewport(Viewport {
-                width: VIEWPORT_WIDTH,
-                height: VIEWPORT_HEIGHT,
-                ..Viewport::default()
-            })
-            .request_timeout(Duration::from_secs(15))
-            // chromiumoxide 自动添加 `--`，带值参数用键值对传入；否则启动开关会失效。
-            .arg("disable-extensions")
-            .arg("disable-sync")
-            .arg((
-                "disable-features",
-                "Translate,MediaRouter,PasswordLeakDetection",
-            ))
-            .arg("no-first-run")
-            .arg("no-default-browser-check")
-            // 首次点击只由 create_tab 建页，禁止 Chromium 额外打开默认 New Tab。
-            .arg("no-startup-window")
-            .arg("mute-audio")
-            .build()
-            .map_err(|error| format!("浏览器配置无效：{error}"))?;
-        let (browser, mut handler) = Browser::launch(config)
-            .await
-            .map_err(|error| format!("无法启动独立 Chromium：{error}"))?;
+        // 一个 profile 只能有一个 Chromium 实例。上次异常退出（崩溃、dev 重编译、被强杀）会留下孤儿，
+        // 这时直接启动会撞上单实例机制：新进程立刻退出、stderr 为空，用户和模型都只看到「无法启动」。
+        // 能连上就接管它（保留上次打开的网页），连不上再走正常启动。
+        if let Some((browser, handler)) = attach_running(&profile).await {
+            log::info!("浏览器已接管仍在运行的 Chromium 实例");
+            return Self::assemble(browser, handler, None, true).await;
+        }
+        let config = build_config(executable.clone(), profile.clone())?;
+        let (browser, handler) = match Browser::launch(config).await {
+            Ok(pair) => pair,
+            Err(error) => return Err(describe_launch_failure(&profile, &error.to_string()).await),
+        };
+        // 自己启动的 Chromium 挂进 Job：应用被强杀时由内核回收整棵进程树，不再留孤儿。
+        let guard = attach_owned_child(std::process::id(), &executable);
+        Self::assemble(browser, handler, guard, false).await
+    }
+
+    /**
+     * 事件泵、初始页签同步和进程归属都在这里收口。
+     * 接管已有实例时要先补一次 target 快照，否则 handler 只跟踪连接之后新建的页面。
+     */
+    async fn assemble(
+        browser: Browser,
+        mut handler: Handler,
+        process_guard: Option<ProcessGuard>,
+        import_existing_targets: bool,
+    ) -> Result<Self, String> {
         // CDP 事件泵必须持续运行，关闭和等待进程退出完成后才停止它。
         let handler_task = tokio::spawn(async move {
             while let Some(event) = handler.next().await {
@@ -91,7 +196,14 @@ impl BrowserSessionState {
             visible_tab_id: String::new(),
             frame_task: None,
             frame_tab_id: None,
+            front_tab_id: String::new(),
+            process_guard,
         };
+        if import_existing_targets {
+            if let Err(error) = session.browser.fetch_targets().await {
+                log::warn!("浏览器接管实例后读取已有页签失败：{error}");
+            }
+        }
         if let Err(error) = session.sync_tabs(false).await {
             session.close().await;
             return Err(error);
@@ -127,6 +239,7 @@ impl BrowserSessionState {
             self.active_tab_id = self.tabs.keys().min().cloned().unwrap_or_default();
         }
         if !self.tabs.contains_key(&self.visible_tab_id) { self.visible_tab_id.clear(); }
+        if !self.tabs.contains_key(&self.front_tab_id) { self.front_tab_id.clear(); }
         Ok(())
     }
 
@@ -192,6 +305,7 @@ impl BrowserSessionState {
             .bring_to_front()
             .await
             .map_err(|error| error.to_string())?;
+        self.front_tab_id = tab_id.to_owned();
         self.active_tab_id = tab_id.to_owned();
         self.visible_tab_id = tab_id.to_owned();
         Ok(())
@@ -201,13 +315,38 @@ impl BrowserSessionState {
     pub async fn show_tab(&mut self, tab_id: &str) -> Result<(), String> {
         let tab = self.tabs.get(tab_id).ok_or_else(|| "标签页已关闭。".to_owned())?;
         tab.page.bring_to_front().await.map_err(|error| error.to_string())?;
+        self.front_tab_id = tab_id.to_owned();
         self.visible_tab_id = tab_id.to_owned();
         Ok(())
     }
 
-    /** Agent 切换自己的目标页不影响用户选择的画面。 */
-    pub fn activate_agent_tab(&mut self, tab_id: &str) -> Result<(), String> {
+    /**
+     * 把目标页真的切到 Chromium 前台。
+     *
+     * 后台标签页不产生渲染帧：布局类、IntersectionObserver 类 CDP 调用会一直不返回，
+     * 只能等 chromiumoxide 的请求超时。任何会碰页面的操作都要先走这一步。
+     */
+    pub async fn ensure_front(&mut self, tab_id: &str) -> Result<(), String> {
+        if self.front_tab_id == tab_id {
+            return Ok(());
+        }
+        let page = self
+            .tabs
+            .get(tab_id)
+            .ok_or_else(|| "标签页已关闭。".to_owned())?
+            .page
+            .clone();
+        page.bring_to_front()
+            .await
+            .map_err(|error| error.to_string())?;
+        self.front_tab_id = tab_id.to_owned();
+        Ok(())
+    }
+
+    /** Agent 切换自己的目标页不影响用户选择的画面，但必须同时切换前台页。 */
+    pub async fn activate_agent_tab(&mut self, tab_id: &str) -> Result<(), String> {
         if !self.tabs.contains_key(tab_id) { return Err("标签页已关闭。".to_owned()); }
+        self.ensure_front(tab_id).await?;
         self.active_tab_id = tab_id.to_owned();
         Ok(())
     }
@@ -224,6 +363,7 @@ impl BrowserSessionState {
         self.tabs.remove(tab_id);
         if !self.tabs.contains_key(&self.active_tab_id) { self.active_tab_id = self.tabs.keys().min().cloned().unwrap_or_default(); }
         if !self.tabs.contains_key(&self.visible_tab_id) { self.visible_tab_id.clear(); }
+        if !self.tabs.contains_key(&self.front_tab_id) { self.front_tab_id.clear(); }
         Ok(())
     }
 
@@ -333,6 +473,10 @@ impl BrowserSessionState {
         ) {
             let _ = self.browser.kill().await;
             let _ = tokio::time::timeout(Duration::from_secs(3), self.browser.wait()).await;
+        }
+        // Job 句柄一关就等于强杀整棵进程树；先显式结束，避免渲染进程比主进程活得更久。
+        if let Some(guard) = self.process_guard.take() {
+            guard.terminate();
         }
         self.tabs.clear();
         self.handler_task.abort();
@@ -712,5 +856,75 @@ mod tests {
         remove_profile(&profile).await.unwrap();
         stopped.store(true, std::sync::atomic::Ordering::SeqCst);
         server.join().unwrap();
+    }
+
+    /** 残留实例占着 profile 时必须接管，而不是让第二个 Chromium 直接退出把面板卡死。 */
+    #[tokio::test]
+    #[ignore = "requires ORANGE_BROWSER_TEST_EXECUTABLE pointing to an installed Chromium"]
+    async fn live_browser_adopts_the_instance_still_holding_the_profile() {
+        let executable = PathBuf::from(std::env::var("ORANGE_BROWSER_TEST_EXECUTABLE").unwrap());
+        let directory = tempfile::tempdir().unwrap();
+        let profile = directory.path().join("profile");
+        // 第一次启动故意不 close，模拟应用被强杀后留下的孤儿实例。
+        let mut leftover = BrowserSessionState::launch(executable.clone(), profile.clone())
+            .await
+            .unwrap();
+        let tab = leftover.create_tab().await.unwrap();
+        let mut adopted = BrowserSessionState::launch(executable, profile.clone())
+            .await
+            .unwrap();
+        adopted.sync_tabs(false).await.unwrap();
+        assert!(
+            adopted.tabs.contains_key(&tab),
+            "接管后必须能看到残留实例里已经打开的页签"
+        );
+        adopted.close().await;
+        leftover.close().await;
+        remove_profile(&profile).await.unwrap();
+    }
+
+    /** DevToolsActivePort 只有端口行有效；0、空文件和脏数据都不能当成可用端点。 */
+    #[test]
+    fn active_port_reads_only_a_valid_first_line() {
+        assert_eq!(
+            parse_active_port("55512\n/devtools/browser/stale\n"),
+            Some(55512)
+        );
+        assert_eq!(parse_active_port("0\n/devtools/browser/stale"), None);
+        assert_eq!(parse_active_port(""), None);
+        assert_eq!(parse_active_port("not-a-port"), None);
+    }
+
+    /** 正常退出也会留下 DevToolsActivePort；端口关掉后不能误报成「被占用」。 */
+    #[tokio::test]
+    async fn launch_failure_only_blames_a_leftover_chromium_when_its_port_answers() {
+        let directory = tempfile::tempdir().unwrap();
+        let profile = directory.path();
+        assert!(active_port(profile).await.is_none());
+        assert_eq!(
+            describe_launch_failure(profile, "ExitStatus(21)").await,
+            "无法启动独立 Chromium：ExitStatus(21)"
+        );
+
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        std::fs::write(
+            profile.join("DevToolsActivePort"),
+            format!("{port}\n/devtools/browser/stale\n"),
+        )
+        .unwrap();
+        assert_eq!(active_port(profile).await, Some(port));
+        let blocked = describe_launch_failure(profile, "ExitStatus(21)").await;
+        assert!(
+            blocked.contains("残留") && blocked.contains(&port.to_string()),
+            "端口仍在应答时必须提示结束残留进程：{blocked}"
+        );
+
+        drop(listener);
+        let recovered = describe_launch_failure(profile, "ExitStatus(21)").await;
+        assert!(
+            recovered.starts_with("无法启动独立 Chromium："),
+            "端口关闭后要回到原始错误：{recovered}"
+        );
     }
 }

@@ -1,6 +1,7 @@
 //! 用户交互终端独立于 Agent 工具；输入与输出只走专用 IPC Channel，不进入日志或模型。
 
-mod process_guard;
+// Job Object 是同一份系统资源策略：终端和浏览器进程树都靠它兜底回收。
+pub(crate) mod process_guard;
 
 use portable_pty::{native_pty_system, CommandBuilder, MasterPty, PtySize};
 use serde::Serialize;

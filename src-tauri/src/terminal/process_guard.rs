@@ -33,6 +33,75 @@ impl Drop for ProcessGuard {
     fn drop(&mut self) { unsafe { windows_sys::Win32::Foundation::CloseHandle(self.0 as _); } }
 }
 
+/**
+ * 在 parent_pid 的直接子进程里找到由 executable 启动的那个进程，并把它的整棵进程树绑进 Job。
+ *
+ * Chromium 会派生 GPU / 渲染 / 工具进程，只盯浏览器主进程会留下孤儿；
+ * 绑定之后父进程无论是正常退出、崩溃还是被强杀，内核都会把这些子进程一起结束。
+ */
+#[cfg(windows)]
+pub fn attach_owned_child(
+    parent_pid: u32,
+    executable: &std::path::Path,
+) -> Option<ProcessGuard> {
+    ProcessGuard::attach(find_child_pid(parent_pid, executable)?).ok()
+}
+
+#[cfg(unix)]
+pub fn attach_owned_child(
+    _parent_pid: u32,
+    _executable: &std::path::Path,
+) -> Option<ProcessGuard> {
+    // Unix 没有 Job Object；子进程回收由调用方在退出路径上显式结束。
+    None
+}
+
+/** 快照一次进程表，按“父进程 + 可执行文件名”定位刚启动的子进程；唯一命中才认。 */
+#[cfg(windows)]
+fn find_child_pid(parent_pid: u32, executable: &std::path::Path) -> Option<u32> {
+    use windows_sys::Win32::Foundation::{CloseHandle, INVALID_HANDLE_VALUE};
+    use windows_sys::Win32::System::Diagnostics::ToolHelp::{
+        CreateToolhelp32Snapshot, Process32FirstW, Process32NextW, PROCESSENTRY32W,
+        TH32CS_SNAPPROCESS,
+    };
+    // 只比文件名：完整镜像路径在短路径 / verbatim 前缀上极易不同名，
+    // 而父进程是自己，且我们只启动一个 chrome.exe，命中多个反而说明状态异常。
+    let expected = executable.file_name()?.to_string_lossy().to_lowercase();
+    let mut matches = Vec::new();
+    unsafe {
+        let snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+        if snapshot == INVALID_HANDLE_VALUE {
+            return None;
+        }
+        let mut entry: PROCESSENTRY32W = std::mem::zeroed();
+        entry.dwSize = std::mem::size_of::<PROCESSENTRY32W>() as u32;
+        if Process32FirstW(snapshot, &mut entry) != 0 {
+            loop {
+                if entry.th32ParentProcessID == parent_pid {
+                    let name = String::from_utf16_lossy(
+                        &entry.szExeFile[..entry
+                            .szExeFile
+                            .iter()
+                            .position(|unit| *unit == 0)
+                            .unwrap_or(entry.szExeFile.len())],
+                    );
+                    if name.to_lowercase() == expected {
+                        matches.push(entry.th32ProcessID);
+                    }
+                }
+                if Process32NextW(snapshot, &mut entry) == 0 {
+                    break;
+                }
+            }
+        }
+        CloseHandle(snapshot);
+    }
+    match matches.as_slice() {
+        [pid] => Some(*pid),
+        _ => None,
+    }
+}
+
 #[cfg(unix)]
 pub struct ProcessGuard(libc::pid_t);
 
