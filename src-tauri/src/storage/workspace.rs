@@ -668,6 +668,14 @@ fn upsert_document_index(
         .enumerate()
     {
         let chunk_id = format!("document:{}:{index}", document.id);
+        // 文档 chunk 也进入语义输入；向量任务与笔记共用同一套 jobs 表。
+        index_document_semantic_input(
+            transaction,
+            document,
+            &chunk_id,
+            &chunk.heading_path,
+            &chunk.content,
+        )?;
         transaction
             .execute(
                 "INSERT OR REPLACE INTO document_chunks
@@ -2185,6 +2193,49 @@ mod tests {
             .len(),
             1
         );
+    }
+
+    /** 文档 chunk 也要进入语义输入，并在知识库移除时通过触发器清干净。 */
+    #[test]
+    fn document_chunks_feed_semantic_inputs_and_cleanup() {
+        let dir = tempdir().unwrap();
+        write_indexable_docx(&dir.path().join("spec.docx"));
+        let database_path = dir.path().join("document-semantic.sqlite3");
+        let mut connection = Connection::open(&database_path).unwrap();
+        ensure_database_schema(&connection, &database_path).unwrap();
+
+        let snapshot = document_snapshot(dir.path(), "docx", "spec.docx");
+        let transaction = connection.transaction().unwrap();
+        apply_index_to_transaction(&transaction, &snapshot, IndexMode::ReplaceAll).unwrap();
+        transaction.commit().unwrap();
+
+        let inputs: Vec<String> = {
+            let mut statement = connection
+                .prepare("SELECT chunk_id FROM semantic_inputs WHERE knowledge_base_id='kb-a' ORDER BY chunk_id")
+                .unwrap();
+            statement
+                .query_map([], |row| row.get::<_, String>(0))
+                .unwrap()
+                .map(|row| row.unwrap())
+                .collect()
+        };
+        assert!(!inputs.is_empty(), "DOCX chunk 应生成语义输入");
+        assert!(
+            inputs.iter().all(|chunk_id| chunk_id.starts_with("document:doc-a:")),
+            "{inputs:?}"
+        );
+
+        let transaction = connection.transaction().unwrap();
+        super::remove_knowledge_base_from_transaction(&transaction, "kb-a").unwrap();
+        transaction.commit().unwrap();
+        let remaining: i64 = connection
+            .query_row(
+                "SELECT count(*) FROM semantic_inputs WHERE knowledge_base_id='kb-a'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(remaining, 0, "知识库移除后不应留下文档语义输入");
     }
 
     /** 移除知识库授权时，文档 chunk/FTS/索引状态必须一并清理。 */

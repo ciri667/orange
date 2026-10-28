@@ -1367,7 +1367,8 @@ pub fn load_document_preview(
                 path: document.path.clone(),
                 updated_at: "刚刚".to_owned(),
                 content_hash: hash_bytes(&bytes),
-                asset_path: None,
+                // 前端用 docx-preview 渲染版式时需要原始文件，只读 asset 路径不下发正文。
+                asset_path: Some(target_path.to_string_lossy().to_string()),
                 blocks: Some(blocks),
                 page_count: None,
                 warnings: Vec::new(),

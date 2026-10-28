@@ -42,6 +42,10 @@ pub(crate) fn ensure_semantic_schema(connection: &Connection) -> Result<(), Stri
           DELETE FROM semantic_inputs WHERE chunk_id = old.chunk_id;
           DELETE FROM semantic_jobs WHERE chunk_id = old.chunk_id;
         END;
+        CREATE TRIGGER IF NOT EXISTS semantic_document_chunk_deleted AFTER DELETE ON document_chunks BEGIN
+          DELETE FROM semantic_inputs WHERE chunk_id = old.chunk_id;
+          DELETE FROM semantic_jobs WHERE chunk_id = old.chunk_id;
+        END;
         INSERT OR IGNORE INTO semantic_index_state(knowledge_base_id, enabled)
           SELECT id, semantic_index_enabled FROM knowledge_bases;
     "#).map_err(|_| "无法初始化语义索引表。".into())
@@ -71,6 +75,33 @@ pub(crate) fn index_semantic_input(
         ON CONFLICT(chunk_id) DO UPDATE SET knowledge_base_id=excluded.knowledge_base_id,input_hash=excluded.input_hash,input=excluded.input",
         params![format!("{}:{}",note.id,chunk.chunk_index),note.knowledge_base_id,hash_content(&input),input])
         .map_err(|_| "无法维护语义索引输入。".to_owned())?;
+    Ok(())
+}
+
+/** DOCX/PDF chunk 的语义输入；chunk_id 与 document_chunks 保持一致（document:<id>:<index>）。 */
+pub(crate) fn index_document_semantic_input(
+    connection: &Connection,
+    document: &WorkspaceDocument,
+    chunk_id: &str,
+    heading_path: &str,
+    content: &str,
+) -> Result<(), String> {
+    let input = format!(
+        "标题：{}\n路径：{}\n页码/结构：{}\n正文：{}",
+        document.title, document.path, heading_path, content
+    );
+    connection
+        .execute(
+            "INSERT INTO semantic_inputs(chunk_id, knowledge_base_id, input_hash, input) VALUES (?1,?2,?3,?4)
+             ON CONFLICT(chunk_id) DO UPDATE SET knowledge_base_id=excluded.knowledge_base_id,input_hash=excluded.input_hash,input=excluded.input",
+            params![
+                chunk_id,
+                &document.knowledge_base_id,
+                hash_content(&input),
+                input
+            ],
+        )
+        .map_err(|_| "无法维护文档语义索引输入。".to_owned())?;
     Ok(())
 }
 

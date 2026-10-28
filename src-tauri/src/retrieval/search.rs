@@ -101,7 +101,152 @@ pub(crate) fn vector_candidates(
         });
         top.truncate(32);
     }
+
+    // DOCX/PDF chunk 与笔记 chunk 在同一向量空间；两路结果一起按相似度截断。
+    top.extend(document_vector_candidates(
+        connection,
+        snapshot,
+        scope,
+        filters,
+        fingerprint,
+        query,
+        threshold,
+    )?);
+    top.sort_by(|a, b| {
+        b.citation
+            .score
+            .total_cmp(&a.citation.score)
+            .then(a.chunk_id.cmp(&b.chunk_id))
+    });
+    top.truncate(32);
     Ok(top)
+}
+
+/** 文档 chunk 的向量召回；语义输入与向量表与笔记共用，只是来源表不同。 */
+fn document_vector_candidates(
+    connection: &rusqlite::Connection,
+    snapshot: &WorkspaceSnapshot,
+    scope: &HashSet<&str>,
+    filters: &NoteSearchFilters,
+    fingerprint: &str,
+    query: &[f32],
+    threshold: f32,
+) -> Result<Vec<NoteChunkCandidate>, String> {
+    if scope.is_empty() {
+        return Ok(Vec::new());
+    }
+    let placeholders = scope.iter().map(|_| "?").collect::<Vec<_>>().join(",");
+    let mut clauses = vec![
+        format!("c.knowledge_base_id IN ({placeholders})"),
+        "s.enabled=1".into(),
+        "v.fingerprint=?".into(),
+        "v.dimensions=?".into(),
+    ];
+    let mut bindings = scope
+        .iter()
+        .map(|id| Value::Text((*id).into()))
+        .collect::<Vec<_>>();
+    bindings.push(Value::Text(fingerprint.into()));
+    bindings.push(Value::Integer(query.len() as i64));
+    if !filters.path_prefix.is_empty() {
+        let like_prefix = filters
+            .path_prefix
+            .replace('\\', "\\\\")
+            .replace('%', "\\%")
+            .replace('_', "\\_");
+        clauses.push("(c.document_path = ? OR c.document_path LIKE ? ESCAPE '\\')".to_owned());
+        bindings.push(Value::Text(filters.path_prefix.clone()));
+        bindings.push(Value::Text(format!("{like_prefix}/%")));
+    }
+    if let Some(after) = filters.updated_after_unix {
+        clauses.push("c.updated_at_unix >= ?".to_owned());
+        bindings.push(Value::Integer(after));
+    }
+    if let Some(before) = filters.updated_before_unix {
+        clauses.push("c.updated_at_unix <= ?".to_owned());
+        bindings.push(Value::Integer(before));
+    }
+    let sql = format!(
+        "SELECT c.chunk_id, c.document_id, c.knowledge_base_id, c.document_title, c.document_path,
+                c.page, c.block_start, c.heading_path, c.content, v.vector
+         FROM semantic_inputs i
+         JOIN semantic_vectors v ON v.knowledge_base_id=i.knowledge_base_id AND v.input_hash=i.input_hash
+         JOIN document_chunks c ON c.chunk_id=i.chunk_id
+         JOIN semantic_index_state s ON s.knowledge_base_id=c.knowledge_base_id
+         WHERE {}",
+        clauses.join(" AND ")
+    );
+    let mut statement = connection
+        .prepare(&sql)
+        .map_err(|_| "无法准备文档向量查询。")?;
+    let mut rows = statement
+        .query(params_from_iter(bindings))
+        .map_err(|_| "无法执行文档向量查询。")?;
+    let mut candidates = Vec::new();
+    while let Some(row) = rows.next().map_err(|_| "无法读取文档向量结果。")? {
+        let knowledge_base_id: String = row.get(2).map_err(|_| "无法读取向量来源。")?;
+        let Some(document) = snapshot
+            .documents
+            .iter()
+            .find(|document| document.id == row.get::<_, String>(1).unwrap_or_default())
+        else {
+            continue;
+        };
+        if !filters.file_types.is_empty()
+            && !filters
+                .file_types
+                .iter()
+                .any(|file_type| file_type == &document.file_type)
+        {
+            continue;
+        }
+        let Some(knowledge_base) = snapshot
+            .knowledge_bases
+            .iter()
+            .find(|knowledge_base| knowledge_base.id == knowledge_base_id)
+        else {
+            continue;
+        };
+        let bytes = row
+            .get_ref(9)
+            .and_then(|value| Ok(value.as_blob()?))
+            .map_err(|_| "无法读取向量数据。")?;
+        let Some(similarity) = cosine_blob(bytes, query) else {
+            continue;
+        };
+        if similarity < threshold as f64 {
+            continue;
+        }
+        let content: String = row.get(8).map_err(|_| "无法读取引用片段。")?;
+        let page: Option<i64> = row.get(5).map_err(|_| "无法读取页码。")?;
+        let block_start: i64 = row.get(6).map_err(|_| "无法读取结构块。")?;
+        let heading_path: String = row.get(7).map_err(|_| "无法读取章节。")?;
+        let path: String = row.get(4).map_err(|_| "无法读取路径。")?;
+        candidates.push(NoteChunkCandidate {
+            chunk_id: row.get(0).map_err(|_| "无法读取 chunk。")?,
+            citation: Citation {
+                knowledge_base_id,
+                knowledge_base_name: knowledge_base.name.clone(),
+                note_id: row.get(1).map_err(|_| "无法读取文档。")?,
+                title: row.get(3).map_err(|_| "无法读取标题。")?,
+                path,
+                snippet: storage::extract_chunk_snippet(&content, &[]),
+                score: similarity,
+                location: Some(
+                    page.map(|page| format!("第 {page} 页"))
+                        .unwrap_or_else(|| format!("结构块 {block_start}")),
+                ),
+                kind: None,
+                url: None,
+                published_at: None,
+                source_type: Some("document".to_owned()),
+                page: page.map(|page| page as usize),
+                block_index: Some(block_start as usize),
+                heading_path: (!heading_path.is_empty()).then_some(heading_path),
+            },
+        });
+    }
+    Ok(candidates)
 }
 
 /** blob 是归一化的 little-endian f32；损坏、零值、维度不符直接跳过。 */

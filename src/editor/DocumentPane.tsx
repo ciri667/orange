@@ -1,11 +1,12 @@
 import { convertFileSrc } from "@tauri-apps/api/core";
 import { Clock3, Eye, FilePenLine, FileText, Save } from "lucide-react";
-import { createElement, useEffect, useRef } from "react";
+import { createElement, useEffect, useRef, useState } from "react";
 import { Button } from "../shared/Button";
 import { VoiceDictationButton } from "../shared/VoiceDictationButton";
 import { logInfo, logWarn } from "../shared/logger";
 import type { AgentSession, DocumentFileType, DocumentPreview, ExportFormat, KnowledgeBase, WorkspaceDocument } from "../shared/types";
 import { RelatedSessionsButton } from "../agent/RelatedSessionsButton";
+import { DocxLayoutPreview } from "./DocxLayoutPreview";
 import { EditorEmptyHeader, EditorFileHeader, EditorMetaStrip, EditorMoreActionMenu } from "./EditorFileChrome";
 import { LineNumberedTextarea } from "./LineNumberedTextarea";
 import { countLogicalLines } from "./lineNumberUtils";
@@ -244,14 +245,24 @@ function DocumentPreviewView({
   focus?: { page?: number; blockIndex?: number };
 }) {
   const docxRef = useRef<HTMLDivElement | null>(null);
+  const [docxView, setDocxView] = useState<"layout" | "text">("layout");
+  const [docxLayoutError, setDocxLayoutError] = useState("");
+  const docxLayoutUrl = createDocumentAssetUrl(preview?.assetPath);
 
   useEffect(() => {
-    if (document.fileType !== "docx" || !focus?.blockIndex) {
+    // 引用跳转依赖结构块索引，自动切回文本视图，避免在看版式时找不到位置。
+    if (document.fileType === "docx" && focus?.blockIndex) {
+      setDocxView("text");
+    }
+  }, [document.fileType, focus?.blockIndex]);
+
+  useEffect(() => {
+    if (document.fileType !== "docx" || !focus?.blockIndex || docxView !== "text") {
       return;
     }
     const target = docxRef.current?.querySelector<HTMLElement>(`[data-block-index="${focus.blockIndex}"]`);
     target?.scrollIntoView({ block: "center" });
-  }, [document.fileType, focus?.blockIndex, preview?.blocks?.length]);
+  }, [document.fileType, focus?.blockIndex, docxView, preview?.blocks?.length]);
   if (isPreviewLoading) {
     return <div className="grid min-h-0 min-w-0 place-items-center rounded-panel border border-dashed border-border-strong bg-surface p-6 text-center text-[13px] leading-[1.55] text-ink-muted">正在加载预览...</div>;
   }
@@ -347,25 +358,57 @@ function DocumentPreviewView({
 
   if (document.fileType === "docx") {
     const blocks = preview?.blocks ?? [];
+    const canRenderLayout = Boolean(docxLayoutUrl) && !docxLayoutError;
+    const showLayout = docxView === "layout" && canRenderLayout;
 
     return (
-      <div className="min-h-0 min-w-0 overflow-auto rounded-none border-0 bg-surface py-4 text-body leading-[1.75] text-ink [scrollbar-gutter:stable] [&>:last-child]:mb-0" aria-label="DOCX 预览" ref={docxRef}>
-        {blocks.map((block, index) => {
-          const blockIndex = block.index ?? index + 1;
-          const active = focus?.blockIndex === blockIndex;
-          const commonProps = {
-            "data-block-index": blockIndex,
-            className: active ? "rounded-md bg-surface-muted px-2 ring-2 ring-accent/40" : undefined,
-          } as const;
+      <div className="grid min-h-0 min-w-0 grid-rows-[auto_minmax(0,1fr)] gap-2">
+        <div className="flex flex-wrap items-center gap-2 px-1" role="group" aria-label="DOCX 视图切换">
+          <Button
+            size="compact"
+            variant={showLayout ? "primary" : "ghost"}
+            onClick={() => setDocxView("layout")}
+            disabled={!canRenderLayout}
+            title={canRenderLayout ? "查看保留表格、图片和页眉页脚的版式" : "当前文件无法渲染版式"}
+          >
+            版式视图
+          </Button>
+          <Button size="compact" variant={showLayout ? "ghost" : "primary"} onClick={() => setDocxView("text")}>
+            文本视图
+          </Button>
+          {docxLayoutError ? <span className="text-[11px] text-warning">版式渲染失败，已回退文本视图：{docxLayoutError}</span> : null}
+          {!focus?.blockIndex ? null : <span className="text-[11px] text-ink-soft">已定位结构块 {focus.blockIndex}</span>}
+        </div>
 
-          return block.type === "heading" ? (
-            <DocxHeading key={`${block.type}-${index}`} level={block.headingLevel} text={block.text} {...commonProps} />
-          ) : block.type === "table" ? (
-            <pre className={`whitespace-pre-wrap font-[inherit] ${commonProps.className ?? ""}`} data-block-index={blockIndex} key={`${block.type}-${index}`}>{block.text}</pre>
-          ) : (
-            <p className={`mb-3 mt-0 whitespace-pre-wrap ${commonProps.className ?? ""}`} data-block-index={blockIndex} key={`${block.type}-${index}`}>{block.text}</p>
-          );
-        })}
+        {showLayout ? (
+          <DocxLayoutPreview
+            src={docxLayoutUrl}
+            title={document.title}
+            onError={(message) => {
+              setDocxLayoutError(message);
+              setDocxView("text");
+            }}
+          />
+        ) : (
+          <div className="min-h-0 min-w-0 overflow-auto rounded-none border-0 bg-surface py-4 text-body leading-[1.75] text-ink [scrollbar-gutter:stable] [&>:last-child]:mb-0" aria-label="DOCX 预览" ref={docxRef}>
+            {blocks.map((block, index) => {
+              const blockIndex = block.index ?? index + 1;
+              const active = focus?.blockIndex === blockIndex;
+              const commonProps = {
+                "data-block-index": blockIndex,
+                className: active ? "rounded-md bg-surface-muted px-2 ring-2 ring-accent/40" : undefined,
+              } as const;
+
+              return block.type === "heading" ? (
+                <DocxHeading key={`${block.type}-${index}`} level={block.headingLevel} text={block.text} {...commonProps} />
+              ) : block.type === "table" ? (
+                <pre className={`whitespace-pre-wrap font-[inherit] ${commonProps.className ?? ""}`} data-block-index={blockIndex} key={`${block.type}-${index}`}>{block.text}</pre>
+              ) : (
+                <p className={`mb-3 mt-0 whitespace-pre-wrap ${commonProps.className ?? ""}`} data-block-index={blockIndex} key={`${block.type}-${index}`}>{block.text}</p>
+              );
+            })}
+          </div>
+        )}
       </div>
     );
   }
