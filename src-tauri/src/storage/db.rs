@@ -140,7 +140,9 @@ pub(crate) fn ensure_database_schema(
               knowledge_base_id TEXT NOT NULL,
               content_hash TEXT NOT NULL,
               extractor_version TEXT NOT NULL,
-              updated_at TEXT NOT NULL
+              updated_at TEXT NOT NULL,
+              status TEXT NOT NULL DEFAULT 'ok',
+              error TEXT NOT NULL DEFAULT ''
             );
 
             CREATE TABLE IF NOT EXISTS document_extractions (
@@ -293,12 +295,36 @@ pub(crate) fn ensure_database_schema(
         .map_err(|error| format!("无法初始化定时任务 schema：{error}"))?;
     ensure_audit_log_columns(&connection)?;
     ensure_retrieval_filter_columns(&connection)?;
+    ensure_document_index_columns(&connection)?;
     ensure_semantic_schema(connection)?;
 
     let mut initialized_paths = initialized_paths
         .lock()
         .map_err(|_| "SQLite 初始化状态锁已损坏。".to_owned())?;
     initialized_paths.insert(database_path.to_path_buf());
+
+    Ok(())
+}
+
+/** 为旧库的文档索引状态补齐成功/失败标记，供设置页展示索引健康度。 */
+pub(crate) fn ensure_document_index_columns(connection: &Connection) -> Result<(), String> {
+    let migration_columns = [
+        ("status", "TEXT NOT NULL DEFAULT 'ok'"),
+        ("error", "TEXT NOT NULL DEFAULT ''"),
+    ];
+
+    for (column_name, column_type) in migration_columns {
+        let sql = format!("ALTER TABLE document_index_state ADD COLUMN {column_name} {column_type}");
+
+        // 旧表已有列时 SQLite 返回 duplicate column name，属于幂等迁移的正常情况。
+        if let Err(error) = connection.execute(&sql, []) {
+            let message = error.to_string();
+
+            if !message.contains("duplicate column name") {
+                return Err(format!("无法迁移文档索引状态：{error}"));
+            }
+        }
+    }
 
     Ok(())
 }

@@ -264,19 +264,75 @@ pub(crate) fn apply_index_to_transaction(
         else {
             continue;
         };
-        // 单个文档解析失败不能阻塞整个知识库索引；下次扫描会重试。
-        if let Ok(extraction) = extract_document_text(Path::new(&knowledge_base.path), document) {
-            if let Err(error) = upsert_document_index(transaction, document, &extraction) {
+        // 单个文档解析失败不能阻塞整个知识库索引；记录失败原因，下次扫描重试。
+        match extract_document_text(Path::new(&knowledge_base.path), document) {
+            Ok(extraction) => {
+                if let Err(error) = upsert_document_index(transaction, document, &extraction) {
+                    log::warn!(
+                        target: "document_index",
+                        "文档索引写入失败：path={} error={}",
+                        document.path,
+                        error
+                    );
+                    record_document_index_failure(transaction, document, &error)?;
+                }
+            }
+            Err(error) => {
                 log::warn!(
                     target: "document_index",
-                    "文档索引写入失败：path={} error={}",
+                    "文档解析失败，已跳过索引：path={} error={}",
                     document.path,
                     error
                 );
+                record_document_index_failure(transaction, document, &error)?;
             }
         }
     }
 
+    Ok(())
+}
+
+/** 记录一次文档索引失败，供设置页展示失败篇数和原因。 */
+fn record_document_index_failure(
+    transaction: &rusqlite::Transaction<'_>,
+    document: &WorkspaceDocument,
+    error: &str,
+) -> Result<(), String> {
+    // 失败时清掉可能残留的 chunk，避免检索到过期内容。
+    transaction
+        .execute(
+            "DELETE FROM document_chunk_fts WHERE document_id=?1",
+            [&document.id],
+        )
+        .map_err(|write_error| format!("无法清理失败文档的 FTS：{write_error}"))?;
+    transaction
+        .execute(
+            "DELETE FROM document_chunks WHERE document_id=?1",
+            [&document.id],
+        )
+        .map_err(|write_error| format!("无法清理失败文档的 chunk：{write_error}"))?;
+    let summary: String = error.chars().take(300).collect();
+    transaction
+        .execute(
+            "INSERT INTO document_index_state(document_id, knowledge_base_id, content_hash, extractor_version, updated_at, status, error)
+             VALUES (?1, ?2, ?3, ?4, ?5, 'failed', ?6)
+             ON CONFLICT(document_id) DO UPDATE SET
+               knowledge_base_id=excluded.knowledge_base_id,
+               content_hash=excluded.content_hash,
+               extractor_version=excluded.extractor_version,
+               updated_at=excluded.updated_at,
+               status='failed',
+               error=excluded.error",
+            params![
+                &document.id,
+                &document.knowledge_base_id,
+                &document.content_hash,
+                crate::storage::DOCUMENT_EXTRACTOR_VERSION,
+                &document.updated_at,
+                summary
+            ],
+        )
+        .map_err(|write_error| format!("无法写入文档索引失败状态：{write_error}"))?;
     Ok(())
 }
 
@@ -719,8 +775,8 @@ fn upsert_document_index(
     transaction
         .execute(
             "INSERT OR REPLACE INTO document_index_state
-             (document_id, knowledge_base_id, content_hash, extractor_version, updated_at)
-             VALUES (?1, ?2, ?3, ?4, ?5)",
+             (document_id, knowledge_base_id, content_hash, extractor_version, updated_at, status, error)
+             VALUES (?1, ?2, ?3, ?4, ?5, 'ok', '')",
             params![
                 &document.id,
                 &document.knowledge_base_id,
@@ -731,6 +787,54 @@ fn upsert_document_index(
         )
         .map_err(|error| format!("无法写入文档索引状态：{error}"))?;
     Ok(())
+}
+
+/// 单库文档索引健康度摘要。
+#[derive(Clone, Debug, Default)]
+struct DocumentIndexSummary {
+    indexed_documents: usize,
+    indexed_chunks: usize,
+    failed_documents: usize,
+    first_failure: Option<String>,
+}
+
+/** 汇总某知识库上一次文档索引的结果；查询失败时退化为全零，不影响快照加载。 */
+fn document_index_summary(connection: &Connection, knowledge_base_id: &str) -> DocumentIndexSummary {
+    let Ok(indexed_documents) = connection.query_row(
+        "SELECT count(*) FROM document_index_state WHERE knowledge_base_id=?1 AND status='ok'",
+        [knowledge_base_id],
+        |row| row.get::<_, i64>(0),
+    ) else {
+        return DocumentIndexSummary::default();
+    };
+    let indexed_chunks = connection
+        .query_row(
+            "SELECT count(*) FROM document_chunks WHERE knowledge_base_id=?1",
+            [knowledge_base_id],
+            |row| row.get::<_, i64>(0),
+        )
+        .unwrap_or(0);
+    let failed_documents = connection
+        .query_row(
+            "SELECT count(*) FROM document_index_state WHERE knowledge_base_id=?1 AND status='failed'",
+            [knowledge_base_id],
+            |row| row.get::<_, i64>(0),
+        )
+        .unwrap_or(0);
+    let first_failure = connection
+        .query_row(
+            "SELECT error FROM document_index_state WHERE knowledge_base_id=?1 AND status='failed' AND error<>'' LIMIT 1",
+            [knowledge_base_id],
+            |row| row.get::<_, String>(0),
+        )
+        .ok();
+
+    DocumentIndexSummary {
+        indexed_documents: indexed_documents.max(0) as usize,
+        indexed_chunks: indexed_chunks.max(0) as usize,
+        failed_documents: failed_documents.max(0) as usize,
+        first_failure,
+    }
 }
 
 /** 读取单篇文档已建立的检索 chunk 数，供预览界面显示索引状态。 */
@@ -1111,6 +1215,14 @@ pub fn load_workspace_snapshot(app: &AppHandle) -> Result<WorkspaceSnapshot, Str
                 knowledge_base.is_default = knowledge_bases.is_empty();
                 knowledge_base.note_count = scanned_notes.len();
                 knowledge_base.document_count = scanned_documents.len();
+                // 回填上一次文档索引的健康度；本轮索引结果会在下一次快照里体现。
+                if let Some(report) = knowledge_base.scan_report.as_mut() {
+                    let summary = document_index_summary(&connection, &stored_knowledge_base.id);
+                    report.indexed_document_count = summary.indexed_documents;
+                    report.indexed_chunk_count = summary.indexed_chunks;
+                    report.failed_document_count = summary.failed_documents;
+                    report.index_failure_summary = summary.first_failure;
+                }
                 folders.extend(scanned_folders);
                 notes.extend(scanned_notes);
                 documents.extend(scanned_documents);
@@ -1137,6 +1249,10 @@ pub fn load_workspace_snapshot(app: &AppHandle) -> Result<WorkspaceSnapshot, Str
                         skipped_directories: Vec::new(),
                         errors: vec![error_message],
                         unsupported_files: Vec::new(),
+                        indexed_document_count: 0,
+                        indexed_chunk_count: 0,
+                        failed_document_count: 0,
+                        index_failure_summary: None,
                     }),
                 });
             }
@@ -2219,6 +2335,42 @@ mod tests {
             .len(),
             1
         );
+    }
+
+    /** 解析失败的文档要记录失败状态和原因，且不留下过期 chunk。 */
+    #[test]
+    fn failed_document_is_recorded_without_chunks() {
+        let dir = tempdir().unwrap();
+        // 不是 ZIP 的 .docx：解析必然失败。
+        std::fs::write(dir.path().join("broken.docx"), b"this is not a zip archive").unwrap();
+        let database_path = dir.path().join("document-failure.sqlite3");
+        let mut connection = Connection::open(&database_path).unwrap();
+        ensure_database_schema(&connection, &database_path).unwrap();
+
+        let snapshot = document_snapshot(dir.path(), "docx", "broken.docx");
+        let transaction = connection.transaction().unwrap();
+        apply_index_to_transaction(&transaction, &snapshot, IndexMode::ReplaceAll).unwrap();
+        transaction.commit().unwrap();
+
+        let (status, error): (String, String) = connection
+            .query_row(
+                "SELECT status, error FROM document_index_state WHERE document_id='doc-a'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(status, "failed");
+        assert!(!error.is_empty(), "失败记录必须带原因");
+
+        let chunks: i64 = connection
+            .query_row("SELECT count(*) FROM document_chunks", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(chunks, 0, "解析失败不应留下 chunk");
+
+        let summary = super::document_index_summary(&connection, "kb-a");
+        assert_eq!(summary.failed_documents, 1);
+        assert_eq!(summary.indexed_documents, 0);
+        assert!(summary.first_failure.is_some());
     }
 
     /** 文档 chunk 也要进入语义输入，并在知识库移除时通过触发器清干净。 */

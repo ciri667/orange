@@ -135,6 +135,13 @@ function ScanReportDetails({ knowledgeBase }: { knowledgeBase: KnowledgeBase }) 
         </span>
       )}
       {report.errors.length > 0 && <span className="text-danger">{report.errors[0]}</span>}
+      <span>
+        文档索引：已索引 {report.indexedDocumentCount ?? 0} 篇 / {report.indexedChunkCount ?? 0} 块
+        {(report.failedDocumentCount ?? 0) > 0 ? `，失败 ${report.failedDocumentCount} 篇` : ""}
+      </span>
+      {report.indexFailureSummary && (
+        <span className="text-danger">索引失败原因：{report.indexFailureSummary}</span>
+      )}
     </div>
   );
 }

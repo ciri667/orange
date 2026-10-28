@@ -235,6 +235,14 @@ export interface ScanReport {
   errors: string[];
   /** 明确不支持、因此未索引的旧格式文件（如 .doc）。 */
   unsupportedFiles?: string[];
+  /** 上一次文档索引：成功建立索引的文档数。 */
+  indexedDocumentCount?: number;
+  /** 上一次文档索引：写入的检索 chunk 数。 */
+  indexedChunkCount?: number;
+  /** 上一次文档索引：解析失败的文档数。 */
+  failedDocumentCount?: number;
+  /** 第一条文档索引失败原因。 */
+  indexFailureSummary?: string;
 }
 
 /** 单篇 Markdown 笔记的数据模型，正式桌面版应映射到本地文件。 */

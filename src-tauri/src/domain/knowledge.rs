@@ -55,6 +55,18 @@ pub struct ScanReport {
     /// 明确不支持、因此未纳入索引的旧格式文件（如 .doc），供用户改存为 .docx。
     #[serde(default)]
     pub unsupported_files: Vec<String>,
+    /// 上一次文档索引结果：成功写入索引的文档数。
+    #[serde(default)]
+    pub indexed_document_count: usize,
+    /// 上一次文档索引结果：写入的检索 chunk 数。
+    #[serde(default)]
+    pub indexed_chunk_count: usize,
+    /// 上一次文档索引结果：解析失败、未建立索引的文档数。
+    #[serde(default)]
+    pub failed_document_count: usize,
+    /// 第一条文档索引失败原因，供设置页直接展示。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub index_failure_summary: Option<String>,
 }
 
 /** 单篇 Markdown 笔记，真实内容来自本地文件。 */

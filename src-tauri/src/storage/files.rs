@@ -529,6 +529,11 @@ pub fn scan_supported_documents_directory(
         skipped_directories,
         errors,
         unsupported_files,
+        // 文档索引在扫描之后异步建立；快照装配时会回填真实的索引计数。
+        indexed_document_count: 0,
+        indexed_chunk_count: 0,
+        failed_document_count: 0,
+        index_failure_summary: None,
     };
 
     let knowledge_base = KnowledgeBase {
