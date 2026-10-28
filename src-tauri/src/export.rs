@@ -594,7 +594,8 @@ fn docx_blocks_to_markdown(blocks: &[DocumentPreviewBlock]) -> String {
         .iter()
         .map(|block| {
             if block.r#type == "heading" {
-                format!("## {}", block.text.trim())
+                let level = block.heading_level.unwrap_or(2).clamp(1, 6) as usize;
+                format!("{} {}", "#".repeat(level), block.text.trim())
             } else {
                 block.text.trim().to_owned()
             }
@@ -996,15 +997,23 @@ mod tests {
                 r#type: "heading".to_owned(),
                 text: "标题".to_owned(),
                 page: None,
+                heading_level: Some(1),
+                role: Some("body".to_owned()),
+                table_row: None,
+                table_col: None,
             },
             DocumentPreviewBlock {
                 r#type: "paragraph".to_owned(),
                 text: "正文".to_owned(),
                 page: None,
+                heading_level: None,
+                role: Some("body".to_owned()),
+                table_row: None,
+                table_col: None,
             },
         ];
 
-        assert_eq!(docx_blocks_to_markdown(&blocks), "## 标题\n\n正文");
+        assert_eq!(docx_blocks_to_markdown(&blocks), "# 标题\n\n正文");
     }
 
     #[test]

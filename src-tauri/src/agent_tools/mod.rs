@@ -264,6 +264,67 @@ mod tests {
             .contains("Page one"));
     }
 
+    /** PDF read(page/pageEnd/block) 必须返回真实范围，越界必须显式失败。 */
+    #[test]
+    fn read_pdf_page_ranges_and_blocks_fail_explicitly() {
+        let dir = tempfile::tempdir().unwrap();
+        let pdf_path = dir.path().join("spec.pdf");
+        write_two_page_pdf(&pdf_path);
+
+        let mut snapshot = tool_test_snapshot("pdf range test".to_owned());
+        snapshot.knowledge_bases[0].path = dir.path().to_string_lossy().to_string();
+        snapshot.documents.push(WorkspaceDocument {
+            id: "document-pdf-range".to_owned(),
+            knowledge_base_id: "kb-a".to_owned(),
+            title: "spec".to_owned(),
+            path: "spec.pdf".to_owned(),
+            file_type: "pdf".to_owned(),
+            updated_at: "刚刚".to_owned(),
+            content_hash: String::new(),
+            content: None,
+            preview_available: true,
+        });
+
+        let ranged = execute::execute_read_document(
+            &snapshot,
+            0,
+            &json!({"documentId": "document-pdf-range", "page": 1, "pageEnd": 2}),
+        );
+        assert!(ranged.success, "{:?}", ranged.payload);
+        assert_eq!(ranged.payload["offsetScope"], "range".to_string());
+        assert_eq!(ranged.payload["requestedPageEnd"], 2);
+        let blocks = ranged.payload["document"]["blocks"].as_array().unwrap();
+        assert_eq!(blocks.len(), 2);
+        assert!(blocks[0]["text"].as_str().unwrap().contains("Page one"));
+        assert!(blocks[1]["text"].as_str().unwrap().contains("Page two"));
+
+        let bad_range = execute::execute_read_document(
+            &snapshot,
+            0,
+            &json!({"documentId": "document-pdf-range", "page": 2, "pageEnd": 3}),
+        );
+        assert!(!bad_range.success);
+        assert!(bad_range.summary.contains("pageEnd"));
+
+        let block_two = execute::execute_read_document(
+            &snapshot,
+            0,
+            &json!({"documentId": "document-pdf-range", "block": 2}),
+        );
+        assert!(block_two.success, "{:?}", block_two.payload);
+        assert_eq!(block_two.payload["offsetScope"], "block".to_string());
+        assert_eq!(block_two.payload["document"]["blocks"].as_array().unwrap().len(), 1);
+        assert_eq!(block_two.payload["document"]["blocks"][0]["page"], 2);
+
+        let bad_block = execute::execute_read_document(
+            &snapshot,
+            0,
+            &json!({"documentId": "document-pdf-range", "block": 99}),
+        );
+        assert!(!bad_block.success);
+        assert!(bad_block.summary.contains("结构块 99"));
+    }
+
     /** 默认 registry 只暴露闭集五个短名。 */
     #[test]
     fn registry_schema_contains_builtin_tools() {
@@ -1120,6 +1181,31 @@ mod tests {
         assert_eq!(file_type_counts["docx"].as_u64(), Some(1));
         assert_eq!(file_type_counts["pdf"].as_u64(), Some(1));
         assert_eq!(file_type_counts["image"].as_u64(), Some(1));
+    }
+
+    /** list 的 query 必须按文件名/路径缩小结果，而不是让模型遍历全部文档。 */
+    #[test]
+    fn list_query_filters_documents_by_name() {
+        let registry = ToolRegistry::default();
+        let mut snapshot = tool_test_snapshot("正文内容足够用于测试。".to_owned());
+        snapshot.documents = vec![
+            tool_test_document("document-pdf", "kb-a", "Docs/季度报告.pdf", "pdf", true),
+            tool_test_document("document-docx", "kb-a", "Docs/会议纪要.docx", "docx", true),
+        ];
+
+        let request = tool_test_request("ask", "找报告");
+        let mut context = tool_test_context(&mut snapshot, &request);
+        let outcome = registry.execute_named(
+            &mut context,
+            "list",
+            json!({ "query": "报告", "fileType": "pdf" }),
+        );
+        assert_eq!(outcome.call.status, "completed");
+        assert_eq!(outcome.payload["query"], json!("报告"));
+        let documents = outcome.payload["documents"].as_array().unwrap();
+        assert_eq!(documents.len(), 1);
+        assert_eq!(documents[0]["id"], json!("document-pdf"));
+        assert_eq!(outcome.payload["totalDocuments"], json!(1));
     }
 
     /** read_note 会按上下文预算截断长正文并保留截断标记。 */

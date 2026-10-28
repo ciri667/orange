@@ -32,6 +32,9 @@ pub(crate) const DEFAULT_SEARCH_LIMIT: usize = 4;
 /** search 单次最多返回条数，避免一次检索塞满上下文。 */
 pub(crate) const MAX_SEARCH_LIMIT: usize = 16;
 
+/** search 的 fileTypes 白名单：Markdown/TXT 走笔记索引，DOCX/PDF 走文档 chunk 索引。 */
+pub(crate) const SEARCHABLE_FILE_TYPES: &[&str] = &["markdown", "txt", "docx", "pdf"];
+
 /** list_tree 按支持文档类型输出的计数，避免模型把未知扩展名误认为已索引内容。 */
 #[derive(Clone, Debug)]
 pub(crate) struct ListTreeFileTypeCounts {

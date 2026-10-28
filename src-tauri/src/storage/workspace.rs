@@ -215,6 +215,15 @@ pub(crate) fn apply_index_to_transaction(
         transaction
             .execute("DELETE FROM knowledge_bases", [])
             .map_err(|error| format!("无法清理知识库索引：{error}"))?;
+        transaction
+            .execute("DELETE FROM document_chunk_fts", [])
+            .map_err(|error| format!("无法清理文档 FTS 索引：{error}"))?;
+        transaction
+            .execute("DELETE FROM document_chunks", [])
+            .map_err(|error| format!("无法清理文档 chunk 索引：{error}"))?;
+        transaction
+            .execute("DELETE FROM document_index_state", [])
+            .map_err(|error| format!("无法清理文档索引状态：{error}"))?;
     }
 
     for knowledge_base in &snapshot.knowledge_bases {
@@ -239,6 +248,30 @@ pub(crate) fn apply_index_to_transaction(
 
     for note in &snapshot.notes {
         upsert_note_index(transaction, note)?;
+    }
+
+    for document in &snapshot.documents {
+        if !matches!(document.file_type.as_str(), "docx" | "pdf") {
+            continue;
+        }
+        let Some(knowledge_base) = snapshot
+            .knowledge_bases
+            .iter()
+            .find(|knowledge_base| knowledge_base.id == document.knowledge_base_id)
+        else {
+            continue;
+        };
+        // 单个文档解析失败不能阻塞整个知识库索引；下次扫描会重试。
+        if let Ok(extraction) = extract_document_text(Path::new(&knowledge_base.path), document) {
+            if let Err(error) = upsert_document_index(transaction, document, &extraction) {
+                log::warn!(
+                    target: "document_index",
+                    "文档索引写入失败：path={} error={}",
+                    document.path,
+                    error
+                );
+            }
+        }
     }
 
     Ok(())
@@ -359,6 +392,24 @@ pub(crate) fn remove_knowledge_base_from_transaction(
         .map_err(|error| format!("无法删除知识库笔记索引：{error}"))?;
     transaction
         .execute(
+            "DELETE FROM document_chunk_fts WHERE knowledge_base_id = ?1",
+            params![knowledge_base_id],
+        )
+        .map_err(|error| format!("无法删除知识库文档 FTS：{error}"))?;
+    transaction
+        .execute(
+            "DELETE FROM document_chunks WHERE knowledge_base_id = ?1",
+            params![knowledge_base_id],
+        )
+        .map_err(|error| format!("无法删除知识库文档 chunk：{error}"))?;
+    transaction
+        .execute(
+            "DELETE FROM document_index_state WHERE knowledge_base_id = ?1",
+            params![knowledge_base_id],
+        )
+        .map_err(|error| format!("无法删除知识库文档索引状态：{error}"))?;
+    transaction
+        .execute(
             "DELETE FROM note_tags WHERE knowledge_base_id = ?1",
             params![knowledge_base_id],
         )
@@ -403,7 +454,444 @@ pub(crate) fn reindex_knowledge_base_notes_in_transaction(
     {
         upsert_note_index(transaction, note)?;
     }
+    for document in snapshot.documents.iter().filter(|document| {
+        document.knowledge_base_id == knowledge_base_id
+            && matches!(document.file_type.as_str(), "docx" | "pdf")
+    }) {
+        if let Some(knowledge_base) = snapshot
+            .knowledge_bases
+            .iter()
+            .find(|knowledge_base| knowledge_base.id == document.knowledge_base_id)
+        {
+            if let Ok(extraction) =
+                extract_document_text(Path::new(&knowledge_base.path), document)
+            {
+                let _ = upsert_document_index(transaction, document, &extraction);
+            }
+        }
+    }
     Ok(())
+}
+
+/** 文档索引的中间 chunk，保留页码和结构块范围。 */
+struct DocumentChunkInput {
+    page: Option<usize>,
+    block_start: usize,
+    block_end: usize,
+    heading_path: String,
+    content: String,
+}
+
+const MAX_DOCUMENT_CHUNK_CHARS: usize = 1_200;
+
+/** 把 DOCX/PDF block 按 1200 字符、页码和标题路径切成检索 chunk。 */
+fn chunk_document_blocks(
+    document: &WorkspaceDocument,
+    extraction: &DocumentTextExtraction,
+) -> Vec<DocumentChunkInput> {
+    let mut chunks = Vec::new();
+    let mut current_text = String::new();
+    let mut current_page = None;
+    let mut block_start = 0usize;
+    let mut block_end = 0usize;
+    let mut heading_stack: Vec<(u8, String)> = Vec::new();
+    let mut current_heading = String::new();
+
+    let flush = |chunks: &mut Vec<DocumentChunkInput>,
+                 text: &mut String,
+                 page: Option<usize>,
+                 start: usize,
+                 end: usize,
+                 heading: &str| {
+        let trimmed = text.trim();
+        if !trimmed.is_empty() {
+            chunks.push(DocumentChunkInput {
+                page,
+                block_start: start,
+                block_end: end,
+                heading_path: heading.to_owned(),
+                content: trimmed.to_owned(),
+            });
+        }
+        text.clear();
+    };
+
+    for block in &extraction.blocks {
+        if block
+            .role
+            .as_deref()
+            .is_some_and(|role| matches!(role, "header" | "footer" | "comment" | "footnote" | "endnote"))
+        {
+            continue;
+        }
+        if block.r#type == "heading" {
+            let level = block.heading_level.unwrap_or(1);
+            heading_stack.retain(|(existing_level, _)| *existing_level < level);
+            heading_stack.push((level, block.text.clone()));
+            current_heading = heading_stack
+                .iter()
+                .map(|(_, title)| title.as_str())
+                .collect::<Vec<_>>()
+                .join(" / ");
+            flush(
+                &mut chunks,
+                &mut current_text,
+                current_page,
+                block_start,
+                block_end,
+                &current_heading,
+            );
+        }
+        if current_text.is_empty() {
+            current_page = block.page;
+            block_start = block.index;
+            block_end = block.index;
+        }
+        let prefix = if current_text.is_empty() {
+            String::new()
+        } else {
+            "\n\n".to_owned()
+        };
+        let addition = format!("{prefix}{}", block.text);
+        let projected = current_text.chars().count() + addition.chars().count();
+        if !current_text.is_empty()
+            && (block.page != current_page || projected > MAX_DOCUMENT_CHUNK_CHARS)
+        {
+            flush(
+                &mut chunks,
+                &mut current_text,
+                current_page,
+                block_start,
+                block_end,
+                &current_heading,
+            );
+            current_page = block.page;
+            block_start = block.index;
+        }
+        if current_text.is_empty() {
+            current_text.push_str(&block.text);
+        } else {
+            current_text.push_str(&addition);
+        }
+        block_end = block.index;
+    }
+    flush(
+        &mut chunks,
+        &mut current_text,
+        current_page,
+        block_start,
+        block_end,
+        &current_heading,
+    );
+
+    // 单页/单段超长时按字符切分，仍保留同一页和结构块定位。
+    let mut bounded = Vec::new();
+    for chunk in chunks {
+        if chunk.content.chars().count() <= MAX_DOCUMENT_CHUNK_CHARS {
+            bounded.push(chunk);
+            continue;
+        }
+        let characters: Vec<char> = chunk.content.chars().collect();
+        for (part_index, part) in characters.chunks(MAX_DOCUMENT_CHUNK_CHARS).enumerate() {
+            bounded.push(DocumentChunkInput {
+                page: chunk.page,
+                block_start: chunk.block_start,
+                block_end: chunk.block_end,
+                heading_path: if part_index == 0 {
+                    chunk.heading_path.clone()
+                } else {
+                    format!("{} / 续", chunk.heading_path)
+                },
+                content: part.iter().collect(),
+            });
+        }
+    }
+
+    log::debug!(
+        target: "document_index",
+        "文档 chunk 完成：path={} type={} blocks={} chunks={}",
+        document.path,
+        document.file_type,
+        extraction.blocks.len(),
+        bounded.len()
+    );
+    bounded
+}
+
+/** 写入单个文档的 chunk/FTS；内容 hash 和解析器版本未变时跳过。 */
+fn upsert_document_index(
+    transaction: &rusqlite::Transaction<'_>,
+    document: &WorkspaceDocument,
+    extraction: &DocumentTextExtraction,
+) -> Result<(), String> {
+    let extractor_version = crate::storage::DOCUMENT_EXTRACTOR_VERSION;
+    let previous: Option<(String, String)> = transaction
+        .query_row(
+            "SELECT content_hash, extractor_version FROM document_index_state WHERE document_id=?1",
+            [&document.id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .optional()
+        .map_err(|_| "无法读取文档索引状态。")?;
+    if previous.as_ref().is_some_and(|(hash, version)| {
+        hash == &extraction.content_hash && version == extractor_version
+    }) {
+        return Ok(());
+    }
+
+    transaction
+        .execute(
+            "DELETE FROM document_chunk_fts WHERE document_id=?1",
+            [&document.id],
+        )
+        .map_err(|error| format!("无法删除旧文档 FTS：{error}"))?;
+    transaction
+        .execute(
+            "DELETE FROM document_chunks WHERE document_id=?1",
+            [&document.id],
+        )
+        .map_err(|error| format!("无法删除旧文档 chunk：{error}"))?;
+
+    let updated_at_unix = crate::storage::parse_index_datetime(&document.updated_at);
+    for (index, chunk) in chunk_document_blocks(document, extraction)
+        .into_iter()
+        .enumerate()
+    {
+        let chunk_id = format!("document:{}:{index}", document.id);
+        transaction
+            .execute(
+                "INSERT OR REPLACE INTO document_chunks
+                 (chunk_id, document_id, knowledge_base_id, document_title, document_path, chunk_index, page, block_start, block_end, heading_path, content, content_hash, updated_at_unix)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
+                params![
+                    &chunk_id,
+                    &document.id,
+                    &document.knowledge_base_id,
+                    &document.title,
+                    &document.path,
+                    index as i64,
+                    chunk.page.map(|page| page as i64),
+                    chunk.block_start as i64,
+                    chunk.block_end as i64,
+                    &chunk.heading_path,
+                    &chunk.content,
+                    &extraction.content_hash,
+                    updated_at_unix,
+                ],
+            )
+            .map_err(|error| format!("无法写入文档 chunk：{error}"))?;
+        transaction
+            .execute(
+                "INSERT INTO document_chunk_fts
+                 (chunk_id, document_id, knowledge_base_id, title_tokens, path_tokens, heading_tokens, body_tokens)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                params![
+                    &chunk_id,
+                    &document.id,
+                    &document.knowledge_base_id,
+                    crate::storage::build_fts_tokens(&document.title),
+                    crate::storage::build_fts_tokens(&document.path),
+                    crate::storage::build_fts_tokens(&chunk.heading_path),
+                    crate::storage::build_fts_tokens(&chunk.content),
+                ],
+            )
+            .map_err(|error| format!("无法写入文档 FTS：{error}"))?;
+    }
+
+    transaction
+        .execute(
+            "INSERT OR REPLACE INTO document_index_state
+             (document_id, knowledge_base_id, content_hash, extractor_version, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![
+                &document.id,
+                &document.knowledge_base_id,
+                &extraction.content_hash,
+                extractor_version,
+                &document.updated_at
+            ],
+        )
+        .map_err(|error| format!("无法写入文档索引状态：{error}"))?;
+    Ok(())
+}
+
+/** 在当前授权 scope 内检索已索引的 DOCX/PDF chunk，返回带页码/块号的引用。 */
+pub(crate) fn search_documents(
+    app: &AppHandle,
+    snapshot: &WorkspaceSnapshot,
+    knowledge_base_ids: &[String],
+    query: &str,
+    limit: usize,
+    filters: &NoteSearchFilters,
+) -> Result<Vec<crate::domain::Citation>, String> {
+    if knowledge_base_ids.is_empty() || query.trim().is_empty() {
+        return Ok(Vec::new());
+    }
+    // fileTypes 只包含 markdown 时，文档检索没有可检索范围。
+    if !filters.file_types.is_empty()
+        && !filters
+            .file_types
+            .iter()
+            .any(|file_type| matches!(file_type.as_str(), "pdf" | "docx"))
+    {
+        return Ok(Vec::new());
+    }
+    let connection = open_database(app)?;
+    search_documents_with_connection(
+        &connection,
+        snapshot,
+        knowledge_base_ids,
+        query,
+        limit,
+        filters,
+    )
+}
+
+/** 在调用方连接上执行文档 FTS，便于单元测试直接复用 SQL 过滤。 */
+pub(crate) fn search_documents_with_connection(
+    connection: &rusqlite::Connection,
+    snapshot: &WorkspaceSnapshot,
+    knowledge_base_ids: &[String],
+    query: &str,
+    limit: usize,
+    filters: &NoteSearchFilters,
+) -> Result<Vec<crate::domain::Citation>, String> {
+    let tokens = crate::storage::tokenize_text(query);
+    if tokens.is_empty() {
+        return Ok(Vec::new());
+    }
+    let fts_query = tokens
+        .iter()
+        .map(|term| format!("\"{}\"", term.replace('"', "\"\"")))
+        .collect::<Vec<_>>()
+        .join(" OR ");
+    let placeholders = knowledge_base_ids
+        .iter()
+        .map(|_| "?")
+        .collect::<Vec<_>>()
+        .join(", ");
+    let mut clauses = vec![
+        "document_chunk_fts MATCH ?1".to_owned(),
+        format!("c.knowledge_base_id IN ({placeholders})"),
+    ];
+    let mut bindings: Vec<rusqlite::types::Value> =
+        vec![rusqlite::types::Value::Text(fts_query)];
+    bindings.extend(
+        knowledge_base_ids
+            .iter()
+            .map(|id| rusqlite::types::Value::Text(id.clone())),
+    );
+    if !filters.path_prefix.is_empty() {
+        let like_prefix = filters
+            .path_prefix
+            .replace('\\', "\\\\")
+            .replace('%', "\\%")
+            .replace('_', "\\_");
+        clauses.push("(c.document_path = ? OR c.document_path LIKE ? ESCAPE '\\')".to_owned());
+        bindings.push(rusqlite::types::Value::Text(filters.path_prefix.clone()));
+        bindings.push(rusqlite::types::Value::Text(format!("{like_prefix}/%")));
+    }
+    if let Some(after) = filters.updated_after_unix {
+        clauses.push("c.updated_at_unix >= ?".to_owned());
+        bindings.push(rusqlite::types::Value::Integer(after));
+    }
+    if let Some(before) = filters.updated_before_unix {
+        clauses.push("c.updated_at_unix <= ?".to_owned());
+        bindings.push(rusqlite::types::Value::Integer(before));
+    }
+    let sql = format!(
+        "SELECT c.chunk_id, c.document_id, c.knowledge_base_id, c.document_title,
+                c.document_path, c.page, c.block_start, c.heading_path, c.content,
+                bm25(document_chunk_fts, 8.0, 4.0, 6.0, 1.0)
+         FROM document_chunk_fts
+         JOIN document_chunks c ON c.chunk_id = document_chunk_fts.chunk_id
+         WHERE {}
+         ORDER BY bm25(document_chunk_fts, 8.0, 4.0, 6.0, 1.0)
+         LIMIT 128",
+        clauses.join(" AND ")
+    );
+    let mut statement = connection
+        .prepare(&sql)
+        .map_err(|error| format!("无法准备文档 FTS 检索：{error}"))?;
+    let rows = statement
+        .query_map(rusqlite::params_from_iter(bindings), |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, String>(3)?,
+                row.get::<_, String>(4)?,
+                row.get::<_, Option<i64>>(5)?,
+                row.get::<_, i64>(6)?,
+                row.get::<_, String>(7)?,
+                row.get::<_, String>(8)?,
+                row.get::<_, f64>(9)?,
+            ))
+        })
+        .map_err(|error| format!("无法执行文档 FTS 检索：{error}"))?;
+
+    let mut citations = Vec::new();
+    let mut seen_chunks = HashSet::new();
+    for row in rows {
+        let (
+            chunk_id,
+            document_id,
+            knowledge_base_id,
+            title,
+            path,
+            page,
+            block_start,
+            heading_path,
+            content,
+            rank,
+        ) = row.map_err(|error| format!("无法读取文档检索结果：{error}"))?;
+        if !seen_chunks.insert(chunk_id) {
+            continue;
+        }
+        let Some(document) = snapshot.documents.iter().find(|document| {
+            document.id == document_id && document.knowledge_base_id == knowledge_base_id
+        }) else {
+            continue;
+        };
+        if !filters.file_types.is_empty()
+            && !filters
+                .file_types
+                .iter()
+                .any(|file_type| file_type == &document.file_type)
+        {
+            continue;
+        }
+        let Some(knowledge_base) = snapshot
+            .knowledge_bases
+            .iter()
+            .find(|knowledge_base| knowledge_base.id == knowledge_base_id)
+        else {
+            continue;
+        };
+        citations.push(crate::domain::Citation {
+            knowledge_base_id,
+            knowledge_base_name: knowledge_base.name.clone(),
+            note_id: document_id,
+            title,
+            path,
+            snippet: extract_chunk_snippet(&content, &tokens),
+            score: 1.0 / (1.0 + rank.abs()),
+            location: Some(
+                page.map(|page| format!("第 {page} 页"))
+                    .unwrap_or_else(|| format!("结构块 {block_start}")),
+            ),
+            kind: None,
+            url: None,
+            published_at: None,
+            source_type: Some("document".to_owned()),
+            page: page.map(|page| page as usize),
+            block_index: Some(block_start as usize),
+            heading_path: (!heading_path.is_empty()).then_some(heading_path),
+        });
+    }
+    citations.sort_by(|left, right| right.score.total_cmp(&left.score));
+    citations.truncate(limit);
+    Ok(citations)
 }
 
 fn upsert_note_index(transaction: &rusqlite::Transaction<'_>, note: &Note) -> Result<(), String> {
@@ -1021,6 +1509,7 @@ pub(crate) fn search_snapshot_notes(
                 kind: None,
                 url: None,
                 published_at: None,
+                ..Default::default()
             });
         }
     }
@@ -1556,5 +2045,166 @@ mod tests {
             .unwrap();
         assert_eq!(chunk_count, 0);
         assert_eq!(fts_count, 0);
+    }
+
+    /** 写入包含标题和正文的最小 DOCX，供文档 chunk 索引测试使用。 */
+    fn write_indexable_docx(path: &std::path::Path) {
+        use std::io::Write;
+        use zip::write::SimpleFileOptions;
+        use zip::ZipWriter;
+
+        let document_xml = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body>
+<w:p><w:pPr><w:pStyle w:val="Heading1"/></w:pPr><w:r><w:t>技术方案</w:t></w:r></w:p>
+<w:p><w:r><w:t>本地写入必须先做冲突处理。</w:t></w:r></w:p>
+</w:body></w:document>"#;
+        let styles_xml = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<w:styles xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+<w:style w:type="paragraph" w:styleId="Heading1"><w:name w:val="heading 1"/><w:pPr><w:outlineLvl w:val="0"/></w:pPr></w:style>
+</w:styles>"#;
+
+        let file = std::fs::File::create(path).unwrap();
+        let options = SimpleFileOptions::default();
+        let mut archive = ZipWriter::new(file);
+        archive.start_file("word/document.xml", options).unwrap();
+        archive.write_all(document_xml.as_bytes()).unwrap();
+        archive.start_file("word/styles.xml", options).unwrap();
+        archive.write_all(styles_xml.as_bytes()).unwrap();
+        archive.finish().unwrap();
+    }
+
+    /** 构造带一个 DOCX 文档的快照；知识库根目录指向临时目录。 */
+    fn document_snapshot(root: &std::path::Path, file_type: &str, path: &str) -> WorkspaceSnapshot {
+        let mut snapshot = test_snapshot(Vec::new());
+        snapshot.knowledge_bases[0].path = root.to_string_lossy().to_string();
+        snapshot.documents.push(crate::domain::WorkspaceDocument {
+            id: "doc-a".to_owned(),
+            knowledge_base_id: "kb-a".to_owned(),
+            title: "技术方案".to_owned(),
+            path: path.to_owned(),
+            file_type: file_type.to_owned(),
+            updated_at: "2026/01/02 10:00".to_owned(),
+            content_hash: String::new(),
+            content: None,
+            preview_available: true,
+        });
+        snapshot
+    }
+
+    /** DOCX 索引后应能按正文命中，并带出块号与标题路径引用。 */
+    #[test]
+    fn document_index_roundtrip_searches_docx_chunks() {
+        let dir = tempdir().unwrap();
+        write_indexable_docx(&dir.path().join("spec.docx"));
+        let database_path = dir.path().join("document-index.sqlite3");
+        let mut connection = Connection::open(&database_path).unwrap();
+        ensure_database_schema(&connection, &database_path).unwrap();
+
+        let snapshot = document_snapshot(dir.path(), "docx", "spec.docx");
+        let transaction = connection.transaction().unwrap();
+        apply_index_to_transaction(&transaction, &snapshot, IndexMode::ReplaceAll).unwrap();
+        transaction.commit().unwrap();
+
+        let chunk_count: i64 = connection
+            .query_row("SELECT count(*) FROM document_chunks", [], |row| row.get(0))
+            .unwrap();
+        assert!(chunk_count >= 1, "DOCX 正文应写入 document_chunks");
+
+        let citations = super::search_documents_with_connection(
+            &connection,
+            &snapshot,
+            &["kb-a".to_owned()],
+            "冲突处理",
+            4,
+            &NoteSearchFilters::default(),
+        )
+        .unwrap();
+
+        assert_eq!(citations.len(), 1);
+        assert_eq!(citations[0].note_id, "doc-a");
+        assert_eq!(citations[0].source_type.as_deref(), Some("document"));
+        assert!(citations[0].snippet.contains("冲突处理"));
+        assert!(citations[0].location.as_deref().unwrap().contains("结构块"));
+        assert_eq!(citations[0].heading_path.as_deref(), Some("技术方案"));
+    }
+
+    /** fileTypes 只允许 markdown 时，文档检索必须返回空，不能绕过过滤。 */
+    #[test]
+    fn document_search_respects_file_type_filters() {
+        let dir = tempdir().unwrap();
+        write_indexable_docx(&dir.path().join("spec.docx"));
+        let database_path = dir.path().join("document-filter.sqlite3");
+        let mut connection = Connection::open(&database_path).unwrap();
+        ensure_database_schema(&connection, &database_path).unwrap();
+
+        let snapshot = document_snapshot(dir.path(), "docx", "spec.docx");
+        let transaction = connection.transaction().unwrap();
+        apply_index_to_transaction(&transaction, &snapshot, IndexMode::ReplaceAll).unwrap();
+        transaction.commit().unwrap();
+
+        let markdown_only = NoteSearchFilters {
+            file_types: vec!["markdown".to_owned()],
+            ..Default::default()
+        };
+        assert!(super::search_documents_with_connection(
+            &connection,
+            &snapshot,
+            &["kb-a".to_owned()],
+            "冲突处理",
+            4,
+            &markdown_only,
+        )
+        .unwrap()
+        .is_empty());
+
+        let docx_only = NoteSearchFilters {
+            file_types: vec!["docx".to_owned()],
+            ..Default::default()
+        };
+        assert_eq!(
+            super::search_documents_with_connection(
+                &connection,
+                &snapshot,
+                &["kb-a".to_owned()],
+                "冲突处理",
+                4,
+                &docx_only,
+            )
+            .unwrap()
+            .len(),
+            1
+        );
+    }
+
+    /** 移除知识库授权时，文档 chunk/FTS/索引状态必须一并清理。 */
+    #[test]
+    fn removing_knowledge_base_cleans_document_index() {
+        let dir = tempdir().unwrap();
+        write_indexable_docx(&dir.path().join("spec.docx"));
+        let database_path = dir.path().join("document-remove.sqlite3");
+        let mut connection = Connection::open(&database_path).unwrap();
+        ensure_database_schema(&connection, &database_path).unwrap();
+
+        let snapshot = document_snapshot(dir.path(), "docx", "spec.docx");
+        let transaction = connection.transaction().unwrap();
+        apply_index_to_transaction(&transaction, &snapshot, IndexMode::ReplaceAll).unwrap();
+        transaction.commit().unwrap();
+
+        let transaction = connection.transaction().unwrap();
+        super::remove_knowledge_base_from_transaction(&transaction, "kb-a").unwrap();
+        transaction.commit().unwrap();
+
+        for table in [
+            "document_chunks",
+            "document_chunk_fts",
+            "document_index_state",
+        ] {
+            let count: i64 = connection
+                .query_row(&format!("SELECT count(*) FROM {table}"), [], |row| {
+                    row.get(0)
+                })
+                .unwrap();
+            assert_eq!(count, 0, "{table} 应被清理");
+        }
     }
 }

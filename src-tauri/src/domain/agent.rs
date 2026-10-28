@@ -37,7 +37,7 @@ pub enum AgentToolCallStatus {
 }
 
 /** Agent 引用来源，必须来自已执行的工具结果。 */
-#[derive(Clone, Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Citation {
     pub knowledge_base_id: String,
@@ -59,6 +59,18 @@ pub struct Citation {
     /** 搜索结果上的发布时间，有则原样保留。 */
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub published_at: Option<String>,
+    /** 来源类型：note / document / web；旧数据为空时按 note 处理。 */
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_type: Option<String>,
+    /** PDF 页码；DOCX 为空。 */
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub page: Option<usize>,
+    /** DOCX/PDF 的结构块序号；Markdown 为空。 */
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub block_index: Option<usize>,
+    /** 文档标题路径，便于跳转到章节。 */
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub heading_path: Option<String>,
 }
 
 /** Agent loop 中的一次工具调用记录。 */

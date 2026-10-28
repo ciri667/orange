@@ -90,6 +90,7 @@ pub(crate) fn vector_candidates(
                 kind: None,
                 url: None,
                 published_at: None,
+                ..Default::default()
             },
         });
         top.sort_by(|a, b| {
@@ -178,9 +179,28 @@ pub(crate) fn search(
     } else {
         indexed as f64 / total as f64
     };
+    // 文档 chunk 与笔记共用同一份结构化过滤；合并后按分数截断，避免文档结果被笔记挤出。
+    let merge_documents = |mut citations: Vec<Citation>| -> Vec<Citation> {
+        match storage::search_documents(app, snapshot, ids, query, limit, filters) {
+            Ok(documents) => {
+                citations.extend(documents);
+                citations.sort_by(|left, right| right.score.total_cmp(&left.score));
+                let mut seen = HashSet::new();
+                citations.retain(|citation| seen.insert(citation.note_id.clone()));
+                citations.truncate(limit);
+                citations
+            }
+            Err(error) => {
+                log::warn!(target: "retrieval", "文档检索失败，仅返回笔记结果：{error}");
+                citations
+            }
+        }
+    };
     let keyword = |reason: Option<String>| -> Result<SearchResult, String> {
         Ok(SearchResult {
-            citations: storage::search_notes(app, snapshot, ids, query, limit, filters)?,
+            citations: merge_documents(storage::search_notes(
+                app, snapshot, ids, query, limit, filters,
+            )?),
             mode: if reason.is_some() {
                 "keyword_fallback"
             } else {
@@ -275,7 +295,7 @@ pub(crate) fn search(
         return keyword(None);
     }
     Ok(SearchResult {
-        citations: fuse(fts, semantic, limit),
+        citations: merge_documents(fuse(fts, semantic, limit)),
         mode: "hybrid",
         coverage,
         fallback_reason: None,

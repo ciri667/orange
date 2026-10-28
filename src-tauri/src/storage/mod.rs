@@ -529,6 +529,26 @@ mod tests {
         fs::write(path, pdf).unwrap();
     }
 
+    /** 写入带额外 OOXML part 的最小 DOCX，覆盖 styles/numbering/comments 等结构。 */
+    fn write_docx_with_parts(path: &Path, document_xml: &str, parts: &[(&str, &str)]) {
+        let file = fs::File::create(path).unwrap();
+        let options = SimpleFileOptions::default();
+        let mut archive = ZipWriter::new(file);
+        archive.start_file("[Content_Types].xml", options).unwrap();
+        archive
+            .write_all(
+                br#"<?xml version="1.0" encoding="UTF-8"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"/>"#,
+            )
+            .unwrap();
+        archive.start_file("word/document.xml", options).unwrap();
+        archive.write_all(document_xml.as_bytes()).unwrap();
+        for (name, content) in parts {
+            archive.start_file(*name, options).unwrap();
+            archive.write_all(content.as_bytes()).unwrap();
+        }
+        archive.finish().unwrap();
+    }
+
     /** 构造预览测试所需的普通文档元数据，避免每个用例重复无关字段。 */
     fn test_workspace_document(file_type: &str, path: &str) -> WorkspaceDocument {
         WorkspaceDocument {
@@ -1728,6 +1748,89 @@ mod tests {
         assert!(blocks[0].text.contains("内部第一行"));
         assert!(blocks[0].text.contains("内部第二行"));
         assert!(blocks[0].text.contains("：文本框后"));
+    }
+
+    /** 表格单元格应带行列定位，而不是只留下无来源的扁平段落。 */
+    #[test]
+    fn docx_preview_marks_table_row_and_column() {
+        let dir = tempdir().unwrap();
+        let docx_path = dir.path().join("table-position.docx");
+        write_minimal_docx(
+            &docx_path,
+            r#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:tbl><w:tr><w:tc><w:p><w:r><w:t>r1c1</w:t></w:r></w:p></w:tc><w:tc><w:p><w:r><w:t>r1c2</w:t></w:r></w:p></w:tc></w:tr><w:tr><w:tc><w:p><w:r><w:t>r2c1</w:t></w:r></w:p></w:tc><w:tc><w:p><w:r><w:t>r2c2</w:t></w:r></w:p></w:tc></w:tr></w:tbl></w:body></w:document>"#,
+        );
+
+        let blocks = extract_docx_preview_blocks(&docx_path).unwrap();
+
+        assert_eq!(blocks.len(), 4);
+        assert_eq!(blocks[0].table_row, Some(1));
+        assert_eq!(blocks[0].table_col, Some(1));
+        assert_eq!(blocks[1].table_row, Some(1));
+        assert_eq!(blocks[1].table_col, Some(2));
+        assert_eq!(blocks[3].table_row, Some(2));
+        assert_eq!(blocks[3].table_col, Some(2));
+    }
+
+    /** styles.xml 的 outlineLvl 和 numbering.xml 的编号应进入预览块。 */
+    #[test]
+    fn docx_preview_reads_heading_level_and_numbering() {
+        let dir = tempdir().unwrap();
+        let docx_path = dir.path().join("structured.docx");
+        let styles = r#"<w:styles xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:style w:styleId="SectionLabel"><w:name w:val="SectionLabel"/><w:pPr><w:outlineLvl w:val="1"/></w:pPr></w:style></w:styles>"#;
+        let numbering = r#"<w:numbering xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:abstractNum w:abstractNumId="0"><w:lvl w:ilvl="0"><w:numFmt w:val="decimal"/><w:lvlText w:val="%1."/></w:lvl></w:abstractNum><w:num w:numId="1"><w:abstractNumId w:val="0"/></w:num></w:numbering>"#;
+        write_docx_with_parts(
+            &docx_path,
+            r#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:p><w:pPr><w:pStyle w:val="SectionLabel"/></w:pPr><w:r><w:t>结构化标题</w:t></w:r></w:p><w:p><w:pPr><w:numPr><w:ilvl w:val="0"/><w:numId w:val="1"/></w:numPr></w:pPr><w:r><w:t>列表项</w:t></w:r></w:p></w:body></w:document>"#,
+            &[("word/styles.xml", styles), ("word/numbering.xml", numbering)],
+        );
+
+        let blocks = extract_docx_preview_blocks(&docx_path).unwrap();
+
+        assert_eq!(blocks.len(), 2);
+        assert_eq!(blocks[0].r#type, "heading");
+        assert_eq!(blocks[0].heading_level, Some(2));
+        assert_eq!(blocks[1].r#type, "paragraph");
+        assert_eq!(blocks[1].text, "1. 列表项");
+    }
+
+    /** 隐藏文字不应进入正文，避免把用户有意隐藏的内容交给模型。 */
+    #[test]
+    fn docx_preview_skips_hidden_text() {
+        let dir = tempdir().unwrap();
+        let docx_path = dir.path().join("hidden.docx");
+        write_minimal_docx(
+            &docx_path,
+            r#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:p><w:r><w:t>可见文字</w:t></w:r><w:r><w:rPr><w:vanish/></w:rPr><w:t>隐藏文字</w:t></w:r></w:p></w:body></w:document>"#,
+        );
+
+        let blocks = extract_docx_preview_blocks(&docx_path).unwrap();
+
+        assert_eq!(blocks.len(), 1);
+        assert!(blocks[0].text.contains("可见文字"));
+        assert!(!blocks[0].text.contains("隐藏文字"));
+    }
+
+    /** 批注、页眉和页脚应作为带 role 的独立块附加，而不是混入正文。 */
+    #[test]
+    fn docx_preview_includes_annotations_and_header_footer_roles() {
+        let dir = tempdir().unwrap();
+        let docx_path = dir.path().join("annotations.docx");
+        write_docx_with_parts(
+            &docx_path,
+            r#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:p><w:r><w:t>正文</w:t></w:r></w:p></w:body></w:document>"#,
+            &[
+                ("word/comments.xml", r#"<w:comments xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:comment w:id="0"><w:p><w:r><w:t>法务批注</w:t></w:r></w:p></w:comment></w:comments>"#),
+                ("word/header1.xml", r#"<w:hdr xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:p><w:r><w:t>页眉</w:t></w:r></w:p></w:hdr>"#),
+                ("word/footer1.xml", r#"<w:ftr xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:p><w:r><w:t>页脚</w:t></w:r></w:p></w:ftr>"#),
+            ],
+        );
+
+        let blocks = extract_docx_preview_blocks(&docx_path).unwrap();
+
+        assert!(blocks.iter().any(|block| block.role.as_deref() == Some("comment") && block.text == "法务批注"));
+        assert!(blocks.iter().any(|block| block.role.as_deref() == Some("header") && block.text == "页眉"));
+        assert!(blocks.iter().any(|block| block.role.as_deref() == Some("footer") && block.text == "页脚"));
+        assert!(blocks.iter().any(|block| block.role.as_deref() == Some("body") && block.text == "正文"));
     }
 
     /** PDF 抽取必须保留真实页码，不能把多页 PDF 合并成第 1 页。 */

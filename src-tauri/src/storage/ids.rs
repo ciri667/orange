@@ -1,4 +1,5 @@
 use super::*;
+use std::io::Read;
 
 pub fn hash_content(content: &str) -> String {
     let mut hasher = Sha256::new();
@@ -11,6 +12,21 @@ pub fn hash_bytes(bytes: &[u8]) -> String {
     let mut hasher = Sha256::new();
     hasher.update(bytes);
     format!("{:x}", hasher.finalize())
+}
+
+/** 流式计算大文件 hash，扫描知识库时避免把整个 PDF/DOCX 读入内存。 */
+pub(crate) fn hash_file(path: &Path) -> Result<String, std::io::Error> {
+    let mut file = fs::File::open(path)?;
+    let mut hasher = Sha256::new();
+    let mut buffer = [0u8; 1024 * 1024];
+    loop {
+        let read = file.read(&mut buffer)?;
+        if read == 0 {
+            break;
+        }
+        hasher.update(&buffer[..read]);
+    }
+    Ok(format!("{:x}", hasher.finalize()))
 }
 
 /** 粘贴图片识别后的安全格式，只允许浏览器和 Markdown 预览能直接显示的常见位图。 */

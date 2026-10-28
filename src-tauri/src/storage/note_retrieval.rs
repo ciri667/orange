@@ -192,6 +192,7 @@ pub(crate) fn search_note_chunk_candidates(
                     kind: None,
                     url: None,
                     published_at: None,
+                    ..Default::default()
                 },
             });
         }

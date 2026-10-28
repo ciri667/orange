@@ -1,5 +1,20 @@
 use super::*;
 
+/** 单个文档的硬上限；避免恶意压缩包/超大 PDF 把进程内存打满。 */
+const MAX_DOCUMENT_BYTES: u64 = 128 * 1024 * 1024;
+/** DOCX 单个 XML part 解压后的上限。 */
+const MAX_DOCX_PART_BYTES: u64 = 64 * 1024 * 1024;
+/** 单次抽取允许的最大文本字符数，超过时返回可诊断错误而不是无限占用上下文。 */
+const MAX_EXTRACTED_CHARS: usize = 10_000_000;
+/** PDF 页数上限；防止超长文档拖垮解析和后续视觉读图。 */
+const MAX_PDF_PAGES: usize = 2_000;
+/** 解析器缓存版本；解析规则变化时递增，旧缓存自动失效。 */
+pub(crate) const DOCUMENT_EXTRACTOR_VERSION: &str = "doc-reading-v2";
+/** 进程内解析缓存；key 包含绝对路径、文件 hash 和解析器版本。 */
+static DOCUMENT_EXTRACTION_CACHE: OnceLock<Mutex<HashMap<String, DocumentTextExtraction>>> =
+    OnceLock::new();
+const MAX_DOCUMENT_CACHE_ENTRIES: usize = 64;
+
 pub(crate) struct ImageAttachmentFormat {
     pub(crate) mime_type: &'static str,
     pub(crate) extension: &'static str,
@@ -453,8 +468,8 @@ pub fn scan_supported_documents_directory(
             SupportedDocumentKind::Docx
             | SupportedDocumentKind::Pdf
             | SupportedDocumentKind::Image => {
-                let bytes = match fs::read(path) {
-                    Ok(bytes) => bytes,
+                let content_hash = match hash_file(path) {
+                    Ok(content_hash) => content_hash,
                     Err(error) => {
                         errors.push(format!(
                             "无法读取 {} 文件 {}：{error}",
@@ -475,7 +490,7 @@ pub fn scan_supported_documents_directory(
                     path: relative_path,
                     file_type: file_type.to_owned(),
                     updated_at,
-                    content_hash: hash_bytes(&bytes),
+                    content_hash,
                     content: None,
                     preview_available: true,
                 });
@@ -1282,6 +1297,10 @@ pub fn load_document_preview(
                             r#type: "paragraph".to_owned(),
                             text: block.text,
                             page: block.page,
+                            heading_level: None,
+                            role: Some("body".to_owned()),
+                            table_row: None,
+                            table_col: None,
                         })
                         .collect(),
                     Some(extraction.page_count),
@@ -1360,31 +1379,365 @@ pub fn load_document_preview(
     }
 }
 
+/** 读取 DOCX ZIP 内的 UTF-8 XML part，并执行解压大小上限。 */
+fn read_docx_part(
+    archive: &mut ZipArchive<fs::File>,
+    name: &str,
+) -> Result<Option<String>, String> {
+    let mut file = match archive.by_name(name) {
+        Ok(file) => file,
+        Err(zip::result::ZipError::FileNotFound) => return Ok(None),
+        Err(error) => return Err(format!("无法读取 DOCX part {name}：{error}")),
+    };
+    if file.size() > MAX_DOCX_PART_BYTES {
+        return Err(format!(
+            "DOCX part {name} 超过 {} MB 的解压上限。",
+            MAX_DOCX_PART_BYTES / 1024 / 1024
+        ));
+    }
+    let mut content = String::new();
+    file.read_to_string(&mut content)
+        .map_err(|error| format!("无法读取 DOCX part {name}：{error}"))?;
+    Ok(Some(content))
+}
+
+/** Word 样式定义，用于把 pStyle 解析成标题级别。 */
+#[derive(Clone, Debug, Default)]
+struct DocxStyleInfo {
+    name: String,
+    outline_level: Option<u8>,
+}
+
+type DocxStyleMap = HashMap<String, DocxStyleInfo>;
+
+/** 单个编号层级的显示规则。 */
+#[derive(Clone, Debug, Default)]
+struct DocxNumberingLevel {
+    format: String,
+    text: String,
+}
+
+/** numId -> 各级编号规则。 */
+#[derive(Clone, Debug, Default)]
+struct DocxNumbering(HashMap<String, HashMap<u8, DocxNumberingLevel>>);
+
+/** 解析 styles.xml，重点保留标题样式名和 outlineLvl。 */
+fn parse_docx_style_map(xml: &str) -> Result<DocxStyleMap, String> {
+    let mut reader = Reader::from_str(xml);
+    let mut styles = DocxStyleMap::new();
+    let mut current_id: Option<String> = None;
+    let mut current_info = DocxStyleInfo::default();
+    let mut buffer = Vec::new();
+
+    loop {
+        match reader.read_event_into(&mut buffer) {
+            Ok(Event::Start(element)) => {
+                let name = element.name();
+                if xml_name_matches(name.as_ref(), b"style") {
+                    current_id = read_xml_attribute(&element, b"styleId");
+                    current_info = DocxStyleInfo::default();
+                } else if current_id.is_some() && xml_name_matches(name.as_ref(), b"name") {
+                    if let Some(value) = read_xml_attribute(&element, b"val") {
+                        current_info.name = value;
+                    }
+                } else if current_id.is_some()
+                    && xml_name_matches(name.as_ref(), b"outlineLvl")
+                {
+                    current_info.outline_level =
+                        read_xml_attribute(&element, b"val").and_then(|value| value.parse().ok());
+                }
+            }
+            Ok(Event::Empty(element)) => {
+                let name = element.name();
+                if current_id.is_some() && xml_name_matches(name.as_ref(), b"name") {
+                    if let Some(value) = read_xml_attribute(&element, b"val") {
+                        current_info.name = value;
+                    }
+                } else if current_id.is_some()
+                    && xml_name_matches(name.as_ref(), b"outlineLvl")
+                {
+                    current_info.outline_level =
+                        read_xml_attribute(&element, b"val").and_then(|value| value.parse().ok());
+                }
+            }
+            Ok(Event::End(element)) => {
+                if xml_name_matches(element.name().as_ref(), b"style") {
+                    if let Some(style_id) = current_id.take() {
+                        styles.insert(style_id, current_info.clone());
+                    }
+                }
+            }
+            Ok(Event::Eof) => break,
+            Err(error) => return Err(format!("DOCX styles.xml 解析失败：{error}")),
+            _ => {}
+        }
+        buffer.clear();
+    }
+
+    Ok(styles)
+}
+
+/** 解析 numbering.xml，建立 numId 到各层级编号格式的映射。 */
+fn parse_docx_numbering(xml: &str) -> Result<DocxNumbering, String> {
+    let mut reader = Reader::from_str(xml);
+    let mut buffer = Vec::new();
+    let mut abstract_levels: HashMap<String, HashMap<u8, DocxNumberingLevel>> = HashMap::new();
+    let mut numbering = DocxNumbering::default();
+    let mut current_abstract_id: Option<String> = None;
+    let mut current_level: Option<u8> = None;
+    let mut current_level_value = DocxNumberingLevel::default();
+    let mut current_num_id: Option<String> = None;
+    let mut current_num_abstract_id: Option<String> = None;
+    let mut current_levels = HashMap::new();
+
+    loop {
+        match reader.read_event_into(&mut buffer) {
+            Ok(Event::Start(element)) => {
+                let name = element.name();
+                if xml_name_matches(name.as_ref(), b"abstractNum") {
+                    current_abstract_id = read_xml_attribute(&element, b"abstractNumId");
+                    current_levels.clear();
+                } else if current_abstract_id.is_some()
+                    && xml_name_matches(name.as_ref(), b"lvl")
+                {
+                    current_level = read_xml_attribute(&element, b"ilvl")
+                        .and_then(|value| value.parse().ok());
+                    current_level_value = DocxNumberingLevel::default();
+                } else if current_level.is_some()
+                    && xml_name_matches(name.as_ref(), b"numFmt")
+                {
+                    if let Some(value) = read_xml_attribute(&element, b"val") {
+                        current_level_value.format = value;
+                    }
+                } else if current_level.is_some()
+                    && xml_name_matches(name.as_ref(), b"lvlText")
+                {
+                    if let Some(value) = read_xml_attribute(&element, b"val") {
+                        current_level_value.text = value;
+                    }
+                } else if xml_name_matches(name.as_ref(), b"num") {
+                    current_num_id = read_xml_attribute(&element, b"numId");
+                    current_num_abstract_id = None;
+                } else if current_num_id.is_some()
+                    && xml_name_matches(name.as_ref(), b"abstractNumId")
+                {
+                    current_num_abstract_id =
+                        read_xml_attribute(&element, b"val").map(|value| value.to_string());
+                }
+            }
+            Ok(Event::Empty(element)) => {
+                let name = element.name();
+                if current_level.is_some() && xml_name_matches(name.as_ref(), b"numFmt") {
+                    if let Some(value) = read_xml_attribute(&element, b"val") {
+                        current_level_value.format = value;
+                    }
+                } else if current_level.is_some()
+                    && xml_name_matches(name.as_ref(), b"lvlText")
+                {
+                    if let Some(value) = read_xml_attribute(&element, b"val") {
+                        current_level_value.text = value;
+                    }
+                } else if current_num_id.is_some()
+                    && xml_name_matches(name.as_ref(), b"abstractNumId")
+                {
+                    current_num_abstract_id =
+                        read_xml_attribute(&element, b"val").map(|value| value.to_string());
+                }
+            }
+            Ok(Event::End(element)) => {
+                let name = element.name();
+                if xml_name_matches(name.as_ref(), b"lvl") {
+                    if let Some(level) = current_level.take() {
+                        current_levels.insert(level, current_level_value.clone());
+                    }
+                } else if xml_name_matches(name.as_ref(), b"abstractNum") {
+                    if let Some(abstract_id) = current_abstract_id.take() {
+                        abstract_levels.insert(abstract_id, current_levels.clone());
+                    }
+                } else if xml_name_matches(name.as_ref(), b"num") {
+                    if let (Some(num_id), Some(abstract_id)) =
+                        (current_num_id.take(), current_num_abstract_id.take())
+                    {
+                        numbering.0.insert(
+                            num_id,
+                            abstract_levels.get(&abstract_id).cloned().unwrap_or_default(),
+                        );
+                    }
+                }
+            }
+            Ok(Event::Eof) => break,
+            Err(error) => return Err(format!("DOCX numbering.xml 解析失败：{error}")),
+            _ => {}
+        }
+        buffer.clear();
+    }
+
+    Ok(numbering)
+}
+
+impl DocxNumbering {
+    /** 按 numId/ilvl 生成轻量前缀；没有编号定义时返回空串。 */
+    fn prefix(
+        &self,
+        num_id: &str,
+        ilvl: u8,
+        counters: &mut HashMap<(String, u8), usize>,
+    ) -> String {
+        let Some(levels) = self.0.get(num_id) else {
+            return String::new();
+        };
+        let Some(level) = levels.get(&ilvl) else {
+            return String::new();
+        };
+        {
+            let entry = counters.entry((num_id.to_owned(), ilvl)).or_insert(0);
+            *entry += 1;
+        }
+        if level.format == "bullet" {
+            return "• ".to_owned();
+        }
+        let mut label = level.text.clone();
+        if label.is_empty() {
+            label = format!("%{}", ilvl + 1);
+        }
+        for depth in 0..=ilvl {
+            let value = counters
+                .get(&(num_id.to_owned(), depth))
+                .copied()
+                .unwrap_or(1);
+            label = label.replace(&format!("%{}", depth + 1), &value.to_string());
+        }
+        format!("{label} ")
+    }
+}
+
+/** 判断样式是否为标题，并返回 1-based 级别。样式声明优先于名称猜测。 */
+fn docx_heading_level(style_id: &str, style_map: &DocxStyleMap) -> Option<u8> {
+    if let Some(style) = style_map.get(style_id) {
+        if let Some(level) = style.outline_level {
+            if level < 9 {
+                return Some(level.saturating_add(1).min(6));
+            }
+        }
+        if let Some(level) = heading_level_from_name(&style.name) {
+            return Some(level);
+        }
+    }
+    heading_level_from_name(style_id)
+}
+
+fn heading_level_from_name(value: &str) -> Option<u8> {
+    let normalized = value.to_ascii_lowercase();
+    if normalized.contains("title") {
+        return Some(1);
+    }
+    if let Some(index) = normalized.find("heading") {
+        let suffix = normalized[index + "heading".len()..].trim();
+        if let Ok(level) = suffix.parse::<u8>() {
+            if (1..=6).contains(&level) {
+                return Some(level);
+            }
+        }
+        return Some(1);
+    }
+    None
+}
+
 /** 从 docx 的 word/document.xml 中抽取段落级文本块。 */
 pub fn extract_docx_preview_blocks(path: &Path) -> Result<Vec<DocumentPreviewBlock>, String> {
+    let path = path.to_path_buf();
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        extract_docx_preview_blocks_inner(&path)
+    }))
+    .map_err(|_| "DOCX 解析器内部异常，已中止读取。".to_owned())?
+}
+
+fn extract_docx_preview_blocks_inner(path: &Path) -> Result<Vec<DocumentPreviewBlock>, String> {
     let file = fs::File::open(path).map_err(|error| format!("无法打开 DOCX 文件：{error}"))?;
     let mut archive =
         ZipArchive::new(file).map_err(|error| format!("DOCX 文件结构无效：{error}"))?;
-    let mut document_xml = String::new();
+    let document_xml = read_docx_part(&mut archive, "word/document.xml")?
+        .ok_or_else(|| "DOCX 缺少正文 XML。".to_owned())?;
+    let styles_xml = read_docx_part(&mut archive, "word/styles.xml")?;
+    let numbering_xml = read_docx_part(&mut archive, "word/numbering.xml")?;
+    let comments_xml = read_docx_part(&mut archive, "word/comments.xml")?;
+    let footnotes_xml = read_docx_part(&mut archive, "word/footnotes.xml")?;
+    let endnotes_xml = read_docx_part(&mut archive, "word/endnotes.xml")?;
 
-    archive
-        .by_name("word/document.xml")
-        .map_err(|error| format!("DOCX 缺少正文 XML：{error}"))?
-        .read_to_string(&mut document_xml)
-        .map_err(|error| format!("无法读取 DOCX 正文 XML：{error}"))?;
+    let style_map = styles_xml
+        .as_deref()
+        .map(parse_docx_style_map)
+        .transpose()?
+        .unwrap_or_default();
+    let numbering = numbering_xml
+        .as_deref()
+        .map(parse_docx_numbering)
+        .transpose()?
+        .unwrap_or_default();
+    let mut blocks = parse_docx_document_xml_with_context(
+        &document_xml,
+        &style_map,
+        &numbering,
+    )?;
 
-    parse_docx_document_xml(&document_xml)
+    // 批注/脚注/尾注是独立 part，作为 annotation block 附加，不能混进正文。
+    for (xml, role) in [
+        (comments_xml, "comment"),
+        (footnotes_xml, "footnote"),
+        (endnotes_xml, "endnote"),
+    ] {
+        if let Some(xml) = xml {
+            let mut annotations = parse_docx_annotation_xml(&xml, role, role)?;
+            blocks.append(&mut annotations);
+        }
+    }
+
+    // 页眉/页脚是独立 part；作为 header/footer 角色附加，默认不混入正文。
+    let header_footer_parts = archive
+        .file_names()
+        .filter(|name| {
+            (name.starts_with("word/header") || name.starts_with("word/footer"))
+                && name.ends_with(".xml")
+        })
+        .map(str::to_owned)
+        .collect::<Vec<_>>();
+    for part_name in header_footer_parts {
+        if let Some(xml) = read_docx_part(&mut archive, &part_name)? {
+            let role = if part_name.starts_with("word/header") {
+                "header"
+            } else {
+                "footer"
+            };
+            let mut part_blocks = parse_docx_annotation_xml(&xml, role, role)?;
+            blocks.append(&mut part_blocks);
+        }
+    }
+
+    Ok(blocks)
 }
 
-/** 解析 WordprocessingML 正文；todo: 后续补充图片、批注和样式的高保真还原。 */
-pub(crate) fn parse_docx_document_xml(
+/** 解析 WordprocessingML 正文；保留标题级别、编号、表格行列和嵌套段落。 */
+fn parse_docx_document_xml_with_context(
     document_xml: &str,
+    style_map: &DocxStyleMap,
+    numbering: &DocxNumbering,
 ) -> Result<Vec<DocumentPreviewBlock>, String> {
     #[derive(Default)]
     struct ParagraphState {
         text: String,
         style: String,
         in_text: bool,
+        hidden: bool,
+        num_id: Option<String>,
+        ilvl: u8,
+        table_row: Option<usize>,
+        table_col: Option<usize>,
+    }
+
+    #[derive(Default)]
+    struct TableState {
+        row: usize,
+        col: usize,
     }
 
     let mut reader = Reader::from_str(document_xml);
@@ -1392,8 +1745,9 @@ pub(crate) fn parse_docx_document_xml(
     let mut buffer = Vec::new();
     // 文本框内部可能有嵌套的 w:p；用栈保存父段落，避免内层段落覆盖父段落正文。
     let mut paragraphs: Vec<ParagraphState> = Vec::new();
-    // 表格单元格内的段落仍按顺序保留，但以 table 类型交给预览和 Agent 说明其来源。
-    let mut table_depth = 0usize;
+    // 表格行列只作为定位元数据；嵌套表格使用独立栈层。
+    let mut tables: Vec<TableState> = Vec::new();
+    let mut numbering_counters: HashMap<(String, u8), usize> = HashMap::new();
 
     reader.config_mut().trim_text(true);
 
@@ -1404,18 +1758,53 @@ pub(crate) fn parse_docx_document_xml(
                 let name_bytes = name.as_ref();
 
                 if xml_name_matches(name_bytes, b"p") {
-                    paragraphs.push(ParagraphState::default());
+                    let (table_row, table_col) = tables
+                        .last()
+                        .map(|table| (Some(table.row), Some(table.col)))
+                        .unwrap_or((None, None));
+                    paragraphs.push(ParagraphState {
+                        table_row,
+                        table_col,
+                        ..ParagraphState::default()
+                    });
                 } else if xml_name_matches(name_bytes, b"tbl") {
-                    table_depth = table_depth.saturating_add(1);
+                    tables.push(TableState::default());
+                } else if xml_name_matches(name_bytes, b"tr") {
+                    if let Some(table) = tables.last_mut() {
+                        table.row = table.row.saturating_add(1);
+                        table.col = 0;
+                    }
+                } else if xml_name_matches(name_bytes, b"tc") {
+                    if let Some(table) = tables.last_mut() {
+                        table.col = table.col.saturating_add(1);
+                    }
+                } else if xml_name_matches(name_bytes, b"r") {
+                    if let Some(paragraph) = paragraphs.last_mut() {
+                        paragraph.hidden = false;
+                    }
                 } else if xml_name_matches(name_bytes, b"t") {
                     if let Some(paragraph) = paragraphs.last_mut() {
                         paragraph.in_text = true;
+                    }
+                } else if xml_name_matches(name_bytes, b"vanish") {
+                    if let Some(paragraph) = paragraphs.last_mut() {
+                        paragraph.hidden = true;
                     }
                 } else if xml_name_matches(name_bytes, b"pStyle") {
                     if let Some(paragraph) = paragraphs.last_mut() {
                         if let Some(style) = read_xml_attribute(&element, b"val") {
                             paragraph.style = style;
                         }
+                    }
+                } else if xml_name_matches(name_bytes, b"numId") {
+                    if let Some(paragraph) = paragraphs.last_mut() {
+                        paragraph.num_id = read_xml_attribute(&element, b"val");
+                    }
+                } else if xml_name_matches(name_bytes, b"ilvl") {
+                    if let Some(paragraph) = paragraphs.last_mut() {
+                        paragraph.ilvl = read_xml_attribute(&element, b"val")
+                            .and_then(|value| value.parse().ok())
+                            .unwrap_or(0);
                     }
                 }
             }
@@ -1429,6 +1818,20 @@ pub(crate) fn parse_docx_document_xml(
                             paragraph.style = style;
                         }
                     }
+                } else if xml_name_matches(name_bytes, b"numId") {
+                    if let Some(paragraph) = paragraphs.last_mut() {
+                        paragraph.num_id = read_xml_attribute(&element, b"val");
+                    }
+                } else if xml_name_matches(name_bytes, b"ilvl") {
+                    if let Some(paragraph) = paragraphs.last_mut() {
+                        paragraph.ilvl = read_xml_attribute(&element, b"val")
+                            .and_then(|value| value.parse().ok())
+                            .unwrap_or(0);
+                    }
+                } else if xml_name_matches(name_bytes, b"vanish") {
+                    if let Some(paragraph) = paragraphs.last_mut() {
+                        paragraph.hidden = true;
+                    }
                 } else if xml_name_matches(name_bytes, b"tab") {
                     if let Some(paragraph) = paragraphs.last_mut() {
                         paragraph.text.push('\t');
@@ -1441,7 +1844,7 @@ pub(crate) fn parse_docx_document_xml(
             }
             Ok(Event::Text(text)) => {
                 if let Some(paragraph) = paragraphs.last_mut() {
-                    if paragraph.in_text {
+                    if paragraph.in_text && !paragraph.hidden {
                         let raw_text = std::str::from_utf8(text.as_ref())
                             .map_err(|error| format!("DOCX 文本编码无效：{error}"))?;
                         let unescaped_text = quick_xml::escape::unescape(raw_text)
@@ -1459,6 +1862,10 @@ pub(crate) fn parse_docx_document_xml(
                     if let Some(paragraph) = paragraphs.last_mut() {
                         paragraph.in_text = false;
                     }
+                } else if xml_name_matches(name_bytes, b"r") {
+                    if let Some(paragraph) = paragraphs.last_mut() {
+                        paragraph.hidden = false;
+                    }
                 } else if xml_name_matches(name_bytes, b"p") {
                     if let Some(paragraph) = paragraphs.pop() {
                         let trimmed_text = paragraph.text.trim();
@@ -1471,22 +1878,44 @@ pub(crate) fn parse_docx_document_xml(
                                 }
                                 parent.text.push_str(trimmed_text);
                             } else {
+                                let numbering_prefix = paragraph
+                                    .num_id
+                                    .as_deref()
+                                    .map(|num_id| {
+                                        numbering.prefix(
+                                            num_id,
+                                            paragraph.ilvl,
+                                            &mut numbering_counters,
+                                        )
+                                    })
+                                    .unwrap_or_default();
+                                let text = format!("{numbering_prefix}{trimmed_text}");
+                                let in_table = paragraph.table_row.is_some();
+                                let heading_level = if in_table {
+                                    None
+                                } else {
+                                    docx_heading_level(&paragraph.style, style_map)
+                                };
                                 blocks.push(DocumentPreviewBlock {
-                                    r#type: if table_depth > 0 {
+                                    r#type: if in_table {
                                         "table".to_owned()
-                                    } else if is_docx_heading_style(&paragraph.style) {
+                                    } else if heading_level.is_some() {
                                         "heading".to_owned()
                                     } else {
                                         "paragraph".to_owned()
                                     },
-                                    text: trimmed_text.to_owned(),
+                                    text,
                                     page: None,
+                                    heading_level,
+                                    role: Some("body".to_owned()),
+                                    table_row: paragraph.table_row,
+                                    table_col: paragraph.table_col,
                                 });
                             }
                         }
                     }
                 } else if xml_name_matches(name_bytes, b"tbl") {
-                    table_depth = table_depth.saturating_sub(1);
+                    tables.pop();
                 }
             }
             Ok(Event::Eof) => break,
@@ -1502,10 +1931,51 @@ pub(crate) fn parse_docx_document_xml(
             r#type: "paragraph".to_owned(),
             text: "该 DOCX 暂无可预览正文。".to_owned(),
             page: None,
+            heading_level: None,
+            role: Some("body".to_owned()),
+            table_row: None,
+            table_col: None,
         });
     }
 
     Ok(blocks)
+}
+
+/** 解析 comments/footnotes/endnotes part，并把块标记为独立注释角色。 */
+fn parse_docx_annotation_xml(
+    xml: &str,
+    role: &str,
+    _label: &str,
+) -> Result<Vec<DocumentPreviewBlock>, String> {
+    let mut blocks = parse_docx_document_xml_with_context(
+        xml,
+        &DocxStyleMap::new(),
+        &DocxNumbering::default(),
+    )?;
+    blocks.retain(|block| block.text != "该 DOCX 暂无可预览正文。");
+    for block in &mut blocks {
+        block.role = Some(role.to_owned());
+        block.r#type = "paragraph".to_owned();
+        block.heading_level = None;
+        block.table_row = None;
+        block.table_col = None;
+    }
+    Ok(blocks)
+}
+
+/** 文档解析缓存；进程内共享，避免预览与多次 read 重复解析整个文件。 */
+fn document_extraction_cache() -> &'static Mutex<HashMap<String, DocumentTextExtraction>> {
+    DOCUMENT_EXTRACTION_CACHE.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/** 缓存只按内容 hash 与解析器版本命中；写入时限制条目数，避免无限增长。 */
+fn cache_document_extraction(key: String, extraction: &DocumentTextExtraction) {
+    if let Ok(mut cache) = document_extraction_cache().lock() {
+        if cache.len() >= MAX_DOCUMENT_CACHE_ENTRIES && !cache.contains_key(&key) {
+            cache.clear();
+        }
+        cache.insert(key, extraction.clone());
+    }
 }
 
 /**
@@ -1518,8 +1988,29 @@ pub fn extract_document_text(
     document: &WorkspaceDocument,
 ) -> Result<DocumentTextExtraction, String> {
     let target_path = resolve_existing_file_inside_root(root, &document.path)?;
+    let metadata = fs::metadata(&target_path)
+        .map_err(|error| format!("无法读取文档元数据：{error}"))?;
+    if metadata.len() > MAX_DOCUMENT_BYTES {
+        return Err(format!(
+            "文档超过 {} MB 的读取上限。",
+            MAX_DOCUMENT_BYTES / 1024 / 1024
+        ));
+    }
     let bytes = fs::read(&target_path).map_err(|error| format!("无法读取文档内容：{error}"))?;
     let content_hash = hash_bytes(&bytes);
+    let cache_key = format!(
+        "{}:{}:{}",
+        target_path.to_string_lossy(),
+        content_hash,
+        DOCUMENT_EXTRACTOR_VERSION
+    );
+    if let Some(cached) = document_extraction_cache()
+        .lock()
+        .ok()
+        .and_then(|cache| cache.get(&cache_key).cloned())
+    {
+        return Ok(cached);
+    }
 
     let (blocks, page_count, status, warnings) = match document.file_type.as_str() {
         "docx" => {
@@ -1540,15 +2031,19 @@ pub fn extract_document_text(
                         r#type: block.r#type,
                         text: block.text,
                         page: None,
+                        heading_level: block.heading_level,
+                        role: block.role,
+                        table_row: block.table_row,
+                        table_col: block.table_col,
                     })
                     .collect()
             };
             let status = if blocks.is_empty() { "no_text" } else { "ok" }.to_owned();
             let warnings = if blocks.is_empty() {
-                vec!["未从 DOCX 正文提取到可读文本；图片、文本框和批注不会自动识别。".to_owned()]
+                vec!["未从 DOCX 正文提取到可读文本；图片和图表需要视觉模型读取。".to_owned()]
             } else {
                 vec![
-                    "DOCX 首期仅提取正文段落和表格文本；图片、文本框、批注和修订可能未包含。"
+                    "DOCX 已提取正文、标题、编号、表格和注释结构；图片、图表和 SmartArt 仍需视觉模型读取。"
                         .to_owned(),
                 ]
             };
@@ -1560,9 +2055,18 @@ pub fn extract_document_text(
             }
             // 使用按页 API，避免把整篇 PDF 当成一个无页码 block。
             // 该 API 在某一页失败时会停止返回后续页；page_count 仍需作为独立元数据保留。
-            let pages = pdf_extract::extract_text_from_mem_by_pages(&bytes)
-                .map_err(|error| format!("PDF 文本提取失败：{error}"))?;
+            let pages = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                pdf_extract::extract_text_from_mem_by_pages(&bytes)
+            }))
+            .map_err(|_| "PDF 解析器内部异常，已中止读取。".to_owned())?
+            .map_err(|error| format!("PDF 文本提取失败：{error}"))?;
             let page_count = pages.len();
+            if page_count > MAX_PDF_PAGES {
+                return Err(format!(
+                    "PDF 超过 {} 页的读取上限。",
+                    MAX_PDF_PAGES
+                ));
+            }
             let blocks: Vec<DocumentTextBlock> = pages
                 .into_iter()
                 .enumerate()
@@ -1573,6 +2077,10 @@ pub fn extract_document_text(
                         r#type: "page".to_owned(),
                         text: text.to_owned(),
                         page: Some(index + 1),
+                        heading_level: None,
+                        role: Some("body".to_owned()),
+                        table_row: None,
+                        table_col: None,
                     })
                 })
                 .collect();
@@ -1602,7 +2110,14 @@ pub fn extract_document_text(
         content_chars,
         warnings.len()
     );
-    Ok(DocumentTextExtraction {
+    if content_chars > MAX_EXTRACTED_CHARS {
+        return Err(format!(
+            "文档提取文本超过 {} 万字符上限，已拒绝本次读取。",
+            MAX_EXTRACTED_CHARS / 10_000
+        ));
+    }
+
+    let extraction = DocumentTextExtraction {
         document_id: document.id.clone(),
         file_type: document.file_type.clone(),
         content_hash,
@@ -1611,7 +2126,9 @@ pub fn extract_document_text(
         page_count,
         status,
         warnings,
-    })
+    };
+    cache_document_extraction(cache_key, &extraction);
+    Ok(extraction)
 }
 
 /** 判断带命名空间或不带命名空间的 XML 名称是否匹配目标本地名。 */
@@ -1640,9 +2157,4 @@ pub(crate) fn read_xml_attribute(
         })
 }
 
-/** 根据 docx 段落样式判断是否应作为标题展示。 */
-pub(crate) fn is_docx_heading_style(style: &str) -> bool {
-    let normalized_style = style.to_ascii_lowercase();
 
-    normalized_style.contains("heading") || normalized_style.contains("title")
-}

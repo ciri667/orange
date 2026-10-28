@@ -266,6 +266,10 @@ export interface DocumentPreviewBlock {
   type: DocumentPreviewBlockType;
   text: string;
   page?: number;
+  headingLevel?: number;
+  role?: string;
+  tableRow?: number;
+  tableCol?: number;
 }
 
 /** 非 Markdown 文档预览命令返回值，pdf/图片返回 asset 路径，docx 返回结构化文本。 */
@@ -337,6 +341,10 @@ export interface Citation {
   kind?: "note" | "web";
   url?: string;
   publishedAt?: string;
+  sourceType?: "note" | "document" | "web";
+  page?: number;
+  blockIndex?: number;
+  headingPath?: string;
 }
 
 /** 联网搜索设置。密钥本身不在这里，只保留是否配过和最近一次探测状态。 */
@@ -1273,6 +1281,8 @@ export interface BrowserState {
   tabs: BrowserTabView[];
   activeTabId?: string | null;
   visibleTabId?: string | null;
+  /** `native` 使用原生子窗口；`stream` 保留 JPEG 画面流兼容路径。 */
+  surfaceMode?: "native" | "stream";
   control: BrowserControlState;
 }
 

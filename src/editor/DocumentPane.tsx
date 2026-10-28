@@ -1,6 +1,6 @@
 import { convertFileSrc } from "@tauri-apps/api/core";
 import { Clock3, Eye, FilePenLine, FileText, Save } from "lucide-react";
-import { useRef } from "react";
+import { createElement, useRef } from "react";
 import { Button } from "../shared/Button";
 import { VoiceDictationButton } from "../shared/VoiceDictationButton";
 import { logInfo, logWarn } from "../shared/logger";
@@ -326,7 +326,7 @@ function DocumentPreviewView({
       <div className="min-h-0 min-w-0 overflow-auto rounded-none border-0 bg-surface py-4 text-body leading-[1.75] text-ink [scrollbar-gutter:stable] [&>:last-child]:mb-0" aria-label="DOCX 预览">
         {blocks.map((block, index) =>
           block.type === "heading" ? (
-            <h3 className="mb-3 mt-0 text-lg leading-[1.35] text-ink-strong" key={`${block.type}-${index}`}>{block.text}</h3>
+            <DocxHeading key={`${block.type}-${index}`} level={block.headingLevel} text={block.text} />
           ) : block.type === "table" ? (
             <pre className="whitespace-pre-wrap font-[inherit]" key={`${block.type}-${index}`}>{block.text}</pre>
           ) : (
@@ -338,6 +338,26 @@ function DocumentPreviewView({
   }
 
   return <div className="grid min-h-0 min-w-0 place-items-center rounded-panel border border-dashed border-border-strong bg-surface p-6 text-center text-[13px] leading-[1.55] text-ink-muted">该文档类型暂不支持预览。</div>;
+}
+
+/** 按 DOCX 标题级别渲染，缺失级别时沿用旧版的 h3。 */
+function DocxHeading({ level, text }: { level?: number; text: string }) {
+  const normalizedLevel = Math.min(6, Math.max(1, level ?? 3));
+  const tag = `h${normalizedLevel}` as "h1" | "h2" | "h3" | "h4" | "h5" | "h6";
+  const sizeClass =
+    normalizedLevel === 1
+      ? "text-xl"
+      : normalizedLevel === 2
+        ? "text-lg"
+        : normalizedLevel === 3
+          ? "text-base"
+          : "text-sm";
+
+  return createElement(
+    tag,
+    { className: `mb-3 mt-0 ${sizeClass} font-semibold leading-[1.35] text-ink-strong` },
+    text,
+  );
 }
 
 /** 把文档类型转换成界面短标签。 */

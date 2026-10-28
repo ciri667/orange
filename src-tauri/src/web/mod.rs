@@ -596,6 +596,7 @@ pub(crate) fn hits_to_citations(hits: &[WebHit]) -> Vec<Citation> {
             kind: Some("web".to_owned()),
             url: Some(hit.url.clone()),
             published_at: hit.published_at.clone(),
+            ..Default::default()
         })
         .collect()
 }

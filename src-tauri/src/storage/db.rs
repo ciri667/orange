@@ -135,6 +135,47 @@ pub(crate) fn ensure_database_schema(
               body_tokens
             );
 
+            CREATE TABLE IF NOT EXISTS document_index_state (
+              document_id TEXT PRIMARY KEY,
+              knowledge_base_id TEXT NOT NULL,
+              content_hash TEXT NOT NULL,
+              extractor_version TEXT NOT NULL,
+              updated_at TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS document_chunks (
+              chunk_id TEXT PRIMARY KEY,
+              document_id TEXT NOT NULL,
+              knowledge_base_id TEXT NOT NULL,
+              document_title TEXT NOT NULL,
+              document_path TEXT NOT NULL,
+              chunk_index INTEGER NOT NULL,
+              page INTEGER,
+              block_start INTEGER NOT NULL,
+              block_end INTEGER NOT NULL,
+              heading_path TEXT NOT NULL,
+              content TEXT NOT NULL,
+              content_hash TEXT NOT NULL,
+              updated_at_unix INTEGER,
+              UNIQUE(document_id, chunk_index)
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_document_chunks_document
+              ON document_chunks(document_id, chunk_index);
+
+            CREATE INDEX IF NOT EXISTS idx_document_chunks_kb
+              ON document_chunks(knowledge_base_id);
+
+            CREATE VIRTUAL TABLE IF NOT EXISTS document_chunk_fts USING fts5(
+              chunk_id UNINDEXED,
+              document_id UNINDEXED,
+              knowledge_base_id UNINDEXED,
+              title_tokens,
+              path_tokens,
+              heading_tokens,
+              body_tokens
+            );
+
             CREATE TABLE IF NOT EXISTS agent_sessions (
               id TEXT PRIMARY KEY,
               type TEXT NOT NULL,

@@ -93,6 +93,14 @@ pub struct DocumentPreviewBlock {
     pub text: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub page: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub heading_level: Option<u8>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub role: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub table_row: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub table_col: Option<usize>,
 }
 
 /** 只读文档抽取的单个结构块；DOCX 使用块序号，PDF 使用页码。 */
@@ -104,6 +112,14 @@ pub struct DocumentTextBlock {
     pub text: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub page: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub heading_level: Option<u8>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub role: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub table_row: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub table_col: Option<usize>,
 }
 
 /** 本地解析后的只读文档正文；不进入 WorkspaceSnapshot，避免把二进制文档正文长期驻留内存。 */
