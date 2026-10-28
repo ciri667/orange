@@ -1404,6 +1404,52 @@ pub fn load_document_preview(
     }
 }
 
+/// 阅读顺序重建的最大文件体积，超过后直接用内容流顺序，避免拖慢读取。
+const MAX_LAYOUT_RECONSTRUCTION_BYTES: usize = 4 * 1024 * 1024;
+/// 阅读顺序重建的最大页数；超长文档只走内容流顺序（可用视觉模型读页面）。
+const MAX_LAYOUT_RECONSTRUCTION_PAGES: usize = 200;
+
+/**
+ * 用字形坐标重建 PDF 阅读顺序。
+ *
+ * 任何失败都返回空 Vec，调用方回退到 `pdf-extract` 的内容流顺序；
+ * 解析 panic 不会向上传播。
+ */
+fn layout_reading_order(bytes: &[u8], page_count: usize) -> Vec<LayoutPageText> {
+    if bytes.len() > MAX_LAYOUT_RECONSTRUCTION_BYTES
+        || page_count > MAX_LAYOUT_RECONSTRUCTION_PAGES
+        || page_count > MAX_PDF_PAGES
+    {
+        log::info!(
+            target: "document_extraction",
+            "PDF 超出阅读顺序重建预算，直接使用内容流顺序：bytes={} pages={}",
+            bytes.len(),
+            page_count
+        );
+        return Vec::new();
+    }
+    let payload = bytes.to_vec();
+    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
+        extract_pdf_layout_pages(payload)
+    })) {
+        Ok(Ok(pages)) => pages,
+        Ok(Err(error)) => {
+            log::warn!(
+                target: "document_extraction",
+                "PDF 阅读顺序重建失败，已回退内容流顺序：{error}"
+            );
+            Vec::new()
+        }
+        Err(_) => {
+            log::warn!(
+                target: "document_extraction",
+                "PDF 阅读顺序重建内部异常，已回退内容流顺序。"
+            );
+            Vec::new()
+        }
+    }
+}
+
 /** 识别加密或旧版 OLE 容器，返回面向用户的明确原因，避免笼统的“格式无效”。 */
 fn document_encryption_hint(bytes: &[u8], file_type: &str) -> Option<String> {
     // Office 加密文档（含旧版 .doc）是 OLE 复合文档，不是 ZIP；先于 zip 解析识别。
@@ -2141,16 +2187,61 @@ pub fn extract_document_text(
                     MAX_PDF_PAGES
                 ));
             }
+            // 内容流顺序不可靠（双栏、乱序写入）；尝试用字形坐标重建阅读顺序。
+            // 重建失败或覆盖度过低时保留 pdf-extract 结果，只提示一次。
+            let layout_pages = layout_reading_order(&bytes, page_count);
+            let extract_chars: usize = pages.iter().map(|page| page.trim().chars().count()).sum();
+            let layout_chars: usize = layout_pages
+                .iter()
+                .map(|page| page.text.chars().count())
+                .sum();
+            let use_layout = !layout_pages.is_empty()
+                && layout_chars > 0
+                && layout_chars * 10 >= extract_chars * 6;
+            let mut layout_warning = Vec::new();
+            if use_layout {
+                log::info!(
+                    target: "document_extraction",
+                    "PDF 已按字形坐标重建阅读顺序：path={} pages={} layout_chars={} extract_chars={}",
+                    document.path,
+                    page_count,
+                    layout_chars,
+                    extract_chars
+                );
+            } else if layout_chars > 0 {
+                layout_warning.push(
+                    "未能按字形坐标重建阅读顺序（覆盖率不足），已回退到内容流顺序；双栏 PDF 建议用 includeImages=always 交给视觉模型。"
+                        .to_owned(),
+                );
+            }
+            let layout_by_page: std::collections::HashMap<usize, String> = layout_pages
+                .into_iter()
+                .map(|page| (page.page, page.text))
+                .collect();
             let blocks: Vec<DocumentTextBlock> = pages
                 .into_iter()
                 .enumerate()
                 .filter_map(|(index, page_text)| {
-                    let text = page_text.trim();
+                    let page_number = index + 1;
+                    // 重建后该页仍为空时，退回内容流文本，避免整页丢失。
+                    let text = if use_layout {
+                        let layout_text = layout_by_page
+                            .get(&page_number)
+                            .map(|value| value.trim())
+                            .unwrap_or_default();
+                        if layout_text.is_empty() {
+                            page_text.trim()
+                        } else {
+                            layout_text
+                        }
+                    } else {
+                        page_text.trim()
+                    };
                     (!text.is_empty()).then(|| DocumentTextBlock {
-                        index: index + 1,
+                        index: page_number,
                         r#type: "page".to_owned(),
                         text: text.to_owned(),
-                        page: Some(index + 1),
+                        page: Some(page_number),
                         heading_level: None,
                         role: Some("body".to_owned()),
                         table_row: None,
@@ -2164,11 +2255,12 @@ pub fn extract_document_text(
                 "ok"
             }
             .to_owned();
-            let warnings = if blocks.is_empty() {
+            let mut warnings = if blocks.is_empty() {
                 vec!["未从 PDF 提取到文本；这可能是扫描件或受保护文档。没有视觉模型时无法读取页面内容。".to_owned()]
             } else {
                 Vec::new()
             };
+            warnings.extend(layout_warning);
             (blocks, page_count, status, warnings)
         }
         _ => return Err("该文档类型不支持内容读取。".to_owned()),

@@ -128,6 +128,7 @@ mod document_cache;
 mod document_images;
 mod files;
 mod file_references;
+mod pdf_layout;
 pub use file_references::*;
 mod history;
 mod ids;
@@ -147,6 +148,7 @@ pub use attachments::*;
 pub use workspace::document_indexed_chunk_count;
 pub(crate) use document_cache::*;
 pub(crate) use document_images::*;
+pub(crate) use pdf_layout::*;
 pub use config::*;
 pub use db::*;
 pub use files::*;
@@ -2074,6 +2076,63 @@ mod tests {
         assert_eq!(extraction.blocks[1].page, Some(2));
         assert!(extraction.blocks[0].text.contains("Page one"));
         assert!(extraction.blocks[1].text.contains("Page two"));
+    }
+
+    /** 构造单页双栏 PDF，内容流故意先写右栏，用来验证阅读顺序重建。 */
+    fn write_two_column_pdf(path: &Path) {
+        let content = "BT /F1 12 Tf 330 720 Td (right first) Tj 0 -16 Td (right second) Tj 0 -16 Td (right third) Tj ET\n\
+BT /F1 12 Tf 60 720 Td (left first) Tj 0 -16 Td (left second) Tj 0 -16 Td (left third) Tj ET";
+        let objects = vec![
+            "<< /Type /Catalog /Pages 2 0 R >>".to_owned(),
+            "<< /Type /Pages /Kids [3 0 R] /Count 1 >>".to_owned(),
+            "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 4 0 R >> >> /Contents 5 0 R >>".to_owned(),
+            "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>".to_owned(),
+            format!("<< /Length {} >>\nstream\n{}\nendstream", content.len(), content),
+        ];
+        let mut pdf = String::from("%PDF-1.4\n");
+        let mut offsets = Vec::new();
+        for (index, object) in objects.iter().enumerate() {
+            offsets.push(pdf.len());
+            pdf.push_str(&format!("{} 0 obj\n{}\nendobj\n", index + 1, object));
+        }
+        let xref = pdf.len();
+        pdf.push_str(&format!("xref\n0 {}\n0000000000 65535 f \n", objects.len() + 1));
+        for offset in offsets {
+            pdf.push_str(&format!("{offset:010} 00000 n \n"));
+        }
+        pdf.push_str(&format!(
+            "trailer\n<< /Size {} /Root 1 0 R >>\nstartxref\n{xref}\n%%EOF\n",
+            objects.len() + 1
+        ));
+        fs::write(path, pdf).unwrap();
+    }
+
+    /** 双栏 PDF 即使右栏先出现在内容流里，也要按左栏 → 右栏输出。 */
+    #[test]
+    fn pdf_two_column_text_follows_reading_order() {
+        let dir = tempdir().unwrap();
+        write_two_column_pdf(&dir.path().join("columns.pdf"));
+
+        let extraction = extract_document_text(
+            dir.path(),
+            &test_workspace_document("pdf", "columns.pdf"),
+        )
+        .unwrap();
+
+        assert_eq!(extraction.page_count, 1);
+        let text = &extraction.blocks[0].text;
+        let left = text.find("left first").expect("应包含左栏文本");
+        let right = text.find("right first").expect("应包含右栏文本");
+        assert!(left < right, "左栏应排在右栏之前：{text}");
+        assert!(text.contains("left second") && text.contains("right third"), "{text}");
+        assert!(
+            extraction
+                .warnings
+                .iter()
+                .all(|warning| !warning.contains("回退")),
+            "重建成功时不应提示回退：{:?}",
+            extraction.warnings
+        );
     }
 
     /** DOCX 读取应复用预览解析结果，并保留表格来源及结构块序号。 */
