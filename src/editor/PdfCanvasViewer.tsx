@@ -39,6 +39,26 @@ function writeLastPage(documentId: string, page: number) {
     // 隐私模式或存储配额不足时忽略，阅读位置只是便利功能。
   }
 }
+/** 把大纲目标的 dest 解析成 1-based 页码；命名目标或非法引用返回 null。 */
+async function resolveOutlinePage(
+  document: PDFDocumentProxy,
+  dest: unknown,
+): Promise<number | null> {
+  try {
+    const resolved =
+      typeof dest === "string" ? await document.getDestination(dest) : dest;
+    if (!Array.isArray(resolved) || resolved.length === 0) {
+      return null;
+    }
+    const index = await document.getPageIndex(
+      resolved[0] as Parameters<PDFDocumentProxy["getPageIndex"]>[0],
+    );
+    return index + 1;
+  } catch {
+    return null;
+  }
+}
+
 export function PdfCanvasViewer({
   src,
   documentId,
@@ -68,6 +88,45 @@ export function PdfCanvasViewer({
     String(page && page > 0 ? page : readLastPage(documentId)),
   );
   const [zoom, setZoom] = useState(1);
+  const [outline, setOutline] = useState<Array<{ title: string; page: number }>>([]);
+
+  // 读取 PDF 自带大纲并解析成页码；解析失败就当没有大纲，不影响阅读。
+  useEffect(() => {
+    if (!document) {
+      return;
+    }
+    let cancelled = false;
+    void document
+      .getOutline()
+      .then(async (nodes) => {
+        if (!nodes || cancelled) {
+          return;
+        }
+        const flattened: Array<{ title: string; page: number }> = [];
+        for (const node of nodes) {
+          const page = await resolveOutlinePage(document, node.dest);
+          if (page) {
+            flattened.push({ title: node.title.trim() || `第 ${page} 页`, page });
+          }
+          for (const child of node.items ?? []) {
+            const childPage = await resolveOutlinePage(document, child.dest);
+            if (childPage) {
+              flattened.push({ title: child.title.trim() || `第 ${childPage} 页`, page: childPage });
+            }
+          }
+          if (flattened.length >= 80) {
+            break;
+          }
+        }
+        if (!cancelled) {
+          setOutline(flattened);
+        }
+      })
+      .catch(() => undefined);
+    return () => {
+      cancelled = true;
+    };
+  }, [document]);
 
   useEffect(() => {
     let cancelled = false;
@@ -299,6 +358,25 @@ export function PdfCanvasViewer({
               </button>
             ) : null}
           </span>
+        ) : null}
+
+        {outline.length > 0 ? (
+          <details className="relative ml-2">
+            <summary className="cursor-pointer text-[12px] text-ink-soft">目录（{outline.length}）</summary>
+            <div className="absolute left-0 top-6 z-10 max-h-64 w-64 overflow-auto rounded-lg border border-border bg-surface p-2 shadow-lg">
+              {outline.map((item, index) => (
+                <button
+                  className="block w-full truncate rounded px-2 py-1 text-left text-[12px] text-ink hover:bg-surface-muted"
+                  key={`${item.page}-${index}`}
+                  title={`${item.title} · 第 ${item.page} 页`}
+                  type="button"
+                  onClick={() => goToPage(item.page)}
+                >
+                  {item.title}
+                </button>
+              ))}
+            </div>
+          </details>
         ) : null}
       </div>
 
