@@ -124,6 +124,7 @@ static COMPLETED_INDEX_SIGNATURE: OnceLock<Mutex<Option<String>>> = OnceLock::ne
 mod attachments;
 mod config;
 mod db;
+mod document_cache;
 mod document_images;
 mod files;
 mod file_references;
@@ -143,6 +144,7 @@ mod sessions;
 mod workspace;
 
 pub use attachments::*;
+pub(crate) use document_cache::*;
 pub(crate) use document_images::*;
 pub use config::*;
 pub use db::*;

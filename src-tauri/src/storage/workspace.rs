@@ -224,6 +224,9 @@ pub(crate) fn apply_index_to_transaction(
         transaction
             .execute("DELETE FROM document_index_state", [])
             .map_err(|error| format!("无法清理文档索引状态：{error}"))?;
+        transaction
+            .execute("DELETE FROM document_extractions", [])
+            .map_err(|error| format!("无法清理文档解析缓存：{error}"))?;
     }
 
     for knowledge_base in &snapshot.knowledge_bases {
@@ -408,6 +411,13 @@ pub(crate) fn remove_knowledge_base_from_transaction(
             params![knowledge_base_id],
         )
         .map_err(|error| format!("无法删除知识库文档索引状态：{error}"))?;
+    // 解析缓存只按 document_id 索引；知识库移除后清掉不再被任何索引引用的缓存。
+    transaction
+        .execute(
+            "DELETE FROM document_extractions WHERE document_id NOT IN (SELECT document_id FROM document_index_state)",
+            [],
+        )
+        .map_err(|error| format!("无法清理文档解析缓存：{error}"))?;
     transaction
         .execute(
             "DELETE FROM note_tags WHERE knowledge_base_id = ?1",

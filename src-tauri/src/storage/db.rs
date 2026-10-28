@@ -143,6 +143,20 @@ pub(crate) fn ensure_database_schema(
               updated_at TEXT NOT NULL
             );
 
+            CREATE TABLE IF NOT EXISTS document_extractions (
+              document_id TEXT PRIMARY KEY,
+              content_hash TEXT NOT NULL,
+              extractor_version TEXT NOT NULL,
+              file_type TEXT NOT NULL,
+              page_count INTEGER NOT NULL,
+              blocks_json TEXT NOT NULL,
+              warnings_json TEXT NOT NULL,
+              status TEXT NOT NULL,
+              byte_size INTEGER NOT NULL,
+              duration_ms INTEGER NOT NULL,
+              extracted_at TEXT NOT NULL
+            );
+
             CREATE TABLE IF NOT EXISTS document_chunks (
               chunk_id TEXT PRIMARY KEY,
               document_id TEXT NOT NULL,

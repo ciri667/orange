@@ -1163,7 +1163,12 @@ pub(crate) fn execute_read_document_with_images(
         .and_then(Value::as_str)
         .unwrap_or_default()
         .to_owned();
-    let mut result = execute_read_document(context.snapshot, context.session_index, args);
+    let mut result = execute_read_document(
+        context.snapshot,
+        context.session_index,
+        args,
+        context.app,
+    );
     if !result.success {
         return result;
     }
@@ -1308,6 +1313,7 @@ pub(crate) fn execute_read_document(
     snapshot: &WorkspaceSnapshot,
     session_index: usize,
     args: &Value,
+    app: Option<&AppHandle>,
 ) -> ToolExecutionResult {
     let document_id = args
         .get("documentId")
@@ -1327,12 +1333,26 @@ pub(crate) fn execute_read_document(
         return ToolExecutionResult::failed("找不到文档所属知识库。");
     };
 
-    let extraction = match crate::storage::extract_document_text(
-        std::path::Path::new(&knowledge_base.path),
-        document,
-    ) {
-        Ok(extraction) => extraction,
-        Err(error) => return ToolExecutionResult::failed(&format!("文档读取失败：{error}")),
+    let (extraction, cache_hit, extraction_ms) = match app {
+        Some(app) => match crate::storage::extract_document_text_cached(
+            app,
+            std::path::Path::new(&knowledge_base.path),
+            document,
+        ) {
+            Ok(cached) => (cached.extraction, Some(cached.cache_hit), Some(cached.duration_ms)),
+            Err(error) => {
+                return ToolExecutionResult::failed(&format!("文档读取失败：{error}"));
+            }
+        },
+        None => match crate::storage::extract_document_text(
+            std::path::Path::new(&knowledge_base.path),
+            document,
+        ) {
+            Ok(extraction) => (extraction, None, None),
+            Err(error) => {
+                return ToolExecutionResult::failed(&format!("文档读取失败：{error}"));
+            }
+        },
     };
     let (offset, limit) = read_window(args);
     let requested_page = args
@@ -1567,7 +1587,9 @@ pub(crate) fn execute_read_document(
                 "contentChars": extraction.content_chars, "contentTruncated": truncated,
                 "pageCount": extraction.page_count,
                 "status": &extraction.status,
-                "warnings": &extraction.warnings
+                "warnings": &extraction.warnings,
+                "cacheHit": cache_hit,
+                "extractionMs": extraction_ms
             }
         }),
         citations: vec![citation],

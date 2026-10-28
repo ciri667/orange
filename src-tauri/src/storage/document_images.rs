@@ -40,11 +40,6 @@ impl DocumentImage {
     }
 }
 
-/// 判断 PDF 是否完全没有文本层；这类页面只能交给视觉模型。
-pub(crate) fn pdf_requires_vision(extraction: &DocumentTextExtraction) -> bool {
-    extraction.file_type == "pdf" && extraction.blocks.iter().all(|block| block.text.trim().is_empty())
-}
-
 /**
  * 渲染指定 PDF 页面并写入对话附件目录。
  *
@@ -455,31 +450,5 @@ mod tests {
         assert_eq!(media[0].relationship_id, "rId2");
         assert_eq!(media[0].part_name, "word/media/image2.png");
         assert_eq!(media[1].relationship_id, "rId1");
-    }
-
-    #[test]
-    fn detects_pdf_without_text_layer() {
-        let mut extraction = DocumentTextExtraction {
-            document_id: "doc".to_owned(),
-            file_type: "pdf".to_owned(),
-            content_hash: String::new(),
-            blocks: Vec::new(),
-            content_chars: 0,
-            page_count: 2,
-            status: "no_text_layer".to_owned(),
-            warnings: Vec::new(),
-        };
-        assert!(pdf_requires_vision(&extraction));
-        extraction.blocks.push(DocumentTextBlock {
-            index: 1,
-            r#type: "page".to_owned(),
-            text: "正文".to_owned(),
-            page: Some(1),
-            heading_level: None,
-            role: None,
-            table_row: None,
-            table_col: None,
-        });
-        assert!(!pdf_requires_vision(&extraction));
     }
 }

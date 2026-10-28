@@ -235,6 +235,7 @@ mod tests {
             &snapshot,
             0,
             &json!({"documentId": "document-pdf", "page": 2}),
+            None,
         );
         assert!(page_two.success, "{:?}", page_two.payload);
         assert_eq!(page_two.payload["pageCount"], 2);
@@ -250,6 +251,7 @@ mod tests {
             &snapshot,
             0,
             &json!({"documentId": "document-pdf", "page": 3}),
+            None,
         );
         assert!(!out_of_range.success);
         assert!(out_of_range.summary.contains("页码超出范围"));
@@ -290,6 +292,7 @@ mod tests {
             &snapshot,
             0,
             &json!({"documentId": "document-pdf-range", "page": 1, "pageEnd": 2}),
+            None,
         );
         assert!(ranged.success, "{:?}", ranged.payload);
         assert_eq!(ranged.payload["offsetScope"], "range".to_string());
@@ -303,6 +306,7 @@ mod tests {
             &snapshot,
             0,
             &json!({"documentId": "document-pdf-range", "page": 2, "pageEnd": 3}),
+            None,
         );
         assert!(!bad_range.success);
         assert!(bad_range.summary.contains("pageEnd"));
@@ -311,6 +315,7 @@ mod tests {
             &snapshot,
             0,
             &json!({"documentId": "document-pdf-range", "block": 2}),
+            None,
         );
         assert!(block_two.success, "{:?}", block_two.payload);
         assert_eq!(block_two.payload["offsetScope"], "block".to_string());
@@ -321,6 +326,7 @@ mod tests {
             &snapshot,
             0,
             &json!({"documentId": "document-pdf-range", "block": 99}),
+            None,
         );
         assert!(!bad_block.success);
         assert!(bad_block.summary.contains("结构块 99"));
