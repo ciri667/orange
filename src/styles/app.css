@@ -1263,7 +1263,7 @@ select:focus-visible {
 }
 
 .agent-composer {
-  margin: 4px 12px 12px;
+  margin: 4px 12px 10px;
 }
 
 /* 输入态只把外框加深一档，和内部控件一样不再出现橙色描边。 */
@@ -1273,9 +1273,10 @@ select:focus-visible {
 
 .agent-composer textarea {
   font-size: 13px;
-  min-height: 72px;
+  /* 默认只留两行左右高度，整块输入框更紧凑；正文变多时仍按 max-height 自动增高。 */
+  min-height: 54px;
   max-height: 200px;
-  line-height: 1.75;
+  line-height: 1.6;
 }
 
 .agent-composer-model {
@@ -1283,7 +1284,7 @@ select:focus-visible {
   min-width: 0;
   align-items: center;
   gap: 6px;
-  padding: 4px 2px;
+  padding: 2px;
   border-bottom: 1px solid var(--border);
   color: var(--text-muted);
 }

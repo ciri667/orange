@@ -873,7 +873,7 @@ export function AgentInput({
 
   return (
     <footer
-      className="agent-composer flex min-w-0 shrink-0 flex-col gap-2 rounded-panel border border-border-strong bg-surface p-3"
+      className="agent-composer flex min-w-0 shrink-0 flex-col gap-1.5 rounded-panel border border-border-strong bg-surface p-2.5"
       ref={composerRef}
       onDragOver={handleComposerDragOver}
       onDrop={handleComposerDrop}
@@ -1084,7 +1084,7 @@ export function AgentInput({
           </div>
         )}
         <textarea
-          className="min-h-14 w-full resize-none rounded-control border-0 bg-transparent p-1.5 pt-1.5 text-ink leading-normal outline-none focus-visible:outline-none"
+          className="w-full resize-none rounded-control border-0 bg-transparent px-1.5 py-1 text-ink leading-normal outline-none focus-visible:outline-none"
           ref={promptTextareaRef}
           value={prompt}
           onChange={handlePromptChange}
