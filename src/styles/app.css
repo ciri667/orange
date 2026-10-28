@@ -117,7 +117,12 @@
   --color-border-soft: rgba(var(--border-rgb), 0.88);
   --control-bg: var(--surface);
   --control-bg-hover: var(--surface-hover);
-  --control-ring: rgba(var(--accent-rgb), 0.28);
+  /*
+   * 焦点提示统一走中性灰，不再使用品牌橙。
+   * 橙色留给状态（运行中、当前选项等），避免键盘 / 点击聚焦被误读成警告或强调。
+   */
+  --focus-ring: rgba(var(--ink-rgb), 0.22);
+  --control-ring: rgba(var(--ink-rgb), 0.16);
 }
 
 * {
@@ -194,14 +199,14 @@ button:focus-visible,
 input:focus-visible,
 textarea:focus-visible,
 .workspace-resizer:focus-visible {
-  outline: 2px solid rgba(var(--accent-rgb), 0.35);
+  outline: 2px solid var(--focus-ring);
   outline-offset: 2px;
   box-shadow: none;
 }
 
 /*
  * WebView2 会把单独的 Shift / Ctrl / Alt / Meta 当成键盘操作，
- * 鼠标点过的按钮会重新匹配 :focus-visible，出现橙色描边。
+ * 鼠标点过的按钮会重新匹配 :focus-visible，多出一圈描边。
  * 只有 Tab、方向键等非修饰键才给可点击控件保留描边。
  */
 html:not(.using-keyboard) :is(button, a, summary, [role="button"], [role="tab"], [role="menuitem"], .workspace-resizer):focus-visible {
@@ -225,7 +230,7 @@ select:focus-visible {
  * 内层 input 被全局规则收成直角，描边会画成外壳里的方框。
  */
 .focus-shell:focus-within {
-  outline: 2px solid rgba(var(--accent-rgb), 0.35);
+  outline: 2px solid var(--focus-ring);
   outline-offset: 2px;
 }
 
@@ -670,7 +675,7 @@ select:focus-visible {
 }
 
 .browser-address-bar input:focus {
-  border-color: var(--accent);
+  border-color: var(--border-strong);
 }
 
 .browser-stage {
@@ -1261,9 +1266,9 @@ select:focus-visible {
   margin: 4px 12px 12px;
 }
 
+/* 输入态只把外框加深一档，和内部控件一样不再出现橙色描边。 */
 .agent-composer:focus-within {
-  border-color: var(--accent);
-  box-shadow: 0 0 0 2px rgba(var(--accent-rgb), 0.09);
+  border-color: var(--border-strong);
 }
 
 .agent-composer textarea {

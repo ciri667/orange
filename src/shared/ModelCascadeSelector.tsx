@@ -212,7 +212,7 @@ export function ModelCascadeSelector({
       <button
         ref={triggerRef}
         className={cn(
-          "inline-flex w-full min-w-0 items-center justify-between gap-1.5 border-0 bg-transparent text-left font-bold focus-visible:outline-[3px] focus-visible:outline-[var(--control-ring)] focus-visible:outline-offset-2",
+          "inline-flex w-full min-w-0 items-center justify-between gap-1.5 border-0 bg-transparent text-left font-bold focus-visible:outline-[2px] focus-visible:outline-[var(--focus-ring)] focus-visible:outline-offset-2",
           variant === "inline"
             ? "min-h-7 rounded-full px-0 py-[3px] text-xs font-medium text-ink-muted"
             : "min-h-[var(--control-height)] rounded-control border border-border bg-white px-[11px] py-0 text-ui font-medium text-ink",
