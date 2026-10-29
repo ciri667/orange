@@ -406,7 +406,10 @@ pub fn run() {
             commands::browser::browser_user_take_over,
             commands::browser::browser_close_tab,
             commands::browser::browser_clear_site_data,
-            commands::browser::browser_set_screencast
+            commands::browser::browser_set_screencast,
+            commands::browser::browser_set_surface_bounds,
+            commands::browser::browser_set_surface_visible,
+            commands::browser::browser_focus_surface
         ])
         .build(tauri::generate_context!())
         .expect("failed to build Orange desktop app")

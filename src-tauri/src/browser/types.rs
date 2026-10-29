@@ -43,7 +43,21 @@ pub struct BrowserState {
     pub active_tab_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub visible_tab_id: Option<String>,
+    /// 面板呈现方式：`native` 为原生子窗口，`stream` 为兼容的 JPEG 画面流。
+    #[serde(default = "default_surface_mode")]
+    pub surface_mode: String,
     pub control: BrowserControlState,
+}
+
+fn default_surface_mode() -> String {
+    #[cfg(windows)]
+    {
+        "native".to_owned()
+    }
+    #[cfg(not(windows))]
+    {
+        "stream".to_owned()
+    }
 }
 
 /** 面板实时画面帧；data 是 JPEG 的 base64，不进入模型上下文。 */

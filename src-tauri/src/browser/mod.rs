@@ -9,6 +9,14 @@ mod input;
 pub mod policy;
 mod session;
 mod snapshot;
+#[cfg(windows)]
+mod native_input;
+#[cfg(windows)]
+mod surface_host;
+#[cfg(windows)]
+mod win32_surface;
+#[cfg(target_os = "macos")]
+mod wkwebview_surface;
 pub mod types;
 
 pub use fetcher::*;

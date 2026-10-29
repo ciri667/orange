@@ -116,3 +116,28 @@ pub async fn browser_clear_site_data(app: AppHandle) -> Result<(), String> {
 pub async fn browser_set_screencast(app: AppHandle, enabled: bool) -> Result<(), String> {
     browser::set_screencast_enabled(&app, enabled).await
 }
+
+/** 面板把浏览器 stage 的逻辑像素边界同步给原生子窗口。 */
+#[tauri::command]
+pub async fn browser_set_surface_bounds(
+    app: AppHandle,
+    x: f64,
+    y: f64,
+    width: f64,
+    height: f64,
+    scale: f64,
+) -> Result<(), String> {
+    browser::set_surface_bounds(&app, x, y, width, height, scale).await
+}
+
+/** 面板隐藏、窗口最小化或弹窗遮挡时隐藏原生子窗口。 */
+#[tauri::command]
+pub async fn browser_set_surface_visible(app: AppHandle, visible: bool) -> Result<(), String> {
+    browser::set_surface_visible(&app, visible).await
+}
+
+/** 用户点击面板时把系统焦点交给原生浏览器。 */
+#[tauri::command]
+pub async fn browser_focus_surface(app: AppHandle) -> Result<(), String> {
+    browser::focus_surface(&app).await
+}

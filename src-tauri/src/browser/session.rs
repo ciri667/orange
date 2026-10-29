@@ -7,10 +7,15 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use chromiumoxide::browser::{Browser, BrowserConfig};
+#[cfg(windows)]
+use chromiumoxide::cdp::browser_protocol::target::CreateTargetParams;
+#[cfg(not(windows))]
 use chromiumoxide::cdp::browser_protocol::page::{
-    CaptureScreenshotFormat, CaptureScreenshotParams, EventJavascriptDialogClosed,
-    EventJavascriptDialogOpening, EventScreencastFrame, ScreencastFrameAckParams,
-    StartScreencastFormat, StartScreencastParams, StopScreencastParams,
+    CaptureScreenshotFormat, CaptureScreenshotParams, EventScreencastFrame,
+    ScreencastFrameAckParams, StartScreencastFormat, StartScreencastParams, StopScreencastParams,
+};
+use chromiumoxide::cdp::browser_protocol::page::{
+    EventJavascriptDialogClosed, EventJavascriptDialogOpening,
 };
 use chromiumoxide::handler::viewport::Viewport;
 use chromiumoxide::handler::{Handler, HandlerConfig};
@@ -36,9 +41,12 @@ pub(super) struct BrowserSessionState {
     pub browser: Browser,
     handler_task: tokio::task::JoinHandle<()>,
     pub tabs: HashMap<String, BrowserTab>,
+    /// Page.close 先应答、targetDestroyed 后到；同步期间不能重新收录已主动关闭的页签。
+    closed_tab_ids: HashSet<String>,
     pub active_tab_id: String,
     pub visible_tab_id: String,
     frame_task: Option<tokio::task::JoinHandle<()>>,
+    #[cfg_attr(windows, allow(dead_code))]
     frame_tab_id: Option<String>,
     /// Chromium 真正切到前台的页；后台页不产生渲染帧，元素操作前必须对齐它。
     front_tab_id: String,
@@ -48,6 +56,15 @@ pub(super) struct BrowserSessionState {
     dialog_tasks: Vec<tokio::task::JoinHandle<()>>,
     /// 只有自己启动的实例才挂 Job；接管来的实例由它原本的进程归属决定。
     process_guard: Option<ProcessGuard>,
+    /// Tauri 主窗口句柄；Windows 有头 Chromium 会嵌入这里。
+    #[cfg(windows)]
+    host_hwnd: Option<isize>,
+    /// 原生 Chromium 只有一个窗口承载全部页签；面板同时只显示这一份画面。
+    #[cfg(windows)]
+    surface: Arc<super::surface_host::SurfaceHost>,
+    /// 找不到原生窗口时不再重复等待。
+    #[cfg(windows)]
+    surface_skipped: bool,
 }
 
 /** 读 profile 里的 DevToolsActivePort 端口；文件缺失说明上次是正常退出，没有残留实例。 */
@@ -75,6 +92,7 @@ async fn devtools_endpoint_alive(port: u16) -> bool {
 }
 
 /** 接管上次遗留的实例：连不上说明端口已随进程消失，按正常流程重新启动。 */
+#[cfg_attr(windows, allow(dead_code))]
 async fn attach_running(profile: &Path) -> Option<(Browser, Handler)> {
     let port = active_port(profile).await?;
     let url = format!("http://127.0.0.1:{port}");
@@ -120,19 +138,64 @@ async fn describe_launch_failure(profile: &Path, detail: &str) -> String {
     format!("无法启动独立 Chromium：{detail}")
 }
 
-/** 独立 Chromium 的启动配置：new headless、固定视口，禁止隐式开窗。 */
+/** Chromium 异常退出后默认会恢复上次会话；原生 surface 不能接受后台恢复页。 */
+#[cfg(windows)]
+async fn suppress_session_restore(profile: &Path) {
+    let default = profile.join("Default");
+    // Chromium 的会话恢复数据独立于 Preferences；异常退出后它会尝试恢复上次
+    // 窗口和页签，原生 surface 启动时不应该凭空多出后台页。
+    for name in [
+        "Current Session",
+        "Current Tabs",
+        "Last Session",
+        "Last Tabs",
+        "Sessions",
+    ] {
+        let path = default.join(name);
+        if path.is_dir() {
+            let _ = tokio::fs::remove_dir_all(&path).await;
+        } else {
+            let _ = tokio::fs::remove_file(&path).await;
+        }
+    }
+    let path = default.join("Preferences");
+    let mut root = tokio::fs::read_to_string(&path)
+        .await
+        .ok()
+        .and_then(|text| serde_json::from_str::<serde_json::Value>(&text).ok())
+        .unwrap_or_else(|| serde_json::json!({}));
+    let Some(object) = root.as_object_mut() else {
+        return;
+    };
+    let session = object
+        .entry("session")
+        .or_insert_with(|| serde_json::json!({}));
+    if let Some(session) = session.as_object_mut() {
+        // 5 = 启动时打开新标签页，避免恢复上次会话里的后台页。
+        session.insert("restore_on_startup".to_owned(), serde_json::json!(5));
+        session.insert("startup_urls".to_owned(), serde_json::json!([]));
+    }
+    let profile_section = object
+        .entry("profile")
+        .or_insert_with(|| serde_json::json!({}));
+    if let Some(profile_section) = profile_section.as_object_mut() {
+        profile_section.insert("exit_type".to_owned(), serde_json::json!("Normal"));
+        profile_section.insert("exited_cleanly".to_owned(), serde_json::json!(true));
+    }
+    if let Some(parent) = path.parent() {
+        let _ = tokio::fs::create_dir_all(parent).await;
+    }
+    if let Ok(text) = serde_json::to_string(&root) {
+        let _ = tokio::fs::write(&path, text).await;
+    }
+}
+
+/** 独立 Chromium 的启动配置：Windows 使用有头窗口供原生嵌入，其他平台保留 headless。 */
 fn build_config(executable: PathBuf, profile: PathBuf) -> Result<BrowserConfig, String> {
-    BrowserConfig::builder()
+    let builder = BrowserConfig::builder()
         .chrome_executable(executable)
         .user_data_dir(profile)
-        .new_headless_mode()
         .respect_https_errors()
-        .window_size(VIEWPORT_WIDTH, VIEWPORT_HEIGHT)
-        .viewport(Viewport {
-            width: VIEWPORT_WIDTH,
-            height: VIEWPORT_HEIGHT,
-            ..Viewport::default()
-        })
         .request_timeout(Duration::from_secs(15))
         // chromiumoxide 自动添加 `--`，带值参数用键值对传入；否则启动开关会失效。
         .arg("disable-extensions")
@@ -143,28 +206,70 @@ fn build_config(executable: PathBuf, profile: PathBuf) -> Result<BrowserConfig, 
         ))
         .arg("no-first-run")
         .arg("no-default-browser-check")
-        // 首次点击只由 create_tab 建页，禁止 Chromium 额外打开默认 New Tab。
         .arg("no-startup-window")
-        .arg("mute-audio")
+        .arg("mute-audio");
+
+    #[cfg(windows)]
+    let builder = builder
+        // The browser surface is a real Chromium child window. `--test-type`
+        // removes the "Chrome for Testing" infobar; `--app` removes the tab strip.
+        .with_head()
+        // 有头窗口必须使用真实客户区大小；默认的 800×600 模拟视口不会随面板缩放。
+        .viewport(None)
+        .arg(("app", "about:blank"))
+        .arg("test-type")
+        // 测试 profile / 异常退出后的 Chrome 可能恢复上次会话；原生 surface 不能
+        // 让恢复出来的后台页抢走面板，因此关掉恢复气泡和会话恢复。
+        .arg("disable-session-crashed-bubble")
+        .arg("hide-crash-restore-bubble")
+        // A child window is created only after the panel reports its bounds.
+        .arg("no-startup-window");
+
+    #[cfg(not(windows))]
+    let builder = builder
+        .new_headless_mode()
+        .window_size(VIEWPORT_WIDTH, VIEWPORT_HEIGHT)
+        .viewport(Viewport {
+            width: VIEWPORT_WIDTH,
+            height: VIEWPORT_HEIGHT,
+            ..Viewport::default()
+        });
+
+    builder
         .build()
         .map_err(|error| format!("浏览器配置无效：{error}"))
 }
 
 impl BrowserSessionState {
-    /** 新版 Chromium 使用 new headless；视口与画面、输入坐标共用同一尺寸。 */
-    pub async fn launch(executable: PathBuf, profile: PathBuf) -> Result<Self, String> {
+    /** Windows 使用有头 Chromium 原生窗口；其他平台保留 headless 兼容路径。 */
+    pub async fn launch(
+        executable: PathBuf,
+        profile: PathBuf,
+        host_hwnd: Option<isize>,
+    ) -> Result<Self, String> {
         if !executable.is_file() {
             return Err("独立 Chromium 尚未安装。请在设置中先下载浏览器内核。".to_owned());
         }
         tokio::fs::create_dir_all(&profile)
             .await
             .map_err(|error| format!("无法创建浏览器数据目录：{error}"))?;
+        #[cfg(windows)]
+        suppress_session_restore(&profile).await;
         // 一个 profile 只能有一个 Chromium 实例。上次异常退出（崩溃、dev 重编译、被强杀）会留下孤儿，
         // 这时直接启动会撞上单实例机制：新进程立刻退出、stderr 为空，用户和模型都只看到「无法启动」。
         // 能连上就接管它（保留上次打开的网页），连不上再走正常启动。
+        #[cfg(not(windows))]
         if let Some((browser, handler)) = attach_running(&profile).await {
             log::info!("浏览器已接管仍在运行的 Chromium 实例");
-            return Self::assemble(browser, handler, None, true).await;
+            return Self::assemble(browser, handler, None, true, host_hwnd).await;
+        }
+        #[cfg(windows)]
+        {
+            // 原生 surface 需要把 Chromium 窗口嵌入当前 Tauri 窗口；接管一个旧进程
+            // 拿不到它的窗口归属，宁可按正常流程重启，避免出现无画面的假接管。
+            if active_port(&profile).await.is_some() {
+                log::info!("检测到残留 Chromium 实例；Windows 原生 surface 将重新启动");
+            }
         }
         let config = build_config(executable.clone(), profile.clone())?;
         let (browser, handler) = match Browser::launch(config).await {
@@ -173,7 +278,7 @@ impl BrowserSessionState {
         };
         // 自己启动的 Chromium 挂进 Job：应用被强杀时由内核回收整棵进程树，不再留孤儿。
         let guard = attach_owned_child(std::process::id(), &executable);
-        Self::assemble(browser, handler, guard, false).await
+        Self::assemble(browser, handler, guard, false, host_hwnd).await
     }
 
     /**
@@ -185,6 +290,7 @@ impl BrowserSessionState {
         mut handler: Handler,
         process_guard: Option<ProcessGuard>,
         import_existing_targets: bool,
+        host_hwnd: Option<isize>,
     ) -> Result<Self, String> {
         // CDP 事件泵必须持续运行，关闭和等待进程退出完成后才停止它。
         let handler_task = tokio::spawn(async move {
@@ -199,6 +305,7 @@ impl BrowserSessionState {
             browser,
             handler_task,
             tabs: HashMap::new(),
+            closed_tab_ids: HashSet::new(),
             active_tab_id: String::new(),
             visible_tab_id: String::new(),
             frame_task: None,
@@ -208,6 +315,12 @@ impl BrowserSessionState {
             dialog_watched: HashSet::new(),
             dialog_tasks: Vec::new(),
             process_guard,
+            #[cfg(windows)]
+            host_hwnd,
+            #[cfg(windows)]
+            surface: Arc::default(),
+            #[cfg(windows)]
+            surface_skipped: false,
         };
         if import_existing_targets {
             if let Err(error) = session.browser.fetch_targets().await {
@@ -232,8 +345,14 @@ impl BrowserSessionState {
             .iter()
             .map(|page| page.target_id().as_ref().to_owned())
             .collect();
+        // chromiumoxide::pages 读取事件泵的缓存。保留关闭标记直到销毁事件移除旧 target，
+        // 避免状态刷新复活页签、重新嵌入正在销毁的 HWND，导致后续错误地复用空窗口。
+        self.closed_tab_ids.retain(|id| ids.contains(id));
         self.tabs.retain(|id, _| ids.contains(id));
         for page in pages {
+            if self.closed_tab_ids.contains(page.target_id().as_ref()) {
+                continue;
+            }
             self.tabs
                 .entry(page.target_id().as_ref().to_owned())
                 .or_insert(BrowserTab {
@@ -241,10 +360,34 @@ impl BrowserSessionState {
                     page_generation: 0,
                 });
         }
+        #[cfg(windows)]
+        if self.tabs.is_empty() {
+            // 同样覆盖页面自行关闭最后一页；Chromium 进程存活不代表原生窗口仍然存在。
+            self.surface.detach();
+            self.surface_skipped = false;
+        }
         if create_if_empty && self.tabs.is_empty() {
             self.create_tab().await?;
         }
         self.watch_unwatched_dialogs();
+        // 原生 surface 只嵌入一次；后续页签在同一个 Chromium 窗口里切换。
+        #[cfg(windows)]
+        if self.surface.hwnd().is_none() && !self.surface_skipped {
+            let tab_id = if self.tabs.contains_key(&self.visible_tab_id) {
+                self.visible_tab_id.clone()
+            } else {
+                self.tabs.keys().min().cloned().unwrap_or_default()
+            };
+            if !tab_id.is_empty() {
+                if let Err(error) = self
+                    .attach_surface(&tab_id, Duration::from_secs(2))
+                    .await
+                {
+                    log::warn!("无法为浏览器页签 {tab_id} 找到原生窗口：{error}");
+                    self.surface_skipped = true;
+                }
+            }
+        }
         // 两个选中标识必须指向存活标签；按需补建空白页后同步选择。
         if !self.tabs.contains_key(&self.active_tab_id) {
             self.active_tab_id = self.tabs.keys().min().cloned().unwrap_or_default();
@@ -255,11 +398,29 @@ impl BrowserSessionState {
     }
 
     pub async fn create_tab(&mut self) -> Result<String, String> {
+        // 窗口是否存在由存活页签决定，HWND 只负责嵌入，不能用作 Chromium 的生命周期标识。
+        #[cfg(windows)]
+        let need_window = self.tabs.is_empty();
+
+        #[cfg(windows)]
+        let page = {
+            let params = CreateTargetParams::builder()
+                .url("about:blank")
+                .new_window(need_window)
+                .build()
+                .map_err(|error| error.to_string())?;
+            self.browser
+                .new_page(params)
+                .await
+                .map_err(|error| error.to_string())?
+        };
+        #[cfg(not(windows))]
         let page = self
             .browser
             .new_page("about:blank")
             .await
             .map_err(|error| error.to_string())?;
+
         let id = page.target_id().as_ref().to_owned();
         self.watch_dialogs(id.clone(), page.clone());
         self.tabs.insert(
@@ -269,8 +430,45 @@ impl BrowserSessionState {
                 page_generation: 0,
             },
         );
+
+        #[cfg(windows)]
+        if need_window {
+            self.attach_surface(&id, Duration::from_secs(8)).await?;
+        }
+
         self.activate_tab(&id).await?;
         Ok(id)
+    }
+
+    /// Embed the single Chromium browser window and make it fill the panel.
+    #[cfg(windows)]
+    async fn attach_surface(
+        &mut self,
+        tab_id: &str,
+        timeout: Duration,
+    ) -> Result<(), String> {
+        let Some(host_hwnd) = self.host_hwnd else {
+            // Headless test sessions intentionally have no native host.
+            self.surface_skipped = true;
+            return Ok(());
+        };
+        let pid = self
+            .browser
+            .get_mut_child()
+            .and_then(|child| child.inner.id())
+            .ok_or_else(|| "无法读取 Chromium 进程 ID。".to_owned())?;
+        let hwnd = super::win32_surface::wait_for_new_window(pid, timeout)?;
+        let surface = super::win32_surface::ChromiumSurface::embed(host_hwnd, hwnd)?;
+        self.surface.attach(surface);
+        let _ = tab_id;
+        Ok(())
+    }
+
+    /// 运行时复用常驻显示控制器，启动前的隐藏请求及已有 bounds 不会在重启时丢失。
+    #[cfg(windows)]
+    pub fn set_surface_host(&mut self, host: Arc<super::surface_host::SurfaceHost>) {
+        self.surface.detach();
+        self.surface = host;
     }
 
     /** 给尚未订阅的标签页挂弹窗监听；sync_tabs 每次都会调用，靠 dialog_watched 去重。 */
@@ -352,13 +550,12 @@ impl BrowserSessionState {
                     .map_err(|error| ("INVALID_URL".to_owned(), error))
             })
             .transpose()?;
-        let previous_visible = self.visible_tab_id.clone();
         let id = self
             .create_tab()
             .await
             .map_err(|error| ("CDP_ERROR".to_owned(), error))?;
-        // Agent 新建页面只改变操作目标，不能切走用户正在观察的网页。
-        self.visible_tab_id = previous_visible;
+        // 原生 surface 只保留一个可见页：Agent 新建页面就是当前画面，避免可见页
+        // 与前台页分叉导致后台页不产生渲染帧。
         if let Some(url) = url {
             let tab = self.tabs.get_mut(&id).unwrap();
             // 等待导航完成后才返回 URL 和标题，避免把 about:blank 报成目标页。
@@ -384,6 +581,7 @@ impl BrowserSessionState {
         self.front_tab_id = tab_id.to_owned();
         self.active_tab_id = tab_id.to_owned();
         self.visible_tab_id = tab_id.to_owned();
+        self.show_surface();
         Ok(())
     }
 
@@ -393,7 +591,14 @@ impl BrowserSessionState {
         tab.page.bring_to_front().await.map_err(|error| error.to_string())?;
         self.front_tab_id = tab_id.to_owned();
         self.visible_tab_id = tab_id.to_owned();
+        self.show_surface();
         Ok(())
+    }
+
+    /// 原生 surface 只有一个窗口；Chrome 自己负责窗口内页签切换。
+    fn show_surface(&self) {
+        #[cfg(windows)]
+        self.surface.set_tab_available(!self.visible_tab_id.is_empty());
     }
 
     /**
@@ -416,18 +621,19 @@ impl BrowserSessionState {
             .await
             .map_err(|error| error.to_string())?;
         self.front_tab_id = tab_id.to_owned();
+        // 原生窗口只呈现前台页，显式 tabId 的 Agent 操作也必须发布同一个可见页。
+        self.visible_tab_id = tab_id.to_owned();
+        self.show_surface();
         Ok(())
     }
 
-    /** Agent 切换自己的目标页不影响用户选择的画面，但必须同时切换前台页。 */
+    /** Agent 切页时用户画面跟随；取消可见页与操作页双轨，避免后台页冻结。 */
     pub async fn activate_agent_tab(&mut self, tab_id: &str) -> Result<(), String> {
         if !self.tabs.contains_key(tab_id) { return Err("标签页已关闭。".to_owned()); }
-        self.ensure_front(tab_id).await?;
-        self.active_tab_id = tab_id.to_owned();
-        Ok(())
+        self.activate_tab(tab_id).await
     }
 
-    /** 先成功关闭实际页面再更新索引；关掉最后一页后自动创建空白页。 */
+    /** 成功发起关闭后移除页签；最后一页关闭后保持空会话，下次新建时重新开窗。 */
     pub async fn close_tab(&mut self, tab_id: &str) -> Result<(), String> {
         let page = self
             .tabs
@@ -436,17 +642,37 @@ impl BrowserSessionState {
             .page
             .clone();
         page.close().await.map_err(|error| error.to_string())?;
+        self.closed_tab_ids.insert(tab_id.to_owned());
+        #[cfg(windows)]
+        {
+            self.surface_skipped = false;
+        }
         self.tabs.remove(tab_id);
         self.dialog_watched.remove(tab_id);
         self.dialogs.lock().await.remove(tab_id);
         if !self.tabs.contains_key(&self.active_tab_id) { self.active_tab_id = self.tabs.keys().min().cloned().unwrap_or_default(); }
         if !self.tabs.contains_key(&self.visible_tab_id) { self.visible_tab_id.clear(); }
         if !self.tabs.contains_key(&self.front_tab_id) { self.front_tab_id.clear(); }
+        // 最后一个页签关闭后释放原生窗口，下次新建时重新嵌入。
+        #[cfg(windows)]
+        {
+            if self.tabs.is_empty() {
+                self.surface.detach();
+            }
+        }
         Ok(())
     }
 
     /** 每次最多保留一个转发任务；切换标签或关闭画面会停止旧流。 */
     pub async fn set_screencast(&mut self, enabled: bool, sink: FrameSink) -> Result<(), String> {
+        // Windows 使用真实 Chromium 子窗口，不再需要 JPEG 画面流。
+        #[cfg(windows)]
+        {
+            let _ = (enabled, sink);
+            return Ok(());
+        }
+        #[cfg(not(windows))]
+        {
         let target = enabled.then(|| self.visible_tab_id.clone());
         if self.frame_tab_id == target
             && self
@@ -537,10 +763,13 @@ impl BrowserSessionState {
             });
         }
         Ok(())
+        }
     }
 
     /** 保持事件泵直到 Browser.close + wait 完成，超时后只终止本会话拥有的进程。 */
     pub async fn close(&mut self) {
+        #[cfg(windows)]
+        self.surface.detach();
         if let Some(task) = self.frame_task.take() {
             task.abort();
         }
@@ -563,12 +792,15 @@ impl BrowserSessionState {
         self.dialog_watched.clear();
         self.dialogs.lock().await.clear();
         self.tabs.clear();
+        self.closed_tab_ids.clear();
         self.handler_task.abort();
     }
 }
 
 impl Drop for BrowserSessionState {
     fn drop(&mut self) {
+        #[cfg(windows)]
+        self.surface.detach();
         if let Some(task) = self.frame_task.take() {
             task.abort();
         }
@@ -606,6 +838,7 @@ pub(super) async fn remove_profile(profile: &std::path::Path) -> Result<(), Stri
 mod tests {
     use super::super::input::{send_input, BrowserUserInput};
     use super::*;
+    #[cfg(not(windows))]
     use base64::Engine;
     use futures_util::FutureExt;
     use std::io::{Read, Write};
@@ -620,8 +853,7 @@ mod tests {
         let profile = directory.path().join("profile");
         // 复用测试 profile 再次启动，覆盖首次启动与已有会话数据两条路径。
         for _ in 0..2 {
-            let mut session = BrowserSessionState::launch(executable.clone(), profile.clone())
-                .await
+            let mut session = BrowserSessionState::launch(executable.clone(), profile.clone(), None).await
                 .unwrap();
             let result = async {
                 assert!(
@@ -685,8 +917,7 @@ mod tests {
                 }
             }
         });
-        let mut session = BrowserSessionState::launch(executable.clone(), profile.clone())
-            .await
+        let mut session = BrowserSessionState::launch(executable.clone(), profile.clone(), None).await
             .unwrap();
         session.create_tab().await.unwrap();
         assert!(!session.active_tab_id.is_empty());
@@ -724,7 +955,8 @@ mod tests {
         );
         assert_eq!(session.tabs[&created].page_generation, 1);
         assert_eq!(session.active_tab_id, created);
-        assert_eq!(session.visible_tab_id, initial_tab);
+        // 原生 surface 只保留一个可见页：Agent 切页时用户画面跟随。
+        assert_eq!(session.visible_tab_id, created);
         session.show_tab(&created).await.unwrap();
         session.close_tab(&initial_tab).await.unwrap();
         let first = session.active_tab_id.clone();
@@ -745,34 +977,39 @@ mod tests {
             .iter()
             .any(|element| element.value.as_deref() == Some("original")));
 
+        #[cfg(not(windows))]
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        #[cfg(not(windows))]
         let sink: FrameSink = Arc::new(move |frame| {
             let _ = tx.send(frame);
         });
-        session.set_screencast(true, sink.clone()).await.unwrap();
-        let frame = tokio::time::timeout(Duration::from_secs(5), rx.recv())
-            .await
-            .unwrap()
-            .unwrap();
-        assert_eq!(frame.tab_id, first);
-        let jpeg = base64::engine::general_purpose::STANDARD
-            .decode(&frame.data)
-            .unwrap();
-        assert!(
-            image::load_from_memory(&jpeg).is_ok(),
-            "frame must be a valid JPEG"
-        );
-        assert_eq!(
-            (frame.width, frame.height),
-            (VIEWPORT_WIDTH as i64, VIEWPORT_HEIGHT as i64)
-        );
-        let task_id = session.frame_task.as_ref().unwrap().id();
-        session.set_screencast(true, sink.clone()).await.unwrap();
-        assert_eq!(
-            session.frame_task.as_ref().unwrap().id(),
-            task_id,
-            "repeated enables must reuse one relay"
-        );
+        #[cfg(not(windows))]
+        {
+            session.set_screencast(true, sink.clone()).await.unwrap();
+            let frame = tokio::time::timeout(Duration::from_secs(5), rx.recv())
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(frame.tab_id, first);
+            let jpeg = base64::engine::general_purpose::STANDARD
+                .decode(&frame.data)
+                .unwrap();
+            assert!(
+                image::load_from_memory(&jpeg).is_ok(),
+                "frame must be a valid JPEG"
+            );
+            assert_eq!(
+                (frame.width, frame.height),
+                (VIEWPORT_WIDTH as i64, VIEWPORT_HEIGHT as i64)
+            );
+            let task_id = session.frame_task.as_ref().unwrap().id();
+            session.set_screencast(true, sink.clone()).await.unwrap();
+            assert_eq!(
+                session.frame_task.as_ref().unwrap().id(),
+                task_id,
+                "repeated enables must reuse one relay"
+            );
+        }
 
         send_input(&page, BrowserUserInput::Click { x: 50.0, y: 35.0 })
             .await
@@ -875,16 +1112,19 @@ mod tests {
 
         let second = session.create_tab().await.unwrap();
         assert_ne!(first, second);
-        session.set_screencast(true, sink.clone()).await.unwrap();
-        let deadline = Instant::now() + Duration::from_secs(5);
-        loop {
-            let frame =
-                tokio::time::timeout_at(tokio::time::Instant::from_std(deadline), rx.recv())
-                    .await
-                    .unwrap()
-                    .unwrap();
-            if frame.tab_id == second {
-                break;
+        #[cfg(not(windows))]
+        {
+            session.set_screencast(true, sink.clone()).await.unwrap();
+            let deadline = Instant::now() + Duration::from_secs(5);
+            loop {
+                let frame =
+                    tokio::time::timeout_at(tokio::time::Instant::from_std(deadline), rx.recv())
+                        .await
+                        .unwrap()
+                        .unwrap();
+                if frame.tab_id == second {
+                    break;
+                }
             }
         }
         session.activate_tab(&first).await.unwrap();
@@ -906,16 +1146,19 @@ mod tests {
         .expect("closed targets must disappear after CDP close events");
         assert!(session.tabs.is_empty());
         session.create_tab().await.unwrap();
-        session.set_screencast(false, sink.clone()).await.unwrap();
-        assert!(session.frame_task.is_none());
-        // 静态页重新开启也必须收到首帧，不能一直停在“等待页面画面”。
-        while rx.try_recv().is_ok() {}
-        session.set_screencast(true, sink.clone()).await.unwrap();
-        assert!(tokio::time::timeout(Duration::from_secs(5), rx.recv())
-            .await
-            .unwrap()
-            .is_some());
-        session.set_screencast(false, sink).await.unwrap();
+        #[cfg(not(windows))]
+        {
+            session.set_screencast(false, sink.clone()).await.unwrap();
+            assert!(session.frame_task.is_none());
+            // 静态页重新开启也必须收到首帧，不能一直停在“等待页面画面”。
+            while rx.try_recv().is_ok() {}
+            session.set_screencast(true, sink.clone()).await.unwrap();
+            assert!(tokio::time::timeout(Duration::from_secs(5), rx.recv())
+                .await
+                .unwrap()
+                .is_some());
+            session.set_screencast(false, sink).await.unwrap();
+        }
         session.close().await;
         assert!(session.browser.try_wait().unwrap().is_some());
         remove_profile(&profile).await.unwrap();
@@ -924,8 +1167,7 @@ mod tests {
             "profile must be deletable after Chromium exits"
         );
         // 清除后可以重新启动，避免一次清除把浏览器永久留在空会话。
-        let mut restarted = BrowserSessionState::launch(executable, profile.clone())
-            .await
+        let mut restarted = BrowserSessionState::launch(executable, profile.clone(), None).await
             .unwrap();
         assert!(restarted.tabs.is_empty());
         restarted.create_tab().await.unwrap();
@@ -946,6 +1188,7 @@ mod tests {
     }
 
     /** 残留实例占着 profile 时必须接管，而不是让第二个 Chromium 直接退出把面板卡死。 */
+    #[cfg(not(windows))]
     #[tokio::test]
     #[ignore = "requires ORANGE_BROWSER_TEST_EXECUTABLE pointing to an installed Chromium"]
     async fn live_browser_adopts_the_instance_still_holding_the_profile() {
@@ -953,12 +1196,10 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let profile = directory.path().join("profile");
         // 第一次启动故意不 close，模拟应用被强杀后留下的孤儿实例。
-        let mut leftover = BrowserSessionState::launch(executable.clone(), profile.clone())
-            .await
+        let mut leftover = BrowserSessionState::launch(executable.clone(), profile.clone(), None).await
             .unwrap();
         let tab = leftover.create_tab().await.unwrap();
-        let mut adopted = BrowserSessionState::launch(executable, profile.clone())
-            .await
+        let mut adopted = BrowserSessionState::launch(executable, profile.clone(), None).await
             .unwrap();
         adopted.sync_tabs(false).await.unwrap();
         assert!(
@@ -1013,5 +1254,153 @@ mod tests {
             recovered.starts_with("无法启动独立 Chromium："),
             "端口关闭后要回到原始错误：{recovered}"
         );
+    }
+
+    /** 原生 surface：真实 Chromium 窗口必须成为测试宿主窗口的子窗口。 */
+    #[cfg(windows)]
+    #[tokio::test]
+    #[ignore = "requires ORANGE_BROWSER_TEST_EXECUTABLE pointing to an installed Chromium"]
+    async fn live_browser_embeds_chromium_as_child_window() {
+        use windows_sys::Win32::Foundation::{HWND, RECT};
+        use windows_sys::Win32::System::Threading::GetCurrentThreadId;
+        use windows_sys::Win32::UI::WindowsAndMessaging::{
+            CreateWindowExW, DestroyWindow, DispatchMessageW, GetMessageW, GetParent,
+            GetWindowRect, IsWindowVisible, PostThreadMessageW, ShowWindow, TranslateMessage,
+            CW_USEDEFAULT, MSG, SW_SHOW, WM_QUIT, WS_OVERLAPPEDWINDOW,
+        };
+
+        let executable = PathBuf::from(std::env::var("ORANGE_BROWSER_TEST_EXECUTABLE").unwrap());
+        let directory = tempfile::tempdir().unwrap();
+        let profile = directory.path().join("profile");
+
+        // 宿主独立泵消息，模拟 Tauri UI 线程；跨进程嵌入和关闭都可能同步发送窗口消息。
+        let (ready, receiver) = std::sync::mpsc::sync_channel(1);
+        let host_thread = std::thread::spawn(move || unsafe {
+            let class: Vec<u16> = "STATIC\0".encode_utf16().collect();
+            let title: Vec<u16> = "Orange browser surface test\0".encode_utf16().collect();
+            let host = CreateWindowExW(
+                0,
+                class.as_ptr(),
+                title.as_ptr(),
+                WS_OVERLAPPEDWINDOW,
+                CW_USEDEFAULT,
+                CW_USEDEFAULT,
+                900,
+                700,
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+            );
+            assert!(!host.is_null(), "host window must be created");
+            ShowWindow(host, SW_SHOW);
+            ready.send((host as isize, GetCurrentThreadId())).unwrap();
+            let mut message = MSG::default();
+            while GetMessageW(&mut message, std::ptr::null_mut(), 0, 0) > 0 {
+                TranslateMessage(&message);
+                DispatchMessageW(&message);
+            }
+            DestroyWindow(host);
+        });
+        let (host, host_thread_id) = receiver.recv().unwrap();
+        let host = host as HWND;
+        assert!(!host.is_null(), "host window must be created");
+
+        let mut session =
+            BrowserSessionState::launch(executable, profile.clone(), Some(host as isize))
+                .await
+                .unwrap();
+        let result = async {
+            let id = session.create_tab().await.unwrap();
+            let chrome = session
+                .surface
+                .hwnd()
+                .expect("first tab must embed the Chromium window");
+            assert_eq!(unsafe { GetParent(chrome as HWND) }, host);
+            session.surface.set_visible(true);
+
+            session.surface.set_bounds(10.0, 20.0, 320.0, 480.0, 1.0);
+            let mut rect = RECT::default();
+            unsafe { GetWindowRect(chrome as HWND, &mut rect) };
+            assert!(
+                rect.right - rect.left >= 320,
+                "embedded width must cover the panel"
+            );
+            assert!(
+                rect.bottom - rect.top >= 480,
+                "embedded height must cover the panel"
+            );
+
+            // 第二个页签复用同一个原生窗口，不应再嵌入第二个 surface。
+            let second = session.create_tab().await.unwrap();
+            assert_ne!(id, second);
+            assert_eq!(
+                session.surface.hwnd(),
+                Some(chrome),
+                "all tabs must share the single native Chromium window"
+            );
+
+            // 侧栏收起时前端可能报出 0×0；退化 bounds 必须隐藏窗口而不是把它压成细缝。
+            session.surface.set_bounds(0.0, 0.0, 0.0, 0.0, 1.0);
+            assert!(
+                unsafe { IsWindowVisible(chrome as HWND) } == 0,
+                "degenerate bounds must hide the native surface"
+            );
+            // 合法 bounds 之后必须能重新显示。
+            session.surface.set_bounds(10.0, 20.0, 320.0, 480.0, 1.0);
+            assert!(
+                unsafe { IsWindowVisible(chrome as HWND) } != 0,
+                "valid bounds must show the native surface again"
+            );
+
+            // 复现生产调用顺序：关闭后立即发布状态，再由用户或 Agent 新建。
+            // 两条入口共用 create_tab；Agent 额外走 create_tab_for_request 的参数校验。
+            session.close_tab(&second).await.unwrap();
+            session.close_tab(&id).await.unwrap();
+            for agent_request in [false, true, false, true] {
+                session.sync_tabs(false).await.unwrap();
+                assert!(
+                    session.tabs.is_empty(),
+                    "closed targets must not reappear during state refresh"
+                );
+                assert!(
+                    session.surface.hwnd().is_none(),
+                    "zero tabs must release the old native surface"
+                );
+                let reopened = if agent_request {
+                    session
+                        .create_tab_for_request(&serde_json::json!({}))
+                        .await
+                        .unwrap()
+                } else {
+                    session.create_tab().await.unwrap()
+                };
+                let reopened_hwnd = session
+                    .surface
+                    .hwnd()
+                    .expect("reopening must embed a new window");
+                assert_eq!(unsafe { GetParent(reopened_hwnd as HWND) }, host);
+                assert_ne!(unsafe { IsWindowVisible(reopened_hwnd as HWND) }, 0);
+                session.sync_tabs(false).await.unwrap();
+                assert_eq!(
+                    session.tabs.len(),
+                    1,
+                    "reopening must create exactly one tab"
+                );
+                assert_eq!(session.active_tab_id, reopened);
+                assert_eq!(session.visible_tab_id, reopened);
+                session.close_tab(&reopened).await.unwrap();
+            }
+        };
+        let outcome = std::panic::AssertUnwindSafe(result).catch_unwind().await;
+
+        // 回归断言失败也释放 HWND、Chromium 和临时 profile，避免遗留测试进程。
+        session.close().await;
+        unsafe { PostThreadMessageW(host_thread_id, WM_QUIT, 0, 0) };
+        host_thread.join().unwrap();
+        remove_profile(&profile).await.unwrap();
+        if let Err(error) = outcome {
+            std::panic::resume_unwind(error);
+        }
     }
 }

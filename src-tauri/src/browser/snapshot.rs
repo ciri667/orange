@@ -128,8 +128,7 @@ mod tests {
 
         let executable = PathBuf::from(std::env::var("ORANGE_BROWSER_TEST_EXECUTABLE").unwrap());
         let directory = tempfile::tempdir().unwrap();
-        let mut session = BrowserSessionState::launch(executable, directory.path().join("profile"))
-            .await
+        let mut session = BrowserSessionState::launch(executable, directory.path().join("profile"), None).await
             .unwrap();
         // 启动只创建进程；测试页面与用户新建页签一样显式创建。
         session.create_tab().await.unwrap();

@@ -43,6 +43,9 @@ struct BrowserControl {
 
 pub struct BrowserManager {
     state: Mutex<Option<BrowserSessionState>>,
+    /// 面板布局不等待正在导航/弹窗中的 CDP，且显示意图跨 Chromium 重启保留。
+    #[cfg(windows)]
+    surface: Arc<super::surface_host::SurfaceHost>,
     control: Mutex<BrowserControl>,
     approval_state: Mutex<Option<BrowserState>>,
     approval_elements: Mutex<HashMap<String, Value>>,
@@ -61,6 +64,8 @@ impl Default for BrowserManager {
     fn default() -> Self {
         Self {
             state: Mutex::new(None),
+            #[cfg(windows)]
+            surface: Arc::default(),
             control: Mutex::new(BrowserControl::default()),
             approval_state: Mutex::new(None),
             approval_elements: Mutex::new(HashMap::new()),
@@ -145,6 +150,7 @@ pub async fn browser_status(app: &AppHandle) -> BrowserState {
             tabs: Vec::new(),
             active_tab_id: None,
             visible_tab_id: None,
+            surface_mode: surface_mode(),
             control: control_state,
         };
     };
@@ -168,6 +174,7 @@ pub async fn browser_status(app: &AppHandle) -> BrowserState {
         active_tab_id: (!session.active_tab_id.is_empty()).then(|| session.active_tab_id.clone()),
         visible_tab_id: (!session.visible_tab_id.is_empty())
             .then(|| session.visible_tab_id.clone()),
+        surface_mode: surface_mode(),
         tabs,
         control: control_state,
     }
@@ -504,12 +511,97 @@ pub async fn prepare_operation_approval(app: &AppHandle, session: &AgentSession,
     Ok(prepared)
 }
 
+/** 原生浏览器 surface 需要 Tauri 主窗口句柄；测试或无窗口环境返回 None。 */
+#[cfg(windows)]
+fn main_window_hwnd(app: &AppHandle) -> Option<isize> {
+    app.get_webview_window("main")
+        .and_then(|window| window.hwnd().ok())
+        .map(|hwnd| hwnd.0 as isize)
+}
+
+#[cfg(not(windows))]
+fn main_window_hwnd(_app: &AppHandle) -> Option<isize> {
+    None
+}
+/// 面板呈现方式；Windows 已切换到原生 Chromium 子窗口。
+fn surface_mode() -> String {
+    #[cfg(windows)]
+    {
+        "native".to_owned()
+    }
+    #[cfg(not(windows))]
+    {
+        "stream".to_owned()
+    }
+}
+
+/** 面板 bounds 变化；原生 surface 平台会同步子窗口，流平台是 no-op。 */
+pub async fn set_surface_bounds(
+    _app: &AppHandle,
+    x: f64,
+    y: f64,
+    width: f64,
+    height: f64,
+    scale: f64,
+) -> Result<(), String> {
+    #[cfg(windows)]
+    browser_manager().await.surface.set_bounds(x, y, width, height, scale);
+    #[cfg(not(windows))]
+    let _ = (x, y, width, height, scale);
+    Ok(())
+}
+
+/** 面板隐藏或弹窗遮挡时隐藏原生 surface。 */
+pub async fn set_surface_visible(_app: &AppHandle, visible: bool) -> Result<(), String> {
+    #[cfg(windows)]
+    browser_manager().await.surface.set_visible(visible);
+    #[cfg(not(windows))]
+    let _ = visible;
+    Ok(())
+}
+
+/** 把焦点交给原生 surface。 */
+pub async fn focus_surface(_app: &AppHandle) -> Result<(), String> {
+    #[cfg(windows)]
+    browser_manager().await.surface.focus();
+    Ok(())
+}
+
 /** 启动与恢复在同一把状态锁下串行，避免导航与清除数据同时写 profile。 */
 async fn ensure_browser(app: &AppHandle) -> Result<(), String> {
     if !super::fetcher::browser_settings_enabled(app) {
         return Err("浏览器功能未启用，请先在设置中开启。".to_owned());
     }
     let manager = browser_manager().await;
+    #[cfg(windows)]
+    {
+        // 原生 Chromium 子窗口直接接收用户输入；观察输入并撤销 Agent 控制租约。
+        // OnceLock 保证整个进程只注册一次，后续 ensure_browser 只是 no-op。
+        super::win32_surface::set_user_input_callback(Arc::new({
+            let app = app.clone();
+            let pending = Arc::new(std::sync::atomic::AtomicBool::new(false));
+            move || {
+                // 连续滚轮/按键合并一次失效操作，不堆积所有页签的状态查询。
+                if pending.swap(true, std::sync::atomic::Ordering::SeqCst) { return; }
+                let app = app.clone();
+                let pending = pending.clone();
+                tauri::async_runtime::spawn(async move {
+                    let manager = browser_manager().await;
+                    // 先撤销租约唤醒正在执行的调用，再等待状态锁使旧快照失效。
+                    let revoked = revoke_control(manager, None).await;
+                    if let Some(session) = manager.state.lock().await.as_mut() {
+                        let tab_id = session.visible_tab_id.clone();
+                        bump_generation(session, &tab_id);
+                    }
+                    pending.store(false, std::sync::atomic::Ordering::SeqCst);
+                    if revoked {
+                        set_activity(&app, "user-takeover", None).await;
+                        publish_state(&app).await;
+                    }
+                });
+            }
+        }));
+    }
     let mut state = manager.state.lock().await;
     if let Some(session) = state.as_mut() {
         if session.browser.try_wait().ok().flatten().is_some()
@@ -523,10 +615,13 @@ async fn ensure_browser(app: &AppHandle) -> Result<(), String> {
         let result = BrowserSessionState::launch(
             chromium_executable_path(app)?,
             chromium_root(app)?.join("profile"),
+            main_window_hwnd(app),
         )
         .await;
         match result {
-            Ok(session) => {
+            Ok(mut session) => {
+                #[cfg(windows)]
+                session.set_surface_host(manager.surface.clone());
                 *state = Some(session);
                 *manager.launch_error.lock().await = None;
             }
