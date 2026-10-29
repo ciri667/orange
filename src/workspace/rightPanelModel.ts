@@ -1,4 +1,4 @@
-import type { RightPanelTab } from "../shared/types";
+import type { BrowserState, RightPanelTab } from "../shared/types";
 
 /** 页签状态独立于编辑器和领域快照，后台回合不能改变正在查看的内容。 */
 export interface RightPanelState {
@@ -7,6 +7,16 @@ export interface RightPanelState {
 }
 
 export const rightTabId = (tab: RightPanelTab) => `${tab.kind}:${tab.id}`;
+
+/** 仅已在查看网页时跟随 Agent；会话、终端、创建占位页和用户正在切换的目标保持原选择。 */
+export function browserTabToFollow(state: RightPanelState, browser: BrowserState, pendingTabId: string | null): string | null {
+  const selected = state.tabs.find((tab) => rightTabId(tab) === state.activeId);
+  const visible = browser.visibleTabId;
+  if (pendingTabId || selected?.kind !== "browser" || selected.id.startsWith("pending-")
+    || !browser.control.sessionId || !visible || selected.id === visible
+    || !browser.tabs.some((tab) => tab.tabId === visible)) return null;
+  return `browser:${visible}`;
+}
 
 /** 打开稳定引用时去重；后台发现网页可以仅追加而不激活。 */
 export function openRightTab(state: RightPanelState, tab: RightPanelTab, activate = true): RightPanelState {

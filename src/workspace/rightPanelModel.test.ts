@@ -1,6 +1,23 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { closeRightTab, openRightTab, reorderRightTabs, restoreRightTabs } from "./rightPanelModel.ts";
+import { browserTabToFollow, closeRightTab, openRightTab, reorderRightTabs, restoreRightTabs } from "./rightPanelModel.ts";
+import type { BrowserState } from "../shared/types.ts";
+
+test("Agent visible page follows only a selected browser and never overrides user selection", () => {
+  const browser: BrowserState = {
+    available: true, enabled: true, chromiumInstalled: true, visibleTabId: "b",
+    tabs: [{ tabId: "b", url: "about:blank", title: "B", active: true, visible: true }],
+    control: { running: true, sessionId: "agent", revision: 0, status: "running", elapsedMs: 0 },
+  };
+  const state = { tabs: [{ kind: "browser" as const, id: "a" }], activeId: "browser:a" };
+  assert.equal(browserTabToFollow(state, browser, null), "browser:b");
+  assert.equal(browserTabToFollow(state, browser, "a"), null);
+  for (const kind of ["session", "terminal"] as const) {
+    assert.equal(browserTabToFollow({ tabs: [{ kind, id: "a" }], activeId: `${kind}:a` }, browser, null), null);
+  }
+  assert.equal(browserTabToFollow({ tabs: [{ kind: "browser", id: "pending-new" }], activeId: "browser:pending-new" }, browser, null), null);
+  assert.equal(browserTabToFollow(state, { ...browser, control: { ...browser.control, sessionId: null } }, null), null);
+});
 
 test("opening an existing session activates it without adding a duplicate", () => {
   const first = openRightTab({ tabs: [], activeId: null }, { kind: "session", id: "a" });

@@ -5,7 +5,7 @@ import type { RightPanelTab, WorkspaceSnapshot } from "../shared/types";
 import type { BrowserWorkspace } from "../browser/useBrowserWorkspace";
 import type { Terminals } from "../terminal/useTerminals";
 import type { RightPanelTabs } from "./useRightPanelTabs";
-import { rightTabId } from "./rightPanelModel";
+import { browserTabToFollow, rightTabId } from "./rightPanelModel";
 
 interface Options {
   panel: RightPanelTabs;
@@ -34,10 +34,13 @@ export function useRightPanelActions(options: Options) {
     for (const tab of panel.stateRef.current.tabs) {
       if (tab.kind === "browser" && !tab.id.startsWith("pending-") && !browser.state.tabs.some((page) => page.tabId === tab.id)) panel.removeTab(rightTabId(tab));
     }
-  }, [options.browser.state]);
+    const follow = browserTabToFollow(panel.stateRef.current, browser.state, browser.pendingTabId);
+    if (follow) panel.activateTab(follow);
+  }, [options.browser.state, options.browser.pendingTabId]);
 
   const select = (tab: RightPanelTab) => {
-    const { panel, reveal, selectSession, notice } = current.current;
+    const { panel, browser, reveal, selectSession, notice } = current.current;
+    if (tab.kind === "browser" && !tab.id.startsWith("pending-")) browser.selectTab(tab.id);
     panel.activateTab(rightTabId(tab));
     reveal();
     if (tab.kind === "session") void selectSession(tab.id).catch((cause) => notice(String(cause)));
