@@ -246,18 +246,33 @@ export function useAgentTurn(options: AgentTurnOptions) {
             nextObserved.add(sessionId);
           }
         }
+        // 轮询大多数时候没有任何变化。返回同一个引用才能让 React 跳过重渲染，
+        // 否则整个工作台每 2 秒重建一次，正在阅读的 DOCX / PDF 会跟着闪。
+        const observedChanged =
+          nextObserved.size !== observedRunningSessionIdsRef.current.size ||
+          Array.from(nextObserved).some((sessionId) => !observedRunningSessionIdsRef.current.has(sessionId));
+
         observedRunningSessionIdsRef.current = nextObserved;
-        setObservedRunningSessionIds(Array.from(nextObserved));
+
+        if (observedChanged) {
+          setObservedRunningSessionIds(Array.from(nextObserved));
+        }
+
         setLiveTurns((current) => {
-          const next = { ...current };
-          for (const sessionId of Object.keys(next)) {
-            if (
+          const staleIds = Object.keys(current).filter(
+            (sessionId) =>
               !inFlightSessionIdsRef.current.has(sessionId) &&
               !nextObserved.has(sessionId) &&
-              next[sessionId]?.status !== "running"
-            ) {
-              delete next[sessionId];
-            }
+              current[sessionId]?.status !== "running",
+          );
+
+          if (!staleIds.length) {
+            return current;
+          }
+
+          const next = { ...current };
+          for (const sessionId of staleIds) {
+            delete next[sessionId];
           }
           return next;
         });

@@ -1,6 +1,6 @@
 import { convertFileSrc } from "@tauri-apps/api/core";
 import { Clock3, Eye, FilePenLine, FileText, Save } from "lucide-react";
-import { createElement, useEffect, useRef, useState } from "react";
+import { createElement, useCallback, useEffect, useRef, useState } from "react";
 import { Button } from "../shared/Button";
 import { VoiceDictationButton } from "../shared/VoiceDictationButton";
 import { logInfo, logWarn } from "../shared/logger";
@@ -234,7 +234,7 @@ export function DocumentPane({
 /** 只读文档预览区域，按 docx/pdf/图片分支展示。 */
 function DocumentPreviewView({
   document,
-  preview,
+  preview: previewProp,
   previewError,
   isPreviewLoading,
   focus,
@@ -245,6 +245,9 @@ function DocumentPreviewView({
   isPreviewLoading: boolean;
   focus?: { page?: number; blockIndex?: number };
 }) {
+  // 切换文件的瞬间 state 里还是上一个文件的预览；按 documentId 过滤，
+  // 避免把上一个文件的版式或图片画到新文件的标题下。
+  const preview = previewProp?.documentId === document.id ? previewProp : undefined;
   const docxRef = useRef<HTMLDivElement | null>(null);
   const [docxView, setDocxView] = useState<"layout" | "text">("layout");
   const [docxLayoutError, setDocxLayoutError] = useState("");
@@ -252,6 +255,23 @@ function DocumentPreviewView({
   const indexStatus = preview?.indexedChunkCount
     ? `已建立检索索引：${preview.indexedChunkCount} 块`
     : "尚未建立检索索引：重扫知识库后可用 search 检索本文档";
+
+  /**
+   * 版式渲染失败的回调。
+   *
+   * 必须是稳定引用：DocxLayoutPreview 把它记进 ref 后不再作为渲染依赖，
+   * 但每次渲染都换新函数仍会让依赖比较失去意义，因此这里显式 useCallback。
+   */
+  const handleDocxLayoutError = useCallback((message: string) => {
+    setDocxLayoutError(message);
+    setDocxView("text");
+  }, []);
+
+  useEffect(() => {
+    // 切换文件时重置视图状态：上一个文件的渲染错误不能把新文件也降级成文本视图。
+    setDocxView("layout");
+    setDocxLayoutError("");
+  }, [document.id]);
 
   useEffect(() => {
     // 引用跳转依赖结构块索引，自动切回文本视图，避免在看版式时找不到位置。
@@ -267,7 +287,9 @@ function DocumentPreviewView({
     const target = docxRef.current?.querySelector<HTMLElement>(`[data-block-index="${focus.blockIndex}"]`);
     target?.scrollIntoView({ block: "center" });
   }, [document.fileType, focus?.blockIndex, docxView, preview?.blocks?.length]);
-  if (isPreviewLoading) {
+  // 只有「还没有任何预览」时才显示加载态：同文件刷新仍然保留旧内容，
+  // 否则整块预览会被替换成加载提示再重建，看起来就是一直闪烁。
+  if (isPreviewLoading && !preview) {
     return <div className="grid min-h-0 min-w-0 place-items-center rounded-panel border border-dashed border-border-strong bg-surface p-6 text-center text-[13px] leading-[1.55] text-ink-muted">正在加载预览...</div>;
   }
 
@@ -391,11 +413,9 @@ function DocumentPreviewView({
         {showLayout ? (
           <DocxLayoutPreview
             src={docxLayoutUrl}
+            renderKey={preview?.contentHash}
             title={document.title}
-            onError={(message) => {
-              setDocxLayoutError(message);
-              setDocxView("text");
-            }}
+            onError={handleDocxLayoutError}
           />
         ) : (
           <div className="min-h-0 min-w-0 overflow-auto rounded-none border-0 bg-surface py-4 text-body leading-[1.75] text-ink [scrollbar-gutter:stable] [&>:last-child]:mb-0" aria-label="DOCX 预览" ref={docxRef}>

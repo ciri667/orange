@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { loadDocumentPreview } from "../shared/tauriApi";
 import type { DocumentPreview, WorkspaceSnapshot } from "../shared/types";
 
@@ -15,9 +15,12 @@ export function useDocumentPreview(snapshot: WorkspaceSnapshot | null) {
   const [documentPreviewError, setDocumentPreviewError] = useState("");
   /** 文档预览加载状态，用于右侧面板展示轻量 loading。 */
   const [isDocumentPreviewLoading, setIsDocumentPreviewLoading] = useState(false);
+  /** 当前已加载预览的文档 id；用来区分「同一个文件刷新」和「切换到另一个文件」。 */
+  const loadedDocumentIdRef = useRef("");
 
   useEffect(() => {
     if (!snapshot?.activeDocumentId) {
+      loadedDocumentIdRef.current = "";
       setDocumentPreview(null);
       setDocumentPreviewError("");
       setIsDocumentPreviewLoading(false);
@@ -27,6 +30,7 @@ export function useDocumentPreview(snapshot: WorkspaceSnapshot | null) {
     const activeDocument = snapshot.documents.find((document) => document.id === snapshot.activeDocumentId);
 
     if (!activeDocument || activeDocument.fileType === "txt") {
+      loadedDocumentIdRef.current = "";
       setDocumentPreview(null);
       setDocumentPreviewError("");
       setIsDocumentPreviewLoading(false);
@@ -35,13 +39,18 @@ export function useDocumentPreview(snapshot: WorkspaceSnapshot | null) {
 
     let isMounted = true;
 
-    setDocumentPreview(null);
+    // 只有切换到另一个文件时才清空预览。快照每次提交都会换新引用并重新加载同一个文件，
+    // 如果每次都把预览置空，版式视图会被卸载重建：画面闪烁，阅读位置也会回到顶部。
+    if (loadedDocumentIdRef.current !== activeDocument.id) {
+      setDocumentPreview(null);
+    }
     setDocumentPreviewError("");
     setIsDocumentPreviewLoading(true);
 
     void loadDocumentPreview(snapshot, activeDocument.id)
       .then((preview) => {
         if (isMounted) {
+          loadedDocumentIdRef.current = activeDocument.id;
           setDocumentPreview(preview);
         }
       })
