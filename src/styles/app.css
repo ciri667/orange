@@ -694,6 +694,12 @@ select:focus-visible {
   object-fit: contain;
 }
 
+/* 原生 Chromium 子窗口覆盖在这里；占位节点只负责报告 bounds。 */
+.browser-surface-host {
+  background: #ffffff;
+  overflow: hidden;
+}
+
 /* 文字输入保持焦点并支持输入法，视觉画面由同一个 Chromium 页面提供。 */
 .browser-stage-input {
   position: absolute;

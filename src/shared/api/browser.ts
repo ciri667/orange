@@ -117,6 +117,32 @@ export async function browserSetScreencast(enabled: boolean): Promise<void> {
   return invokeLogged<void>("browser_set_screencast", { enabled });
 }
 
+/** 把浏览器 stage 的逻辑像素边界同步给原生子窗口。 */
+export async function browserSetSurfaceBounds(
+  bounds: { x: number; y: number; width: number; height: number; scale: number },
+): Promise<void> {
+  if (!isTauriRuntime()) {
+    return;
+  }
+  return invokeLogged<void>("browser_set_surface_bounds", bounds);
+}
+
+/** 面板隐藏或弹窗遮挡时隐藏原生子窗口。 */
+export async function browserSetSurfaceVisible(visible: boolean): Promise<void> {
+  if (!isTauriRuntime()) {
+    return;
+  }
+  return invokeLogged<void>("browser_set_surface_visible", { visible });
+}
+
+/** 用户点击面板时把焦点交给原生浏览器。 */
+export async function browserFocusSurface(): Promise<void> {
+  if (!isTauriRuntime()) {
+    return;
+  }
+  return invokeLogged<void>("browser_focus_surface");
+}
+
 /** 订阅浏览器状态变化。 */
 export async function subscribeBrowserState(
   onState: (state: BrowserState) => void,

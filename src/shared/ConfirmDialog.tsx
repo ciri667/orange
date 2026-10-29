@@ -85,6 +85,7 @@ export function ConfirmDialog({
     <div
       className="fixed inset-0 z-confirm grid isolate place-items-center bg-[rgba(17,24,39,0.36)] backdrop-blur-[8px]"
       data-confirm-overlay
+      data-native-surface-occluder
       role="presentation"
       onMouseDown={(event) => {
         event.stopPropagation();

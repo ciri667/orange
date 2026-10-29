@@ -16,6 +16,7 @@ export function ModalBackdrop({
 }) {
   return (
     <div
+      data-native-surface-occluder
       className={cn(
         "fixed inset-0 z-modal grid isolate place-items-center",
         "bg-[rgba(var(--ink-rgb),0.24)] max-[760px]:p-2.5",

@@ -1217,7 +1217,7 @@ export function WorkspaceShell() {
         >
           <div className="right-session-content" hidden={selectedRightTab?.kind !== "session"}>{selectedRightTab?.kind === "session" && renderAgentPanel()}</div>
           {terminals.contents.map((content) => <TerminalPanel key={content.id} content={content} active={rightVisible && selectedRightTab?.kind === "terminal" && selectedRightTab.id === content.id} onRestart={() => void terminals.restart(content.id).catch(setNotice)} />)}
-          <BrowserPanel browser={browserWorkspace} tabId={selectedRightTab?.kind === "browser" ? selectedRightTab.id : null} active={selectedRightTab?.kind === "browser"} onRetry={() => selectedRightTab?.kind === "browser" && rightActions.retryBrowser(selectedRightTab.id)} />
+          <BrowserPanel browser={browserWorkspace} tabId={selectedRightTab?.kind === "browser" ? selectedRightTab.id : null} active={rightVisible && selectedRightTab?.kind === "browser"} onRetry={() => selectedRightTab?.kind === "browser" && rightActions.retryBrowser(selectedRightTab.id)} />
         </RightPanel>
       </main>
       {isSettingsOpen && (

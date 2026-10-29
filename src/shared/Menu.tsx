@@ -42,6 +42,7 @@ export function MenuPanel({
   return (
     <div
       role="menu"
+      data-native-surface-occluder
       className={cn(
         "absolute z-menu grid min-w-max max-w-[min(260px,calc(100vw-32px))] overflow-hidden rounded-control border border-border bg-surface p-[5px] shadow-app-soft",
         placement === "bottom-end" && "top-[calc(100%+8px)] right-0",
