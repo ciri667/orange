@@ -42,7 +42,7 @@ write kind=file 创建 Markdown/TXT，必须提供完整 content 与 targetPath�
 
 ## browser
 
-独立的 browser 工具承载现有 Chromium 操作。浏览器必须显式启用并下载内核，URL 限 http/https。需审批档包括读取在内的每次调用都审批；输入、目标 URL、标签页及已知元素会显示在统一操作审批中。用户接管会取消待审操作并停止当前回合后续工具。截图只给面板和回执，不进入模型。页面弹窗（alert / confirm / prompt / beforeunload）会阻塞其它调用，`browser.get_state` 的 `dialogs` 会列出它们，模型用 `page.dialog.accept` / `page.dialog.dismiss` 处理。详见[内嵌浏览器](/features/browser)。
+独立的 browser 工具承载现有 Chromium 操作。浏览器必须显式启用并下载内核，URL 限 http/https。需审批档包括读取在内的每次调用都审批；输入、目标 URL、标签页及已知元素会显示在统一操作审批中。用户接管会取消待审操作并停止当前回合后续工具。截图只给面板和回执，不进入模型；Windows 右侧栏直接嵌入有头 Chromium 原生子窗口，不再传输 JPEG 画面，元素点击等操作也改为单次 JS 求值后走 CDP 输入。页面弹窗（alert / confirm / prompt / beforeunload）会阻塞其它调用，`browser.get_state` 的 `dialogs` 会列出它们，模型用 `page.dialog.accept` / `page.dialog.dismiss` 处理。详见[内嵌浏览器](/features/browser)。
 
 ## task
 
