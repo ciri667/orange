@@ -790,52 +790,76 @@ fn take_elements(value: Value) -> Vec<BrowserElement> {
         .collect()
 }
 
-/** 按元素 reference 查找 CDP Element；引用失效时返回 SNAPSHOT_EXPIRED。 */
+/** 由快照 reference 生成安全的 CSS 选择器 JSON 字面量。 */
+fn element_selector(reference: &str) -> String {
+    let escaped = reference.replace('\\', "\\\\").replace('"', "\\\"");
+    serde_json::json!(format!("[data-orange-ref=\"{escaped}\"]")).to_string()
+}
+
+/** 仅 press_key 保留 CDP Element：chromiumoxide 的按键表比手写映射更完整。 */
 async fn find_element_by_reference(
     page: &chromiumoxide::Page,
     reference: &str,
 ) -> Result<Element, (String, String)> {
     let escaped = reference.replace('\\', "\\\\").replace('"', "\\\"");
-    let selector = format!("[data-orange-ref=\"{escaped}\"]");
-    page.find_element(selector).await.map_err(|_| {
-        (
+    page.find_element(format!("[data-orange-ref=\"{escaped}\"]"))
+        .await
+        .map_err(|_| {
+            (
+                "SNAPSHOT_EXPIRED".to_owned(),
+                "元素引用已失效，请重新获取页面快照。".to_owned(),
+            )
+        })
+}
+
+/** 在元素上执行一段返回 bool 的 JS；false 表示引用已失效。 */
+async fn run_element_script(
+    page: &chromiumoxide::Page,
+    reference: &str,
+    body: impl FnOnce(&str) -> String,
+) -> Result<(), (String, String)> {
+    let selector = element_selector(reference);
+    let value = page
+        .evaluate(body(&selector))
+        .await
+        .map_err(cdp_error)?;
+    let ok = value
+        .into_value::<bool>()
+        .map_err(|error| ("CDP_ERROR".to_owned(), error.to_string()))?;
+    if ok {
+        Ok(())
+    } else {
+        Err((
             "SNAPSHOT_EXPIRED".to_owned(),
             "元素引用已失效，请重新获取页面快照。".to_owned(),
-        )
-    })
+        ))
+    }
 }
 
 /**
- * 同步滚动元素到视口中央。
+ * 同步滚动元素到视口中央并返回矩形。
  *
- * 不用 chromiumoxide 的 `Element::scroll_into_view()`：它内部是一段 await `IntersectionObserver`
- * 的 JS，而后台（非前台）标签页不产生渲染帧，那段 Promise 可能永远不 resolve，
- * CDP 请求只能等到请求超时——线上表现为一次点击卡住 80 秒。
+ * 一次 evaluate 取代 chromiumoxide 的 `find_element + describeNode + resolveNode +
+ * boundingBox/quads` 多次 CDP 往返；也不等 IntersectionObserver，后台页不会吊住请求。
  */
-async fn scroll_into_view_sync(element: &Element) -> Result<(), (String, String)> {
-    element
-        .call_js_fn(
-            "function() { this.scrollIntoView({ block: 'center', inline: 'center', behavior: 'instant' }); }",
-            false,
-        )
-        .await
-        .map_err(cdp_error)?;
-    Ok(())
-}
-
-/** 先同步滚动，再按视口坐标点击；坐标复用面板手动点击那条输入通道。 */
-async fn click_element(
+async fn element_rect_in_view(
     page: &chromiumoxide::Page,
-    element: &Element,
-) -> Result<(), (String, String)> {
-    scroll_into_view_sync(element).await?;
-    let point = element.clickable_point().await.map_err(cdp_error)?;
-    // 贴边元素夹到画面内：输入通道只接受视口坐标。
-    let x = point.x.clamp(1.0, (super::session::VIEWPORT_WIDTH - 1) as f64);
-    let y = point.y.clamp(1.0, (super::session::VIEWPORT_HEIGHT - 1) as f64);
-    super::input::send_input(page, super::BrowserUserInput::Click { x, y })
-        .await
-        .map_err(|error| ("CDP_ERROR".to_owned(), error))
+    reference: &str,
+) -> Result<BrowserRect, (String, String)> {
+    let selector = element_selector(reference);
+    let script = format!(
+        "(() => {{ const el = document.querySelector({selector}); if (!el) return null; el.scrollIntoView({{ block: 'center', inline: 'center', behavior: 'instant' }}); const r = el.getBoundingClientRect(); return {{ x: r.left, y: r.top, width: r.width, height: r.height }}; }})()"
+    );
+    let value = page.evaluate(script).await.map_err(cdp_error)?;
+    value
+        .into_value::<Option<BrowserRect>>()
+        .map_err(|error| ("CDP_ERROR".to_owned(), error.to_string()))?
+        .ok_or_else(|| {
+            (
+                "SNAPSHOT_EXPIRED".to_owned(),
+                "元素引用已失效，请重新获取页面快照。".to_owned(),
+            )
+        })
 }
 
 /** 动作前保存目标区域截图与归一化坐标作为操作凭证；只发面板事件。 */
@@ -1407,27 +1431,26 @@ async fn dispatch_operation(
                 "INVALID_REQUEST".to_owned(),
                 "缺少元素 reference。".to_owned(),
             ))?;
-            let element = find_element_by_reference(&page, reference).await?;
-            // 凭证只要大致位置：布局查询在异常页面上可能吊住，取不到就只记坐标零点。
-            let rect = match tokio::time::timeout(Duration::from_secs(2), element.bounding_box()).await
-            {
-                Ok(Ok(box_point)) => Some(BrowserRect {
-                    x: box_point.x,
-                    y: box_point.y,
-                    width: box_point.width,
-                    height: box_point.height,
-                }),
-                _ => None,
-            };
-            record_receipt(app, &tab_id, operation, &page, rect.as_ref()).await;
+            // 一次 evaluate 拿到矩形并滚动；click 不再走 find_element/bounding_box/quads。
+            let rect = element_rect_in_view(&page, reference).await?;
+            record_receipt(app, &tab_id, operation, &page, Some(&rect)).await;
+            if operation == "page.element.click" {
+                let x = (rect.x + rect.width / 2.0).max(1.0);
+                let y = (rect.y + rect.height / 2.0).max(1.0);
+                super::input::send_input(&page, super::BrowserUserInput::Click { x, y })
+                    .await
+                    .map_err(|error| ("CDP_ERROR".to_owned(), error))?;
+            } else {
             match operation {
-                "page.element.click" => click_element(&page, &element).await?,
                 "page.element.fill" | "page.element.type_text" => {
                     let text = params
                         .get("text")
                         .and_then(Value::as_str)
                         .unwrap_or_default();
-                    element.focus().await.map_err(cdp_error)?;
+                    run_element_script(&page, reference, |selector| {
+                        format!("(() => {{ const el = document.querySelector({selector}); if (!el) return false; el.focus(); return true; }})()")
+                    })
+                    .await?;
                     if operation == "page.element.fill" {
                         // fill 替换已有值；type_text 保留追加语义。用原生输入事件兼容 React 表单。
                         super::input::send_input(
@@ -1439,7 +1462,15 @@ async fn dispatch_operation(
                         )
                         .await
                         .map_err(|error| ("CDP_ERROR".to_owned(), error))?;
-                        element.press_key("Backspace").await.map_err(cdp_error)?;
+                        super::input::send_input(
+                            &page,
+                            super::BrowserUserInput::Key {
+                                key: "Backspace".to_owned(),
+                                modifiers: 0,
+                            },
+                        )
+                        .await
+                        .map_err(|error| ("CDP_ERROR".to_owned(), error))?;
                     }
                     // type_str 只识别预定义键名，中文会报 Key not found；InsertText 支持任意文字。
                     super::input::send_input(
@@ -1453,6 +1484,7 @@ async fn dispatch_operation(
                 }
                 "page.element.press_key" => {
                     let key = params.get("key").and_then(Value::as_str).unwrap_or("Enter");
+                    let element = find_element_by_reference(&page, reference).await?;
                     element.focus().await.map_err(cdp_error)?;
                     element.press_key(key).await.map_err(cdp_error)?;
                 }
@@ -1462,29 +1494,30 @@ async fn dispatch_operation(
                         .and_then(Value::as_str)
                         .unwrap_or_default();
                     let value_json = serde_json::json!(value).to_string();
-                    element
-                        .call_js_fn(format!(
-                            "function() {{ const option = Array.from(this.options).find((option) => option.value === {value_json} || option.text === {value_json}); this.value = option ? option.value : {value_json}; this.dispatchEvent(new Event('input', {{ bubbles: true }})); this.dispatchEvent(new Event('change', {{ bubbles: true }})); }}"
-                        ), false)
-                        .await
-                        .map_err(cdp_error)?;
+                    run_element_script(&page, reference, move |selector| {
+                        format!(
+                            "(() => {{ const el = document.querySelector({selector}); if (!el) return false; const option = Array.from(el.options).find((option) => option.value === {value_json} || option.text === {value_json}); el.value = option ? option.value : {value_json}; el.dispatchEvent(new Event('input', {{ bubbles: true }})); el.dispatchEvent(new Event('change', {{ bubbles: true }})); return true; }})()"
+                        )
+                    })
+                    .await?;
                 }
                 "page.element.set_checked" => {
                     let checked = params
                         .get("checked")
                         .and_then(Value::as_bool)
                         .unwrap_or(true);
-                    element
-                        .call_js_fn(format!(
-                            "function() {{ if (this.checked !== {checked}) {{ this.click(); }} else {{ this.dispatchEvent(new Event('change', {{ bubbles: true }})); }} }}"
-                        ), false)
-                        .await
-                        .map_err(cdp_error)?;
+                    run_element_script(&page, reference, move |selector| {
+                        format!(
+                            "(() => {{ const el = document.querySelector({selector}); if (!el) return false; if (el.checked !== {checked}) {{ el.click(); }} else {{ el.dispatchEvent(new Event('change', {{ bubbles: true }})); }} return true; }})()"
+                        )
+                    })
+                    .await?;
                 }
                 "page.element.scroll_into_view" => {
-                    scroll_into_view_sync(&element).await?;
+                    // element_rect_in_view 已在取矩形前滚到视口中央。
                 }
                 _ => {}
+            }
             }
             bump_generation(session, &tab_id);
             result.tab = Some(tab_view(session, &tab_id).await?);
