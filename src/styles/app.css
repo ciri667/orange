@@ -1203,6 +1203,38 @@ select:focus-visible {
   }
 }
 
+/* ---------------------------------------------------------------- DOCX 版式预览 */
+
+/*
+ * docx-preview 生成的 DOM 结构是：
+ *   .docx-layout-host > .docx-layout-wrapper > section.docx-layout（每页一个）
+ * 库自带的默认样式把 wrapper 设成 `display:flex; flex-flow:column; align-items:center`，
+ * 并且页面 section 带有固定的 A4/Letter 宽度（如 816pt / 612pt）。
+ *
+ * flex 子项不会因为容器变窄而收缩：一旦阅读面板被左右两侧内容挤窄，
+ * 页面就按原始宽度居中溢出，左右两侧同时被裁掉，顶部灰底也只剩中间一段。
+ * 这就是「两侧内容向中间占位时左侧被截断、右侧样式错乱」的根因。
+ *
+ * 修复：把 wrapper 改回普通块级流，页面 section 用 margin-inline:auto 居中，
+ * 再用 max-width:100% 约束。窄面板里页面等比收窄（不再左右裁切），
+ * 宽面板里仍按原文宽度居中显示。页面阴影、页面间距和灰底观感都保留，
+ * 只给 wrapper 加一点左右内边距，让页面阴影不被外层滚动容器裁掉。
+ *
+ * 选择器作用域到 .docx-layout-host（宿主容器，见 DocxLayoutPreview）：
+ * docx-preview 会在渲染时把自己的 <style> 注入进这个容器，注入时机晚于本文件，
+ * 单类选择器未必压得过；这里用后代选择器提高优先级，确保稳定覆盖 display / padding。
+ */
+.docx-layout-host .docx-layout-wrapper {
+  display: block;
+  padding: 0 16px;
+  background: transparent;
+}
+
+.docx-layout-host .docx-layout-wrapper > section.docx-layout {
+  margin-inline: auto;
+  max-width: 100%;
+}
+
 /* Agent 保持轻量停靠；模型和权限各有稳定位置，长名称不能推走发送。 */
 
 .agent-panel-context {
