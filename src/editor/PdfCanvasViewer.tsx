@@ -3,7 +3,9 @@ import workerUrl from "pdfjs-dist/build/pdf.worker.min.mjs?url";
 import { ChevronLeft, ChevronRight, Minus, Plus, Search } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Button } from "../shared/Button";
+import { cn } from "../shared/cn";
 import type { DocumentPreviewBlock } from "../shared/types";
+import { focusShellClassName } from "../shared/ui";
 
 // pdf.js 只在真正打开 PDF 时加载，避免把 1 MB+ 的解析器放进首屏包体。
 type PdfModule = typeof import("pdfjs-dist");
@@ -271,7 +273,7 @@ export function PdfCanvasViewer({
         </Button>
         <input
           aria-label="页码"
-          className="w-14 rounded-md border border-border bg-surface px-2 py-1 text-center text-[12px] text-ink"
+          className="w-14 min-h-7 rounded-control border border-border bg-surface px-2 text-center text-[12px] text-ink"
           inputMode="numeric"
           value={pageInput}
           onChange={(event) => setPageInput(event.target.value.replace(/[^\d]/g, ""))}
@@ -317,7 +319,7 @@ export function PdfCanvasViewer({
           </Button>
           <button
             type="button"
-            className="min-w-12 rounded px-1 text-[11px] text-ink-soft hover:text-ink"
+            className="min-h-7 min-w-[3rem] rounded-control border border-border bg-surface px-2 text-center text-[12px] text-ink-muted transition-[border-color,color] duration-[140ms] hover:border-border-strong hover:text-ink"
             title="恢复适应宽度"
             onClick={() => setZoom(1)}
           >
@@ -335,11 +337,16 @@ export function PdfCanvasViewer({
           </Button>
         </span>
 
-        <label className="ml-2 flex items-center gap-1 rounded-md border border-border bg-surface px-2 py-1">
-          <Search size={13} className="text-ink-soft" />
+        <label
+          className={cn(
+            "ml-2 flex min-h-8 items-center gap-1.5 rounded-control border border-border bg-surface px-2 text-ink-muted",
+            focusShellClassName,
+          )}
+        >
+          <Search size={13} className="shrink-0" />
           <input
             aria-label="在 PDF 文本层中搜索"
-            className="w-36 bg-transparent text-[12px] text-ink outline-none"
+            className="w-36 min-w-0 border-0 bg-transparent text-[12px] text-ink outline-none placeholder:text-ink-soft"
             placeholder="搜索文本并跳页"
             value={query}
             onChange={(event) => setQuery(event.target.value)}
