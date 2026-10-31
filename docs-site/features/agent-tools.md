@@ -13,10 +13,12 @@ Plan 覆盖为工作区只读，禁用外部工具、命令及所有变更应用
 
 ## search / read / list
 
-- search 默认 target=notes，检索会话选中的知识库，支持 query、knowledgeBaseIds、pathPrefix、tags、fileTypes、updatedAfter、updatedBefore；查询参数只能缩小范围。`fileTypes` 支持 markdown、txt、docx、pdf：前两者查笔记 chunk，后两者查文档 chunk 并返回页码/结构块引用。默认返回 4 条引用，最多 16 条。
+- search 默认 target=notes，检索会话选中的知识库，支持 query、knowledgeBaseIds、pathPrefix、tags、fileTypes、updatedAfter、updatedBefore；查询参数只能缩小范围。`fileTypes` 支持 markdown、txt、docx、pdf：前两者查笔记 chunk，后两者查文档 chunk 并返回页码/结构块引用。默认返回 4 条引用，最多 16 条。传 `image` 会被忽略并提示：图片没有可检索文本（不做 OCR），请先用 list 找到再用 read 看图。
 - 三个工具都支持工作区 path；相对路径以会话所选知识库根目录为基准，根目录用 .，不会随编辑器焦点漂移。
 - read 用 fileId 或 path 读取。Markdown/TXT 返回文本；DOCX 返回结构块，PDF 返回按页文本和 `pageCount`。PDF 文本默认按字形坐标重建阅读顺序（≤ 4 MB 且 ≤ 200 页时生效，双栏先左后右）；超出预算或覆盖率不足会回退内容流顺序并在 `warnings` 里说明。普通文件默认 6000 字符，按 nextOffset 续读；PDF 可传 page，或用 page=N&pageEnd=M 读页区间；DOCX/PDF 都可用 block=N 读单个结构块，DOCX 还可用 heading 读标题到下一个同级标题之间的正文。越界页码或结构块会明确失败。DOCX/PDF 的 path 必须对应已扫描且在当前会话授权范围内的文件，否则请使用 fileId。
 - read 的 includeImages=auto（默认）会在 PDF 无文本层或指定了 page/block 时返回 documentImages，并在后续图片消息里把页面或 DOCX 内嵌图片交给视觉模型；always 会在有文本层时也渲染最多 4 页（或指定页区间）和 DOCX 图片，适合双栏、扫描或文本顺序错乱的 PDF；none 跳过图片。payload 只含 id、页码、图注和尺寸，不内联 base64。Provider 未打开「支持视觉」时返回 `visionUnavailable` 并说明原因。图片按 8 张/消息、4 MB/张、长边 2048 px 预算处理，长扫描件请按 1–4 页分批读。
+- read 可以直接读图片文件本身（png/jpg/jpeg/webp/gif）：用 fileId（list 返回的 `fileType=image`、`requiresVision=true` 条目）或 path 读取，字节会作为图片消息交给视觉模型直接看，**不做 OCR、不产生文本层**，图片永远只读。SVG 是矢量图、无法光栅化，会明确失败；超过 20 MB 的单图也会被拒绝；因为像素会离开本机发给模型服务，图片只从授权知识库内读取，外部路径即使有完全权限也不放行。list/search 都不返回图片正文：图片没有可检索文本，请先用 list 按文件名定位再 read。
+- 用 fileId 或授权知识库内的 path 读 Markdown 笔记时，正文里的 `![image](...)` 引用会以 `imageRefs` 返回：每条给出知识库相对路径、对应 fileId、是否存在，以及 remote / absolute / escapes-knowledge-base 这类跳过原因；默认只给路径、不附像素，需要看图时对该 fileId 或 path 再调用一次 read。支持尖括号包住的含空格路径、配对括号文件名和转义标点。`includeImages=always` 会在读笔记时直接附上正文引用的最多 4 张本地图片（同样受「支持视觉」约束）；工作区外 Markdown 只读文本，不解析或附加插图。
 - read target=skill、skillId、可选包内 path 读取启用 Skill 的说明、参考、模板和脚本，基础权限即可读取。内置与自定义都读取 `.orange/skills` 中的真实文件，禁止路径或链接逃逸。
 - list 默认最多 120 项；可用 query 按文件名/路径子串定位文档，再用 prefix、fileType 缩小范围。
 - 完全权限支持工作区外绝对路径；另一个已登记但未选中的知识库按外部路径处理。需审批档每次实际外部读取都审批，不缓存目录授权。
@@ -47,6 +49,8 @@ write kind=file 创建 Markdown/TXT，必须提供完整 content 与 targetPath�
 ## task
 
 唯一编排工具，内置 explore、researcher 只读，writer 可生成可审阅的文件变更。子任务工具集与父权限取交集，不提供 exec/browser/MCP，不允许递归委派。任务指令须自足。
+
+子 Agent 与父 Agent 共用视觉能力和图片读取流程，read 返回的图片会作为实际图片消息提供给子模型；图片消息仅用于当前运行，续跑时需要重新读取。
 
 最多 3 个独立只读任务并行；background 只支持只读任务，完成后通知。续跑绑定父会话、角色和权限版本，收权或跨会话后不能复用旧上下文。
 
