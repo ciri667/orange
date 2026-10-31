@@ -1,7 +1,7 @@
-import { openUrl } from "@tauri-apps/plugin-opener";
-import { isTauri } from "@tauri-apps/api/core";
 import type { AnchorHTMLAttributes, MouseEvent } from "react";
+import { useExternalLinkHandler, type ExternalLinkHandler } from "./externalLink";
 import { logInfo, logWarn } from "./logger";
+import { openExternalUrl } from "./openExternalUrl";
 
 /** Markdown 链接来源，用于日志区分编辑器预览和 Agent 消息。 */
 export type MarkdownLinkSource = "editor_preview" | "agent_message";
@@ -14,10 +14,11 @@ interface MarkdownLinkProps extends AnchorHTMLAttributes<HTMLAnchorElement> {
   source: MarkdownLinkSource;
 }
 
-/** 安全 Markdown 链接组件，拦截外部链接并交给系统默认应用打开。 */
+/** 安全 Markdown 链接组件，优先交给内置浏览器，缺少入口时才用系统默认应用。 */
 export function MarkdownLink({ href, source, children, onClick, ...props }: MarkdownLinkProps) {
   const linkSummary = summarizeMarkdownLink(href);
   const isExternalLink = Boolean(linkSummary?.isAllowedExternal);
+  const routeExternalLink = useExternalLinkHandler();
 
   /** 点击链接时先执行上游回调，再按协议决定是否拦截默认 WebView 导航。 */
   const handleClick = (event: MouseEvent<HTMLAnchorElement>) => {
@@ -48,7 +49,9 @@ export function MarkdownLink({ href, source, children, onClick, ...props }: Mark
       return;
     }
 
-    void openAllowedExternalLink(linkSummary.href, source, linkSummary);
+    // Ctrl / Cmd 点击沿用浏览器习惯：用户明确要求交给系统默认浏览器，不进内置面板。
+    const bypassEmbeddedBrowser = event.metaKey || event.ctrlKey;
+    void openAllowedExternalLink(linkSummary, source, routeExternalLink, bypassEmbeddedBrowser);
   };
 
   return (
@@ -64,17 +67,37 @@ export function MarkdownLink({ href, source, children, onClick, ...props }: Mark
   );
 }
 
-/** 打开已校验外部链接，并只记录协议、域名等脱敏摘要。 */
-async function openAllowedExternalLink(href: string, source: MarkdownLinkSource, summary: MarkdownLinkSummary) {
+/**
+ * 打开已校验外部链接：先问工作区能否交给内置浏览器，未接手才用系统默认应用。
+ * 只记录协议、域名等脱敏摘要，不把完整 URL 写进日志。
+ */
+async function openAllowedExternalLink(
+  summary: MarkdownLinkSummary,
+  source: MarkdownLinkSource,
+  routeExternalLink: ExternalLinkHandler | null,
+  bypassEmbeddedBrowser: boolean,
+) {
   try {
-    if (!isTauri()) {
-      const browserWindow = globalThis.open?.(href, "_blank", "noopener,noreferrer");
+    let handledByEmbeddedBrowser = false;
 
-      if (!browserWindow) {
-        throw new Error("Browser blocked opening the external link.");
-      }
+    if (summary.isWebPage && !bypassEmbeddedBrowser && routeExternalLink) {
+      // 内置浏览器打不开时返回 false，由下面回退系统默认浏览器，保证点击总有结果。
+      handledByEmbeddedBrowser = await routeExternalLink({
+        href: summary.href,
+        source,
+        isWebPage: true,
+      });
+    }
 
-      logInfo("已在浏览器开发态打开 Markdown 外部链接。", {
+    if (!handledByEmbeddedBrowser) {
+      await openExternalUrl(summary.href);
+    }
+
+    logInfo(
+      handledByEmbeddedBrowser
+        ? "已在内置浏览器打开 Markdown 外部链接。"
+        : "已通过系统默认应用打开 Markdown 外部链接。",
+      {
         category: "frontend",
         event: "markdown_external_link_opened",
         status: "completed",
@@ -82,24 +105,10 @@ async function openAllowedExternalLink(href: string, source: MarkdownLinkSource,
           source,
           protocol: summary.protocol,
           host: summary.host,
-          runtime: "browser",
+          target: handledByEmbeddedBrowser ? "embedded" : "system",
         },
-      });
-      return;
-    }
-
-    // Tauri opener 负责调用系统默认浏览器或默认应用，避免主 WebView 导航到外部页面。
-    await openUrl(href);
-    logInfo("已通过系统默认应用打开 Markdown 外部链接。", {
-      category: "frontend",
-      event: "markdown_external_link_opened",
-      status: "completed",
-      metadata: {
-        source,
-        protocol: summary.protocol,
-        host: summary.host,
       },
-    });
+    );
   } catch (error) {
     logWarn("Markdown 外部链接打开失败。", {
       category: "frontend",
@@ -119,6 +128,8 @@ async function openAllowedExternalLink(href: string, source: MarkdownLinkSource,
 interface MarkdownLinkSummary {
   isAllowedExternal: boolean;
   isFragment: boolean;
+  /** 是否为内置浏览器能承载的普通网页（http/https）。 */
+  isWebPage: boolean;
   href: string;
   protocol: string;
   host: string;
@@ -137,6 +148,7 @@ function summarizeMarkdownLink(href?: string): MarkdownLinkSummary | null {
     return {
       isAllowedExternal: false,
       isFragment: true,
+      isWebPage: false,
       href: trimmedHref,
       protocol: "fragment",
       host: "",
@@ -152,6 +164,7 @@ function summarizeMarkdownLink(href?: string): MarkdownLinkSummary | null {
     return {
       isAllowedExternal,
       isFragment: false,
+      isWebPage: parsedUrl.protocol === "http:" || parsedUrl.protocol === "https:",
       href: normalizedHref,
       protocol: parsedUrl.protocol.replace(/:$/, ""),
       host: parsedUrl.hostname || parsedUrl.protocol.replace(/:$/, ""),
@@ -162,6 +175,7 @@ function summarizeMarkdownLink(href?: string): MarkdownLinkSummary | null {
     return {
       isAllowedExternal: false,
       isFragment: false,
+      isWebPage: false,
       href: trimmedHref,
       protocol: "relative",
       host: "",

@@ -18,6 +18,7 @@ import { SettingsDrawer } from "../settings/SettingsDrawer";
 import { BootCopy, BootErrorMessage, BootScreen, BootTitle } from "../shared/BootScreen";
 import { Button } from "../shared/Button";
 import { ConfirmDialog, type ConfirmDialogConfig } from "../shared/ConfirmDialog";
+import { ExternalLinkProvider } from "../shared/externalLink";
 import { ModalBackdrop, ModalForm } from "../shared/Modal";
 import { OperationNotice } from "../shared/OperationNotice";
 import { fieldControlClassName, fieldLabelClassName, sectionLabelClassName } from "../shared/ui";
@@ -196,6 +197,8 @@ export function WorkspaceShell() {
     onNoticeChange: setNotice,
   });
   const browserEnabled = userSettings?.browser?.enabled ?? false;
+  // 旧配置可能还没写这个字段；缺省按“默认内置浏览器”处理，和 Rust 侧 serde 默认值一致。
+  const openLinksInEmbedded = userSettings?.browser?.openLinksInEmbedded ?? true;
   const setRightOpen = useCallback((open: boolean) => { setAgentOpen(open); if (!open && compactView.singlePane) compactView.showPane("editor"); }, [setAgentOpen, compactView.singlePane, compactView.showPane]);
   const rightTabs = useRightPanelTabs(snapshot, setSnapshot, setRightOpen);
   const selectedRightTab = rightTabs.tabs.find((tab) => rightTabId(tab) === rightTabs.activeId);
@@ -567,7 +570,7 @@ export function WorkspaceShell() {
     handleSubmitPrompt,
   });
 
-  const rightActions = useRightPanelActions({ panel: rightTabs, browser: browserWorkspace, terminals, snapshot, browserEnabled, reveal: revealRightPanel, showSettings: () => setIsSettingsOpen(true), selectSession: handleSelectSession, createSession: handleCreateSession, confirm: requestConfirmation, notice: setNotice });
+  const rightActions = useRightPanelActions({ panel: rightTabs, browser: browserWorkspace, terminals, snapshot, browserEnabled, openLinksInEmbedded, reveal: revealRightPanel, showSettings: () => setIsSettingsOpen(true), selectSession: handleSelectSession, createSession: handleCreateSession, confirm: requestConfirmation, notice: setNotice });
 
   if (isBooting) {
     return (
@@ -1018,7 +1021,8 @@ export function WorkspaceShell() {
   }
 
   return (
-    <div className="app-shell">
+    <ExternalLinkProvider handler={rightActions.openExternalLink}>
+      <div className="app-shell">
       {/*
         顶栏常驻在内容区上方：左栏收起后仍有专门的收展按钮，
         不必再靠悬浮收起态图标栏、从浮层里点「展开」。
@@ -1375,6 +1379,7 @@ export function WorkspaceShell() {
       )}
       {/* MCP 工具确认由 agent 模块自订阅事件，这里只负责挂载。 */}
       <OperationApprovalDialog />
-    </div>
+      </div>
+    </ExternalLinkProvider>
   );
 }

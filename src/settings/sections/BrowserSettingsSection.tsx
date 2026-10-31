@@ -59,6 +59,23 @@ export function BrowserSettingsSection({
         />
         启用内嵌浏览器
       </label>
+      <label className="mt-3 flex items-center gap-2 text-sm text-ink">
+        <Checkbox
+          checked={browser.openLinksInEmbedded}
+          disabled={locked || !browser.enabled}
+          onChange={(event) =>
+            onSettingsChange({
+              ...settingsDraft,
+              browser: { ...browser, openLinksInEmbedded: event.target.checked },
+            })
+          }
+        />
+        网页链接默认在内置浏览器打开
+      </label>
+      <p className="mt-1 text-xs text-ink-soft">
+        关闭后，笔记和消息里的网页链接仍用系统默认浏览器；内置浏览器面板和 Agent 的浏览器操作不受影响。按住
+        Ctrl / Cmd 点击链接也会直接交给系统浏览器。
+      </p>
       <div className="mt-4 rounded-lg border border-border bg-surface-muted p-3 text-xs text-ink-soft">
         <p>
           浏览器内核：Chrome for Testing（固定版本，独立 profile，不读取你日常浏览器的任何数据）。
