@@ -166,6 +166,32 @@ fn parse_note_search_filters(
     Ok((filters, filters_json, unsupported_file_types))
 }
 
+/**
+ * fileTypes 被忽略时的可执行建议。
+ *
+ * image 单独说明：图片不进文本索引，但可以按元数据找到后交给视觉模型，所以不能只说“不支持”。
+ */
+fn unsupported_file_types_hint(unsupported_file_types: &[String]) -> String {
+    let mut hint = if unsupported_file_types.is_empty() {
+        "fileTypes 目前只支持 markdown、txt、docx、pdf；请移除不支持的文件类型，或改用 list 查看文档元数据。"
+            .to_owned()
+    } else {
+        format!(
+            "fileTypes 目前只支持 markdown、txt、docx、pdf；已忽略 {}，请移除它们或改用 list 查看文档元数据。",
+            unsupported_file_types.join("、")
+        )
+    };
+
+    if unsupported_file_types
+        .iter()
+        .any(|file_type| file_type == "image")
+    {
+        hint.push_str(" 图片没有可检索文本（不做 OCR）：请用 list 按文件名找到图片，再用 read 把像素交给视觉模型。");
+    }
+
+    hint
+}
+
 /** search_notes 工具，在当前会话授权知识库内执行 SQLite/FTS 检索。 */
 pub(crate) struct SearchNotesTool;
 
@@ -219,7 +245,7 @@ impl AgentTool for SearchNotesTool {
                 "fileTypes": {
                     "type": "array",
                     "items": { "type": "string", "enum": ["markdown", "txt", "docx", "pdf"] },
-                    "description": "Restrict results by file type. markdown/txt search note chunks; docx/pdf search indexed document chunks and return page or block citations."
+                    "description": "Restrict results by file type. markdown/txt search note chunks; docx/pdf search indexed document chunks and return page or block citations. image is not indexable (no OCR text): use list to locate images by name, then read to hand the pixels to a vision model."
                 },
                 "updatedAfter": {
                     "type": "string",
@@ -724,9 +750,6 @@ pub(crate) fn execute_search_notes(
     context: &mut AgentToolContext<'_>,
     args: &Value,
 ) -> ToolExecutionResult {
-    let Some(app) = context.app else {
-        return ToolExecutionResult::failed("当前运行环境无法访问本地检索索引。");
-    };
     let query = args
         .get("query")
         .and_then(Value::as_str)
@@ -749,10 +772,9 @@ pub(crate) fn execute_search_notes(
     if allowed_knowledge_base_ids.is_empty() || unsupported_only {
         let hint = if allowed_knowledge_base_ids.is_empty() {
             "请求的知识库不在当前会话授权范围内。请改用会话内 knowledgeBaseIds，或去掉该过滤。"
-        } else if !unsupported_file_types.is_empty() {
-            "fileTypes 目前只支持 markdown、txt、docx、pdf；已忽略不支持的类型，请移除它们或改用 list 查看文档元数据。"
+                .to_owned()
         } else {
-            "fileTypes 目前只支持 markdown、txt、docx、pdf；请移除不支持的文件类型，或改用 list 查看文档元数据。"
+            unsupported_file_types_hint(&unsupported_file_types)
         };
 
         return ToolExecutionResult {
@@ -775,6 +797,11 @@ pub(crate) fn execute_search_notes(
             )),
         };
     }
+
+    // 索引只有桌面运行时有；纯结构化过滤（例如只给了 image）在上面的分支就已经答完了。
+    let Some(app) = context.app else {
+        return ToolExecutionResult::failed("当前运行环境无法访问本地检索索引。");
+    };
 
     match crate::retrieval::search(
         app,
@@ -805,13 +832,16 @@ pub(crate) fn execute_search_notes(
                 if has_structured_filter {
                     if unsupported_file_types.is_empty() {
                         "过滤条件下没有命中。可放宽时间、标签或路径，再用更短关键词重试一次；仍为空再用 list 查看目录。"
+                            .to_owned()
                     } else {
-                        "fileTypes 目前只支持 markdown、txt、docx、pdf；已忽略不支持的类型。可放宽剩余过滤或用更短关键词重试。"
+                        let mut hint = unsupported_file_types_hint(&unsupported_file_types);
+                        hint.push_str(" 也可以放宽剩余过滤或用更短关键词重试。");
+                        hint
                     }
                 } else {
                     "没有命中。先用更短关键词重试一次；仍为空再用 list 查看目录，不要直接断言不存在。"
+                        .to_owned()
                 }
-                .to_owned()
             } else {
                 hint.unwrap_or_default()
             };
