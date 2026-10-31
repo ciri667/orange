@@ -1270,6 +1270,8 @@ export interface McpProbeResult {
 /** 浏览器功能设置；默认关闭，启用后需下载固定版本 Chromium。 */
 export interface BrowserFeatureSettings {
   enabled: boolean;
+  /** 笔记、消息里的网页链接默认在右侧内置浏览器新开页签；关闭后回到系统默认浏览器。 */
+  openLinksInEmbedded: boolean;
 }
 
 /** 面板标签页视图。 */

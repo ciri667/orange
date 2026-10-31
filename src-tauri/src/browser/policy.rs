@@ -6,16 +6,27 @@
 use serde::{Deserialize, Serialize};
 use url::Url;
 
+/** 网页链接默认走内置浏览器；旧配置缺少该字段时沿用这个新默认值。 */
+fn default_open_links_in_embedded() -> bool {
+    true
+}
+
 /** 浏览器功能设置；默认关闭，用户显式启用并确认下载后才可用。 */
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct BrowserSettings {
     pub enabled: bool,
+    /// 笔记、消息里的网页链接默认在右侧内置浏览器新开页签；关闭后回到系统默认浏览器。
+    #[serde(default = "default_open_links_in_embedded")]
+    pub open_links_in_embedded: bool,
 }
 
 impl Default for BrowserSettings {
     fn default() -> Self {
-        Self { enabled: false }
+        Self {
+            enabled: false,
+            open_links_in_embedded: default_open_links_in_embedded(),
+        }
     }
 }
 
@@ -194,6 +205,34 @@ mod tests {
         assert!(normalize_web_url("chrome://settings").is_err());
         assert!(normalize_web_url("javascript:alert(1)").is_err());
         assert!(normalize_web_url("").is_err());
+    }
+
+    /** 老配置里 browser 只有 enabled；新增字段必须带默认值，不能把用户设置判成解析失败。 */
+    #[test]
+    fn legacy_browser_settings_json_defaults_open_links_in_embedded() {
+        let legacy: BrowserSettings = serde_json::from_str(r#"{"enabled":true}"#).unwrap();
+        assert!(legacy.enabled);
+        assert!(legacy.open_links_in_embedded);
+    }
+
+    /** 默认值只改打开方式，浏览器功能本身仍要求用户显式启用。 */
+    #[test]
+    fn browser_settings_default_opens_web_links_in_embedded() {
+        let settings = BrowserSettings::default();
+        assert!(!settings.enabled);
+        assert!(settings.open_links_in_embedded);
+    }
+
+    /** 序列化字段名要和前端 types.ts 的 openLinksInEmbedded 对齐，否则开关会静默失效。 */
+    #[test]
+    fn browser_settings_serializes_camel_case_open_links_field() {
+        let json = serde_json::to_string(&BrowserSettings {
+            enabled: true,
+            open_links_in_embedded: false,
+        })
+        .unwrap();
+
+        assert!(json.contains("\"openLinksInEmbedded\":false"), "{json}");
     }
 
     #[test]

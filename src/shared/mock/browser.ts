@@ -83,7 +83,7 @@ export const defaultBrowserUserSettings: UserSettings = {
     keyReference: "orange-web-search-tavily",
     credentialStatus: "not_configured",
   },
-  browser: { enabled: false },
+  browser: { enabled: false, openLinksInEmbedded: true },
 };
 
 /** 浏览器开发态默认飞书 provider；桌面端真实设置由 SQLite 和系统 keyring 保存。 */
