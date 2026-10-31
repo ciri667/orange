@@ -34,6 +34,12 @@ pub(crate) const MAX_SEARCH_LIMIT: usize = 16;
 
 /** search 的 fileTypes 白名单：Markdown/TXT 走笔记索引，DOCX/PDF 走文档 chunk 索引。 */
 pub(crate) const SEARCHABLE_FILE_TYPES: &[&str] = &["markdown", "txt", "docx", "pdf"];
+/**
+ * 笔记正文最多回给模型的图片引用条数。
+ *
+ * 图片本身不进检索索引，只有元数据；给太多引用会挤占上下文，因此超出部分只报数量。
+ */
+pub(crate) const MAX_MARKDOWN_IMAGE_REFS: usize = 12;
 
 /** list_tree 按支持文档类型输出的计数，避免模型把未知扩展名误认为已索引内容。 */
 #[derive(Clone, Debug)]
