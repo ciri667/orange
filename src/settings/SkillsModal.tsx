@@ -1,5 +1,3 @@
-import { isTauri } from "@tauri-apps/api/core";
-import { openUrl } from "@tauri-apps/plugin-opener";
 import { Archive, Download, Edit3, ExternalLink, FolderOpen, Link, Plus, Save, Search, Trash2, X } from "lucide-react";
 import type { FormEvent } from "react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
@@ -10,6 +8,7 @@ import { ConfirmDialog, type ConfirmDialogConfig } from "../shared/ConfirmDialog
 import { FilterChip } from "../shared/FilterChip";
 import { ListRow } from "../shared/ListRow";
 import { logError, logInfo, logWarn } from "../shared/logger";
+import { openExternalUrl } from "../shared/openExternalUrl";
 import { ModalBackdrop, ModalHeader, ModalPanel } from "../shared/Modal";
 import { OverflowTooltipText } from "../shared/OverflowTooltipText";
 import { SegmentedControl, SegmentedControlItem } from "../shared/SegmentedControl";
@@ -203,20 +202,10 @@ export function SkillsModal({
     setInstallDraft(null);
   }
 
-  /** 在系统浏览器打开 skills.sh 详情，主窗口不跟跳。 */
+  /** 在系统浏览器打开 skills.sh 详情，主窗口不跟跳；设置面板内不经过内置浏览器。 */
   async function handleOpenOnlineSkillPage(url: string) {
     try {
-      if (!isTauri()) {
-        const browserWindow = globalThis.open?.(url, "_blank", "noopener,noreferrer");
-
-        if (!browserWindow) {
-          throw new Error("浏览器拦截了外部链接。");
-        }
-
-        return;
-      }
-
-      await openUrl(url);
+      await openExternalUrl(url);
     } catch (error) {
       logWarn("打开在线 Skill 页面失败。", {
         category: "skill",
