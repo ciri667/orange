@@ -14,7 +14,7 @@ use context::*;
 use dsml::*;
 use stream::*;
 use tool_budget::{ModelLoopPhase, ToolRoundBudget};
-use tool_results::model_tool_result_text;
+use tool_results::{append_tool_result_messages, model_tool_result_text};
 
 pub use cancel::{
     clear_placeholder as clear_agent_cancel_placeholder, is_session_turn_active,
@@ -1524,32 +1524,15 @@ async fn run_model_loop(
                 last_failed_tool_summary = Some(tool_error);
             }
             tool_calls.push(tool_outcome.call);
-            model_messages.push(json!({
-                "role": "tool",
-                "tool_call_id": model_tool_call.get("id").and_then(Value::as_str).unwrap_or("tool-call"),
-                "content": tool_result_text
-            }));
-            // 文档页面/内嵌图片以独立 user 消息附在工具结果之后；tool 角色不能带图，
-            // 且 hydrate_model_images 会在发送前把 orange_image 展开成 image_url。
-            if let Some(images) = tool_outcome.payload.get("documentImages").and_then(Value::as_array) {
-                let mut parts = vec![json!({
-                    "type": "text",
-                    "text": "以下是本次 read 返回的文档图片（按页码顺序）。请直接读图，回答时引用对应页码或图注。"
-                })];
-                for image in images {
-                    if let Some(id) = image.get("id").and_then(Value::as_str) {
-                        parts.push(json!({ "type": crate::storage::MODEL_IMAGE_REF_TYPE, "id": id }));
-                    }
-                }
-                if parts.len() > 1 {
-                    model_messages.push(json!({
-                        "role": "user",
-                        "content": parts,
-                        // 仅本轮有效；persist_turn_transcript 会丢弃带该标记的消息。
-                        "ephemeral": true
-                    }));
-                }
-            }
+            append_tool_result_messages(
+                &mut model_messages,
+                model_tool_call
+                    .get("id")
+                    .and_then(Value::as_str)
+                    .unwrap_or("tool-call"),
+                &tool_result_text,
+                &tool_outcome.payload,
+            );
         }
     }
 

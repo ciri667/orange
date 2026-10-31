@@ -1430,7 +1430,15 @@ pub(super) fn render_mentioned_files_prompt(materials: &[MentionedFileMaterial])
                     material.id
                 )
             } else if let Some(markdown_path) = &material.image_markdown_path {
-                format!("{metadata}\n可插入本轮 @ 的 Markdown 的安全引用：![]({markdown_path})")
+                format!(
+                    "{metadata}\n可插入本轮 @ 的 Markdown 的安全引用：![]({markdown_path})\n如需真正看图（不做 OCR），调用 read(fileId=\"{}\") 把图片像素交给视觉模型。",
+                    material.id
+                )
+            } else if material.file_type == "image" {
+                format!(
+                    "{metadata}\n该文件是图片：如需看图（不做 OCR），调用 read(fileId=\"{}\") 把图片像素交给视觉模型。",
+                    material.id
+                )
             } else {
                 format!("{metadata}\n该文件仅提供元数据；不要读取或上传原始二进制内容。")
             }

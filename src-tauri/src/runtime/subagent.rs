@@ -25,6 +25,7 @@ use super::stream::stream_ui_progress;
 use super::subagent_personas::{
     build_subagent_system_prompt, catalog_names, resolve_agent, ResolvedAgent,
 };
+use super::tool_results::append_tool_result_messages;
 use super::{send_chat_completion_with_policy, MAX_INNER_TOOL_ROUNDS, MAX_TOOL_RESULT_CHARS};
 
 /** 顶层可委派，子级深度为 1 时禁止再委派。 */
@@ -350,6 +351,8 @@ async fn run_nested_loop(
     let allowed=parsed.agent.tools.iter().filter(|name| !matches!(name.as_str(),"edit"|"write") || crate::permissions::ensure(&params.snapshot.sessions[params.session_index],crate::permissions::Operation::ProposeText).is_ok()).collect::<Vec<_>>();
     let registry = ToolRegistry::for_subagent_tools(&allowed);
     let tool_schemas = registry.schemas();
+    // 工具附件与父 Agent 共用同一目录，请求前才能把图片引用展开为真实像素。
+    let image_root = storage::conversation_attachments_root(params.app)?;
     let endpoint = model_provider::chat_completions_endpoint(&params.provider.api_base);
     let mut citations: Vec<Citation> = Vec::new();
     let mut last_failed: Option<String> = None;
@@ -377,7 +380,7 @@ async fn run_nested_loop(
             &mut model_messages,
             Some(&tool_schemas),
             None,
-            None,
+            Some(&image_root),
             params.cancel,
             &mut |streamed| {
                 let progress = stream_ui_progress(streamed);
@@ -550,11 +553,15 @@ async fn run_nested_loop(
                 last_failed = Some(tool_error);
             }
             citations.extend(tool_outcome.citations);
-            model_messages.push(json!({
-                "role": "tool",
-                "tool_call_id": model_tool_call.get("id").and_then(Value::as_str).unwrap_or("tool-call"),
-                "content": tool_result_text
-            }));
+            append_tool_result_messages(
+                &mut model_messages,
+                model_tool_call
+                    .get("id")
+                    .and_then(Value::as_str)
+                    .unwrap_or("tool-call"),
+                &tool_result_text,
+                &tool_outcome.payload,
+            );
         }
     }
 
@@ -628,7 +635,11 @@ fn parse_task_args(args: &Value) -> Result<ParsedTask, String> {
 }
 
 fn persist_child(app: &AppHandle, parsed: &ParsedTask, messages: &[Value]) {
-    if let Err(error) = storage::save_agent_session_transcript(app, &parsed.task_id, messages) {
+    // 和父循环一致，只保留工具元数据；续跑时需要看图应重新读取。
+    let persistent_messages = super::persistent_model_messages(messages);
+    if let Err(error) =
+        storage::save_agent_session_transcript(app, &parsed.task_id, &persistent_messages)
+    {
         log::warn!(
             target: "agent_runtime",
             "保存子 Agent transcript 失败：task_id={} error={}",
