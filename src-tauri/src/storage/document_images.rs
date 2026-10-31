@@ -328,6 +328,284 @@ pub(crate) fn extract_docx_images(
     Ok(images)
 }
 
+/// 笔记正文里一条图片引用的解析结果；无法定位时保留原因，便于模型自我纠偏。
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct MarkdownImageRef {
+    /// 原始 Markdown 目标写法（已去掉 `<...>` 和标题），保证模型能和正文对上。
+    pub(crate) markdown_target: String,
+    /// 已 percent-decode、并相对知识库根目录归一化的路径；不可解析时为 None。
+    pub(crate) relative_path: Option<String>,
+    /// 不可解析原因：empty/remote/anchor/absolute/invalid-encoding/escapes-knowledge-base。
+    /// 与 relative_path 互斥，原样回给模型。
+    pub(crate) skip_reason: Option<&'static str>,
+}
+
+/**
+ * 解析 Markdown 正文里的 `![alt](target)` 引用，不读取像素、不校验存在性。
+ *
+ * 只处理行内写法，支持尖括号目标、配对括号、转义和可选标题；引用式 `![alt][id]`
+ * 不解析。这里保持纯函数，方便单测覆盖转义、`..` 和外链等分支。
+ */
+pub(crate) fn resolve_markdown_image_refs(
+    markdown_path: &str,
+    content: &str,
+) -> Vec<MarkdownImageRef> {
+    let mut refs = Vec::new();
+    let mut cursor = 0;
+
+    while let Some(relative_start) = content[cursor..].find("![") {
+        let after_bang = cursor + relative_start + 2;
+        let Some(alt_end) = content[after_bang..].find("](") else {
+            break;
+        };
+        let target_start = after_bang + alt_end + 2;
+        let Some((raw_target, consumed)) = parse_inline_image_target(&content[target_start..]) else {
+            // 坏引用不应阻断后续正常图片的发现。
+            cursor = target_start;
+            continue;
+        };
+        cursor = target_start + consumed;
+        refs.push(classify_markdown_image_target(markdown_path, raw_target));
+    }
+
+    refs
+}
+
+/** 解析 `](` 后的目标和可选标题，返回目标切片与包含末尾 `)` 的已消费字节数。 */
+fn parse_inline_image_target(input: &str) -> Option<(&str, usize)> {
+    let source = input.trim_start();
+    let angled = source.starts_with('<');
+    let start = usize::from(angled);
+    let mut depth = 0usize;
+    let mut end = None;
+    let mut chars = source[start..].char_indices().peekable();
+    while let Some((index, character)) = chars.next() {
+        // Markdown 仅把反斜杠后的 ASCII 标点当作转义；被转义的括号不改变深度。
+        if character == '\\'
+            && chars.peek().is_some_and(|(_, next)| next.is_ascii_punctuation())
+        {
+            chars.next();
+            continue;
+        }
+        if angled {
+            match character {
+                '>' => {
+                    end = Some(start + index);
+                    break;
+                }
+                '<' | '\n' | '\r' => return None,
+                _ => {}
+            }
+        } else {
+            match character {
+                '(' => depth += 1,
+                ')' if depth > 0 => depth -= 1,
+                ')' => {
+                    end = Some(index);
+                    break;
+                }
+                value if value.is_whitespace() => {
+                    if depth > 0 {
+                        return None;
+                    }
+                    end = Some(index);
+                    break;
+                }
+                _ => {}
+            }
+        }
+    }
+    let end = end?;
+    let destination_end = end + usize::from(angled);
+    let tail = &source[destination_end..];
+    let mut remaining = tail.trim_start();
+    if !remaining.starts_with(')') {
+        // 标题必须与目标用空白分隔；标题内的右括号不能提前结束整个图片引用。
+        if remaining.len() == tail.len() {
+            return None;
+        }
+        let closing = match remaining.chars().next()? {
+            '"' => '"',
+            '\'' => '\'',
+            '(' => ')',
+            _ => return None,
+        };
+        let mut title_chars = remaining[1..].char_indices().peekable();
+        let mut title_end = None;
+        while let Some((index, character)) = title_chars.next() {
+            if character == '\\'
+                && title_chars.peek().is_some_and(|(_, next)| next.is_ascii_punctuation())
+            {
+                title_chars.next();
+            } else if character == closing {
+                title_end = Some(index + 2);
+                break;
+            }
+        }
+        remaining = remaining[title_end?..].trim_start();
+    }
+    remaining.strip_prefix(')')?;
+    Some((&source[start..end], input.len() - remaining.len() + 1))
+}
+
+/// 判断一条 Markdown 图片引用指向哪里，并把相对路径归一化成知识库相对路径。
+fn classify_markdown_image_target(markdown_path: &str, raw_target: &str) -> MarkdownImageRef {
+    // 目标已经与标题分离，尖括号内的空格是文件名的一部分，不能再按空白切割。
+    let mut unescaped = String::new();
+    let mut chars = raw_target.chars().peekable();
+    while let Some(character) = chars.next() {
+        if character == '\\' && chars.peek().is_some_and(char::is_ascii_punctuation) {
+            unescaped.push(chars.next().unwrap());
+        } else {
+            unescaped.push(character);
+        }
+    }
+    let target = unescaped.as_str();
+    let skipped = |reason: &'static str| MarkdownImageRef {
+        markdown_target: target.to_owned(),
+        relative_path: None,
+        skip_reason: Some(reason),
+    };
+
+    if target.is_empty() {
+        return skipped("empty");
+    }
+    let lowered = target.to_ascii_lowercase();
+    if lowered.starts_with("http://")
+        || lowered.starts_with("https://")
+        || lowered.starts_with("data:")
+        || lowered.starts_with("file:")
+        || target.starts_with("//")
+    {
+        return skipped("remote");
+    }
+    if target.starts_with('#') {
+        return skipped("anchor");
+    }
+    // Windows 盘符和 UNC 路径都不是知识库内的相对引用。
+    if target.starts_with('/')
+        || target.starts_with('\\')
+        || target.as_bytes().get(1) == Some(&b':')
+    {
+        return skipped("absolute");
+    }
+
+    let Some(decoded) = decode_markdown_image_path(target) else {
+        return skipped("invalid-encoding");
+    };
+    let Some(relative_path) = join_relative_asset_path(markdown_path, &decoded) else {
+        return skipped("escapes-knowledge-base");
+    };
+
+    MarkdownImageRef {
+        markdown_target: target.to_owned(),
+        relative_path: Some(relative_path),
+        skip_reason: None,
+    }
+}
+
+/** 把笔记内的相对图片路径按笔记目录归一化成知识库相对路径；越出知识库根时返回 None。 */
+fn join_relative_asset_path(markdown_path: &str, target: &str) -> Option<String> {
+    let mut parts: Vec<String> = Path::new(markdown_path)
+        .parent()
+        .map(relative_components)
+        .unwrap_or_default();
+
+    for component in Path::new(target).components() {
+        match component {
+            Component::Normal(value) => parts.push(value.to_string_lossy().to_string()),
+            Component::CurDir => {}
+            // 已到根还要继续上跳，说明这条引用指向知识库外。
+            Component::ParentDir => {
+                parts.pop()?;
+            }
+            Component::RootDir | Component::Prefix(_) => return None,
+        }
+    }
+
+    (!parts.is_empty()).then(|| parts.join("/"))
+}
+
+/// 只保留普通路径段；扫描得到的路径一定在知识库内，因此根目录/盘符一律视为空。
+fn relative_components(path: &Path) -> Vec<String> {
+    path.components()
+        .filter_map(|component| match component {
+            Component::Normal(value) => Some(value.to_string_lossy().to_string()),
+            _ => None,
+        })
+        .collect()
+}
+
+/**
+ * 校验知识库内的一张图片并写入对话附件目录，交给视觉模型直接查看像素。
+ *
+ * 不做 OCR、不做文本化：这里只做路径、扩展名、格式与体积校验，图片内容全部由模型理解。
+ * 附件目录内容寻址，模型请求前再由 [`crate::storage::hydrate_model_images`] 压到预算内。
+ */
+pub(crate) fn attach_local_image(
+    root: &Path,
+    relative_path: &str,
+    attachments_root: &Path,
+    caption: &str,
+) -> Result<DocumentImage, String> {
+    let extension = Path::new(relative_path)
+        .extension()
+        .and_then(|value| value.to_str())
+        .map(str::to_ascii_lowercase)
+        .unwrap_or_default();
+
+    if extension == "svg" {
+        return Err("SVG 是矢量图，无法光栅化后交给视觉模型；请先导出为 PNG/JPG。".to_owned());
+    }
+    if !crate::storage::is_readable_image_extension(&extension) {
+        return Err(format!(
+            "{relative_path} 不是可读图片（支持 png/jpg/jpeg/webp/gif）。"
+        ));
+    }
+
+    let absolute_path = resolve_existing_file_inside_root(root, relative_path)
+        .map_err(|error| format!("图片不在授权知识库内或不存在：{error}"))?;
+    let bytes = fs::read(&absolute_path).map_err(|error| format!("无法读取图片：{error}"))?;
+
+    if bytes.is_empty() {
+        return Err("图片内容为空。".to_owned());
+    }
+    if bytes.len() > MAX_SINGLE_PASTE_IMAGE_BYTES {
+        return Err(format!(
+            "图片超过 {} MB 上限，已拒绝交给视觉模型。",
+            MAX_SINGLE_PASTE_IMAGE_BYTES / (1024 * 1024)
+        ));
+    }
+
+    let format = detect_image_attachment_format(&bytes)?;
+    let attachment =
+        save_conversation_image_from_bytes(attachments_root, &bytes, Some(relative_path))?;
+
+    log::debug!(
+        target: "document_vision",
+        "图片已作为视觉输入：path={} bytes={} mime={}",
+        relative_path,
+        bytes.len(),
+        format.mime_type
+    );
+
+    Ok(DocumentImage {
+        attachment,
+        page: None,
+        caption: caption.to_owned(),
+    })
+}
+
+/// 只读图片文件头取像素尺寸；失败时返回 None，不因为尺寸探测失败阻断读图。
+pub(crate) fn probe_image_dimensions(path: &Path) -> Option<(u32, u32)> {
+    image::ImageReader::open(path)
+        .ok()?
+        .with_guessed_format()
+        .ok()?
+        .into_dimensions()
+        .ok()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -452,5 +730,141 @@ mod tests {
         assert_eq!(media[0].relationship_id, "rId2");
         assert_eq!(media[0].part_name, "word/media/image2.png");
         assert_eq!(media[1].relationship_id, "rId1");
+    }
+
+    /// 写一张最小 PNG，用于验证图片准入而不是像素内容。
+    fn write_test_png(path: &Path) {
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent).unwrap();
+        }
+        image::RgbaImage::from_pixel(4, 4, image::Rgba([10, 20, 30, 255]))
+            .save(path)
+            .unwrap();
+    }
+
+    /// 笔记里的图片引用要解码转义路径，并按笔记目录归一化成知识库相对路径。
+    #[test]
+    fn markdown_image_refs_decode_and_normalize_relative_paths() {
+        let refs = resolve_markdown_image_refs(
+            "Notes/目标.md",
+            "![image](assets/%E6%B5%8B%E8%AF%95/pasted-1.png)\n![图](../assets/共用/d2.jpg)\n",
+        );
+        assert_eq!(refs.len(), 2);
+        assert_eq!(
+            refs[0].relative_path.as_deref(),
+            Some("Notes/assets/测试/pasted-1.png")
+        );
+        assert_eq!(refs[1].relative_path.as_deref(), Some("assets/共用/d2.jpg"));
+        assert!(refs[0].skip_reason.is_none());
+    }
+
+    /// 合法目标中的空格、配对括号和转义标点不能被当成标题或引用结束符。
+    #[test]
+    fn markdown_image_refs_preserve_spaces_parentheses_and_escapes() {
+        let refs = resolve_markdown_image_refs(
+            "Notes/note.md",
+            r#"![](<assets/my image.png> "标题含 ) 和 (")
+![](assets/diagram(v2).png)
+![](assets/nested(v2(final)).png '标题')
+![](<assets/my (image).png>)
+![](assets/escaped\(v2\).png (图注))
+![](assets/quote\".png)
+![](assets/final.png)"#,
+        );
+        let paths: Vec<_> = refs
+            .iter()
+            .map(|image_ref| image_ref.relative_path.as_deref())
+            .collect();
+        assert_eq!(
+            paths,
+            vec![
+                Some("Notes/assets/my image.png"),
+                Some("Notes/assets/diagram(v2).png"),
+                Some("Notes/assets/nested(v2(final)).png"),
+                Some("Notes/assets/my (image).png"),
+                Some("Notes/assets/escaped(v2).png"),
+                Some("Notes/assets/quote\".png"),
+                Some("Notes/assets/final.png"),
+            ]
+        );
+        assert_eq!(refs[0].markdown_target, "assets/my image.png");
+    }
+
+    /// 未闭合的图片目标不能截出错误路径，也不能阻断后续合法引用。
+    #[test]
+    fn markdown_image_refs_recover_after_malformed_targets() {
+        let refs = resolve_markdown_image_refs(
+            "note.md",
+            "![](<broken\n![](assets/good.png) ![](unbalanced(v2.png)\n![](assets/next.png)",
+        );
+        assert_eq!(refs.len(), 2);
+        assert_eq!(refs[0].relative_path.as_deref(), Some("assets/good.png"));
+        assert_eq!(refs[1].relative_path.as_deref(), Some("assets/next.png"));
+    }
+
+    /// 外链、锚点、绝对路径和越出知识库的引用都不能被当成可读的本地图片。
+    #[test]
+    fn markdown_image_refs_skip_remote_absolute_and_escaping_targets() {
+        let refs = resolve_markdown_image_refs(
+            "note.md",
+            "![](https://example.com/a.png) ![](data:image/png;base64,AA) ![](#anchor) \
+             ![](/etc/a.png) ![](C:/tmp/a.png) ![](../outside.png) ![](assets/ok.png)",
+        );
+        let reasons: Vec<Option<&str>> =
+            refs.iter().map(|image_ref| image_ref.skip_reason).collect();
+        assert_eq!(
+            reasons,
+            vec![
+                Some("remote"),
+                Some("remote"),
+                Some("anchor"),
+                Some("absolute"),
+                Some("absolute"),
+                Some("escapes-knowledge-base"),
+                None
+            ]
+        );
+        assert_eq!(refs[6].relative_path.as_deref(), Some("assets/ok.png"));
+    }
+
+    /// 知识库内的图片能准入成对话附件；SVG、伪扩展名和坏字节必须被明确拒绝。
+    #[test]
+    fn attach_local_image_validates_format_and_rejects_svg() {
+        let dir = tempdir().unwrap();
+        let attachments = dir.path().join("attachments");
+        write_test_png(&dir.path().join("assets/diagram.png"));
+
+        let image =
+            attach_local_image(dir.path(), "assets/diagram.png", &attachments, "图示").unwrap();
+        assert_eq!(image.caption, "图示");
+        assert_eq!(image.attachment.mime_type, "image/png");
+        assert!(image.attachment.byte_size > 0);
+        assert_eq!(
+            probe_image_dimensions(&dir.path().join("assets/diagram.png")),
+            Some((4, 4))
+        );
+
+        // SVG 是矢量图，现有解码器无法光栅化，必须给出可执行的原因。
+        fs::write(dir.path().join("assets/vector.svg"), "<svg/>").unwrap();
+        let svg_error =
+            attach_local_image(dir.path(), "assets/vector.svg", &attachments, "矢量").unwrap_err();
+        assert!(svg_error.contains("光栅化"), "{svg_error}");
+
+        // 扩展名伪装成图片、内容不是图片时，按格式校验拒绝。
+        fs::write(dir.path().join("assets/fake.png"), b"not a png").unwrap();
+        let fake_error =
+            attach_local_image(dir.path(), "assets/fake.png", &attachments, "假图").unwrap_err();
+        assert!(fake_error.contains("图片格式"), "{fake_error}");
+
+        // 非图片扩展名不会进入图片通道。
+        fs::write(dir.path().join("assets/notes.txt"), "text").unwrap();
+        let text_error =
+            attach_local_image(dir.path(), "assets/notes.txt", &attachments, "文本").unwrap_err();
+        assert!(text_error.contains("不是可读图片"), "{text_error}");
+
+        // 越出知识库根目录的路径必须被拒绝。
+        let outside_error =
+            attach_local_image(dir.path(), "../outside.png", &attachments, "越界").unwrap_err();
+        assert!(!outside_error.is_empty());
     }
 }

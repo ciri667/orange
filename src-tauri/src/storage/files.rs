@@ -596,6 +596,21 @@ pub(crate) fn is_image_document_file(path: &Path) -> bool {
     supported_document_kind(path) == Some(SupportedDocumentKind::Image)
 }
 
+/**
+ * 判断扩展名是否属于能直接交给视觉模型的位图格式。
+ *
+ * 扫描白名单里的 SVG 是矢量图，现有解码器无法光栅化，因此不算“可交给模型”的图片。
+ */
+pub(crate) fn is_readable_image_extension(extension: &str) -> bool {
+    matches!(
+        extension
+            .trim_start_matches('.')
+            .to_ascii_lowercase()
+            .as_str(),
+        "png" | "jpg" | "jpeg" | "webp" | "gif"
+    )
+}
+
 /** 校验用户输入的新文件名，只允许当前目录下的 Markdown 文件名。 */
 pub fn validate_markdown_file_name(file_name: &str) -> Result<String, String> {
     let trimmed_file_name = file_name.trim();
@@ -942,6 +957,32 @@ pub(crate) fn encode_markdown_image_path(path: &str) -> String {
     }
 
     encoded_path
+}
+
+/**
+ * 反解 Markdown 图片路径里的最小 URL 转义，是 [`encode_markdown_image_path`] 的逆操作。
+ *
+ * Agent 读到的笔记正文里，图片链接是转义后的写法（中文目录会变成 `%E6%B5%8B`），
+ * 要落到知识库相对路径必须先解码；非法十六进制或非 UTF-8 一律返回 None，由调用方跳过。
+ */
+pub(crate) fn decode_markdown_image_path(path: &str) -> Option<String> {
+    let bytes = path.as_bytes();
+    let mut decoded = Vec::with_capacity(bytes.len());
+    let mut index = 0;
+
+    while index < bytes.len() {
+        if bytes[index] == b'%' {
+            let hex = bytes.get(index + 1..index + 3)?;
+            let value = u8::from_str_radix(std::str::from_utf8(hex).ok()?, 16).ok()?;
+            decoded.push(value);
+            index += 3;
+        } else {
+            decoded.push(bytes[index]);
+            index += 1;
+        }
+    }
+
+    String::from_utf8(decoded).ok()
 }
 
 /** 批量写入后续失败时清理本次已经创建的文件；清理失败不覆盖原始业务错误。 */
