@@ -1617,4 +1617,293 @@ mod tests {
         assert_eq!(outcome.call.status, "failed");
         assert!(context.snapshot.sessions[0].pending_change.is_none());
     }
+
+    /** Provider 未开视觉时读图必须显式说明拿不到像素，不能静默只回元数据。 */
+    #[test]
+    fn read_image_reports_vision_unavailable_instead_of_silent_metadata() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut snapshot = tool_test_snapshot("正文内容足够用于测试。".to_owned());
+        snapshot.knowledge_bases[0].path = dir.path().to_string_lossy().to_string();
+        snapshot.documents.push(tool_test_document(
+            "image-a",
+            "kb-a",
+            "assets/diagram.png",
+            "image",
+            true,
+        ));
+
+        let request = tool_test_request("ask", "这张图里是什么");
+        let mut context = tool_test_context(&mut snapshot, &request);
+        let outcome = execute::execute_read(&mut context, &json!({ "fileId": "image-a" }));
+
+        assert!(outcome.success, "{:?}", outcome.payload);
+        assert_eq!(outcome.payload["image"]["path"], json!("assets/diagram.png"));
+        assert_eq!(outcome.payload["image"]["fileType"], json!("image"));
+        assert_eq!(outcome.payload["visionUnavailable"], json!(true));
+        assert!(outcome.payload["includeImagesHint"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("支持视觉"));
+        assert!(outcome.payload.get("documentImages").is_none());
+    }
+
+    /** includeImages=none 只回元数据，并且不算视觉不可用。 */
+    #[test]
+    fn read_image_include_images_none_stays_metadata_only() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut snapshot = tool_test_snapshot("正文内容足够用于测试。".to_owned());
+        snapshot.knowledge_bases[0].path = dir.path().to_string_lossy().to_string();
+        snapshot.documents.push(tool_test_document(
+            "image-a",
+            "kb-a",
+            "assets/diagram.png",
+            "image",
+            true,
+        ));
+
+        let request = tool_test_request("ask", "只看元数据");
+        let mut context = tool_test_context(&mut snapshot, &request);
+        let outcome = execute::execute_read(
+            &mut context,
+            &json!({ "fileId": "image-a", "includeImages": "none" }),
+        );
+
+        assert!(outcome.success, "{:?}", outcome.payload);
+        assert!(outcome.payload.get("visionUnavailable").is_none());
+        assert!(outcome.payload.get("documentImages").is_none());
+        assert!(outcome.payload["includeImagesHint"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("includeImages=none"));
+    }
+
+    /** 图片按 fileId 读取时同样受会话 scope 约束。 */
+    #[test]
+    fn read_image_rejects_document_outside_scope() {
+        let mut snapshot = tool_test_snapshot("正文内容足够用于测试。".to_owned());
+        snapshot.documents.push(tool_test_document(
+            "image-b",
+            "kb-b",
+            "Private/diagram.png",
+            "image",
+            true,
+        ));
+        let request = tool_test_request("ask", "读越界图片");
+        let mut context = tool_test_context(&mut snapshot, &request);
+        let outcome = execute::execute_read(&mut context, &json!({ "fileId": "image-b" }));
+
+        assert!(!outcome.success);
+        assert!(
+            outcome.summary.contains("不在当前会话允许范围内"),
+            "{}",
+            outcome.summary
+        );
+    }
+
+    /** list 必须把图片标成可读但需要视觉，让模型知道该走 read 而不是 search。 */
+    #[test]
+    fn list_marks_image_documents_agent_readable_and_vision_gated() {
+        let registry = ToolRegistry::default();
+        let mut snapshot = tool_test_snapshot("正文内容足够用于测试。".to_owned());
+        snapshot.documents = vec![
+            tool_test_document("document-txt", "kb-a", "Docs/base.txt", "txt", false),
+            tool_test_document("document-image", "kb-a", "assets/diagram.png", "image", true),
+        ];
+        let request = tool_test_request("ask", "列出文件");
+        let mut context = tool_test_context(&mut snapshot, &request);
+        let outcome = registry.execute_named(&mut context, "list_tree", json!({}));
+        let documents = outcome.payload["documents"].as_array().unwrap();
+        let image = documents
+            .iter()
+            .find(|document| document["id"] == json!("document-image"))
+            .unwrap();
+        let text = documents
+            .iter()
+            .find(|document| document["id"] == json!("document-txt"))
+            .unwrap();
+
+        assert_eq!(image["agentReadable"], json!(true));
+        assert_eq!(image["readOnly"], json!(true));
+        assert_eq!(image["requiresVision"], json!(true));
+        // TXT 可写，不能被图片的只读标记带偏。
+        assert_eq!(text["agentReadable"], json!(true));
+        assert_eq!(text["readOnly"], json!(false));
+        assert_eq!(text["requiresVision"], json!(false));
+    }
+
+    /** 读笔记只回图片引用元数据，不默认附图；always 在没有视觉时也要显式说明。 */
+    #[test]
+    fn markdown_read_exposes_image_refs_without_attaching_pixels() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut snapshot = tool_test_snapshot("正文内容足够用于测试。".to_owned());
+        snapshot.knowledge_bases[0].path = dir.path().to_string_lossy().to_string();
+        snapshot.notes[0].path = "Notes/目标.md".to_owned();
+        snapshot.notes[0].content =
+            "见下图\n\n![image](assets/%E6%B5%8B%E8%AF%95/pasted-1.png)\n\n![](https://example.com/x.png)\n"
+                .to_owned();
+        std::fs::create_dir_all(dir.path().join("Notes/assets/测试")).unwrap();
+        std::fs::write(
+            dir.path().join("Notes/assets/测试/pasted-1.png"),
+            b"placeholder",
+        )
+        .unwrap();
+        snapshot.documents.push(tool_test_document(
+            "image-a",
+            "kb-a",
+            "Notes/assets/测试/pasted-1.png",
+            "image",
+            true,
+        ));
+
+        let request = tool_test_request("ask", "评价一下这篇笔记");
+        let mut context = tool_test_context(&mut snapshot, &request);
+        let outcome = execute::execute_read(&mut context, &json!({ "fileId": "note-a" }));
+        assert!(outcome.success, "{:?}", outcome.payload);
+        let refs = outcome.payload["imageRefs"].as_array().unwrap();
+        assert_eq!(refs.len(), 2);
+        assert_eq!(refs[0]["path"], json!("Notes/assets/测试/pasted-1.png"));
+        assert_eq!(refs[0]["fileId"], json!("image-a"));
+        assert_eq!(refs[0]["exists"], json!(true));
+        assert_eq!(refs[0]["requiresVision"], json!(true));
+        assert_eq!(refs[1]["skipped"], json!("remote"));
+        assert!(outcome.payload.get("documentImages").is_none());
+
+        // always 在无视觉能力时必须报告原因，不能假装已经附图。
+        let always = execute::execute_read(
+            &mut context,
+            &json!({ "fileId": "note-a", "includeImages": "always" }),
+        );
+        assert_eq!(always.payload["visionUnavailable"], json!(true));
+        assert!(always.payload["includeImagesHint"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("includeImages=always"));
+        assert!(always.payload.get("documentImages").is_none());
+    }
+
+    /** Markdown 路径读取也应发现插图，并使用磁盘正文和所属知识库，而不是旧快照。 */
+    #[test]
+    fn markdown_path_read_exposes_images_for_relative_absolute_and_unscanned_notes() {
+        let dir = tempfile::tempdir().unwrap();
+        let note_path = dir.path().join("Notes/目标.md");
+        let new_note_path = dir.path().join("Notes/新笔记.md");
+        std::fs::create_dir_all(dir.path().join("Notes/assets")).unwrap();
+        let content = "磁盘中的新正文\n![](<assets/my image(v2).png> \"图注\")";
+        std::fs::write(&note_path, content).unwrap();
+        std::fs::write(&new_note_path, content).unwrap();
+        std::fs::write(
+            dir.path().join("Notes/assets/my image(v2).png"),
+            b"placeholder",
+        )
+        .unwrap();
+        let mut snapshot = tool_test_snapshot("![](assets/stale.png)".to_owned());
+        snapshot.knowledge_bases[0].path = dir.path().to_string_lossy().into_owned();
+        snapshot.notes[0].path = "Notes/目标.md".to_owned();
+        snapshot.documents.push(tool_test_document(
+            "image-a",
+            "kb-a",
+            "Notes/assets/my image(v2).png",
+            "image",
+            true,
+        ));
+        let request = tool_test_request("ask", "看笔记中的图");
+        let mut context = tool_test_context(&mut snapshot, &request);
+
+        for path in [
+            "Notes/目标.md".to_owned(),
+            note_path.to_string_lossy().into_owned(),
+            new_note_path.to_string_lossy().into_owned(),
+        ] {
+            let outcome = execute::execute_read(&mut context, &json!({ "path": path }));
+            assert!(outcome.success, "{}", outcome.summary);
+            assert_eq!(outcome.payload["content"], json!(content));
+            assert_eq!(
+                outcome.payload["imageRefs"][0]["path"],
+                "Notes/assets/my image(v2).png"
+            );
+            assert_eq!(outcome.payload["imageRefs"][0]["fileId"], "image-a");
+            assert_eq!(outcome.payload["imageRefs"][0]["exists"], true);
+            assert!(outcome.payload.get("documentImages").is_none());
+
+            let always = execute::execute_read(
+                &mut context,
+                &json!({ "path": path, "includeImages": "always" }),
+            );
+            assert_eq!(always.payload["visionUnavailable"], true);
+            let none = execute::execute_read(
+                &mut context,
+                &json!({ "path": path, "includeImages": "none" }),
+            );
+            assert!(none.payload.get("visionUnavailable").is_none());
+            assert!(none.payload.get("documentImages").is_none());
+        }
+    }
+
+    /** 已批准的外部 Markdown 只返回文本，不应沿插图引用额外上传本机文件。 */
+    #[test]
+    fn external_markdown_read_does_not_resolve_or_attach_images() {
+        let dir = tempfile::tempdir().unwrap();
+        let external = tempfile::tempdir().unwrap();
+        let path = external.path().join("note.md");
+        std::fs::write(&path, "![](private.png)").unwrap();
+        let mut snapshot = tool_test_snapshot(String::new());
+        snapshot.knowledge_bases[0].path = dir.path().to_string_lossy().into_owned();
+        snapshot.sessions[0].security_level = "full-auto".to_owned();
+        let request = tool_test_request("ask", "读取外部笔记");
+        let mut context = tool_test_context(&mut snapshot, &request);
+        let outcome = execute::execute_read(
+            &mut context,
+            &json!({ "path": path.to_string_lossy(), "includeImages": "always" }),
+        );
+        assert!(outcome.success, "{}", outcome.summary);
+        assert_eq!(outcome.payload["external"], true);
+        assert!(outcome.payload.get("imageRefs").is_none());
+        assert!(outcome.payload.get("documentImages").is_none());
+    }
+
+    /** 外部绝对路径的图片即使有完全权限也不放行，避免把本机任意图片发给模型。 */
+    #[test]
+    fn read_image_refuses_external_absolute_path() {
+        let knowledge_base_root = tempfile::tempdir().unwrap();
+        let external_root = tempfile::tempdir().unwrap();
+        let external_image = external_root.path().join("shot.png");
+        std::fs::write(&external_image, b"png").unwrap();
+
+        let mut snapshot = tool_test_snapshot("正文内容足够用于测试。".to_owned());
+        snapshot.knowledge_bases[0].path =
+            knowledge_base_root.path().to_string_lossy().to_string();
+        snapshot.sessions[0].security_level = "full-auto".to_owned();
+        let request = tool_test_request("ask", "读外部图片");
+        let mut context = tool_test_context(&mut snapshot, &request);
+        let outcome = execute::execute_read(
+            &mut context,
+            &json!({ "path": external_image.to_string_lossy() }),
+        );
+
+        assert!(!outcome.success);
+        assert!(
+            outcome.summary.contains("只支持授权知识库内"),
+            "{}",
+            outcome.summary
+        );
+    }
+
+    /** search 不支持 image 时必须给出「用 list 找、用 read 看图」的可执行建议。 */
+    #[test]
+    fn search_image_file_type_hint_points_at_list_and_read() {
+        let registry = ToolRegistry::default();
+        let mut snapshot = tool_test_snapshot("正文内容足够用于测试。".to_owned());
+        let request = tool_test_request("ask", "找图片");
+        let mut context = tool_test_context(&mut snapshot, &request);
+        let outcome = registry.execute_named(
+            &mut context,
+            "search",
+            json!({ "query": "图示", "fileTypes": ["image"] }),
+        );
+        let hint = outcome.payload["hint"].as_str().unwrap_or_default();
+
+        assert_eq!(outcome.payload["unsupportedFileTypes"], json!(["image"]));
+        assert!(hint.contains("list"), "{hint}");
+        assert!(hint.contains("视觉模型"), "{hint}");
+    }
 }
