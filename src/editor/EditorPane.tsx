@@ -51,6 +51,9 @@ const MARKDOWN_PREVIEW_SANITIZE_SCHEMA: RehypeSanitizeOptions = {
 /** Windows 盘符绝对路径识别，用于兼容跨平台 Markdown 图片引用。 */
 const WINDOWS_ABSOLUTE_PATH_PATTERN = /^[a-zA-Z]:[\\/]/;
 
+/** Windows 扩展长度（verbatim）路径前缀：`\\?\D:\…` 与 `\\?\UNC\…`。 */
+const WINDOWS_VERBATIM_PATH_PATTERN = /^\\\\\?(?:UNC\\)?/i;
+
 /** 格式化当前笔记的阅读统计，帮助用户快速判断内容长度。 */
 function getReadingStats(content: string) {
   const words = content.replace(/\s+/g, "").length;
@@ -496,15 +499,17 @@ function parseFileUrl(source: string) {
 
 /** 将本地路径主体与查询/hash 拆开，避免把 cache busting 参数当作文件名。 */
 function splitLocalPathSuffix(source: string) {
-  const suffixIndex = source.search(/[?#]/);
+  // verbatim 前缀自带 `?`，不跳过它会把路径截成 `\\`，随即被当成相对路径拼到知识库根目录。
+  const prefixLength = source.match(WINDOWS_VERBATIM_PATH_PATTERN)?.[0].length ?? 0;
+  const suffixIndex = source.slice(prefixLength).search(/[?#]/);
 
   if (suffixIndex < 0) {
     return { path: source, suffix: "" };
   }
 
   return {
-    path: source.slice(0, suffixIndex),
-    suffix: source.slice(suffixIndex),
+    path: source.slice(0, prefixLength + suffixIndex),
+    suffix: source.slice(prefixLength + suffixIndex),
   };
 }
 
@@ -517,9 +522,9 @@ function decodeLocalPath(path: string) {
   }
 }
 
-/** 判断路径是否已经是系统绝对路径。 */
+/** 判断路径是否已经是系统绝对路径；verbatim 路径（`\\?\D:\…`）同样是绝对路径。 */
 function isAbsoluteLocalPath(path: string) {
-  return path.startsWith("/") || WINDOWS_ABSOLUTE_PATH_PATTERN.test(path);
+  return path.startsWith("/") || WINDOWS_ABSOLUTE_PATH_PATTERN.test(path) || WINDOWS_VERBATIM_PATH_PATTERN.test(path);
 }
 
 /** 获取文件路径的父目录，用于 Markdown 相对图片定位。 */
@@ -535,9 +540,13 @@ function joinLocalFilePath(...segments: string[]) {
   return normalizeLocalFilePath(segments.filter(Boolean).join("/"));
 }
 
-/** 归一化本地路径分隔符和相对段，保留 POSIX 根路径与 Windows 盘符。 */
+/** 归一化本地路径分隔符和相对段，保留 POSIX 根路径、Windows 盘符与 verbatim 前缀。 */
 function normalizeLocalFilePath(path: string) {
-  const normalizedPath = path.replace(/\\/g, "/");
+  // verbatim 前缀不能参与归一化：反斜杠先被换成斜杠后，`\\?\D:\…` 只会被当成 `/?/D:/…`，
+  // 既匹配不上按 verbatim 路径授权目录的 asset scope，也打不开文件。
+  // 长路径本身也依赖该前缀（普通写法受 MAX_PATH 限制），因此这里原样保留，最后按原分隔符拼回。
+  const verbatimPrefix = path.match(WINDOWS_VERBATIM_PATH_PATTERN)?.[0] ?? "";
+  const normalizedPath = path.slice(verbatimPrefix.length).replace(/\\/g, "/");
   const driveMatch = normalizedPath.match(/^([a-zA-Z]:)(\/|$)/);
   const prefix = driveMatch ? `${driveMatch[1]}/` : normalizedPath.startsWith("/") ? "/" : "";
   const pathWithoutPrefix = driveMatch
@@ -565,5 +574,7 @@ function normalizeLocalFilePath(path: string) {
     normalizedSegments.push(segment);
   }
 
-  return `${prefix}${normalizedSegments.join("/")}`;
+  const normalizedBody = `${prefix}${normalizedSegments.join("/")}`;
+
+  return verbatimPrefix ? `${verbatimPrefix}${normalizedBody.replace(/\//g, "\\")}` : normalizedBody;
 }
