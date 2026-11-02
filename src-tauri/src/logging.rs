@@ -501,6 +501,7 @@ mod tests {
             total_chars: 12,
             file_path: String::new(),
             outline: "system:12".to_owned(),
+            tools: vec![json!({"type":"function","function":{"name":"search"}})],
             messages: vec![AgentPromptDumpMessage {
                 index: 0,
                 role: "system".to_owned(),
@@ -520,6 +521,8 @@ mod tests {
         assert_eq!(loaded.model_context_length, Some(128_000));
         assert!(loaded.messages[0].content.is_none());
         assert_eq!(loaded.messages[0].preview, "角色说明");
+        assert_eq!(loaded.tools.len(), 1);
+        assert_eq!(loaded.tools[0]["function"]["name"], "search");
         let stored = fs::read_to_string(&path).unwrap();
         assert!(stored.contains("角色说明"));
         let _ = fs::remove_dir_all(&dir);

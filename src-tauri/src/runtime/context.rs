@@ -1548,6 +1548,7 @@ pub(super) fn build_prompt_dump(
     round: u32,
     kind: &str,
     messages: &[Value],
+    tools: &[Value],
     recorded_at: &str,
 ) -> AgentPromptDump {
     let dump_messages = messages
@@ -1561,6 +1562,15 @@ pub(super) fn build_prompt_dump(
         .map(|message| format!("{}:{}", message.role, message.chars))
         .collect::<Vec<_>>()
         .join(",");
+    let tools_chars = tools
+        .iter()
+        .map(|tool| tool.to_string().chars().count())
+        .sum::<usize>();
+    let outline = if tools.is_empty() {
+        outline
+    } else {
+        format!("{outline},tools:{}x{}", tools.len(), tools_chars)
+    };
 
     AgentPromptDump {
         session_id: session_id.to_owned(),
@@ -1572,6 +1582,7 @@ pub(super) fn build_prompt_dump(
         total_chars,
         file_path: String::new(),
         outline,
+        tools: tools.to_vec(),
         messages: dump_messages,
     }
 }
@@ -1807,6 +1818,10 @@ mod tests {
             json!({ "role": "system", "content": "角色说明" }),
             json!({ "role": "user", "content": "请整理这篇笔记" }),
         ];
+        let tools = vec![json!({
+            "type": "function",
+            "function": { "name": "search", "description": "检索", "parameters": { "type": "object" } }
+        })];
         let dump = build_prompt_dump(
             "session-a",
             "gpt-4o-mini",
@@ -1814,6 +1829,7 @@ mod tests {
             1,
             "turn",
             &messages,
+            &tools,
             "2026-08-28 10:00:00",
         );
 
@@ -1821,6 +1837,9 @@ mod tests {
         assert_eq!(dump.model_context_length, Some(128_000));
         assert!(dump.outline.contains("system:"));
         assert!(dump.outline.contains("user:"));
+        assert!(dump.outline.contains("tools:1x"));
+        assert_eq!(dump.tools.len(), 1);
+        assert_eq!(dump.tools[0]["function"]["name"], "search");
         assert_eq!(dump.messages.len(), 2);
         assert!(dump.messages[0]
             .content
@@ -1840,6 +1859,7 @@ mod tests {
             2,
             "turn",
             &messages,
+            &[],
             "2026-08-28 10:00:00",
         );
 
@@ -1930,6 +1950,7 @@ mod tests {
                     "image_url": { "url": "data:image/png;base64,QUJDRA==" }
                 }]
             })],
+            &[],
             "2026-09-09 10:00:00",
         );
         let content = dump.messages[0].content.as_deref().unwrap_or("");

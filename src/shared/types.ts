@@ -542,6 +542,8 @@ export interface AgentPromptDump {
   totalChars: number;
   filePath: string;
   outline: string;
+  /** 本轮随请求发送的 tools 声明；旧转储没有该字段。 */
+  tools?: unknown[];
   messages: AgentPromptDumpMessage[];
 }
 

@@ -1,8 +1,8 @@
-mod external_dispatch;
 mod cancel;
 mod compaction;
 mod context;
 mod dsml;
+mod external_dispatch;
 mod stream;
 mod subagent;
 mod subagent_personas;
@@ -446,7 +446,12 @@ pub async fn compact_agent_context_summary(
                     session_id,
                     reason
                 );
-                update_agent_context_summary_deterministic(&mut snapshot, session_index, None, true);
+                update_agent_context_summary_deterministic(
+                    &mut snapshot,
+                    session_index,
+                    None,
+                    true,
+                );
                 ContextSummaryUpdate::DeterministicFallback(reason)
             }
         };
@@ -540,10 +545,7 @@ fn load_stored_transcript_best_effort(app: &AppHandle, session_id: &str) -> Opti
  * 条件是「没有新的未整理消息」且「transcript 已经是检查点开头」。重复整理不会改变
  * 任何内容，却要再等一次几十秒的模型请求 —— 用户连点时体感就是「点了没反应」。
  */
-fn is_context_already_current(
-    session: &AgentSession,
-    stored_transcript: Option<&[Value]>,
-) -> bool {
+fn is_context_already_current(session: &AgentSession, stored_transcript: Option<&[Value]>) -> bool {
     if compact_unsummarized_message_count(session) > 0 {
         return false;
     }
@@ -907,8 +909,14 @@ async fn run_model_loop(
     let history_pack = model_prompt.history.clone();
     let mut prompt_prefix_len = model_prompt.prefix_len;
     let mut model_messages = model_prompt.messages;
-    let mut loaded_resources=crate::skills::resources::LoadedResources::default();
-    for skill in &explicit_skills { if let Ok(payload)=crate::skills::resources::read_resource(&available_skills,&skill.id,None) {loaded_resources.remember(&payload);} }
+    let mut loaded_resources = crate::skills::resources::LoadedResources::default();
+    for skill in &explicit_skills {
+        if let Ok(payload) =
+            crate::skills::resources::read_resource(&available_skills, &skill.id, None)
+        {
+            loaded_resources.remember(&payload);
+        }
+    }
     let endpoint = model_provider::chat_completions_endpoint(&provider.api_base);
     let tool_registry =
         ToolRegistry::for_session(&snapshot.sessions[session_index], &agent_security);
@@ -983,7 +991,7 @@ async fn run_model_loop(
             }));
         }
         // 压缩可能丢掉旧 tool/user 消息，已加载指令恢复到当前唯一 system 前缀。
-        loaded_resources.restore(app,&mut model_messages)?;
+        loaded_resources.restore(app, &mut model_messages)?;
         audit_trail.record_model_request();
         model_round = model_round.saturating_add(1);
         // 总结请求保留最后一步结果，但临时限制不进入持久化 transcript。
@@ -991,6 +999,7 @@ async fn run_model_loop(
         let mut summary_messages =
             finalizing.then(|| tool_budget.summary_messages(&model_messages));
         let request_messages = summary_messages.as_mut().unwrap_or(&mut model_messages);
+        let request_tool_schemas = (!finalizing).then_some(&tool_schemas);
         capture_model_prompt_dump(
             app,
             &session_id,
@@ -998,6 +1007,7 @@ async fn run_model_loop(
             model_context_length,
             model_round,
             request_messages,
+            request_tool_schemas,
         );
         let image_root = conversation_attachments_root(app).ok();
         let response = match send_chat_completion_with_policy(
@@ -1377,17 +1387,51 @@ async fn run_model_loop(
             }
             let model_tool_call = remaining_tool_calls.remove(0);
             let raw_name = model_tool_call_name(&model_tool_call);
-            let (canonical, tool_args) = crate::agent_tools::remap_tool_call(&raw_name, parse_tool_args(&model_tool_call));
+            let (canonical, tool_args) =
+                crate::agent_tools::remap_tool_call(&raw_name, parse_tool_args(&model_tool_call));
             let tool_name = canonical.to_owned();
             let preparation = if tool_name == "exec" {
-                external_dispatch::prepare_exec(app,&snapshot,session_index,&tool_args)
+                external_dispatch::prepare_exec(app, &snapshot, session_index, &tool_args)
             } else if tool_name == "browser" {
-                crate::browser::prepare_operation_approval(app,&snapshot.sessions[session_index],&tool_args).await
-            } else { Ok(tool_args.clone()) };
+                crate::browser::prepare_operation_approval(
+                    app,
+                    &snapshot.sessions[session_index],
+                    &tool_args,
+                )
+                .await
+            } else {
+                Ok(tool_args.clone())
+            };
             let tool_args = preparation.as_ref().cloned().unwrap_or(tool_args);
-            let previous_operation_ids = snapshot.sessions[session_index].pending_change_set.as_ref().map(|set|set.operations.iter().map(|op|op.id.clone()).collect::<Vec<_>>()).unwrap_or_default();
-            let permission = match preparation.and_then(|_| crate::agent_tools::external::decision(&snapshot,session_index,&tool_name,&tool_args)) {
-                Ok(decision) => crate::operation_approval::authorize(app,&snapshot.sessions[session_index],&tool_name,&tool_args,decision,cancel).await,
+            let previous_operation_ids = snapshot.sessions[session_index]
+                .pending_change_set
+                .as_ref()
+                .map(|set| {
+                    set.operations
+                        .iter()
+                        .map(|op| op.id.clone())
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default();
+            let permission = match preparation.and_then(|_| {
+                crate::agent_tools::external::decision(
+                    &snapshot,
+                    session_index,
+                    &tool_name,
+                    &tool_args,
+                )
+            }) {
+                Ok(decision) => {
+                    crate::operation_approval::authorize(
+                        app,
+                        &snapshot.sessions[session_index],
+                        &tool_name,
+                        &tool_args,
+                        decision,
+                        cancel,
+                    )
+                    .await
+                }
                 Err(e) => Err(e),
             };
             let trace_step_id = tracer.begin_tool(
@@ -1397,9 +1441,17 @@ async fn run_model_loop(
                 Some(app),
             );
             let mut tool_outcome = if let Err(error) = &permission {
-                external_dispatch::failed(&tool_name,&tool_args,error)
+                external_dispatch::failed(&tool_name, &tool_args, error)
             } else if tool_name == "exec" {
-                external_dispatch::exec(app,&mut snapshot,session_index,&tool_args,cancel,permission.as_ref().unwrap()).await
+                external_dispatch::exec(
+                    app,
+                    &mut snapshot,
+                    session_index,
+                    &tool_args,
+                    cancel,
+                    permission.as_ref().unwrap(),
+                )
+                .await
             } else if tool_name.starts_with("mcp__") {
                 crate::mcp::execute_model_tool(
                     app,
@@ -1478,23 +1530,51 @@ async fn run_model_loop(
                     web_override: None,
                 };
 
-                tool_registry.execute_with_permit(&mut tool_context, &tool_name, tool_args.clone(), permission.as_ref().ok())
+                tool_registry.execute_with_permit(
+                    &mut tool_context,
+                    &tool_name,
+                    tool_args.clone(),
+                    permission.as_ref().ok(),
+                )
             };
-            if tool_outcome.call.name=="read" && tool_args["target"]=="skill" && tool_outcome.call.status=="completed" {
+            if tool_outcome.call.name == "read"
+                && tool_args["target"] == "skill"
+                && tool_outcome.call.status == "completed"
+            {
                 if loaded_resources.remember(&tool_outcome.payload) {
-                    if let Some(object)=tool_outcome.payload.as_object_mut() { object.remove("content"); object.insert("alreadyLoaded".into(),json!(true)); }
+                    if let Some(object) = tool_outcome.payload.as_object_mut() {
+                        object.remove("content");
+                        object.insert("alreadyLoaded".into(), json!(true));
+                    }
                 }
             }
             tool_budget.observe_call(&tool_outcome.call, &tool_outcome.payload);
             let mut tool_result_text =
                 model_tool_result_text(&tool_outcome.call, &tool_outcome.payload);
             // 只自动应用本次写工具新生成的操作；read、切档、新回合不能触碰旧 pending。
-            if !cancel.is_aborted() && matches!(tool_name.as_str(), "edit" | "write") && tool_outcome.call.status == "completed"
-                && crate::agent_writes::allows_autonomous_auto_apply(&snapshot.sessions[session_index]) {
-                match crate::file_changes::auto_apply_new(app,&mut snapshot,session_index,&previous_operation_ids) {
-                    Ok(Some(selected))=> {tool_result_text=json!({"status":"applied","autoApproved":true,"operationIds":selected}).to_string();},
-                    Err(error)=> {tool_result_text=json!({"status":"pending_review","reason":error}).to_string();},
-                    _=>{},
+            if !cancel.is_aborted()
+                && matches!(tool_name.as_str(), "edit" | "write")
+                && tool_outcome.call.status == "completed"
+                && crate::agent_writes::allows_autonomous_auto_apply(
+                    &snapshot.sessions[session_index],
+                )
+            {
+                match crate::file_changes::auto_apply_new(
+                    app,
+                    &mut snapshot,
+                    session_index,
+                    &previous_operation_ids,
+                ) {
+                    Ok(Some(selected)) => {
+                        tool_result_text =
+                            json!({"status":"applied","autoApproved":true,"operationIds":selected})
+                                .to_string();
+                    }
+                    Err(error) => {
+                        tool_result_text =
+                            json!({"status":"pending_review","reason":error}).to_string();
+                    }
+                    _ => {}
                 }
             }
             log::debug!(
@@ -1671,7 +1751,12 @@ fn capture_model_prompt_dump(
     model_context_length: Option<u64>,
     round: u32,
     messages: &[Value],
+    tool_schemas: Option<&Value>,
 ) {
+    let tools = tool_schemas
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
     let dump = build_prompt_dump(
         session_id,
         model_id,
@@ -1679,6 +1764,7 @@ fn capture_model_prompt_dump(
         round,
         "turn",
         messages,
+        &tools,
         &format_local_datetime(),
     );
     log::info!(
@@ -1713,6 +1799,7 @@ fn capture_model_prompt_dump(
             "modelContextLength": model_context_length.unwrap_or(0),
             "round": round,
             "messageCount": dump.messages.len(),
+            "toolCount": dump.tools.len(),
             "totalChars": dump.total_chars,
         })),
     );
@@ -3792,7 +3879,7 @@ mod tests {
                 pending_change: None,
                 pending_change_set: None,
                 security_level: "basic".to_owned(),
-            permission_version: 0,
+                permission_version: 0,
                 plan_mode: false,
                 context_summary: None,
                 created_at: "刚刚".to_owned(),
@@ -4025,7 +4112,9 @@ mod tests {
 
         let persisted = persistent_model_messages(&messages);
         assert_eq!(persisted.len(), 2);
-        assert!(persisted.iter().all(|message| message.get("ephemeral").is_none()));
+        assert!(persisted
+            .iter()
+            .all(|message| message.get("ephemeral").is_none()));
         assert!(persisted
             .iter()
             .all(|message| !message.to_string().contains("orange_image")));
@@ -4800,7 +4889,11 @@ mod tests {
         assert_eq!(summary.current_goal.as_deref(), Some(""));
         assert_eq!(summary.last_compacted_message_id.as_deref(), Some(""));
 
-        let normalized = normalize_context_summary(summary, &runtime_test_snapshot(String::new()).sessions[0], false);
+        let normalized = normalize_context_summary(
+            summary,
+            &runtime_test_snapshot(String::new()).sessions[0],
+            false,
+        );
         assert!(normalized.current_goal.is_none());
         assert!(normalized.last_compacted_message_id.is_none());
         assert_eq!(normalized.touched_notes.len(), 2);
@@ -4876,9 +4969,13 @@ mod tests {
         ));
 
         // 有新消息后必须重新整理。
-        snapshot.sessions[0]
-            .messages
-            .push(history_test_message("user-2", "user", "新问题", None, Vec::new()));
+        snapshot.sessions[0].messages.push(history_test_message(
+            "user-2",
+            "user",
+            "新问题",
+            None,
+            Vec::new(),
+        ));
         assert!(!is_context_already_current(
             &snapshot.sessions[0],
             Some(&checkpoint_transcript)
@@ -5553,15 +5650,20 @@ mod tests {
         let request = runtime_test_request("ask", "总结");
         let skills = crate::skills::built_in_skills();
         for (level, label) in [
-            ("workspace-readonly", "工作区内只读"), ("workspace-write", "工作区内修改，需审批"),
-            ("full-confirm", "完全权限，需审批"), ("full-auto", "完全权限，无需审批"),
+            ("workspace-readonly", "工作区内只读"),
+            ("workspace-write", "工作区内修改，需审批"),
+            ("full-confirm", "完全权限，需审批"),
+            ("full-auto", "完全权限，无需审批"),
         ] {
             snapshot.sessions[0].security_level = level.into();
-            let messages = build_model_messages(&snapshot, 0, &request, &skills, &[], "user-current", &[]);
+            let messages =
+                build_model_messages(&snapshot, 0, &request, &skills, &[], "user-current", &[]);
             let content = messages[0]["content"].as_str().unwrap();
             assert!(content.contains(label), "{content}");
             assert!(!content.contains("protected system directories"));
-            if level.starts_with("full-") { assert!(content.contains("不提供文件系统沙箱隔离")); }
+            if level.starts_with("full-") {
+                assert!(content.contains("不提供文件系统沙箱隔离"));
+            }
         }
     }
 

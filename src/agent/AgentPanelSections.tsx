@@ -469,7 +469,7 @@ export function AgentSessionContextPopover({
               <span className="text-xs text-ink-muted">发给模型的上下文</span>
               <strong className="mt-1 block text-[13px] text-ink-strong">
                 {promptDump
-                  ? `第 ${promptDump.round} 轮 · ${promptDump.messages.length} 条 · ${promptDump.totalChars.toLocaleString()} 字`
+                  ? `第 ${promptDump.round} 轮 · ${promptDump.messages.length} 条 · ${promptDump.tools?.length ?? 0} 个工具 · ${promptDump.totalChars.toLocaleString()} 字`
                   : "尚未发送"}
               </strong>
             </div>

@@ -364,6 +364,9 @@ pub struct AgentPromptDump {
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub file_path: String,
     pub outline: String,
+    /** 本轮随请求发送的 tools 声明；旧转储没有该字段。 */
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tools: Vec<serde_json::Value>,
     pub messages: Vec<AgentPromptDumpMessage>,
 }
 
@@ -493,11 +496,19 @@ impl AgentSecurityLevel {
             _ => Self::WorkspaceReadonly,
         }
     }
-    pub fn allows_general_fs_tools(self) -> bool { !matches!(self, Self::WorkspaceReadonly) }
-    pub fn allows_external_filesystem(self) -> bool { matches!(self, Self::FullConfirm | Self::FullAuto) }
-    pub fn allows_auto_apply(self) -> bool { self == Self::FullAuto }
+    pub fn allows_general_fs_tools(self) -> bool {
+        !matches!(self, Self::WorkspaceReadonly)
+    }
+    pub fn allows_external_filesystem(self) -> bool {
+        matches!(self, Self::FullConfirm | Self::FullAuto)
+    }
+    pub fn allows_auto_apply(self) -> bool {
+        self == Self::FullAuto
+    }
 }
-fn default_agent_security_level() -> String { "workspace-readonly".to_owned() }
+fn default_agent_security_level() -> String {
+    "workspace-readonly".to_owned()
+}
 
 fn default_agent_resource_limits() -> AgentResourceLimits {
     AgentResourceLimits {
