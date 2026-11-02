@@ -1,15 +1,15 @@
-pub(crate) mod external;
 pub(crate) mod execute;
+pub(crate) mod external;
 mod registry;
 mod types;
 
 #[cfg(test)]
 mod web_tests;
 
+pub(crate) use registry::write_kind;
 pub use registry::ToolRegistry;
 pub(crate) use registry::{model_tool_call_name, parse_tool_args, remap_tool_call};
-pub(crate) use registry::write_kind;
-pub use types::{AgentToolContext, ToolOutcome, ToolExecutionResult};
+pub use types::{AgentToolContext, ToolExecutionResult, ToolOutcome};
 
 #[cfg(test)]
 pub(crate) use types::MAX_READ_NOTE_CHARS;
@@ -101,7 +101,7 @@ mod tests {
                 pending_change: None,
                 pending_change_set: None,
                 security_level: "workspace-write".to_owned(),
-            permission_version: 0,
+                permission_version: 0,
                 plan_mode: false,
                 context_summary: None,
                 created_at: "刚刚".to_owned(),
@@ -173,7 +173,10 @@ mod tests {
             pdf.push_str(&format!("{} 0 obj\n{}\nendobj\n", index + 1, object));
         }
         let xref_offset = pdf.len();
-        pdf.push_str(&format!("xref\n0 {}\n0000000000 65535 f \n", objects.len() + 1));
+        pdf.push_str(&format!(
+            "xref\n0 {}\n0000000000 65535 f \n",
+            objects.len() + 1
+        ));
         for offset in offsets {
             pdf.push_str(&format!("{offset:010} 00000 n \n"));
         }
@@ -319,7 +322,13 @@ mod tests {
         );
         assert!(block_two.success, "{:?}", block_two.payload);
         assert_eq!(block_two.payload["offsetScope"], "block".to_string());
-        assert_eq!(block_two.payload["document"]["blocks"].as_array().unwrap().len(), 1);
+        assert_eq!(
+            block_two.payload["document"]["blocks"]
+                .as_array()
+                .unwrap()
+                .len(),
+            1
+        );
         assert_eq!(block_two.payload["document"]["blocks"][0]["page"], 2);
 
         let bad_block = execute::execute_read_document(
@@ -406,8 +415,11 @@ mod tests {
         let mut snapshot = tool_test_snapshot("正文".to_owned());
         let settings = AgentSecuritySettings::default();
         for (level, writable, external) in [
-            ("workspace-readonly", false, false), ("workspace-write", true, false),
-            ("full-confirm", true, true), ("full-auto", true, true), ("autonomous", false, false),
+            ("workspace-readonly", false, false),
+            ("workspace-write", true, false),
+            ("full-confirm", true, true),
+            ("full-auto", true, true),
+            ("autonomous", false, false),
         ] {
             snapshot.sessions[0].security_level = level.into();
             let registry = ToolRegistry::for_session(&snapshot.sessions[0], &settings);
@@ -417,8 +429,20 @@ mod tests {
             assert_eq!(names.contains(&"exec"), external, "{level}");
             assert_eq!(names.contains(&"browser"), external, "{level}");
             assert!(!names.contains(&"run"));
-            let read = registry.schemas().as_array().unwrap().iter().find(|s| s["function"]["name"] == "read").unwrap().clone();
-            assert_eq!(read["function"]["parameters"]["properties"].get("url").is_some(), external);
+            let read = registry
+                .schemas()
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|s| s["function"]["name"] == "read")
+                .unwrap()
+                .clone();
+            assert_eq!(
+                read["function"]["parameters"]["properties"]
+                    .get("url")
+                    .is_some(),
+                external
+            );
         }
     }
 
@@ -426,23 +450,133 @@ mod tests {
     #[test]
     fn im_schema_and_execution_both_reject_file_management_aliases() {
         let mut snapshot = tool_test_snapshot("正文".into());
-        snapshot.sessions[0].im_identity = Some(serde_json::from_value(json!({
-            "providerId":"feishu", "conversationKind":"direct", "channelHash":"test",
-            "initialMessagePreview":"", "lastMessagePreview":""
-        })).unwrap());
+        snapshot.sessions[0].im_identity = Some(
+            serde_json::from_value(json!({
+                "providerId":"feishu", "conversationKind":"direct", "channelHash":"test",
+                "initialMessagePreview":"", "lastMessagePreview":""
+            }))
+            .unwrap(),
+        );
         let registry = ToolRegistry::for_session(&snapshot.sessions[0], &Default::default());
         let schemas = registry.schemas();
-        let edit = schemas.as_array().unwrap().iter().find(|s|s["function"]["name"]=="edit").unwrap();
-        assert_eq!(edit["function"]["parameters"]["properties"]["operation"]["enum"],json!(["replace","append","multi_replace"]));
-        let write = schemas.as_array().unwrap().iter().find(|s|s["function"]["name"]=="write").unwrap();
-        assert_eq!(write["function"]["parameters"]["properties"]["kind"]["enum"],json!(["file"]));
-        assert_eq!(write["function"]["parameters"]["properties"]["fileType"]["enum"],json!(["markdown","txt"]));
-        let request = tool_test_request("ask","创建目录");
-        for args in [json!({"kind":"folder","targetPath":"new"}), json!({"fileType":"FOLDER","targetPath":"new"}), json!({"file_type":"folder","targetPath":"new"})] {
-            let mut context = tool_test_context(&mut snapshot,&request);
-            assert_eq!(registry.execute_named(&mut context,"write",args).call.status,"failed");
+        let edit = schemas
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|s| s["function"]["name"] == "edit")
+            .unwrap();
+        assert_eq!(
+            edit["function"]["parameters"]["properties"]["operation"]["enum"],
+            json!(["replace", "append", "multi_replace"])
+        );
+        let write = schemas
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|s| s["function"]["name"] == "write")
+            .unwrap();
+        assert_eq!(
+            write["function"]["parameters"]["properties"]["kind"]["enum"],
+            json!(["file"])
+        );
+        assert_eq!(
+            write["function"]["parameters"]["properties"]["fileType"]["enum"],
+            json!(["markdown", "txt"])
+        );
+        let request = tool_test_request("ask", "创建目录");
+        for args in [
+            json!({"kind":"folder","targetPath":"new"}),
+            json!({"fileType":"FOLDER","targetPath":"new"}),
+            json!({"file_type":"folder","targetPath":"new"}),
+        ] {
+            let mut context = tool_test_context(&mut snapshot, &request);
+            assert_eq!(
+                registry
+                    .execute_named(&mut context, "write", args)
+                    .call
+                    .status,
+                "failed"
+            );
         }
         assert!(snapshot.sessions[0].pending_change_set.is_none());
+    }
+
+    #[test]
+    fn plan_mode_keeps_read_only_external_research_schema() {
+        let mut snapshot = tool_test_snapshot("正文".to_owned());
+        snapshot.sessions[0].plan_mode = true;
+        snapshot.sessions[0].security_level = "full-auto".to_owned();
+        let registry = ToolRegistry::for_session(&snapshot.sessions[0], &Default::default());
+        let schemas = registry.schemas();
+        let schema = |name: &str| {
+            schemas
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|schema| schema["function"]["name"] == name)
+                .unwrap()
+                .clone()
+        };
+
+        let read = schema("read");
+        assert!(read["function"]["parameters"]["properties"]
+            .get("url")
+            .is_some());
+        assert!(read["function"]["description"]
+            .as_str()
+            .unwrap()
+            .contains("url fetches"));
+
+        let search = schema("search");
+        assert!(
+            search["function"]["parameters"]["properties"]["target"]["enum"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|value| value == "web")
+        );
+
+        let browser = schema("browser");
+        let operations = browser["function"]["parameters"]["properties"]["operation"]["enum"]
+            .as_array()
+            .unwrap();
+        assert!(operations.iter().all(
+            |operation| crate::browser::READ_OPERATIONS.contains(&operation.as_str().unwrap())
+        ));
+        assert!(!operations
+            .iter()
+            .any(|operation| operation == "tab.navigate"));
+    }
+
+    #[test]
+    fn pruned_schema_description_matches_hidden_url_parameter() {
+        let mut snapshot = tool_test_snapshot("正文".to_owned());
+        snapshot.sessions[0].security_level = "workspace-write".to_owned();
+        let registry = ToolRegistry::for_session(&snapshot.sessions[0], &Default::default());
+        let schemas = registry.schemas();
+        let read = schemas
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|schema| schema["function"]["name"] == "read")
+            .unwrap();
+        assert!(read["function"]["parameters"]["properties"]
+            .get("url")
+            .is_none());
+        let description = read["function"]["description"].as_str().unwrap();
+        assert!(!description.contains("unless path or url"));
+        assert!(!description.contains("url fetches"));
+
+        let search = schemas
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|schema| schema["function"]["name"] == "search")
+            .unwrap();
+        assert!(!search["function"]["description"]
+            .as_str()
+            .unwrap()
+            .contains("target=web"));
     }
 
     #[test]
@@ -451,13 +585,22 @@ mod tests {
         let settings = AgentSecuritySettings::default();
         snapshot.sessions[0].plan_mode = true;
 
-        for level in ["workspace-write", "workspace-write", "full-auto"] {
+        for (level, expected) in [
+            ("workspace-write", vec!["search", "read", "list", "task"]),
+            (
+                "full-confirm",
+                vec!["search", "read", "list", "task", "browser"],
+            ),
+            (
+                "full-auto",
+                vec!["search", "read", "list", "task", "browser"],
+            ),
+        ] {
             snapshot.sessions[0].security_level = level.to_owned();
             let names = ToolRegistry::for_session(&snapshot.sessions[0], &settings).tool_names();
             assert_eq!(
-                names,
-                vec!["search", "read", "list", "task"],
-                "级别 {level} 的规划模式工具集应为只读闭集"
+                names, expected,
+                "级别 {level} 的规划模式工具集应只保留只读能力"
             );
         }
 
@@ -1637,7 +1780,10 @@ mod tests {
         let outcome = execute::execute_read(&mut context, &json!({ "fileId": "image-a" }));
 
         assert!(outcome.success, "{:?}", outcome.payload);
-        assert_eq!(outcome.payload["image"]["path"], json!("assets/diagram.png"));
+        assert_eq!(
+            outcome.payload["image"]["path"],
+            json!("assets/diagram.png")
+        );
         assert_eq!(outcome.payload["image"]["fileType"], json!("image"));
         assert_eq!(outcome.payload["visionUnavailable"], json!(true));
         assert!(outcome.payload["includeImagesHint"]
@@ -1707,7 +1853,13 @@ mod tests {
         let mut snapshot = tool_test_snapshot("正文内容足够用于测试。".to_owned());
         snapshot.documents = vec![
             tool_test_document("document-txt", "kb-a", "Docs/base.txt", "txt", false),
-            tool_test_document("document-image", "kb-a", "assets/diagram.png", "image", true),
+            tool_test_document(
+                "document-image",
+                "kb-a",
+                "assets/diagram.png",
+                "image",
+                true,
+            ),
         ];
         let request = tool_test_request("ask", "列出文件");
         let mut context = tool_test_context(&mut snapshot, &request);
@@ -1870,8 +2022,7 @@ mod tests {
         std::fs::write(&external_image, b"png").unwrap();
 
         let mut snapshot = tool_test_snapshot("正文内容足够用于测试。".to_owned());
-        snapshot.knowledge_bases[0].path =
-            knowledge_base_root.path().to_string_lossy().to_string();
+        snapshot.knowledge_bases[0].path = knowledge_base_root.path().to_string_lossy().to_string();
         snapshot.sessions[0].security_level = "full-auto".to_owned();
         let request = tool_test_request("ask", "读外部图片");
         let mut context = tool_test_context(&mut snapshot, &request);

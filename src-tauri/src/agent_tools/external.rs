@@ -41,6 +41,10 @@ pub(crate) fn decision(snapshot: &crate::domain::WorkspaceSnapshot, index: usize
         let target=crate::fs_guard::resolve_agent_fs_target(&snapshot.knowledge_bases,&session.knowledge_base_ids,
             active,&session.security_level,identified.map(|(kb, _)| kb.as_str()).or(args["knowledgeBaseId"].as_str()),path,false)?;
         if target.is_external() {
+            // Plan 的只读外部研究仅限联网与浏览器快照，不能借此读取工作区外文件。
+            if session.plan_mode {
+                return Err("Plan 模式只允许只读联网研究，不允许读取工作区外文件；请由用户切换权限。".into());
+            }
             // 外部新建只需要最终文件变更审批；准备 edit 的正文/清单必须先审批读取。
             if name == "write" { permissions::ensure(session,Operation::ExternalRead)?; }
             else { return Ok(permissions::decide(session,Operation::ExternalRead)); }

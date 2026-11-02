@@ -495,7 +495,8 @@ async fn refresh_screencast(app: &AppHandle) -> Result<(), String> {
 
 /** 只读已发布的本地缓存，审批之前不发起 CDP 或网络访问。 */
 pub async fn prepare_operation_approval(app: &AppHandle, session: &AgentSession, args: &Value) -> Result<Value,String> {
-    crate::permissions::ensure(session,crate::permissions::Operation::ExternalTool)?;
+    // 读取类操作在 Plan 模式下属于 ExternalRead；变更类仍是 ExternalTool。
+    crate::permissions::ensure(session,crate::permissions::tool_operation("browser",args))?;
     if !args.is_object() || args["operation"].as_str().and_then(operation_kind).is_none() { return Err("浏览器操作参数无效。".into()); }
     if !super::fetcher::browser_settings_enabled(app) { return Err("浏览器功能未启用。".into()); }
     let manager=browser_manager().await;
@@ -1044,12 +1045,19 @@ pub async fn execute_run_request(
             &format!("未知浏览器操作 {operation}。"),
         );
     }
+    // Plan 模式只放行浏览器只读操作；导航、点击、输入与标签页变更仍要求外部执行权限。
+    let plan_read_only = session.plan_mode
+        && operation_kind(operation) == Some(super::policy::BrowserOperationKind::Read)
+        && matches!(session.security_level.as_str(), "full-confirm" | "full-auto")
+        && session.im_identity.is_none()
+        && session.schedule_identity.is_none();
     if !session_allows_browser(
         session.im_identity.is_some(),
         session.schedule_identity.is_some(),
         session.plan_mode,
         &session.security_level,
-    ) {
+    ) && !plan_read_only
+    {
         return failed_run("PERMISSION_DENIED", "当前会话安全级别不允许浏览器操作。");
     }
     if !super::fetcher::browser_settings_enabled(app) {

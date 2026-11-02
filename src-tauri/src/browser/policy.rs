@@ -53,7 +53,9 @@ pub fn normalize_web_url(value: &str) -> Result<String, String> {
 
 /** 提取 URL origin 供审计日志使用；解析失败返回 None，不记录完整 URL。 */
 pub fn url_origin(value: &str) -> Option<String> {
-    Url::parse(value).ok().map(|url| url.origin().ascii_serialization())
+    Url::parse(value)
+        .ok()
+        .map(|url| url.origin().ascii_serialization())
 }
 
 /** 第一版搜索固定走 Bing；后续开放搜索引擎设置时再扩展。 */
@@ -65,7 +67,8 @@ pub fn bing_search_url(query: &str) -> Result<String, String> {
     if query.chars().count() > 512 {
         return Err("搜索词超过长度限制。".to_owned());
     }
-    let mut url = Url::parse("https://www.bing.com/search").map_err(|_| "搜索地址无效。".to_owned())?;
+    let mut url =
+        Url::parse("https://www.bing.com/search").map_err(|_| "搜索地址无效。".to_owned())?;
     url.query_pairs_mut().append_pair("q", query);
     Ok(url.to_string())
 }
@@ -119,7 +122,7 @@ pub fn operation_kind(operation: &str) -> Option<BrowserOperationKind> {
     }
 }
 
-/** 浏览器功能只对本机交互会话的进阶/完全级别可见；IM、定时、规划模式一律拒绝。 */
+/** 浏览器功能只对本机交互会话的进阶/完全级别可见；IM、定时任务拒绝，Plan 仅保留只读操作。 */
 pub fn session_allows_browser(
     has_im_identity: bool,
     has_schedule_identity: bool,
@@ -256,7 +259,12 @@ mod tests {
     fn session_gate_blocks_non_local_or_low_levels() {
         assert!(session_allows_browser(false, false, false, "full-confirm"));
         assert!(session_allows_browser(false, false, false, "full-auto"));
-        assert!(!session_allows_browser(false, false, false, "workspace-readonly"));
+        assert!(!session_allows_browser(
+            false,
+            false,
+            false,
+            "workspace-readonly"
+        ));
         assert!(!session_allows_browser(true, false, false, "full-confirm"));
         assert!(!session_allows_browser(false, true, false, "full-confirm"));
         assert!(!session_allows_browser(false, false, true, "full-confirm"));

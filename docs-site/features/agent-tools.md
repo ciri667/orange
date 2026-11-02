@@ -6,10 +6,11 @@
 | --- | --- | --- | --- | --- |
 | search / read / list | 工作区及启用的 Skill 资源 | 同左 | 增加逐次审批的外部读取 | 增加外部读取 |
 | edit / write | 禁止 | 生成待审变更 | 生成待审变更 | 自动应用本次新变更 |
-| exec / browser | 禁止 | 禁止 | 每次操作审批 | 自动执行 |
+| exec | 禁止 | 禁止 | 每次操作审批 | 自动执行 |
+| browser | 禁止（Plan 仅在完全权限档开放只读操作） | 禁止 | 读取与变更都审批 | 自动执行 |
 | task | 只读角色 | 与父权限取交集 | 与父权限取交集 | 与父权限取交集 |
 
-Plan 覆盖为工作区只读，禁用外部工具、命令及所有变更应用。前两档禁止的动作不能通过一次审批临时放行。
+Plan 覆盖为工作区只读，禁用命令、浏览器变更、MCP 及所有变更应用；完全权限档下允许 **只读外部研究**：`search target=web`、`read url`，以及 browser 的 `browser.get_state` / `page.text.snapshot` / `page.elements.snapshot` / `page.wait_for`。前两档禁止的动作不能通过一次审批临时放行。
 
 ## search / read / list
 
@@ -48,7 +49,7 @@ write kind=file 创建 Markdown/TXT，必须提供完整 content 与 targetPath�
 
 ## task
 
-唯一编排工具，内置 explore、researcher 只读，writer 可生成可审阅的文件变更。子任务工具集与父权限取交集，不提供 exec/browser/MCP，不允许递归委派。任务指令须自足。
+唯一编排工具，内置 explore、researcher 只读，writer 可生成可审阅的文件变更。子任务工具集与父权限取交集，不提供 exec、browser 变更或 MCP，不允许递归委派；只读联网（`web`）与浏览器只读快照（`browser-read`）由角色或用户定义 agent 显式声明，explore 默认含 web，researcher 默认含 web + browser-read。任务指令须自足。
 
 子 Agent 与父 Agent 共用视觉能力和图片读取流程，read 返回的图片会作为实际图片消息提供给子模型；图片消息仅用于当前运行，续跑时需要重新读取。
 
