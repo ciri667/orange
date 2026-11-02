@@ -580,6 +580,44 @@ mod tests {
     }
 
     #[test]
+    fn subagent_web_and_browser_read_capabilities_are_opt_in() {
+        let registry =
+            ToolRegistry::for_subagent_tools(&["search", "read", "list", "web", "browser-read"]);
+        assert!(registry.tool_names().contains(&"browser"));
+        let schemas = registry.schemas();
+        let search = schemas
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|schema| schema["function"]["name"] == "search")
+            .unwrap();
+        assert!(
+            search["function"]["parameters"]["properties"]["target"]["enum"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|value| value == "web")
+        );
+
+        let plain = ToolRegistry::for_subagent_tools(&["search", "read", "list"]);
+        assert!(!plain.tool_names().contains(&"browser"));
+        let plain_schemas = plain.schemas();
+        let plain_search = plain_schemas
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|schema| schema["function"]["name"] == "search")
+            .unwrap();
+        assert!(
+            !plain_search["function"]["parameters"]["properties"]["target"]["enum"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|value| value == "web")
+        );
+    }
+
+    #[test]
     fn plan_mode_session_omits_write_and_skill_tools() {
         let mut snapshot = tool_test_snapshot("正文内容足够用于测试。".to_owned());
         let settings = AgentSecuritySettings::default();

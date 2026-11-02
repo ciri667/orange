@@ -5,8 +5,8 @@ use super::types::*;
 use crate::domain::AgentTurnRequest;
 use crate::domain::{
     AgentSecurityLevel, AgentSession, Citation, KnowledgeBase, ProposedChange, ProposedChangeSet,
-    ProposedFileOperation, WorkspaceDocument, WorkspaceSnapshot,
-    AGENT_DIRECT_EXECUTION_ID, AGENT_DIRECT_SOURCE,
+    ProposedFileOperation, WorkspaceDocument, WorkspaceSnapshot, AGENT_DIRECT_EXECUTION_ID,
+    AGENT_DIRECT_SOURCE,
 };
 use crate::storage::{create_id, format_local_datetime, hash_content};
 use crate::text_edit::{
@@ -342,7 +342,9 @@ impl AgentTool for ReadFileTool {
     }
 
     fn execute(&self, context: &mut AgentToolContext<'_>, args: &Value) -> ToolExecutionResult {
-        if args["target"] == "skill" { return crate::skills::resources::execute(context,args); }
+        if args["target"] == "skill" {
+            return crate::skills::resources::execute(context, args);
+        }
         execute_read(context, args)
     }
 }
@@ -518,7 +520,7 @@ impl AgentTool for TaskTool {
     }
 
     fn description(&self) -> &'static str {
-        "Delegate a complex, multi-hop knowledge-base task to an isolated subagent. The subagent does not see this conversation, so prompt must be self-contained. Built-in agents: explore (fast read-only recon), researcher (deeper read-only handoff), writer (edit/write pending diffs merged into the parent change set). You may also pass a user-defined agent from the orange home agents directory. Launch independent tasks together in one assistant message (up to 3 read-only tasks run in parallel). Use task_id to resume a previous subagent session. Set background=true only for independent read-only work; you will be notified when it finishes — do not poll. Do not use task for a single known-path read, a single keyword search, or editing the current note yourself. Return value is the subagent's final report only, not its intermediate traces."
+        "Delegate a complex, multi-hop knowledge-base task to an isolated subagent. The subagent does not see this conversation, so prompt must be self-contained. Built-in agents: explore (fast read-only recon, local + web search), researcher (deeper read-only handoff, adds read-only browser snapshots), writer (edit/write pending diffs merged into the parent change set, read-only web for verification). You may also pass a user-defined agent from the orange home agents directory; its tools are limited to search/read/list/edit/write/web/browser-read. Launch independent tasks together in one assistant message (up to 3 read-only tasks run in parallel). Use task_id to resume a previous subagent session. Set background=true only for independent read-only work; you will be notified when it finishes — do not poll. Do not use task for a single known-path read, a single keyword search, or editing the current note yourself. Return value is the subagent's final report only, not its intermediate traces."
     }
 
     fn parameters(&self) -> Value {
@@ -535,7 +537,7 @@ impl AgentTool for TaskTool {
                 },
                 "agent": {
                     "type": "string",
-                    "description": "explore: fast recon of notes and folders (read-only). researcher: deeper multi-hop reading (read-only). writer: draft edit/write pending diffs. You may also pass a user-defined agent name from ~/.orange/agents."
+                    "description": "explore: fast recon of notes and folders (read-only, web search). researcher: deeper multi-hop reading (read-only, web search + browser snapshots). writer: draft edit/write pending diffs (read-only web for verification). You may also pass a user-defined agent name from ~/.orange/agents."
                 },
                 "task_id": {
                     "type": "string",
@@ -640,7 +642,11 @@ pub(crate) fn execute_search_path(
     let resolved = match crate::fs_guard::resolve_agent_fs_target(
         &context.snapshot.knowledge_bases,
         &session.knowledge_base_ids,
-        session.knowledge_base_ids.first().map(String::as_str).unwrap_or(""),
+        session
+            .knowledge_base_ids
+            .first()
+            .map(String::as_str)
+            .unwrap_or(""),
         &session.security_level,
         requested_knowledge_base_id,
         raw_path,
@@ -662,7 +668,9 @@ pub(crate) fn execute_search_path(
         if !entry.file_type().is_file() {
             continue;
         }
-        if crate::file_changes::reject_links(entry.path()).is_err() { continue; }
+        if crate::file_changes::reject_links(entry.path()).is_err() {
+            continue;
+        }
         scanned += 1;
         if scanned > 400 {
             break;
@@ -904,12 +912,9 @@ pub(crate) fn execute_read(
             .unwrap_or_default()
             .to_ascii_lowercase();
         if matches!(extension.as_str(), "docx" | "pdf") {
-            if let Some(document_id) = document_id_for_read_path(
-                context.snapshot,
-                context.session_index,
-                args,
-                path,
-            ) {
+            if let Some(document_id) =
+                document_id_for_read_path(context.snapshot, context.session_index, args, path)
+            {
                 let mut read_args = args.clone();
                 if let Some(object) = read_args.as_object_mut() {
                     object.insert("documentId".to_owned(), json!(document_id));
@@ -952,16 +957,54 @@ pub(crate) fn execute_read(
     }
     if context.app.is_some() {
         // 命令或外部编辑后仍以磁盘为准；读取失败不能用旧快照伪装成功。
-        let item = context.snapshot.notes.iter().find(|n|n.id==file_id).map(|n|(n.knowledge_base_id.clone(),n.path.clone()))
-            .or_else(||context.snapshot.documents.iter().find(|d|d.id==file_id && d.file_type=="txt").map(|d|(d.knowledge_base_id.clone(),d.path.clone())));
-        if let Some((kb,path))=item {
-            let session=&context.snapshot.sessions[context.session_index];
-            let resolved=crate::fs_guard::resolve_agent_fs_target(&context.snapshot.knowledge_bases,&session.knowledge_base_ids,
-                session.knowledge_base_ids.first().map(String::as_str).unwrap_or(""),&session.security_level,Some(&kb),&path,true);
-            let content=resolved.and_then(|t|std::fs::read_to_string(t.absolute_path).map_err(|e|e.to_string()));
-            let content=match content {Ok(c)=>c,Err(e)=>return ToolExecutionResult::failed(&format!("无法读取磁盘文件：{e}"))};
-            if let Some(n)=context.snapshot.notes.iter_mut().find(|n|n.id==file_id) {n.content_hash=hash_content(&content);n.content=content.clone();}
-            if let Some(d)=context.snapshot.documents.iter_mut().find(|d|d.id==file_id) {d.content_hash=hash_content(&content);d.content=Some(content);}
+        let item = context
+            .snapshot
+            .notes
+            .iter()
+            .find(|n| n.id == file_id)
+            .map(|n| (n.knowledge_base_id.clone(), n.path.clone()))
+            .or_else(|| {
+                context
+                    .snapshot
+                    .documents
+                    .iter()
+                    .find(|d| d.id == file_id && d.file_type == "txt")
+                    .map(|d| (d.knowledge_base_id.clone(), d.path.clone()))
+            });
+        if let Some((kb, path)) = item {
+            let session = &context.snapshot.sessions[context.session_index];
+            let resolved = crate::fs_guard::resolve_agent_fs_target(
+                &context.snapshot.knowledge_bases,
+                &session.knowledge_base_ids,
+                session
+                    .knowledge_base_ids
+                    .first()
+                    .map(String::as_str)
+                    .unwrap_or(""),
+                &session.security_level,
+                Some(&kb),
+                &path,
+                true,
+            );
+            let content = resolved
+                .and_then(|t| std::fs::read_to_string(t.absolute_path).map_err(|e| e.to_string()));
+            let content = match content {
+                Ok(c) => c,
+                Err(e) => return ToolExecutionResult::failed(&format!("无法读取磁盘文件：{e}")),
+            };
+            if let Some(n) = context.snapshot.notes.iter_mut().find(|n| n.id == file_id) {
+                n.content_hash = hash_content(&content);
+                n.content = content.clone();
+            }
+            if let Some(d) = context
+                .snapshot
+                .documents
+                .iter_mut()
+                .find(|d| d.id == file_id)
+            {
+                d.content_hash = hash_content(&content);
+                d.content = Some(content);
+            }
         }
     }
     if scoped_note(context.snapshot, context.session_index, &file_id).is_some()
@@ -1334,7 +1377,9 @@ fn enrich_markdown_read_with_images(
                         if attached > 0 {
                             object.insert(
                                 "documentImages".to_owned(),
-                                Value::Array(images.iter().map(|image| image.to_payload()).collect()),
+                                Value::Array(
+                                    images.iter().map(|image| image.to_payload()).collect(),
+                                ),
                             );
                         }
                         if !errors.is_empty() {
@@ -1383,12 +1428,8 @@ pub(crate) fn execute_read_document_with_images(
         .and_then(Value::as_str)
         .unwrap_or_default()
         .to_owned();
-    let mut result = execute_read_document(
-        context.snapshot,
-        context.session_index,
-        args,
-        context.app,
-    );
+    let mut result =
+        execute_read_document(context.snapshot, context.session_index, args, context.app);
     if !result.success {
         return result;
     }
@@ -1407,11 +1448,9 @@ pub(crate) fn execute_read_document_with_images(
         }
         return result;
     }
-    let Some(document) = scoped_readonly_document(
-        context.snapshot,
-        context.session_index,
-        &document_id,
-    ) else {
+    let Some(document) =
+        scoped_readonly_document(context.snapshot, context.session_index, &document_id)
+    else {
         return result;
     };
     let Some(knowledge_base) = context
@@ -1602,13 +1641,13 @@ pub(crate) fn execute_read_image(
     }
 
     let Some(app) = context.app else {
-        return ToolExecutionResult::failed(
-            "当前环境无法暂存图片附件，无法把图片交给视觉模型。",
-        );
+        return ToolExecutionResult::failed("当前环境无法暂存图片附件，无法把图片交给视觉模型。");
     };
     let attachments_root = match crate::storage::conversation_attachments_root(app) {
         Ok(root) => root,
-        Err(error) => return ToolExecutionResult::failed(&format!("无法解析对话附件目录：{error}")),
+        Err(error) => {
+            return ToolExecutionResult::failed(&format!("无法解析对话附件目录：{error}"))
+        }
     };
 
     let caption = format!("{}（{}）", target.title, target.relative_path);
@@ -1800,7 +1839,11 @@ pub(crate) fn execute_read_document(
             std::path::Path::new(&knowledge_base.path),
             document,
         ) {
-            Ok(cached) => (cached.extraction, Some(cached.cache_hit), Some(cached.duration_ms)),
+            Ok(cached) => (
+                cached.extraction,
+                Some(cached.cache_hit),
+                Some(cached.duration_ms),
+            ),
             Err(error) => {
                 return ToolExecutionResult::failed(&format!("文档读取失败：{error}"));
             }
@@ -1871,9 +1914,10 @@ pub(crate) fn execute_read_document(
 
     // heading 定位取该标题到下一个同级/更高级标题之间的正文；PDF 无标题结构时直接报错。
     let heading_range: Option<(usize, usize)> = requested_heading.and_then(|heading| {
-        let start = extraction.blocks.iter().position(|block| {
-            block.r#type == "heading" && block.text.contains(heading)
-        })?;
+        let start = extraction
+            .blocks
+            .iter()
+            .position(|block| block.r#type == "heading" && block.text.contains(heading))?;
         let level = extraction.blocks[start].heading_level.unwrap_or(1);
         let end = extraction.blocks[start + 1..]
             .iter()
@@ -1904,7 +1948,9 @@ pub(crate) fn execute_read_document(
             match requested_page {
                 Some(page) => {
                     let page_end = requested_page_end.unwrap_or(page);
-                    block.page.is_some_and(|value| value >= page && value <= page_end)
+                    block
+                        .page
+                        .is_some_and(|value| value >= page && value <= page_end)
                 }
                 None => true,
             }
@@ -3354,7 +3400,11 @@ pub(crate) fn execute_list_path(
     let resolved = match crate::fs_guard::resolve_agent_fs_target(
         &context.snapshot.knowledge_bases,
         &session.knowledge_base_ids,
-        session.knowledge_base_ids.first().map(String::as_str).unwrap_or(""),
+        session
+            .knowledge_base_ids
+            .first()
+            .map(String::as_str)
+            .unwrap_or(""),
         &session.security_level,
         requested_knowledge_base_id,
         raw_path,
@@ -3477,7 +3527,11 @@ pub(crate) fn execute_read_path(
     let resolved = match crate::fs_guard::resolve_agent_fs_target(
         &context.snapshot.knowledge_bases,
         &session.knowledge_base_ids,
-        session.knowledge_base_ids.first().map(String::as_str).unwrap_or(""),
+        session
+            .knowledge_base_ids
+            .first()
+            .map(String::as_str)
+            .unwrap_or(""),
         &session.security_level,
         requested_knowledge_base_id,
         raw_path,
@@ -3647,7 +3701,11 @@ fn document_id_for_read_path(
     let scoped_ids: Vec<&str> = match requested_knowledge_base_id {
         Some(id) if session.knowledge_base_ids.iter().any(|item| item == id) => vec![id],
         Some(_) => return None,
-        None => session.knowledge_base_ids.iter().map(String::as_str).collect(),
+        None => session
+            .knowledge_base_ids
+            .iter()
+            .map(String::as_str)
+            .collect(),
     };
 
     for knowledge_base_id in scoped_ids {
@@ -3670,17 +3728,10 @@ fn document_id_for_read_path(
             };
             relative.to_string_lossy().replace('\\', "/")
         } else {
-            raw_path
-                .trim()
-                .trim_start_matches("./")
-                .replace('\\', "/")
+            raw_path.trim().trim_start_matches("./").replace('\\', "/")
         };
 
-        if relative_path.is_empty()
-            || relative_path
-                .split('/')
-                .any(|component| component == "..")
-        {
+        if relative_path.is_empty() || relative_path.split('/').any(|component| component == "..") {
             continue;
         }
 

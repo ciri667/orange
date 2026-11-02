@@ -76,24 +76,38 @@ impl ToolRegistry {
         registry
     }
 
-    /** 子 Agent 只读闭集：search/read/list，不含 task/edit/write/run。 */
+    /** 子 Agent 只读闭集：search/read/list，不含 task/edit/write/exec/browser 变更/MCP。 */
     pub fn for_subagent() -> Self {
         Self::for_subagent_tools(&["search", "read", "list"])
     }
 
-    /** 按角色白名单构造子 Agent 工具集；未知名忽略，task/run 永远不会注册。 */
+    /** 按角色白名单构造子 Agent 工具集；未知名字忽略，task/exec/browser 变更/MCP 永远不会注册。 */
     pub fn for_subagent_tools(names: &[impl AsRef<str>]) -> Self {
+        let names: Vec<&str> = names.iter().map(AsRef::as_ref).collect();
         let mut tools: Vec<Box<dyn AgentTool>> = Vec::new();
-        for name in names {
-            match name.as_ref() {
-                "search" => tools.push(Box::new(SearchNotesTool)),
-                "read" => tools.push(Box::new(ReadFileTool)),
-                "list" => tools.push(Box::new(ListTreeTool)),
-                "edit" => tools.push(Box::new(ProposeFileChangeTool)),
-                "write" => tools.push(Box::new(CreateFileDraftTool)),
+        let mut external_read = false;
+        // web 依赖 search/read 两个入口：只声明 web 时补齐它们，声明 search 不会自动获得 web。
+        if names.contains(&"web") {
+            external_read = true;
+            for name in ["search", "read"] {
+                if !names.contains(&name) {
+                    tools.push(new_tool(name));
+                }
+            }
+        }
+        for name in &names {
+            match *name {
+                "search" | "read" | "list" | "edit" | "write" => tools.push(new_tool(name)),
+                "browser-read" => {
+                    external_read = true;
+                    tools.push(Box::new(BrowserTool));
+                }
                 _ => {}
             }
         }
+        // 去重并保持稳定顺序，避免同一工具因 web 补齐被注册两次。
+        let mut seen = std::collections::HashSet::new();
+        tools.retain(|tool| seen.insert(tool.name()));
         if tools.is_empty() {
             return Self::for_subagent();
         }
@@ -102,7 +116,7 @@ impl ToolRegistry {
             subagent: true,
             manage_files: true,
             external_tools: false,
-            external_read: false,
+            external_read,
         }
     }
 
@@ -153,6 +167,12 @@ impl ToolRegistry {
     #[cfg(test)]
     pub fn tool_names(&self) -> Vec<&'static str> {
         self.tools.iter().map(|tool| tool.name()).collect()
+    }
+
+    /** 父会话没有外部读取权限时，子级 schema 也不能宣称 web / 浏览器只读能力。 */
+    pub fn disable_external_read(&mut self) {
+        self.external_read = false;
+        self.tools.retain(|tool| tool.name() != "browser");
     }
 
     /** 按名称执行工具，未知工具会被显式拒绝且不会修改工作台快照。 */
@@ -461,6 +481,18 @@ pub(crate) fn description_for(tool: &dyn AgentTool, external: bool) -> String {
                 "",
             ),
         _ => text.to_owned(),
+    }
+}
+
+/** 构造子 Agent 白名单里的单个工具；调用方已过滤未知名字。 */
+fn new_tool(name: &str) -> Box<dyn AgentTool> {
+    match name {
+        "search" => Box::new(SearchNotesTool),
+        "read" => Box::new(ReadFileTool),
+        "list" => Box::new(ListTreeTool),
+        "edit" => Box::new(ProposeFileChangeTool),
+        "write" => Box::new(CreateFileDraftTool),
+        _ => unreachable!("unknown subagent tool {name}"),
     }
 }
 

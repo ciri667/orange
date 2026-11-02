@@ -95,7 +95,10 @@ pub(super) fn is_parallelizable_task(args: &Value) -> bool {
     let Ok(parsed) = parse_task_args(args) else {
         return false;
     };
-    !parsed.background && !parsed.agent.writable()
+    !parsed.background
+        && !parsed.agent.writable()
+        // 多个子 Agent 共用同一浏览器控制权，不能并行抢快照或接管。
+        && !parsed.agent.tools.iter().any(|tool| tool == "browser-read")
 }
 
 /** 规划模式遇到 writable 角色时返回拒绝文案，其余情况返回 None。 */
@@ -129,18 +132,50 @@ pub(super) async fn run_one_shot(mut params: SubagentRunParams<'_>) -> ToolOutco
         Err(message) => return failed_outcome(params.args, &message, None),
     };
 
-    let parent=&params.snapshot.sessions[params.session_index];
-    parsed.parent_session_id=parent.id.clone(); parsed.permission_version=parent.permission_version;
-    if let Err(e)=crate::operation_approval::check_current(params.app,parent) { return failed_outcome(params.args,&e,Some(&parsed.task_id)); }
+    let parent = &params.snapshot.sessions[params.session_index];
+    parsed.parent_session_id = parent.id.clone();
+    parsed.permission_version = parent.permission_version;
+    if let Err(e) = crate::operation_approval::check_current(params.app, parent) {
+        return failed_outcome(params.args, &e, Some(&parsed.task_id));
+    }
     if parsed.agent.writable() {
-        if parent.im_identity.is_some() { return failed_outcome(params.args,"IM 不开放 writer 变更集；请使用原身份绑定的工作区文本草稿流程。",Some(&parsed.task_id)); }
-        if let Err(e)=crate::permissions::ensure(parent,crate::permissions::Operation::ProposeText) { return failed_outcome(params.args,&e,Some(&parsed.task_id)); }
+        if parent.im_identity.is_some() {
+            return failed_outcome(
+                params.args,
+                "IM 不开放 writer 变更集；请使用原身份绑定的工作区文本草稿流程。",
+                Some(&parsed.task_id),
+            );
+        }
+        if let Err(e) =
+            crate::permissions::ensure(parent, crate::permissions::Operation::ProposeText)
+        {
+            return failed_outcome(params.args, &e, Some(&parsed.task_id));
+        }
     }
     if parsed.resume {
-        let meta=storage::load_agent_session_transcript(params.app,&format!("{}{META_SUFFIX}",parsed.task_id)).ok().flatten();
-        let valid=meta.as_ref().and_then(|v|v.first()).and_then(|v|v.as_array()).and_then(|v|v.first()).is_some_and(|m|
-            m["parentSessionId"]==parent.id && m["permissionVersion"]==parent.permission_version && m["agent"]==parsed.agent.name);
-        if !valid { return failed_outcome(params.args,"子任务所属会话、权限版本或角色已变化，不能复用旧上下文。",Some(&parsed.task_id)); }
+        let meta = storage::load_agent_session_transcript(
+            params.app,
+            &format!("{}{META_SUFFIX}", parsed.task_id),
+        )
+        .ok()
+        .flatten();
+        let valid = meta
+            .as_ref()
+            .and_then(|v| v.first())
+            .and_then(|v| v.as_array())
+            .and_then(|v| v.first())
+            .is_some_and(|m| {
+                m["parentSessionId"] == parent.id
+                    && m["permissionVersion"] == parent.permission_version
+                    && m["agent"] == parsed.agent.name
+            });
+        if !valid {
+            return failed_outcome(
+                params.args,
+                "子任务所属会话、权限版本或角色已变化，不能复用旧上下文。",
+                Some(&parsed.task_id),
+            );
+        }
     }
     if params.parent_depth >= MAX_SUBAGENT_DEPTH {
         return failed_outcome(
@@ -348,8 +383,29 @@ async fn run_nested_loop(
         model_messages.push(json!({ "role": "user", "content": parsed.prompt }));
     }
 
-    let allowed=parsed.agent.tools.iter().filter(|name| !matches!(name.as_str(),"edit"|"write") || crate::permissions::ensure(&params.snapshot.sessions[params.session_index],crate::permissions::Operation::ProposeText).is_ok()).collect::<Vec<_>>();
-    let registry = ToolRegistry::for_subagent_tools(&allowed);
+    let allowed = parsed
+        .agent
+        .tools
+        .iter()
+        .filter(|name| {
+            !matches!(name.as_str(), "edit" | "write")
+                || crate::permissions::ensure(
+                    &params.snapshot.sessions[params.session_index],
+                    crate::permissions::Operation::ProposeText,
+                )
+                .is_ok()
+        })
+        .collect::<Vec<_>>();
+    let mut registry = ToolRegistry::for_subagent_tools(&allowed);
+    if matches!(
+        crate::permissions::decide(
+            &params.snapshot.sessions[params.session_index],
+            crate::permissions::Operation::ExternalRead
+        ),
+        crate::permissions::Decision::Deny(_)
+    ) {
+        registry.disable_external_read();
+    }
     let tool_schemas = registry.schemas();
     // 工具附件与父 Agent 共用同一目录，请求前才能把图片引用展开为真实像素。
     let image_root = storage::conversation_attachments_root(params.app)?;
@@ -366,7 +422,13 @@ async fn run_nested_loop(
     }
 
     for _ in 0..MAX_INNER_TOOL_ROUNDS {
-        if params.cancel.is_aborted() || crate::operation_approval::check_current(params.app,&params.snapshot.sessions[params.session_index]).is_err() {
+        if params.cancel.is_aborted()
+            || crate::operation_approval::check_current(
+                params.app,
+                &params.snapshot.sessions[params.session_index],
+            )
+            .is_err()
+        {
             persist_child(params.app, parsed, &model_messages);
             return Ok(aborted_outcome(params.args, Some(&parsed.task_id)));
         }
@@ -500,17 +562,87 @@ async fn run_nested_loop(
                     trace_app,
                 )
             });
-            let (canonical,canonical_args)=crate::agent_tools::remap_tool_call(&tool_name,parse_tool_args(&model_tool_call));
-            let gate=if crate::permissions::tool_operation(canonical,&canonical_args)==crate::permissions::Operation::ExternalTool {
-                Ok(crate::permissions::Decision::Deny("子 Agent 不提供外部服务、命令、浏览器或 MCP。"))
-            } else { crate::agent_tools::external::decision(params.snapshot,params.session_index,canonical,&canonical_args) };
-            let permission=match gate {
-                Ok(decision)=>crate::operation_approval::authorize(params.app,&params.snapshot.sessions[params.session_index],canonical,&canonical_args,decision,params.cancel).await,
-                Err(e)=>Err(e),
+            let (canonical, raw_args) =
+                crate::agent_tools::remap_tool_call(&tool_name, parse_tool_args(&model_tool_call));
+            // 浏览器是异步 CDP 操作，必须像主循环一样先准备审批上下文，再交给 Runtime 派发。
+            let preparation = if canonical == "browser" {
+                crate::browser::prepare_operation_approval(
+                    params.app,
+                    &params.snapshot.sessions[params.session_index],
+                    &raw_args,
+                )
+                .await
+            } else {
+                Ok(raw_args.clone())
             };
-            let previous=params.snapshot.sessions[params.session_index].pending_change_set.as_ref().map(|s|s.operations.iter().map(|o|o.id.clone()).collect::<Vec<_>>()).unwrap_or_default();
-            let mut tool_outcome = if let Err(e)=&permission {
-                super::external_dispatch::failed(canonical,&canonical_args,e)
+            let (canonical_args, preparation_error) = match preparation {
+                Ok(args) => (args, None),
+                Err(error) => (raw_args, Some(error)),
+            };
+            let gate = if let Some(error) = preparation_error {
+                Err(error)
+            } else if crate::permissions::tool_operation(canonical, &canonical_args)
+                == crate::permissions::Operation::ExternalTool
+            {
+                Ok(crate::permissions::Decision::Deny(
+                    "子 Agent 不提供命令、浏览器变更或 MCP；只读联网与浏览器快照按角色声明。",
+                ))
+            } else {
+                crate::agent_tools::external::decision(
+                    params.snapshot,
+                    params.session_index,
+                    canonical,
+                    &canonical_args,
+                )
+            };
+            let permission = match gate {
+                Ok(decision) => {
+                    crate::operation_approval::authorize(
+                        params.app,
+                        &params.snapshot.sessions[params.session_index],
+                        canonical,
+                        &canonical_args,
+                        decision,
+                        params.cancel,
+                    )
+                    .await
+                }
+                Err(e) => Err(e),
+            };
+            let previous = params.snapshot.sessions[params.session_index]
+                .pending_change_set
+                .as_ref()
+                .map(|s| {
+                    s.operations
+                        .iter()
+                        .map(|o| o.id.clone())
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default();
+            let mut tool_outcome = if let Err(e) = &permission {
+                super::external_dispatch::failed(canonical, &canonical_args, e)
+            } else if canonical == "browser" {
+                let outcome = crate::browser::execute_run_request(
+                    params.app,
+                    &params.snapshot.sessions[params.session_index],
+                    &canonical_args,
+                    params.cancel,
+                    permission.as_ref().unwrap(),
+                )
+                .await;
+                let (success, summary, payload, citations, audit_fragment) = outcome.into_parts();
+                ToolOutcome {
+                    call: AgentToolCall {
+                        id: create_id("tool"),
+                        name: canonical.to_owned(),
+                        status: if success { "completed" } else { "failed" }.to_owned(),
+                        summary,
+                        args: canonical_args.clone(),
+                    },
+                    payload,
+                    citations,
+                    audit_fragment,
+                }
             } else {
                 let mut tool_context = AgentToolContext {
                     app: Some(params.app),
@@ -520,13 +652,31 @@ async fn run_nested_loop(
                     supports_vision: params.supports_vision,
                     web_override: None,
                 };
-                registry.execute_with_permit(&mut tool_context, canonical, canonical_args.clone(), permission.as_ref().ok())
+                registry.execute_with_permit(
+                    &mut tool_context,
+                    canonical,
+                    canonical_args.clone(),
+                    permission.as_ref().ok(),
+                )
             };
-            if !params.cancel.is_aborted() && matches!(canonical,"edit"|"write") && tool_outcome.call.status=="completed" {
-                match crate::file_changes::auto_apply_new(params.app,params.snapshot,params.session_index,&previous) {
-                    Ok(Some(ids))=> { tool_outcome.payload=json!({"status":"applied","operationIds":ids}); tool_outcome.call.summary="本次新文件变更已自动应用。".into(); },
-                    Err(e)=> { tool_outcome.payload["autoApplyError"]=json!(e); },
-                    _=>{},
+            if !params.cancel.is_aborted()
+                && matches!(canonical, "edit" | "write")
+                && tool_outcome.call.status == "completed"
+            {
+                match crate::file_changes::auto_apply_new(
+                    params.app,
+                    params.snapshot,
+                    params.session_index,
+                    &previous,
+                ) {
+                    Ok(Some(ids)) => {
+                        tool_outcome.payload = json!({"status":"applied","operationIds":ids});
+                        tool_outcome.call.summary = "本次新文件变更已自动应用。".into();
+                    }
+                    Err(e) => {
+                        tool_outcome.payload["autoApplyError"] = json!(e);
+                    }
+                    _ => {}
                 }
             }
             nested_steps = nested_steps.saturating_add(1);
@@ -630,7 +780,8 @@ fn parse_task_args(args: &Value) -> Result<ParsedTask, String> {
         task_id,
         resume,
         background,
-        parent_session_id: String::new(), permission_version: 0,
+        parent_session_id: String::new(),
+        permission_version: 0,
     })
 }
 
@@ -732,7 +883,9 @@ fn pending_change_to_operation(change: &ProposedChange) -> ProposedFileOperation
         binary: false,
         byte_size: change.next.len(),
         staged_path: None,
-        status: "pending".into(), error: None, affected_files: 1,
+        status: "pending".into(),
+        error: None,
+        affected_files: 1,
     }
 }
 
@@ -1160,7 +1313,7 @@ mod tests {
                 pending_change: None,
                 pending_change_set: None,
                 security_level: "basic".to_owned(),
-            permission_version: 0,
+                permission_version: 0,
                 plan_mode: false,
                 context_summary: None,
                 created_at: "刚刚".to_owned(),

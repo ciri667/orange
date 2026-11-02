@@ -40,14 +40,14 @@ Agent 可以先提出编号执行计划，经用户确认后退出 Plan 开始�
 
 | 名称 | 能力 |
 | --- | --- |
-| `explore` | 快速只读侦察 |
-| `researcher` | 更深入的只读调研 |
-| `writer` | 可产生 edit/write 的待确认 diff，合并回父级变更集 |
+| `explore` | 快速只读侦察，含联网搜索 |
+| `researcher` | 更深入的只读调研，含联网搜索与浏览器只读快照 |
+| `writer` | 可产生 edit/write 的待确认 diff，合并回父级变更集；联网仅用于查证 |
 
 要点：
 
 - 子 Agent **看不到**当前对话，所以交给它的指令必须自包含。
-- 子工具与父权限取交集，writer 可生成多文件变更；不提供 exec/browser/MCP 或递归委派。
+- 子工具与父权限取交集，writer 可生成多文件变更；不提供 exec、browser 变更或 MCP，也不允许递归委派。只读联网与浏览器快照由角色或 `~/.orange/agents` 中的 `tools` 声明，可选值为 search/read/list/edit/write/web/browser-read。
 - 续跑绑定父会话、角色和权限版本，收权或跨会话后不能复用旧上下文。
 - 最多 3 个只读任务可以并行执行。
 - `background=true` 只用于独立的只读工作，完成时会通知你。
