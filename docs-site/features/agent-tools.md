@@ -33,6 +33,8 @@ write kind=file 创建 Markdown/TXT，必须提供完整 content 与 targetPath�
 
 变更进入同一通用变更集，展示文本 diff 或源/目标、影响文件数、警告，可选择独立操作。目录包含隐藏和未索引内容；删除进入系统回收站，失败不降级为永久删除。不能操作知识库根目录、链接逃逸或重叠路径，跨卷移动明确失败并保留源。详见[文件变更与操作审批](/guide/write-safety)。
 
+工具结果只回 `changeSetId`、`operationId`、摘要和字符数，不回 `original` / `next` 全文；这样大段改写不会撑爆工具结果预算，模型仍能用 operationId 指代待审操作。
+
 ## exec
 
 参数为 command、可选 cwd 和 timeoutSeconds。默认 cwd 为当前会话第一个知识库根目录，失效时报错。Windows 优先 PowerShell 7，回退系统 PowerShell；macOS/Linux 优先 Bash，回退 /bin/sh。实际 Shell 会在上下文中声明。

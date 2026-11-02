@@ -128,6 +128,35 @@ pub fn append(snapshot: &mut WorkspaceSnapshot, index: usize, operation: Propose
     Ok(())
 }
 
+/** 工具结果里的单条变更摘要：只回定位信息和长度，不回 original/next 全文。 */
+pub(crate) fn compact_operation_payload(op: &ProposedFileOperation) -> Value {
+    json!({
+        "id": &op.id,
+        "operation": &op.operation,
+        "sourcePath": op.source_path,
+        "targetPath": &op.target_path,
+        "fileType": &op.file_type,
+        "binary": op.binary,
+        "byteSize": op.byte_size,
+        "affectedFiles": op.affected_files,
+        "originalChars": op.original.as_deref().map(|value| value.chars().count()).unwrap_or(0),
+        "nextChars": op.next.as_deref().map(|value| value.chars().count()).unwrap_or(0),
+    })
+}
+
+/** 变更集对模型的可读摘要；全量正文只留在 UI 审阅 payload 里。 */
+pub(crate) fn compact_change_set_payload(set: &ProposedChangeSet) -> Value {
+    json!({
+        "changeSetId": &set.id,
+        "status": &set.status,
+        "summary": &set.summary,
+        "warnings": &set.warnings,
+        "operationCount": set.operations.len(),
+        "operations": set.operations.iter().map(compact_operation_payload).collect::<Vec<_>>(),
+        "hint": "变更处于待审阅状态，用户确认后才会写入磁盘；不要重复提交同一变更。",
+    })
+}
+
 /** 通用 edit/write，文本编辑仅接受 Markdown/TXT，管理操作可覆盖二进制和完整目录。 */
 pub fn propose(context: &mut AgentToolContext<'_>, name: &str, args: &Value) -> ToolExecutionResult {
     if let Err(e) = crate::permissions::ensure(&context.snapshot.sessions[context.session_index], crate::permissions::tool_operation(name,args)) {
@@ -138,7 +167,17 @@ pub fn propose(context: &mut AgentToolContext<'_>, name: &str, args: &Value) -> 
         append(context.snapshot, context.session_index, op)?;
         Ok(receipt)
     }) {
-        Ok(receipt) => ToolExecutionResult { success: true, summary: "已生成待审文件变更。".into(), payload: json!({"changeSet": context.snapshot.sessions[context.session_index].pending_change_set, "receipt": receipt}), citations: vec![], audit_fragment: None },
+        Ok(receipt) => {
+            let payload = match context.snapshot.sessions[context.session_index].pending_change_set.as_ref() {
+                Some(set) => {
+                    let mut payload = compact_change_set_payload(set);
+                    payload["receipt"] = receipt;
+                    payload
+                }
+                None => json!({ "receipt": receipt }),
+            };
+            ToolExecutionResult { success: true, summary: "已生成待审文件变更。".into(), payload, citations: vec![], audit_fragment: None }
+        },
         Err(e) => ToolExecutionResult::failed(&e),
     }
 }
@@ -485,5 +524,25 @@ mod tests {
         migrate_legacy_pending(&mut snapshot.sessions[0],&snapshot.knowledge_bases);
         assert_eq!(snapshot.sessions[0].pending_change_set.as_ref().unwrap().id,set.id);
         assert_eq!(snapshot.sessions[0].pending_change.as_ref().unwrap().status,"migrated");
+    }
+
+    #[test]
+    fn compact_change_set_payload_keeps_ids_without_full_text() {
+        let set: ProposedChangeSet = serde_json::from_value(json!({
+            "id":"set-1","executionId":"agent-direct","skillId":"agent","status":"pending",
+            "summary":"变更","warnings":["注意"],"createdAt":"2026/10/26 10:00",
+            "operations":[{
+                "id":"op-1","knowledgeBaseId":"kb-a","operation":"replace","targetPath":"note.md",
+                "fileType":"markdown","originalHash":"hash","original":"原".repeat(9000),"next":"新",
+                "selected":true,"binary":false,"byteSize":0,"status":"pending","affectedFiles":1
+            }]
+        })).unwrap();
+        let payload = compact_change_set_payload(&set);
+        assert_eq!(payload["changeSetId"], "set-1");
+        assert_eq!(payload["operationCount"], 1);
+        assert_eq!(payload["operations"][0]["id"], "op-1");
+        assert!(payload["operations"][0].get("original").is_none());
+        assert!(payload["operations"][0].get("next").is_none());
+        assert_eq!(payload["operations"][0]["originalChars"], 9000);
     }
 }

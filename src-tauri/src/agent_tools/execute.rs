@@ -3318,7 +3318,11 @@ pub(crate) fn execute_create_folder(
     let resolved = match crate::fs_guard::resolve_agent_fs_target(
         &context.snapshot.knowledge_bases,
         &session.knowledge_base_ids,
-        session.knowledge_base_ids.first().map(String::as_str).unwrap_or(""),
+        session
+            .knowledge_base_ids
+            .first()
+            .map(String::as_str)
+            .unwrap_or(""),
         &session.security_level,
         requested_knowledge_base_id,
         raw_target_path,
@@ -3345,7 +3349,9 @@ pub(crate) fn execute_create_folder(
         binary: false,
         byte_size: 0,
         staged_path: None,
-        status: "pending".into(), error: None, affected_files: 1,
+        status: "pending".into(),
+        error: None,
+        affected_files: 1,
     };
 
     let summary = format!(
@@ -3376,7 +3382,11 @@ pub(crate) fn execute_create_folder(
     ToolExecutionResult {
         success: true,
         summary: format!("已生成待确认的文件夹变更：{}", resolved.stored_path),
-        payload: json!({ "changeSet": &change_set, "operation": &operation }),
+        payload: {
+            let mut payload = crate::file_changes::compact_change_set_payload(&change_set);
+            payload["operation"] = crate::file_changes::compact_operation_payload(&operation);
+            payload
+        },
         citations: Vec::new(),
         audit_fragment: Some(format!(
             "create_folder knowledge_base_id={} target_path={}",
