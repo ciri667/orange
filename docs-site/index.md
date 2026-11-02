@@ -30,8 +30,8 @@ features:
     title: 写入先看 diff
     details: Agent 的任何文件改动都先生成可审阅的 diff，经路径校验、内容 hash 校验和你的确认后才原子写入。
   - icon: 🧰
-    title: 七个工具的闭集
-    details: search / read / list / edit / write / run / task 构成固定的工具集，按会话权限动态注册，高权限工具对模型直接不可见。
+    title: 八个工具的闭集
+    details: search / read / list / edit / write / exec / browser / task 构成固定的工具集，按会话权限动态注册，高权限工具对模型直接不可见。
   - icon: 💬
     title: 从 IM 里用
     details: 可选接入飞书 / Lark、QQ、个人微信、企业微信，在聊天里发起检索或写入请求，写入变更仍需审批。

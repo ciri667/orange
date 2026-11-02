@@ -27,7 +27,7 @@ orange/
 | `commands/` | Tauri IPC 适配，按领域分组（workspace、knowledge、notes、documents、history、sessions、settings、skills、im、agent、builtin_commands、logs、browser） |
 | `builtin_commands.rs` | 内置斜杠命令的**唯一注册表** |
 | `storage/` | SQLite、FTS、文件扫描与写入、keyring、文档历史、预览抽取 |
-| `agent_tools/` | 七个工具的闭集（types / registry / execute） |
+| `agent_tools/` | 八个工具的闭集（types / registry / execute / external） |
 | `browser/` | 受控 Chromium 会话（manager / policy / types / fetcher） |
 | `runtime/` | Agent 循环、DSML 解析、子 Agent 派生 |
 | `domain/` | IPC 与持久化 DTO |
@@ -37,7 +37,7 @@ orange/
 
 ### 几条硬约束
 
-- **工具闭集固定为七个**：`search` / `read` / `list` / `edit` / `write` / `run` / `task`。不要加第八个工具名，新能力通过扩展现有工具的参数实现。
+- **工具闭集固定为八个**：`search` / `read` / `list` / `edit` / `write` / `exec` / `browser` / `task`。不要加第九个工具名，新能力通过扩展现有工具的参数实现。
 - **`task` 是唯一的编排工具**，由 runtime 分发，不走 `AgentTool::execute`。
 - **浏览器只能通过 `run` + `kind: "browser"` 访问**，该分支在 `runtime/mod.rs` 里异步预分发。
 - **Agent 文件改动必须保持 diff → 确认 → hash 校验 → 原子写入**。
