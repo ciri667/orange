@@ -30,7 +30,7 @@ export const SESSION_LIST_FACETS: Array<{ id: SessionListFacet; label: string }>
   { id: "pending", label: "待确认" },
   { id: "local", label: "本地" },
   { id: "im", label: "即时通讯" },
-  { id: "schedule", label: "定时" },
+  { id: "schedule", label: "任务" },
   { id: "archived", label: "已归档" },
 ];
 
@@ -57,7 +57,7 @@ export function sessionSubtitle(session: AgentSession, knowledgeBases: Knowledge
 
   const knowledgeBaseLabel = getSessionKnowledgeBaseLabel(session, knowledgeBases);
   if (session.scheduleIdentity) {
-    return `定时任务 · ${knowledgeBaseLabel}`;
+    return `任务 · ${knowledgeBaseLabel}`;
   }
 
   return knowledgeBaseLabel;

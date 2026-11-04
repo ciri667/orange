@@ -1,4 +1,4 @@
-import { ChevronDown, Globe, MessageSquare, PanelRightClose, PanelRightOpen, Plus, TerminalSquare, X } from "lucide-react";
+import { CalendarClock, ChevronDown, Globe, MessageSquare, PanelRightClose, PanelRightOpen, Plus, TerminalSquare, X } from "lucide-react";
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import { Button } from "../shared/Button";
 import { Menu, MenuItem, MenuPanel } from "../shared/Menu";
@@ -7,7 +7,14 @@ import type { RightPanelTab } from "../shared/types";
 import { rightTabId } from "./rightPanelModel";
 
 export interface RightPanelTabItem { tab: RightPanelTab; title: string; status?: string }
-const ICONS = { session: MessageSquare, terminal: TerminalSquare, browser: Globe };
+const ICONS: Record<RightPanelTab["kind"], typeof MessageSquare> = {
+  session: MessageSquare,
+  task: CalendarClock,
+  terminal: TerminalSquare,
+  browser: Globe,
+};
+/** 右侧「新建内容」菜单只创建会话/终端/浏览器；任务从左侧任务面板新建。 */
+export type RightPanelCreateKind = "session" | "terminal" | "browser";
 
 /** 三类内容共用页签 chrome，内容实例由各领域维护。 */
 export function RightPanel({ items, activeId, open, onExpand, onCollapse, onSelect, onClose, onCreate, onReorder, browserEnabled, children }: {
@@ -18,7 +25,7 @@ export function RightPanel({ items, activeId, open, onExpand, onCollapse, onSele
   onCollapse: () => void;
   onSelect: (tab: RightPanelTab) => void;
   onClose: (tab: RightPanelTab) => void;
-  onCreate: (kind: RightPanelTab["kind"]) => void;
+  onCreate: (kind: RightPanelCreateKind) => void;
   onReorder: (source: string, target: string) => void;
   browserEnabled: boolean;
   children: ReactNode;
@@ -30,7 +37,7 @@ export function RightPanel({ items, activeId, open, onExpand, onCollapse, onSele
     const index = items.findIndex((item) => rightTabId(item.tab) === activeId);
     strip.current?.children[index]?.scrollIntoView({ block: "nearest", inline: "nearest" });
   }, [activeId, items.length, open]);
-  const create = (kind: RightPanelTab["kind"]) => { setNewOpen(false); onCreate(kind); };
+  const create = (kind: RightPanelCreateKind) => { setNewOpen(false); onCreate(kind); };
   const newMenu = <Menu open={newOpen} onClose={() => setNewOpen(false)}>
     <Button variant="icon" title="新建内容" aria-label="新建内容" aria-haspopup="menu" aria-expanded={newOpen} onClick={() => setNewOpen(!newOpen)}><Plus size={16} /></Button>
     {newOpen && <MenuPanel>

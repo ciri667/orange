@@ -8,6 +8,7 @@ import type { BrowserWorkspace } from "../browser/useBrowserWorkspace";
 import { resolveExternalLinkTarget } from "../browser/linkRouting";
 import type { Terminals } from "../terminal/useTerminals";
 import type { RightPanelTabs } from "./useRightPanelTabs";
+import type { RightPanelCreateKind } from "./RightPanel";
 import { browserTabToFollow, rightTabId } from "./rightPanelModel";
 
 interface Options {
@@ -71,7 +72,7 @@ export function useRightPanelActions(options: Options) {
     } catch { /* 错误在同一浏览器占位页展示，可原地重试。 */ }
     finally { browserCreating.current.delete(pendingId); }
   };
-  const create = (kind: RightPanelTab["kind"]) => {
+  const create = (kind: RightPanelCreateKind) => {
     const { snapshot, terminals, panel, reveal, createSession } = current.current;
     if (kind === "session") { reveal(); void createSession(); }
     else if (kind === "browser") void createBrowser();

@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { AlertCircle, Clock, Database, Plus, RefreshCw, Search, Settings } from "lucide-react";
+import { AlertCircle, Database, Plus, RefreshCw, Search, Settings } from "lucide-react";
 import { SessionList } from "../agent/SessionList";
 import { FileTree } from "./FileTree";
 import { Button } from "../shared/Button";
@@ -9,7 +9,9 @@ import { OperationNotice } from "../shared/OperationNotice";
 import { OverflowTooltipText } from "../shared/OverflowTooltipText";
 import { SegmentedControl, SegmentedControlItem } from "../shared/SegmentedControl";
 import { focusShellClassName, sectionLabelClassName } from "../shared/ui";
-import type { AgentSession, FileTreeNode, KnowledgeBase } from "../shared/types";
+import type { AgentSession, FileTreeNode, KnowledgeBase, ScheduledJob, TaskKind } from "../shared/types";
+import { TaskPanel } from "../tasks/TaskPanel";
+import { taskAttentionCount } from "../tasks/taskUtils";
 
 /** 生成单个资料库文件数量摘要，用于 tooltip，不占侧栏两行。 */
 function getKnowledgeBaseFileSummary(knowledgeBase: KnowledgeBase) {
@@ -18,8 +20,8 @@ function getKnowledgeBaseFileSummary(knowledgeBase: KnowledgeBase) {
   return `${fileCount} 个文件 · ${knowledgeBase.noteCount} 个 Markdown`;
 }
 
-/** 侧栏下半区一次只展开一块，避免会话列表和文件树抢高度。 */
-export type SidebarPane = "sessions" | "files";
+/** 侧栏一次只展开一块，避免会话列表、文件树和任务列表抢高度。 */
+export type SidebarPane = "sessions" | "files" | "tasks";
 
 /** 左侧导航：会话和文件分栏切换，同一时间只展开一块。 */
 export function KnowledgeBaseSidebar({
@@ -55,8 +57,14 @@ export function KnowledgeBaseSidebar({
   onCreateProjectInstruction,
   onRefreshKnowledgeBase,
   onCreateSession,
-  onOpenSchedules,
-  schedulesActive = false,
+  tasks = [],
+  tasksLoading = false,
+  tasksError = "",
+  activeTaskId,
+  onOpenTask,
+  onCreateTask,
+  onCreateTaskFromSession,
+  onRetryTasks,
   onOpenSettings,
   onSelectSession,
   onDeleteSession,
@@ -99,8 +107,14 @@ export function KnowledgeBaseSidebar({
   onCreateProjectInstruction: () => void;
   onRefreshKnowledgeBase: (knowledgeBaseId: string) => void;
   onCreateSession: () => void;
-  onOpenSchedules?: () => void;
-  schedulesActive?: boolean;
+  tasks?: ScheduledJob[];
+  tasksLoading?: boolean;
+  tasksError?: string;
+  activeTaskId?: string;
+  onOpenTask?: (taskId: string) => void;
+  onCreateTask?: (kind?: TaskKind) => void;
+  onCreateTaskFromSession?: () => void;
+  onRetryTasks?: () => void;
   onOpenSettings: () => void;
   onSelectSession: (sessionId: string) => void;
   onDeleteSession: (sessionId: string) => void;
@@ -121,6 +135,7 @@ export function KnowledgeBaseSidebar({
   const sidebarPane = activePane ?? internalPane;
   const setSidebarPane = onActivePaneChange ?? setInternalPane;
   const runningSessionCount = inFlightSessionIds.length;
+  const taskBadgeCount = taskAttentionCount(tasks);
 
   return (
     <aside className={cn("sidebar", compactPreview && "is-preview")} aria-label="知识库导航">
@@ -132,17 +147,6 @@ export function KnowledgeBaseSidebar({
         <Plus size={18} />
         新对话
       </Button>
-      {onOpenSchedules ? (
-        <Button
-          variant="ghost"
-          className={cn("w-full shrink-0 justify-start gap-2 px-2.5 text-ui", schedulesActive && "bg-surface-muted text-ink-strong")}
-          onClick={onOpenSchedules}
-        >
-          <Clock size={16} />
-          定时任务
-        </Button>
-      ) : null}
-
       <SegmentedControl aria-label="侧栏内容" role="radiogroup" className="sidebar-pane-tabs flex shrink-0">
         <SegmentedControlItem
           active={sidebarPane === "sessions"}
@@ -168,9 +172,41 @@ export function KnowledgeBaseSidebar({
         >
           文件
         </SegmentedControlItem>
+        <SegmentedControlItem
+          active={sidebarPane === "tasks"}
+          role="radio"
+          aria-checked={sidebarPane === "tasks"}
+          className="flex-1"
+          onClick={() => setSidebarPane("tasks")}
+        >
+          任务
+          {taskBadgeCount > 0 ? (
+            <span className="inline-flex min-w-4 items-center justify-center rounded-full bg-danger px-1 text-[10px] font-medium leading-4 text-white">
+              {taskBadgeCount > 9 ? "9+" : taskBadgeCount}
+            </span>
+          ) : null}
+        </SegmentedControlItem>
       </SegmentedControl>
 
       <div className="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden">
+      <section
+        className={cn("flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden", sidebarPane !== "tasks" && "hidden")}
+        aria-label="任务"
+      >
+        <TaskPanel
+          tasks={tasks}
+          activeTaskId={activeTaskId}
+          isLoading={tasksLoading}
+          error={tasksError}
+          isBusy={isBusy}
+          compactPreview={compactPreview}
+          onCreateTask={(kind) => onCreateTask?.(kind)}
+          onCreateTaskFromSession={onCreateTaskFromSession}
+          onOpenTask={(taskId) => onOpenTask?.(taskId)}
+          onRetry={() => onRetryTasks?.()}
+        />
+      </section>
+
       <section
         className={cn("flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden", sidebarPane !== "sessions" && "hidden")}
         aria-label="会话"

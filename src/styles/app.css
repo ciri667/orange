@@ -170,6 +170,14 @@ button {
   cursor: pointer;
 }
 
+/* 浏览器默认给 fieldset 画 2px groove 边框；橘记的分组标题由 legend 自己承担。 */
+fieldset {
+  min-width: 0;
+  margin: 0;
+  padding: 0;
+  border: 0;
+}
+
 button:disabled,
 textarea:disabled {
   cursor: not-allowed;
@@ -501,7 +509,7 @@ select:focus-visible {
 }
 
 /* 统一内容区始终持有终端实例；hidden 必须覆盖组件本身的 flex 布局。 */
-.right-workbench[hidden], .right-session-content[hidden], .terminal-panel[hidden], .browser-panel[hidden] { display: none !important; }
+.right-workbench[hidden], .right-session-content[hidden], .right-task-content[hidden], .terminal-panel[hidden], .browser-panel[hidden] { display: none !important; }
 .right-workbench { display: flex; flex-direction: column; position: relative; min-width: 0; min-height: 0; height: 100%; background: var(--surface); }
 .right-panel-header { display: flex; align-items: center; height: 44px; flex-shrink: 0; min-width: 0; border-bottom: 1px solid var(--border); position: relative; z-index: 3; }
 .right-tab-strip { display: flex; flex: 1; min-width: 0; overflow-x: auto; scrollbar-width: thin; align-self: stretch; align-items: center; padding-left: 6px; gap: 3px; }
@@ -515,8 +523,8 @@ select:focus-visible {
 .right-tab-status { width: 5px; height: 5px; border-radius: 50%; flex-shrink: 0; background: var(--accent); }
 .right-tab-status.is-running { box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent) 18%, transparent); }
 .right-panel-tools { display: flex; align-items: center; flex-shrink: 0; padding: 0 6px; gap: 1px; background: var(--surface); }
-.right-panel-content, .right-session-content { display: flex; flex-direction: column; flex: 1; min-height: 0; min-width: 0; overflow: hidden; }
-.right-session-content > .agent-panel, .right-panel-content > .browser-panel { flex: 1; min-height: 0; }
+.right-panel-content, .right-session-content, .right-task-content { display: flex; flex-direction: column; flex: 1; min-height: 0; min-width: 0; overflow: hidden; }
+.right-session-content > .agent-panel, .right-task-content > *, .right-panel-content > .browser-panel { flex: 1; min-height: 0; }
 .right-panel-empty { display: flex; flex: 1; flex-direction: column; align-items: center; justify-content: center; gap: 12px; padding: 24px; color: var(--text-muted); font-size: 13px; }
 .right-content-rail { display: flex; flex-direction: column; align-items: center; gap: 8px; padding-top: 9px; overflow: visible; }
 .terminal-panel { display: flex; flex-direction: column; flex: 1; min-width: 0; min-height: 0; background: var(--terminal-bg); color: var(--terminal-fg); }
@@ -861,10 +869,6 @@ select:focus-visible {
   overflow: hidden;
   /* 工具栏跟随编辑区实际宽度变化，而不是跟随整个窗口的宽度。 */
   container: editor / inline-size;
-}
-
-.editor-workbench.is-schedules {
-  grid-template-rows: minmax(0, 1fr);
 }
 
 .editor-file-panel {

@@ -471,7 +471,7 @@ function SessionKnowledgeBaseChips({
 }) {
   return (
     <span className="flex min-w-0 flex-1 items-center gap-1 overflow-hidden">
-      {scheduled ? <span className="shrink-0">定时</span> : null}
+      {scheduled ? <span className="shrink-0">任务</span> : null}
       {knowledgeBases.map((knowledgeBase) => {
         const isCurrent = knowledgeBase.id === activeKnowledgeBaseId;
         const className = cn(

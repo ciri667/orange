@@ -28,14 +28,26 @@ import {
   getActiveDocument,
   getActiveNote,
 } from "../shared/selectors";
-import { listenScheduledJobUpdated, loadSessions, restoreSessionContext, saveWorkspaceEditorState } from "../shared/tauriApi";
-import { SchedulesView } from "../schedules/SchedulesView";
+import { listenScheduledJobUpdated, loadSessions, saveWorkspaceEditorState } from "../shared/tauriApi";
+import { TaskDetail } from "../tasks/TaskDetail";
+import { TaskPanel } from "../tasks/TaskPanel";
+import {
+  TaskEditorDialog,
+  draftToSchedule,
+  emptyTaskDraft,
+  taskDraftFromJob,
+  type TaskEditorDraft,
+} from "../tasks/TaskEditorDialog";
+import { taskStatus, taskStatusLabel } from "../tasks/taskUtils";
+import { useTasks } from "../tasks/useTasks";
 import type {
   AgentContextCompactionReport,
   Citation,
   DocumentHistoryTargetKind,
   EditorFileTab,
   MarkdownViewMode,
+  ScheduledJob,
+  TaskKind,
   WorkspaceEditorState,
   WorkspaceSnapshot,
 } from "../shared/types";
@@ -92,8 +104,13 @@ export function WorkspaceShell() {
   const [isScopeSelectorOpen, setIsScopeSelectorOpen] = useState(false);
   /** 设置抽屉打开状态，打开时会刷新非阻塞诊断日志。 */
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
-  /** 主区切到定时任务视图时隐藏编辑器。 */
-  const [isSchedulesOpen, setIsSchedulesOpen] = useState(false);
+  /** 任务新建/编辑弹窗；任务详情本身在右侧页签中打开。 */
+  const [taskEditor, setTaskEditor] = useState<{
+    mode: "create" | "edit";
+    taskId?: string;
+    draft: TaskEditorDraft;
+  } | null>(null);
+  const [taskEditorError, setTaskEditorError] = useState("");
   /** 全局忙碌状态覆盖文件、会话、设置和日志刷新操作；用计数避免切会话清掉 Agent 回合。 */
   const [isBusy, setIsBusy] = useState(false);
   const busyCountRef = useRef(0);
@@ -201,7 +218,22 @@ export function WorkspaceShell() {
   const openLinksInEmbedded = userSettings?.browser?.openLinksInEmbedded ?? true;
   const setRightOpen = useCallback((open: boolean) => { setAgentOpen(open); if (!open && compactView.singlePane) compactView.showPane("editor"); }, [setAgentOpen, compactView.singlePane, compactView.showPane]);
   const rightTabs = useRightPanelTabs(snapshot, setSnapshot, setRightOpen);
+  const tasksState = useTasks();
   const selectedRightTab = rightTabs.tabs.find((tab) => rightTabId(tab) === rightTabs.activeId);
+  const activeTaskId = selectedRightTab?.kind === "task" ? selectedRightTab.id : undefined;
+
+  // 任务被删除后关闭对应页签；首次加载完成前不清理，避免把恢复中的页签误关。
+  useEffect(() => {
+    if (tasksState.isLoading) {
+      return;
+    }
+    const validTaskIds = new Set(tasksState.tasks.map((task) => task.id));
+    for (const tab of rightTabs.tabs) {
+      if (tab.kind === "task" && !validTaskIds.has(tab.id)) {
+        rightTabs.removeTab(rightTabId(tab));
+      }
+    }
+  }, [tasksState.tasks, tasksState.isLoading, rightTabs.tabs, rightTabs.removeTab]);
   const rightVisible = agentOpen && (!compactView.singlePane || compactView.pane === "agent");
   const browserWorkspace = useBrowserWorkspace(selectedRightTab?.kind === "browser" ? selectedRightTab.id : null, rightVisible && browserEnabled && selectedRightTab?.kind === "browser");
   const terminals = useTerminals();
@@ -212,11 +244,13 @@ export function WorkspaceShell() {
     void listenScheduledJobUpdated((payload) => {
       const status = payload.job.lastStatus;
       if (status === "ok") {
-        setNotice(`定时任务「${payload.job.name}」已完成。`);
+        setNotice(`任务「${payload.job.name}」已完成。`);
       } else if (status === "failed" || status === "blocked") {
         setNotice(
-          `定时任务「${payload.job.name}」未成功${payload.job.lastError ? `：${payload.job.lastError}` : "。"}`,
+          `任务「${payload.job.name}」未成功${payload.job.lastError ? `：${payload.job.lastError}` : "。"}`,
         );
+      } else if (status === "skipped") {
+        setNotice(`任务「${payload.job.name}」已错过，可在任务面板手动补做。`);
       }
       setSnapshot((current) => {
         if (!current || !payload.sessionId) {
@@ -459,7 +493,6 @@ export function WorkspaceShell() {
     const document = currentSnapshot.documents.find((item) => item.id === citation.noteId);
     if (document) {
       compactView.showPane("editor");
-      setIsSchedulesOpen(false);
       setDocumentFocus({
         documentId: document.id,
         page: citation.page,
@@ -472,7 +505,6 @@ export function WorkspaceShell() {
     const note = currentSnapshot.notes.find((item) => item.id === citation.noteId);
     if (note) {
       compactView.showPane("editor");
-      setIsSchedulesOpen(false);
       handleSelectNote(note.id);
       return;
     }
@@ -731,6 +763,132 @@ export function WorkspaceShell() {
     await confirmation.onConfirm();
   }
 
+  /** 任务详情和会话一样走右侧内容区页签，不占用中间编辑器。 */
+  function handleOpenTask(taskId: string) {
+    setRegionActiveItem("sidebar", "tasks");
+    rightTabs.openTab({ kind: "task", id: taskId });
+    revealRightPanel();
+  }
+
+  /** 打开新建任务弹窗；kind 用于从“日程/定时”快捷入口预选类型。 */
+  function handleOpenCreateTask(kind: TaskKind = "agenda") {
+    setTaskEditorError("");
+    setTaskEditor({
+      mode: "create",
+      draft: emptyTaskDraft(activeKnowledgeBase.id, kind),
+    });
+  }
+
+  /** 把当前会话最后一条用户消息转成任务草稿。 */
+  function handleCreateTaskFromSession() {
+    const message = [...activeSession.messages]
+      .reverse()
+      .find((item) => item.role === "user" && item.content.trim());
+    if (!message) {
+      setNotice("当前会话还没有可保存的用户消息。");
+      return;
+    }
+    const firstLine = message.content.trim().split(/\r?\n/)[0].trim();
+    const draft = emptyTaskDraft(activeKnowledgeBase.id, "agenda");
+    draft.knowledgeBaseIds = activeSession.knowledgeBaseIds.length
+      ? [...activeSession.knowledgeBaseIds]
+      : [activeKnowledgeBase.id];
+    draft.name = firstLine.length > 26 ? `${firstLine.slice(0, 26)}…` : firstLine;
+    draft.prompt = message.content.trim();
+    setTaskEditorError("");
+    setTaskEditor({ mode: "create", draft });
+  }
+
+  function handleOpenEditTask(task: ScheduledJob) {
+    setTaskEditorError("");
+    setTaskEditor({
+      mode: "edit",
+      taskId: task.id,
+      draft: taskDraftFromJob(task, activeKnowledgeBase.id),
+    });
+  }
+
+  async function handleSubmitTask(draft: TaskEditorDraft) {
+    if (!draft.name.trim() || !draft.prompt.trim()) {
+      setTaskEditorError("请填写任务名称和任务说明。");
+      return;
+    }
+    if (!draft.knowledgeBaseIds.length) {
+      setTaskEditorError("请至少选择一个知识库。");
+      return;
+    }
+    if (draft.kind === "agenda" && !draft.onceAt) {
+      setTaskEditorError("请选择日程的日期和时间。");
+      return;
+    }
+
+    const editor = taskEditor;
+    if (!editor) {
+      return;
+    }
+
+    setTaskEditorError("");
+    beginBusy(editor.mode === "create" ? "正在创建任务..." : "正在保存任务...");
+    try {
+      const payload = {
+        name: draft.name.trim(),
+        prompt: draft.prompt.trim(),
+        schedule: draftToSchedule(draft),
+        knowledgeBaseIds: draft.knowledgeBaseIds,
+        sessionPolicy: draft.sessionPolicy,
+        outputMode: "session",
+      };
+      const saved =
+        editor.mode === "create"
+          ? await tasksState.create(payload)
+          : await tasksState.update({ jobId: editor.taskId ?? "", ...payload });
+      setTaskEditor(null);
+      setRegionActiveItem("sidebar", "tasks");
+      handleOpenTask(saved.id);
+      setNotice(editor.mode === "create" ? "已创建任务。" : "已保存任务。");
+    } catch (error) {
+      setTaskEditorError(formatErrorMessage(error));
+    } finally {
+      endBusy();
+    }
+  }
+
+  async function handleRunTask(taskId: string) {
+    beginBusy("正在启动任务...");
+    try {
+      await tasksState.run(taskId);
+      setNotice("已开始运行任务，结果会写入新的 Agent 会话。");
+    } catch (error) {
+      setNotice(formatErrorMessage(error));
+    } finally {
+      endBusy();
+    }
+  }
+
+  async function handleToggleTask(task: ScheduledJob) {
+    beginBusy(task.enabled ? "正在暂停任务..." : "正在恢复任务...");
+    try {
+      await tasksState.toggle(task);
+    } catch (error) {
+      setNotice(formatErrorMessage(error));
+    } finally {
+      endBusy();
+    }
+  }
+
+  async function handleDeleteTask(taskId: string) {
+    beginBusy("正在删除任务...");
+    try {
+      await tasksState.remove(taskId);
+      rightTabs.removeTab(rightTabId({ kind: "task", id: taskId }));
+      setNotice("已删除任务。");
+    } catch (error) {
+      setNotice(formatErrorMessage(error));
+    } finally {
+      endBusy();
+    }
+  }
+
   /** 写入新快照时同步保存基准 hash，清理已经不存在的草稿标记。 */
   function commitSnapshot(
     nextSnapshot: WorkspaceSnapshot,
@@ -758,11 +916,9 @@ export function WorkspaceShell() {
   }
 
   /**
-   * 收起态图标栏点击左栏条目：只切板块，不展开左栏。
+   * 收起态图标栏点击左栏条目。
    *
-   * 展开左栏是顶栏收展按钮的职责：图标栏点击后停留在「收起态 + 悬浮浮层」里，
-   * 浮层里可以就地操作，指针离开就收回。
-   * 「设置」和「定时任务」不是左栏内的分块，只切界面，不改左栏的「会话 / 文件」分块。
+   * 会话/文件沿用「切分块」的行为；任务需要把左栏展开，让任务列表成为可停留的面板。
    */
   function handleSelectSidebarItem(itemId: RegionItemId) {
     if (itemId === "settings") {
@@ -770,45 +926,38 @@ export function WorkspaceShell() {
       return;
     }
 
-    if (itemId === "schedules") {
-      setIsSchedulesOpen(true);
+    if (itemId === "tasks") {
+      setRegionActiveItem("sidebar", "tasks");
+      if (compactView.compact) {
+        compactView.setSidebarOpen(true);
+      } else {
+        setRegionOpen("sidebar", true);
+      }
       return;
     }
 
-    setIsSchedulesOpen(false);
     setRegionActiveItem("sidebar", itemId);
   }
 
   /**
    * 悬浮浮层里的左栏内容。
    *
-   * 会话和文件是一对互斥分块，读共享的 activeItems.sidebar 而不是悬浮的那个图标 id：
-   * 在浮层内点「文件」会写共享状态，浮层就地换成文件树，和展开后的行为一致。
-   * 定时任务和设置不内嵌在左栏里，各自给出对应内容。
+   * 会话、文件、任务共用同一份侧栏状态；任务预览就是任务面板的 compact 版本。
    */
   function renderSidebarPreview(itemId: RegionItemId) {
-    if (itemId === "schedules") {
+    if (itemId === "tasks") {
       return (
-        <SchedulesView
-          knowledgeBases={currentSnapshot.knowledgeBases}
-          activeKnowledgeBaseId={activeKnowledgeBase.id}
+        <TaskPanel
+          compactPreview
+          tasks={tasksState.tasks}
+          activeTaskId={activeTaskId}
+          isLoading={tasksState.isLoading}
+          error={tasksState.error}
           isBusy={isBusy}
-          onBusy={async (label, task) => {
-            beginBusy(label);
-            try {
-              await task();
-            } catch (error) {
-              setNotice(formatErrorMessage(error));
-            } finally {
-              endBusy();
-            }
-          }}
-          onNotice={setNotice}
-          onOpenSession={(sessionId) => {
-            setIsSchedulesOpen(true);
-            setRegionOpen("sidebar", true);
-            void handleSelectSession(sessionId);
-          }}
+          onCreateTask={handleOpenCreateTask}
+          onCreateTaskFromSession={handleCreateTaskFromSession}
+          onOpenTask={handleOpenTask}
+          onRetry={() => void tasksState.refresh()}
         />
       );
     }
@@ -944,6 +1093,36 @@ export function WorkspaceShell() {
     );
   }
 
+  /** 右侧任务详情页签；任务被删除时给出轻量空态而不是报错。 */
+  function renderTaskDetail() {
+    if (selectedRightTab?.kind !== "task") {
+      return null;
+    }
+    const task = tasksState.tasks.find((item) => item.id === selectedRightTab.id);
+    if (!task) {
+      return (
+        <div className="grid h-full place-items-center p-6 text-center text-sm text-ink-muted">
+          任务已被删除。
+        </div>
+      );
+    }
+    return (
+      <TaskDetail
+        task={task}
+        knowledgeBases={currentSnapshot.knowledgeBases}
+        isBusy={isBusy}
+        onEdit={handleOpenEditTask}
+        onRun={handleRunTask}
+        onToggleEnabled={handleToggleTask}
+        onDelete={handleDeleteTask}
+        onOpenSession={(sessionId) => {
+          revealRightPanel();
+          void handleSelectSession(sessionId);
+        }}
+      />
+    );
+  }
+
   /** 展开态和收起态浮层共用同一个文档面板元素，避免两处 props 漂移。 */
   function renderDocumentPane() {
     if (!activeDocument) {
@@ -969,7 +1148,6 @@ export function WorkspaceShell() {
         focus={documentFocus?.documentId === activeDocument.id ? documentFocus : undefined}
         sessions={currentSnapshot.sessions}
         onSelectSession={(sessionId) => {
-          setIsSchedulesOpen(false);
           if (!agentOpen) {
             setAgentOpen(true);
           }
@@ -1010,7 +1188,6 @@ export function WorkspaceShell() {
         onNotice={setNotice}
         sessions={currentSnapshot.sessions}
         onSelectSession={(sessionId) => {
-          setIsSchedulesOpen(false);
           if (!agentOpen) {
             setAgentOpen(true);
           }
@@ -1056,23 +1233,24 @@ export function WorkspaceShell() {
           isBusy={isBusy}
           busyLabel={busyLabel}
           notice={notice}
-          activePane={activeItems.sidebar === "files" ? "files" : "sessions"}
+          activePane={
+            activeItems.sidebar === "tasks"
+              ? "tasks"
+              : activeItems.sidebar === "files"
+                ? "files"
+                : "sessions"
+          }
           onActivePaneChange={(pane) => setRegionActiveItem("sidebar", pane)}
           onSearchChange={setSearchTerm}
-          onSelectKnowledgeBase={(knowledgeBaseId) => {
-            setIsSchedulesOpen(false);
-            handleSelectKnowledgeBase(knowledgeBaseId);
-          }}
+          onSelectKnowledgeBase={handleSelectKnowledgeBase}
           onAddKnowledgeBase={handleAddKnowledgeBase}
           onToggleFolder={handleToggleFolder}
           onSelectNote={(noteId) => {
             compactView.showPane("editor");
-            setIsSchedulesOpen(false);
             handleSelectNote(noteId);
           }}
           onSelectDocument={(documentId) => {
             compactView.showPane("editor");
-            setIsSchedulesOpen(false);
             handleSelectDocument(documentId);
           }}
           onRenameNote={openRenameDialog}
@@ -1088,14 +1266,19 @@ export function WorkspaceShell() {
           onRefreshKnowledgeBase={handleRescanKnowledgeBase}
           onCreateSession={() => {
             compactView.showPane("agent");
-            setIsSchedulesOpen(false);
             if (!agentOpen) {
               setAgentOpen(true);
             }
             void handleCreateSession();
           }}
-          onOpenSchedules={() => { compactView.showPane("editor"); setIsSchedulesOpen(true); }}
-          schedulesActive={isSchedulesOpen}
+          tasks={tasksState.tasks}
+          tasksLoading={tasksState.isLoading}
+          tasksError={tasksState.error}
+          activeTaskId={activeTaskId}
+          onOpenTask={handleOpenTask}
+          onCreateTask={handleOpenCreateTask}
+          onCreateTaskFromSession={handleCreateTaskFromSession}
+          onRetryTasks={() => void tasksState.refresh()}
           onOpenSettings={handleOpenSettings}
           sessions={currentSnapshot.sessions}
           activeSessionId={activeSession.id}
@@ -1103,7 +1286,6 @@ export function WorkspaceShell() {
           queuedSessionIds={queuedSessionIds}
           onSelectSession={(sessionId) => {
             compactView.showPane("agent");
-            setIsSchedulesOpen(false);
             if (!agentOpen) {
               setAgentOpen(true);
             }
@@ -1121,10 +1303,10 @@ export function WorkspaceShell() {
             items={getRegion("sidebar").items}
             activeItemId={activeItems.sidebar}
             onSelectItem={(itemId) => handleSelectSidebarItem(itemId)}
-            // 会话/文件共享同一份分块状态；悬浮哪个图标就把分块同步过去，
+            // 会话/文件/任务共享同一份分块状态；悬浮哪个图标就把分块同步过去，
             // 这样悬浮看到的内容和图标一致，而不是停在用户上次点过的分块上。
             onHoverItem={(itemId) => {
-              if (itemId === "sessions" || itemId === "files") {
+              if (itemId === "sessions" || itemId === "files" || itemId === "tasks") {
                 setRegionActiveItem("sidebar", itemId);
               }
             }}
@@ -1138,44 +1320,7 @@ export function WorkspaceShell() {
             {...getSeparatorProps("sidebar")}
           />
         )}
-        <div className={`editor-workbench${isSchedulesOpen ? " is-schedules" : ""}`}>
-          {isSchedulesOpen ? (
-            <SchedulesView
-              knowledgeBases={currentSnapshot.knowledgeBases}
-              activeKnowledgeBaseId={activeKnowledgeBase.id}
-              isBusy={isBusy}
-              onBusy={async (label, task) => {
-                beginBusy(label);
-                try {
-                  await task();
-                } catch (error) {
-                  setNotice(formatErrorMessage(error));
-                } finally {
-                  endBusy();
-                }
-              }}
-              onNotice={setNotice}
-              onOpenSession={(sessionId) => {
-                setIsSchedulesOpen(false);
-                if (!agentOpen) {
-                  setAgentOpen(true);
-                }
-                void (async () => {
-                  beginBusy("正在打开任务会话...");
-                  try {
-                    const sessions = await loadSessions(currentSnapshot);
-                    commitSnapshot(await restoreSessionContext({ ...currentSnapshot, sessions }, sessionId, false));
-                    rightTabs.openTab({ kind: "session", id: sessionId });
-                  } catch (error) {
-                    setNotice(formatErrorMessage(error));
-                  } finally {
-                    endBusy();
-                  }
-                })();
-              }}
-            />
-          ) : (
-            <>
+        <div className="editor-workbench">
           <EditorTabBar
             tabs={editorTabs}
             activeTab={activeEditorTab}
@@ -1194,8 +1339,6 @@ export function WorkspaceShell() {
           <div className="editor-file-panel" id="editor-file-panel" role="tabpanel" aria-label="当前文件内容">
             {activeDocument ? renderDocumentPane() : renderEditorPane()}
           </div>
-            </>
-          )}
         </div>
         {regionOpen.agent && (
           <div
@@ -1205,6 +1348,14 @@ export function WorkspaceShell() {
         )}
         <RightPanel
           items={rightTabs.tabs.map<RightPanelTabItem>((tab) => {
+            if (tab.kind === "task") {
+              const task = tasksState.tasks.find((item) => item.id === tab.id);
+              return {
+                tab,
+                title: task?.name ?? "任务",
+                status: task ? taskStatusLabel(taskStatus(task)) : "任务已删除",
+              };
+            }
             if (tab.kind === "session") {
               const session = currentSnapshot.sessions.find((item) => item.id === tab.id);
               return { tab, title: session?.title ?? "会话", status: inFlightSessionIds.includes(tab.id) || queuedSessionIds.includes(tab.id) ? "运行中" : session?.pendingChange?.status === "pending" || session?.pendingChangeSet?.status === "pending" ? "待确认" : session?.messages.at(-1)?.role === "assistant" ? "已完成" : undefined };
@@ -1219,11 +1370,25 @@ export function WorkspaceShell() {
           activeId={rightTabs.activeId} open={agentOpen} onExpand={revealRightPanel} onCollapse={() => setRightOpen(false)}
           onSelect={rightActions.select} onClose={rightActions.close} onCreate={rightActions.create} onReorder={rightTabs.reorder} browserEnabled={browserEnabled}
         >
+          <div className="right-task-content" hidden={selectedRightTab?.kind !== "task"}>{renderTaskDetail()}</div>
           <div className="right-session-content" hidden={selectedRightTab?.kind !== "session"}>{selectedRightTab?.kind === "session" && renderAgentPanel()}</div>
           {terminals.contents.map((content) => <TerminalPanel key={content.id} content={content} active={rightVisible && selectedRightTab?.kind === "terminal" && selectedRightTab.id === content.id} onRestart={() => void terminals.restart(content.id).catch(setNotice)} />)}
           <BrowserPanel browser={browserWorkspace} tabId={selectedRightTab?.kind === "browser" ? selectedRightTab.id : null} active={rightVisible && selectedRightTab?.kind === "browser"} onRetry={() => selectedRightTab?.kind === "browser" && rightActions.retryBrowser(selectedRightTab.id)} />
         </RightPanel>
       </main>
+      {taskEditor ? (
+        <TaskEditorDialog
+          title={taskEditor.mode === "create" ? "新建任务" : "编辑任务"}
+          draft={taskEditor.draft}
+          knowledgeBases={currentSnapshot.knowledgeBases}
+          blueprints={tasksState.blueprints}
+          isBusy={isBusy}
+          error={taskEditorError}
+          onChange={(draft) => setTaskEditor({ ...taskEditor, draft })}
+          onClose={() => setTaskEditor(null)}
+          onSubmit={handleSubmitTask}
+        />
+      ) : null}
       {isSettingsOpen && (
         <SettingsDrawer
           knowledgeBases={currentSnapshot.knowledgeBases}

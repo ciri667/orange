@@ -1,4 +1,4 @@
-import { Clock, FolderTree, History, MessageSquare, Settings } from "lucide-react";
+import { CalendarClock, FolderTree, History, MessageSquare, Settings } from "lucide-react";
 import type { ComponentType } from "react";
 
 /** 工作台里可完全收起的区域：左栏、右栏。中间的文档内容区始终存在，不参与收起。 */
@@ -47,7 +47,7 @@ export const COLLAPSIBLE_REGIONS: Record<RegionId, {
     items: [
       { id: "sessions", label: "会话", Icon: MessageSquare },
       { id: "files", label: "文件", Icon: FolderTree },
-      { id: "schedules", label: "定时任务", Icon: Clock },
+      { id: "tasks", label: "任务", Icon: CalendarClock },
       { id: "settings", label: "设置", Icon: Settings },
     ],
     collapsedSize: REGION_RAIL_SIZE,

@@ -8,8 +8,71 @@ import type {
   UpdateScheduledJobPayload,
 } from "../types";
 
-const mockJobs: ScheduledJob[] = [];
-const mockRuns: ScheduledJobRun[] = [];
+/** 浏览器开发态的示例任务：一个待开始日程、一个周期任务、一个已错过日程。 */
+const mockJobs: ScheduledJob[] = [
+  {
+    id: "sched-mock-agenda",
+    name: "整理会议纪要",
+    prompt: "把今天的会议记录整理成一份带行动项的中文纪要。",
+    schedule: { type: "once", at: tomorrowAt(15, 0) },
+    scheduleDisplay: "一次",
+    scheduledAt: toIso(tomorrowAt(15, 0)),
+    timezone: "local",
+    knowledgeBaseIds: ["kb-personal"],
+    outputMode: "session",
+    sessionPolicy: "newEachRun",
+    enabled: true,
+    nextRunAt: toIso(tomorrowAt(15, 0)),
+    failureStreak: 0,
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString(),
+  },
+  {
+    id: "sched-mock-daily",
+    name: "每日简报",
+    prompt: "检索知识库最近 24 小时的改动，整理每日简报。",
+    schedule: { type: "weekdays", time: "08:00" },
+    scheduleDisplay: "工作日 8:00",
+    timezone: "local",
+    knowledgeBaseIds: ["kb-personal"],
+    outputMode: "session",
+    sessionPolicy: "newEachRun",
+    enabled: true,
+    nextRunAt: toIso(tomorrowAt(8, 0)),
+    failureStreak: 0,
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString(),
+  },
+  {
+    id: "sched-mock-missed",
+    name: "补一份上周回顾",
+    prompt: "整理上周的笔记，列出一份简短的回顾。",
+    schedule: { type: "once", at: yesterdayAt(9, 0) },
+    scheduleDisplay: "一次",
+    scheduledAt: toIso(yesterdayAt(9, 0)),
+    timezone: "local",
+    knowledgeBaseIds: ["kb-personal"],
+    outputMode: "session",
+    sessionPolicy: "newEachRun",
+    enabled: false,
+    lastStatus: "skipped",
+    lastError: "应用启动时已错过预定时间，等待手动补做。",
+    failureStreak: 0,
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString(),
+  },
+];
+const mockRuns: ScheduledJobRun[] = [
+  {
+    id: "srun-mock-missed",
+    jobId: "sched-mock-missed",
+    scheduledInstant: toIso(yesterdayAt(9, 0)),
+    startedAt: toIso(yesterdayAt(9, 0)),
+    finishedAt: toIso(yesterdayAt(9, 0)),
+    status: "skipped",
+    error: "应用启动时已错过预定时间，等待手动补做。",
+  },
+];
 
 const MOCK_BLUEPRINTS: ScheduleBlueprint[] = [
   {
@@ -69,6 +132,7 @@ export function createMockScheduledJob(payload: CreateScheduledJobPayload): Sche
     prompt: payload.prompt.trim(),
     schedule: payload.schedule,
     scheduleDisplay: displaySchedule(payload.schedule),
+    scheduledAt: payload.schedule.type === "once" ? toIso(payload.schedule.at) : undefined,
     timezone: "local",
     knowledgeBaseIds: payload.knowledgeBaseIds,
     outputMode: payload.outputMode ?? "session",
@@ -102,6 +166,7 @@ export function updateMockScheduledJob(payload: UpdateScheduledJobPayload): Sche
     prompt: payload.prompt?.trim() || current.prompt,
     schedule,
     scheduleDisplay: displaySchedule(schedule),
+    scheduledAt: schedule.type === "once" ? toIso(schedule.at) : undefined,
     knowledgeBaseIds: payload.knowledgeBaseIds ?? current.knowledgeBaseIds,
     outputMode: payload.outputMode ?? current.outputMode,
     inboxKnowledgeBaseId: payload.inboxKnowledgeBaseId ?? current.inboxKnowledgeBaseId,
@@ -139,16 +204,17 @@ export function triggerMockScheduledJob(jobId: string): ScheduledJob {
     throw new Error("找不到该定时任务。");
   }
   const now = new Date().toISOString();
+  const status = "ok";
   mockRuns.unshift({
     id: createLocalId("srun"),
     jobId,
     scheduledInstant: `manual:${now}`,
     startedAt: now,
     finishedAt: now,
-    status: "ok",
+    status,
   });
   job.lastRunAt = now;
-  job.lastStatus = "ok";
+  job.lastStatus = status;
   job.lastError = undefined;
   job.updatedAt = now;
   return { ...job };
@@ -173,6 +239,30 @@ function displaySchedule(schedule: JobSchedule): string {
     return schedule.intervalHours <= 1 ? "每小时" : `每 ${schedule.intervalHours} 小时`;
   }
   return `一次 ${schedule.at}`;
+}
+
+function tomorrowAt(hours: number, minutes: number): string {
+  const date = new Date();
+  date.setDate(date.getDate() + 1);
+  date.setHours(hours, minutes, 0, 0);
+  return formatLocalDateTime(date);
+}
+
+function yesterdayAt(hours: number, minutes: number): string {
+  const date = new Date();
+  date.setDate(date.getDate() - 1);
+  date.setHours(hours, minutes, 0, 0);
+  return formatLocalDateTime(date);
+}
+
+function formatLocalDateTime(date: Date): string {
+  const pad = (value: number) => String(value).padStart(2, "0");
+  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}T${pad(date.getHours())}:${pad(date.getMinutes())}`;
+}
+
+function toIso(value: string): string {
+  const parsed = new Date(value);
+  return Number.isNaN(parsed.getTime()) ? new Date().toISOString() : parsed.toISOString();
 }
 
 function estimateNextRun(schedule: JobSchedule): string {

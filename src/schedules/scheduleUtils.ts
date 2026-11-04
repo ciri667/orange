@@ -39,7 +39,17 @@ export function formatScheduleDisplay(schedule: JobSchedule): string {
     }
     return interval;
   }
-  return `一次 ${schedule.at}`;
+  const at = new Date(schedule.at);
+  if (Number.isNaN(at.getTime())) {
+    return "一次";
+  }
+  return `一次 ${new Intl.DateTimeFormat("zh-CN", {
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    hour12: false,
+  }).format(at)}`;
 }
 
 /** 把 UTC RFC3339 显示成本地时间。 */

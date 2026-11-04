@@ -53,7 +53,7 @@ export const TOP_BAR_MENUS: { id: TopBarMenuId; label: string; items: TopBarMenu
     items: [
       { id: "toggle-sidebar", label: "收展知识库栏", disabled: true },
       { id: "toggle-agent", label: "收展右侧内容区", disabled: true },
-      { id: "toggle-schedules", label: "定时任务", disabled: true },
+      { id: "toggle-tasks", label: "任务", disabled: true },
       { id: "open-settings", label: "设置", disabled: true },
     ],
   },

@@ -1000,6 +1000,7 @@ export interface EditorFileTab {
 /** 右侧内容使用稳定引用；终端和网页仅存在于当前应用运行期。 */
 export type RightPanelTab =
   | { kind: "session"; id: string }
+  | { kind: "task"; id: string }
   | { kind: "terminal"; id: string }
   | { kind: "browser"; id: string };
 
@@ -1113,6 +1114,8 @@ export interface ScheduledJob {
   prompt: string;
   schedule: JobSchedule;
   scheduleDisplay: string;
+  /** 一次性任务的原定时间；跑完后 nextRunAt 为空时仍用于日历归位。 */
+  scheduledAt?: string;
   timezone: string;
   knowledgeBaseIds: string[];
   outputMode: ScheduleOutputMode | string;
@@ -1133,6 +1136,12 @@ export interface ScheduledJob {
   createdAt: string;
   updatedAt: string;
 }
+
+/** 任务类型：一次性日程，或按重复规则运行的定时任务。 */
+export type TaskKind = "agenda" | "scheduled";
+
+/** 任务中心展示状态；由 schedule/nextRunAt/lastStatus 派生，不额外持久化。 */
+export type TaskStatus = "todo" | "scheduled" | "running" | "done" | "reminded" | "missed" | "paused" | "failed";
 
 export interface ScheduledJobRun {
   id: string;
