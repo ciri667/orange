@@ -86,6 +86,8 @@
   --z-settings: 320;
   --z-modal: 420;
   --z-confirm: 520;
+  /** 提醒 Toast 压在面板之上，但低于设置抽屉和模态，避免盖住真弹窗。 */
+  --z-toast: 300;
   /** 收起态悬浮浮层压过所有面板内容，但低于设置抽屉和模态，避免浮层盖住真弹窗。 */
   --z-region-preview: 260;
   --control-height: 36px;
@@ -378,6 +380,47 @@ select:focus-visible {
 .region-rail-item.is-active {
   background: var(--surface);
   color: var(--accent);
+}
+
+/*
+ * 未读角标：贴在图标右上角的小胶囊。
+ * 图标只有 32px，所以角标压到边缘并加一圈底色描边，避免和图标糊在一起。
+ */
+.region-rail-badge {
+  position: absolute;
+  top: 2px;
+  right: 1px;
+  display: inline-flex;
+  min-width: 12px;
+  height: 12px;
+  align-items: center;
+  justify-content: center;
+  border-radius: 999px;
+  padding: 0 3px;
+  background: var(--accent);
+  box-shadow: 0 0 0 2px var(--app-bg);
+  color: #fff;
+  font-size: 9px;
+  font-weight: 600;
+  line-height: 1;
+}
+
+/* ---------------------------------------------------------------- 提醒 Toast */
+
+/*
+ * 固定在右下角，纵向堆叠；容器本身不吃指针事件，
+ * 这样 Toast 之间的空隙仍然可以点到下面的界面。
+ */
+.reminder-toast-stack {
+  position: fixed;
+  right: 16px;
+  bottom: 16px;
+  z-index: var(--z-toast);
+  display: flex;
+  width: min(340px, calc(100vw - 32px));
+  flex-direction: column;
+  gap: 8px;
+  pointer-events: none;
 }
 
 /* 竖向图标栏用竖条标记当前条目：左栏挂在图标左侧，右栏镜像到右侧。 */

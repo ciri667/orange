@@ -150,15 +150,22 @@ async fn execute_claimed_job(app: AppHandle, claimed: ClaimedScheduledRun) {
         })),
     );
 
-    let result = crate::commands::run_scheduled_job_turn(app.clone(), claimed.job.clone()).await;
-    let (status, session_id, error, continued_session_id) = match &result {
-        Ok(outcome) => (
-            outcome.status.clone(),
-            outcome.session_id.clone(),
-            outcome.error.clone(),
-            outcome.session_id.clone(),
-        ),
-        Err(error) => ("failed".to_owned(), None, Some(error.clone()), None),
+    // 仅提醒任务不调用模型，只记一条已提醒的运行记录，避免浪费 token。
+    let (status, session_id, error, continued_session_id) = if claimed.job.output_mode == "reminder"
+    {
+        ("reminded".to_owned(), None, None, None)
+    } else {
+        let result =
+            crate::commands::run_scheduled_job_turn(app.clone(), claimed.job.clone()).await;
+        match &result {
+            Ok(outcome) => (
+                outcome.status.clone(),
+                outcome.session_id.clone(),
+                outcome.error.clone(),
+                outcome.session_id.clone(),
+            ),
+            Err(error) => ("failed".to_owned(), None, Some(error.clone()), None),
+        }
     };
 
     let finish_app = app.clone();
@@ -186,7 +193,7 @@ async fn execute_claimed_job(app: AppHandle, claimed: ClaimedScheduledRun) {
             logging::write_app_event_best_effort(
                 &app,
                 AppEventBuilder::new(
-                    if status == "ok" {
+                    if status == "ok" || status == "reminded" {
                         AppLogLevel::Info
                     } else {
                         AppLogLevel::Warn
@@ -204,6 +211,10 @@ async fn execute_claimed_job(app: AppHandle, claimed: ClaimedScheduledRun) {
                     "failureStreak": job.failure_streak,
                 })),
             );
+            // 提醒类任务：窗口不在前台时补一条系统通知，前台则由前端 Toast 呈现。
+            if status == "reminded" {
+                crate::notifications::notify_reminder(&app, &job);
+            }
             emit_job_updated(&app, job, session_id.clone());
         }
         Ok(Err(error)) => {

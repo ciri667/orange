@@ -1104,7 +1104,7 @@ export type JobSchedule =
   | { type: "weekly"; days: JobWeekday[]; time: string }
   | { type: "once"; at: string };
 
-export type ScheduleOutputMode = "session" | "inbox";
+export type ScheduleOutputMode = "session" | "inbox" | "reminder";
 export type ScheduleSessionPolicy = "newEachRun" | "continue";
 
 /** 一条持久化定时任务。 */

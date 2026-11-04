@@ -40,6 +40,8 @@ import {
 } from "../tasks/TaskEditorDialog";
 import { taskStatus, taskStatusLabel } from "../tasks/taskUtils";
 import { useTasks } from "../tasks/useTasks";
+import { useReminderInbox } from "../tasks/useReminderInbox";
+import { ReminderToastStack } from "../tasks/ReminderToast";
 import type {
   AgentContextCompactionReport,
   Citation,
@@ -219,6 +221,7 @@ export function WorkspaceShell() {
   const setRightOpen = useCallback((open: boolean) => { setAgentOpen(open); if (!open && compactView.singlePane) compactView.showPane("editor"); }, [setAgentOpen, compactView.singlePane, compactView.showPane]);
   const rightTabs = useRightPanelTabs(snapshot, setSnapshot, setRightOpen);
   const tasksState = useTasks();
+  const reminders = useReminderInbox();
   const selectedRightTab = rightTabs.tabs.find((tab) => rightTabId(tab) === rightTabs.activeId);
   const activeTaskId = selectedRightTab?.kind === "task" ? selectedRightTab.id : undefined;
 
@@ -243,14 +246,19 @@ export function WorkspaceShell() {
     let unlisten: (() => void) | undefined;
     void listenScheduledJobUpdated((payload) => {
       const status = payload.job.lastStatus;
-      if (status === "ok") {
-        setNotice(`任务「${payload.job.name}」已完成。`);
-      } else if (status === "failed" || status === "blocked") {
-        setNotice(
-          `任务「${payload.job.name}」未成功${payload.job.lastError ? `：${payload.job.lastError}` : "。"}`,
-        );
-      } else if (status === "skipped") {
-        setNotice(`任务「${payload.job.name}」已错过，可在任务面板手动补做。`);
+      // 提醒走独立的 Toast + 未读收件箱：全局 notice 只渲染在左栏，
+      // 左栏收起时用户看不到，而且任何操作都会把它清空。
+      const reminder = reminders.push(payload.job);
+      if (!reminder) {
+        if (status === "ok") {
+          setNotice(`任务「${payload.job.name}」已完成。`);
+        } else if (status === "failed" || status === "blocked") {
+          setNotice(
+            `任务「${payload.job.name}」未成功${payload.job.lastError ? `：${payload.job.lastError}` : "。"}`,
+          );
+        } else if (status === "skipped") {
+          setNotice(`任务「${payload.job.name}」已错过，可在任务面板手动补做。`);
+        }
       }
       setSnapshot((current) => {
         if (!current || !payload.sessionId) {
@@ -265,7 +273,7 @@ export function WorkspaceShell() {
       unlisten = stop;
     });
     return () => unlisten?.();
-  }, [setSnapshot]);
+  }, [setSnapshot, reminders.push]);
   useReviewChangeLogger(snapshot);
   /** Agent 输入草稿按会话隔离，切走再切回时保留该会话的模型和未发送文字。 */
   const {
@@ -766,6 +774,8 @@ export function WorkspaceShell() {
   /** 任务详情和会话一样走右侧内容区页签，不占用中间编辑器。 */
   function handleOpenTask(taskId: string) {
     setRegionActiveItem("sidebar", "tasks");
+    // 打开详情即视为处理过该任务的提醒，清掉未读和角标。
+    reminders.dismissJob(taskId);
     rightTabs.openTab({ kind: "task", id: taskId });
     revealRightPanel();
   }
@@ -836,7 +846,7 @@ export function WorkspaceShell() {
         schedule: draftToSchedule(draft),
         knowledgeBaseIds: draft.knowledgeBaseIds,
         sessionPolicy: draft.sessionPolicy,
-        outputMode: "session",
+        outputMode: draft.reminderOnly ? "reminder" : "session",
       };
       const saved =
         editor.mode === "create"
@@ -954,10 +964,13 @@ export function WorkspaceShell() {
           isLoading={tasksState.isLoading}
           error={tasksState.error}
           isBusy={isBusy}
+          reminderNotices={reminders.notices}
           onCreateTask={handleOpenCreateTask}
           onCreateTaskFromSession={handleCreateTaskFromSession}
           onOpenTask={handleOpenTask}
           onRetry={() => void tasksState.refresh()}
+          onDismissReminder={reminders.dismiss}
+          onClearReminders={reminders.clear}
         />
       );
     }
@@ -1279,6 +1292,9 @@ export function WorkspaceShell() {
           onCreateTask={handleOpenCreateTask}
           onCreateTaskFromSession={handleCreateTaskFromSession}
           onRetryTasks={() => void tasksState.refresh()}
+          reminderNotices={reminders.notices}
+          onDismissReminder={reminders.dismiss}
+          onClearReminders={reminders.clear}
           onOpenSettings={handleOpenSettings}
           sessions={currentSnapshot.sessions}
           activeSessionId={activeSession.id}
@@ -1312,6 +1328,8 @@ export function WorkspaceShell() {
             }}
             renderPreview={(itemId) => renderSidebarPreview(itemId)}
             previewWidth={regionPreviewWidth.sidebar}
+            // 收起态看不到侧栏页签角标，未读提醒要在图标栏上也能看见。
+            badges={{ tasks: reminders.unreadCount }}
           />
         )}
         {regionOpen.sidebar && (
@@ -1544,6 +1562,18 @@ export function WorkspaceShell() {
       )}
       {/* MCP 工具确认由 agent 模块自订阅事件，这里只负责挂载。 */}
       <OperationApprovalDialog />
+      {/*
+        提醒 Toast 挂在最外层：它要压在面板之上，且不随左栏/右栏收展消失。
+        窗口不在前台时后端会同时发系统通知，这里只负责前台可见的那一份。
+      */}
+      <ReminderToastStack
+        toasts={reminders.toasts}
+        onOpen={(notice) => {
+          reminders.dismiss(notice.id);
+          handleOpenTask(notice.jobId);
+        }}
+        onDismiss={reminders.dismiss}
+      />
       </div>
     </ExternalLinkProvider>
   );

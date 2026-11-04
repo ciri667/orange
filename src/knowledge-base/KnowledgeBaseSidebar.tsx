@@ -11,6 +11,7 @@ import { SegmentedControl, SegmentedControlItem } from "../shared/SegmentedContr
 import { focusShellClassName, sectionLabelClassName } from "../shared/ui";
 import type { AgentSession, FileTreeNode, KnowledgeBase, ScheduledJob, TaskKind } from "../shared/types";
 import { TaskPanel } from "../tasks/TaskPanel";
+import type { ReminderNotice } from "../tasks/reminderInbox";
 import { taskAttentionCount } from "../tasks/taskUtils";
 
 /** 生成单个资料库文件数量摘要，用于 tooltip，不占侧栏两行。 */
@@ -65,6 +66,9 @@ export function KnowledgeBaseSidebar({
   onCreateTask,
   onCreateTaskFromSession,
   onRetryTasks,
+  reminderNotices = [],
+  onDismissReminder,
+  onClearReminders,
   onOpenSettings,
   onSelectSession,
   onDeleteSession,
@@ -115,6 +119,10 @@ export function KnowledgeBaseSidebar({
   onCreateTask?: (kind?: TaskKind) => void;
   onCreateTaskFromSession?: () => void;
   onRetryTasks?: () => void;
+  /** 未读提醒；任务页签角标和面板里的提醒条共用这一份。 */
+  reminderNotices?: ReminderNotice[];
+  onDismissReminder?: (id: string) => void;
+  onClearReminders?: () => void;
   onOpenSettings: () => void;
   onSelectSession: (sessionId: string) => void;
   onDeleteSession: (sessionId: string) => void;
@@ -136,6 +144,8 @@ export function KnowledgeBaseSidebar({
   const setSidebarPane = onActivePaneChange ?? setInternalPane;
   const runningSessionCount = inFlightSessionIds.length;
   const taskBadgeCount = taskAttentionCount(tasks);
+  /** 任务页签角标：待处理任务 + 未读提醒，两者都要用户回到任务面板。 */
+  const taskPaneBadgeCount = taskBadgeCount + reminderNotices.length;
 
   return (
     <aside className={cn("sidebar", compactPreview && "is-preview")} aria-label="知识库导航">
@@ -180,9 +190,9 @@ export function KnowledgeBaseSidebar({
           onClick={() => setSidebarPane("tasks")}
         >
           任务
-          {taskBadgeCount > 0 ? (
+          {taskPaneBadgeCount > 0 ? (
             <span className="inline-flex min-w-4 items-center justify-center rounded-full bg-danger px-1 text-[10px] font-medium leading-4 text-white">
-              {taskBadgeCount > 9 ? "9+" : taskBadgeCount}
+              {taskPaneBadgeCount > 9 ? "9+" : taskPaneBadgeCount}
             </span>
           ) : null}
         </SegmentedControlItem>
@@ -200,10 +210,13 @@ export function KnowledgeBaseSidebar({
           error={tasksError}
           isBusy={isBusy}
           compactPreview={compactPreview}
+          reminderNotices={reminderNotices}
           onCreateTask={(kind) => onCreateTask?.(kind)}
           onCreateTaskFromSession={onCreateTaskFromSession}
           onOpenTask={(taskId) => onOpenTask?.(taskId)}
           onRetry={() => onRetryTasks?.()}
+          onDismissReminder={onDismissReminder}
+          onClearReminders={onClearReminders}
         />
       </section>
 

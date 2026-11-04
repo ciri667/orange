@@ -33,6 +33,8 @@ export interface TaskEditorDraft {
   days: JobWeekday[];
   knowledgeBaseIds: string[];
   sessionPolicy: "newEachRun" | "continue";
+  /** 只发提醒，不运行 Agent；仍按日程/定时规则触发。 */
+  reminderOnly: boolean;
 }
 
 export function emptyTaskDraft(knowledgeBaseId: string, kind: TaskKind = "agenda"): TaskEditorDraft {
@@ -47,6 +49,7 @@ export function emptyTaskDraft(knowledgeBaseId: string, kind: TaskKind = "agenda
     days: ["FR"],
     knowledgeBaseIds: knowledgeBaseId ? [knowledgeBaseId] : [],
     sessionPolicy: "newEachRun",
+    reminderOnly: false,
   };
 }
 
@@ -62,6 +65,7 @@ export function taskDraftFromJob(job: ScheduledJob, fallbackKnowledgeBaseId: str
       ? job.knowledgeBaseIds
       : [fallbackKnowledgeBaseId].filter(Boolean),
     sessionPolicy: job.sessionPolicy === "continue" ? "continue" : "newEachRun",
+    reminderOnly: job.outputMode === "reminder",
   };
 }
 
@@ -147,6 +151,7 @@ export function TaskEditorDialog({
       prompt: fillBlueprintPrompt(blueprint, topic),
       ...recurring,
       sessionPolicy: blueprint.sessionPolicy === "continue" ? "continue" : "newEachRun",
+      reminderOnly: false,
     });
   }
 
@@ -205,6 +210,15 @@ export function TaskEditorDialog({
             </SegmentedControlItem>
           ))}
         </SegmentedControl>
+
+        <label className="flex items-center gap-2 text-sm text-ink">
+          <Checkbox
+            checked={draft.reminderOnly}
+            onChange={(event) => onChange({ ...draft, reminderOnly: event.target.checked })}
+          />
+          <span>仅提醒，不运行 Agent</span>
+          <span className="text-xs text-ink-muted">到点只发应用内提醒</span>
+        </label>
 
         <label className={fieldLabelClassName}>
           <span>任务名称</span>
@@ -368,21 +382,23 @@ export function TaskEditorDialog({
           </div>
         </fieldset>
 
-        <label className={fieldLabelClassName}>
-          <span>会话</span>
-          <SelectControl
-            value={draft.sessionPolicy}
-            onChange={(event) =>
-              onChange({
-                ...draft,
-                sessionPolicy: event.target.value as TaskEditorDraft["sessionPolicy"],
-              })
-            }
-          >
-            <option value="newEachRun">每次新建会话</option>
-            <option value="continue">在同一会话续跑</option>
-          </SelectControl>
-        </label>
+        {draft.reminderOnly ? null : (
+          <label className={fieldLabelClassName}>
+            <span>会话</span>
+            <SelectControl
+              value={draft.sessionPolicy}
+              onChange={(event) =>
+                onChange({
+                  ...draft,
+                  sessionPolicy: event.target.value as TaskEditorDraft["sessionPolicy"],
+                })
+              }
+            >
+              <option value="newEachRun">每次新建会话</option>
+              <option value="continue">在同一会话续跑</option>
+            </SelectControl>
+          </label>
+        )}
 
 
 

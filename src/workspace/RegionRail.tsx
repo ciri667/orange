@@ -62,6 +62,8 @@ export interface RegionRailProps {
   renderPreview: (itemId: RegionItemId) => ReactNode;
   /** 浮层宽度：取该区域展开态的实际宽度，让浮层里的换行和展开后一致。 */
   previewWidth?: number;
+  /** 条目上的未读角标；0 或未提供时不渲染。 */
+  badges?: Partial<Record<RegionItemId, number>>;
 }
 
 /**
@@ -81,6 +83,7 @@ export function RegionRail({
   onHoverItem,
   renderPreview,
   previewWidth,
+  badges,
 }: RegionRailProps) {
   const railRef = useRef<HTMLElement | null>(null);
   const previewRef = useRef<HTMLDivElement | null>(null);
@@ -292,6 +295,8 @@ export function RegionRail({
           {items.map((item) => {
             const ItemIcon = item.Icon;
             const isActive = item.id === activeItemId;
+            const badgeCount = badges?.[item.id] ?? 0;
+            const badgeLabel = badgeCount > 0 ? `（${badgeCount} 条未读提醒）` : "";
 
             return (
               <li key={item.id}>
@@ -307,10 +312,10 @@ export function RegionRail({
                   className={cn("region-rail-item", isActive && "is-active")}
                   aria-label={
                     // 单一内容的区域（顶栏/编辑区/Agent）不重复读区域名。
-                    items.length > 1 ? `切换到${item.label}` : `浏览${label}`
+                    (items.length > 1 ? `切换到${item.label}` : `浏览${label}`) + badgeLabel
                   }
                   aria-current={isActive ? "true" : undefined}
-                  title={items.length > 1 ? item.label : label}
+                  title={(items.length > 1 ? item.label : label) + badgeLabel}
                   onClick={() => onSelectItem(item.id)}
                   onMouseEnter={() => scheduleOpen(item.id)}
                   onMouseLeave={scheduleClose}
@@ -318,6 +323,11 @@ export function RegionRail({
                   onBlur={scheduleClose}
                 >
                   <ItemIcon size={17} aria-hidden />
+                  {badgeCount > 0 ? (
+                    <span className="region-rail-badge" aria-hidden>
+                      {badgeCount > 9 ? "9+" : badgeCount}
+                    </span>
+                  ) : null}
                 </button>
               </li>
             );

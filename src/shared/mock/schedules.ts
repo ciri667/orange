@@ -204,7 +204,7 @@ export function triggerMockScheduledJob(jobId: string): ScheduledJob {
     throw new Error("找不到该定时任务。");
   }
   const now = new Date().toISOString();
-  const status = "ok";
+  const status = job.outputMode === "reminder" ? "reminded" : "ok";
   mockRuns.unshift({
     id: createLocalId("srun"),
     jobId,

@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import {
   AlertCircle,
+  Bell,
   CalendarDays,
   CheckCircle2,
   Clock3,
@@ -99,7 +100,9 @@ export function TaskDetail({
           <div className="grid min-w-0 gap-1.5">
             <div className="flex flex-wrap items-center gap-1.5">
               <span className="inline-flex items-center gap-1 whitespace-nowrap rounded-full bg-surface-muted px-2 py-0.5 text-[11px] text-ink-muted">
-                {kind === "agenda" ? (
+                {task.outputMode === "reminder" ? (
+                  <Bell size={11} />
+                ) : kind === "agenda" ? (
                   <CalendarDays size={11} />
                 ) : (
                   <Repeat size={11} />

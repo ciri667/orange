@@ -17,6 +17,9 @@ export function taskKind(task: ScheduledJob): TaskKind {
 }
 
 export function taskKindLabel(task: ScheduledJob): string {
+  if (task.outputMode === "reminder") {
+    return "提醒";
+  }
   return taskKind(task) === "agenda" ? "日程" : "定时";
 }
 

@@ -88,4 +88,5 @@
   --z-index-settings: var(--z-settings);
   --z-index-modal: var(--z-modal);
   --z-index-confirm: var(--z-confirm);
+  --z-index-toast: var(--z-toast);
 }

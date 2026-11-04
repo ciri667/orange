@@ -14,18 +14,20 @@ pub const SCHEDULE_FAILURE_PAUSE_STREAK: i64 = 3;
  */
 pub const SCHEDULE_DISPATCH_TOLERANCE_SECS: i64 = 90;
 
-/** 任务产出方式：会话或收件箱。 */
+/** 任务产出方式：会话、收件箱，或只发提醒不运行 Agent。 */
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub enum ScheduleOutputMode {
     Session,
     Inbox,
+    Reminder,
 }
 
 impl ScheduleOutputMode {
     pub fn parse(value: &str) -> Self {
         match value {
             "inbox" => Self::Inbox,
+            "reminder" => Self::Reminder,
             _ => Self::Session,
         }
     }
@@ -34,6 +36,7 @@ impl ScheduleOutputMode {
         match self {
             Self::Session => "session",
             Self::Inbox => "inbox",
+            Self::Reminder => "reminder",
         }
     }
 }

@@ -67,6 +67,8 @@ zip = { version = "2", default-features = false, features = ["deflate"] }
 tauri-plugin-log = "2.8.0"
 log = "0.4"
 tauri-plugin-opener = "2"
+# 提醒类任务在窗口不可见/失焦时发系统通知；窗口在前台时改由前端 Toast 提示。
+tauri-plugin-notification = "2"
 # IM 网关需要按通道异步串行化会话读写，避免并发事件覆盖持久化快照。
 tokio = { version = "1", features = ["fs", "io-util", "macros", "process", "rt", "sync", "time"] }
 # MCP streamable HTTP 传输的 custom_headers 需要 http 1.x 的 HeaderName/HeaderValue，与 rmcp 内部版本保持一致。

@@ -1,6 +1,7 @@
 import { useMemo, useState } from "react";
 import {
   AlertCircle,
+  Bell,
   CalendarClock,
   CalendarDays,
   CalendarRange,
@@ -12,6 +13,7 @@ import {
   Plus,
   Repeat,
   Search,
+  X,
 } from "lucide-react";
 import { Button } from "../shared/Button";
 import { ListRow } from "../shared/ListRow";
@@ -20,6 +22,7 @@ import { cn } from "../shared/cn";
 import { focusShellClassName } from "../shared/ui";
 import type { ScheduledJob, TaskKind } from "../shared/types";
 import { TaskMonthDialog } from "./TaskMonthDialog";
+import type { ReminderNotice } from "./reminderInbox";
 import {
   formatTaskTime,
   groupTasks,
@@ -43,6 +46,9 @@ export function TaskPanel({
   onCreateTaskFromSession,
   onOpenTask,
   onRetry,
+  reminderNotices = [],
+  onDismissReminder,
+  onClearReminders,
   compactPreview = false,
 }: {
   tasks: ScheduledJob[];
@@ -54,6 +60,10 @@ export function TaskPanel({
   onCreateTaskFromSession?: () => void;
   onOpenTask: (taskId: string) => void;
   onRetry: () => void;
+  /** 未读提醒：面板顶部单独一条，避免只靠 Toast 一闪而过。 */
+  reminderNotices?: ReminderNotice[];
+  onDismissReminder?: (id: string) => void;
+  onClearReminders?: () => void;
   compactPreview?: boolean;
 }) {
   const [filter, setFilter] = useState<TaskFilter>("all");
@@ -147,6 +157,54 @@ export function TaskPanel({
         </div>
       </header>
 
+      {reminderNotices.length ? (
+        <section
+          className="mx-1.5 mb-1.5 grid shrink-0 gap-1 rounded-control border border-accent/25 bg-accent-soft px-2 py-1.5"
+          aria-label="未读提醒"
+        >
+          <div className="flex items-center gap-1.5">
+            <Bell size={12} className="shrink-0 text-accent" aria-hidden />
+            <span className="text-[11px] font-medium text-accent">{reminderNotices.length} 条未读提醒</span>
+            {onClearReminders ? (
+              <Button
+                variant="text"
+                size="compact"
+                className="ml-auto min-h-5 px-1 text-[11px] text-accent"
+                onClick={onClearReminders}
+              >
+                全部已读
+              </Button>
+            ) : null}
+          </div>
+          <ul className="m-0 grid max-h-32 list-none gap-0.5 overflow-auto p-0">
+            {reminderNotices.map((notice) => (
+              <li key={notice.id} className="flex items-start gap-1">
+                <button
+                  type="button"
+                  className="grid min-w-0 flex-1 gap-0 rounded-control px-1 py-0.5 text-left hover:bg-surface/70"
+                  onClick={() => onOpenTask(notice.jobId)}
+                >
+                  <span className="truncate text-[11px] font-medium text-ink">{notice.jobName}</span>
+                  <span className="truncate text-[10px] text-ink-muted">{notice.preview}</span>
+                </button>
+                {onDismissReminder ? (
+                  <Button
+                    variant="icon"
+                    size="compact"
+                    className="size-5 min-h-5 text-ink-soft"
+                    title="标记已读"
+                    aria-label={`把「${notice.jobName}」的提醒标记为已读`}
+                    onClick={() => onDismissReminder(notice.id)}
+                  >
+                    <X size={11} />
+                  </Button>
+                ) : null}
+              </li>
+            ))}
+          </ul>
+        </section>
+      ) : null}
+
       <div className="shrink-0 px-1.5">
         <Button
           variant="ghost"
@@ -230,7 +288,9 @@ export function TaskPanel({
                             {task.name}
                           </span>
                           <span className="inline-flex shrink-0 items-center gap-0.5 rounded-full bg-surface-muted px-1.5 py-0.5 text-[10px] text-ink-muted">
-                            {kind === "agenda" ? (
+                            {task.outputMode === "reminder" ? (
+                              <Bell size={10} />
+                            ) : kind === "agenda" ? (
                               <CalendarDays size={10} />
                             ) : (
                               <Repeat size={10} />
