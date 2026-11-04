@@ -151,6 +151,9 @@ pub struct ScheduledJob {
     pub prompt: String,
     pub schedule: JobSchedule,
     pub schedule_display: String,
+    /// 一次性任务的原定时间；跑完后 `next_run_at` 会清空，但日历仍需按这个时间归位。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scheduled_at: Option<String>,
     pub timezone: String,
     pub knowledge_base_ids: Vec<String>,
     pub output_mode: String,

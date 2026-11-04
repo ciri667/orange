@@ -293,6 +293,7 @@ pub(crate) fn ensure_database_schema(
     connection
         .execute_batch(SCHEDULED_JOBS_SCHEMA)
         .map_err(|error| format!("无法初始化定时任务 schema：{error}"))?;
+    ensure_scheduled_job_columns(&connection)?;
     ensure_audit_log_columns(&connection)?;
     ensure_retrieval_filter_columns(&connection)?;
     ensure_document_index_columns(&connection)?;
@@ -302,6 +303,43 @@ pub(crate) fn ensure_database_schema(
         .lock()
         .map_err(|_| "SQLite 初始化状态锁已损坏。".to_owned())?;
     initialized_paths.insert(database_path.to_path_buf());
+
+    Ok(())
+}
+
+/** 为旧库的定时任务补齐一次性日程的原定时间，并尽量从历史运行记录回填。 */
+pub(crate) fn ensure_scheduled_job_columns(connection: &Connection) -> Result<(), String> {
+    let sql = "ALTER TABLE scheduled_jobs ADD COLUMN scheduled_at TEXT";
+
+    // 旧表已有列时 SQLite 返回 duplicate column name，属于幂等迁移的正常情况。
+    if let Err(error) = connection.execute(sql, []) {
+        let message = error.to_string();
+
+        if !message.contains("duplicate column name") {
+            return Err(format!("无法迁移定时任务日历字段：{error}"));
+        }
+    }
+
+    connection
+        .execute_batch(
+            r#"
+            UPDATE scheduled_jobs
+            SET scheduled_at = COALESCE(
+              next_run_at,
+              (
+                SELECT scheduled_instant
+                FROM scheduled_job_runs
+                WHERE job_id = scheduled_jobs.id
+                  AND scheduled_instant NOT LIKE 'manual:%'
+                ORDER BY scheduled_instant DESC
+                LIMIT 1
+              )
+            )
+            WHERE scheduled_at IS NULL
+              AND schedule_json LIKE '%"type":"once"%';
+            "#,
+        )
+        .map_err(|error| format!("无法回填一次性日程时间：{error}"))?;
 
     Ok(())
 }

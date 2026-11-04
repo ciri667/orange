@@ -15,6 +15,7 @@ pub(crate) const SCHEDULED_JOBS_SCHEMA: &str = r#"
               name TEXT NOT NULL,
               prompt TEXT NOT NULL,
               schedule_json TEXT NOT NULL,
+              scheduled_at TEXT,
               timezone TEXT NOT NULL,
               knowledge_base_ids_json TEXT NOT NULL,
               output_mode TEXT NOT NULL,
@@ -190,6 +191,9 @@ pub fn create_scheduled_job(
     }
 
     let next_run_at = next_run.map(format_utc);
+    let scheduled_at = matches!(&payload.schedule, JobSchedule::Once { .. })
+        .then(|| next_run_at.clone())
+        .flatten();
     let output_mode =
         ScheduleOutputMode::parse(payload.output_mode.as_deref().unwrap_or("session"));
     let session_policy =
@@ -200,6 +204,7 @@ pub fn create_scheduled_job(
         name: name.to_owned(),
         prompt: prompt.to_owned(),
         schedule_display: schedule_display(&payload.schedule),
+        scheduled_at,
         schedule: payload.schedule,
         timezone: "local".to_owned(),
         knowledge_base_ids: payload.knowledge_base_ids,
@@ -284,6 +289,11 @@ fn update_scheduled_job_on(
                 parse_once_local(previous)? != parse_once_local(next)?
             }
             _ => job.schedule != schedule,
+        };
+        // 原定时间独立于未来的 next_run_at，编辑过期日程也不能将它清空。
+        job.scheduled_at = match &schedule {
+            JobSchedule::Once { at } => Some(format_utc(parse_once_local(at)?.with_timezone(&Utc))),
+            _ => None,
         };
         job.schedule_display = schedule_display(&schedule);
         job.schedule = schedule;
@@ -700,7 +710,7 @@ fn next_hourly(
 fn list_scheduled_jobs_on(connection: &Connection) -> Result<Vec<ScheduledJob>, String> {
     let mut statement = connection
         .prepare(
-            "SELECT id, name, prompt, schedule_json, timezone, knowledge_base_ids_json, output_mode,
+            "SELECT id, name, prompt, schedule_json, scheduled_at, timezone, knowledge_base_ids_json, output_mode,
                     inbox_knowledge_base_id, inbox_folder, session_policy, continued_session_id,
                     model_provider_id, model_id, explicit_skill_ids_json, enabled, next_run_at,
                     last_run_at, last_status, last_error, last_session_id, failure_streak,
@@ -719,7 +729,7 @@ fn list_scheduled_jobs_on(connection: &Connection) -> Result<Vec<ScheduledJob>, 
 fn list_due_jobs_on(connection: &Connection, now_text: &str) -> Result<Vec<ScheduledJob>, String> {
     let mut statement = connection
         .prepare(
-            "SELECT id, name, prompt, schedule_json, timezone, knowledge_base_ids_json, output_mode,
+            "SELECT id, name, prompt, schedule_json, scheduled_at, timezone, knowledge_base_ids_json, output_mode,
                     inbox_knowledge_base_id, inbox_folder, session_policy, continued_session_id,
                     model_provider_id, model_id, explicit_skill_ids_json, enabled, next_run_at,
                     last_run_at, last_status, last_error, last_session_id, failure_streak,
@@ -742,7 +752,7 @@ fn get_scheduled_job_on(
 ) -> Result<Option<ScheduledJob>, String> {
     connection
         .query_row(
-            "SELECT id, name, prompt, schedule_json, timezone, knowledge_base_ids_json, output_mode,
+            "SELECT id, name, prompt, schedule_json, scheduled_at, timezone, knowledge_base_ids_json, output_mode,
                     inbox_knowledge_base_id, inbox_folder, session_policy, continued_session_id,
                     model_provider_id, model_id, explicit_skill_ids_json, enabled, next_run_at,
                     last_run_at, last_status, last_error, last_session_id, failure_streak,
@@ -765,20 +775,21 @@ fn insert_scheduled_job_on(connection: &Connection, job: &ScheduledJob) -> Resul
     connection
         .execute(
             "INSERT INTO scheduled_jobs (
-                id, name, prompt, schedule_json, timezone, knowledge_base_ids_json, output_mode,
+                id, name, prompt, schedule_json, scheduled_at, timezone, knowledge_base_ids_json, output_mode,
                 inbox_knowledge_base_id, inbox_folder, session_policy, continued_session_id,
                 model_provider_id, model_id, explicit_skill_ids_json, enabled, next_run_at,
                 last_run_at, last_status, last_error, last_session_id, failure_streak,
                 created_at, updated_at
              ) VALUES (
                 ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16,
-                ?17, ?18, ?19, ?20, ?21, ?22, ?23
+                ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24
              )",
             params![
                 job.id,
                 job.name,
                 job.prompt,
                 schedule_json,
+                job.scheduled_at,
                 job.timezone,
                 knowledge_base_ids_json,
                 job.output_mode,
@@ -814,18 +825,19 @@ fn persist_scheduled_job_on(connection: &Connection, job: &ScheduledJob) -> Resu
     connection
         .execute(
             "UPDATE scheduled_jobs SET
-                name = ?2, prompt = ?3, schedule_json = ?4, timezone = ?5,
-                knowledge_base_ids_json = ?6, output_mode = ?7, inbox_knowledge_base_id = ?8,
-                inbox_folder = ?9, session_policy = ?10, continued_session_id = ?11,
-                model_provider_id = ?12, model_id = ?13, explicit_skill_ids_json = ?14,
-                enabled = ?15, next_run_at = ?16, last_run_at = ?17, last_status = ?18,
-                last_error = ?19, last_session_id = ?20, failure_streak = ?21, updated_at = ?22
+                name = ?2, prompt = ?3, schedule_json = ?4, scheduled_at = ?5, timezone = ?6,
+                knowledge_base_ids_json = ?7, output_mode = ?8, inbox_knowledge_base_id = ?9,
+                inbox_folder = ?10, session_policy = ?11, continued_session_id = ?12,
+                model_provider_id = ?13, model_id = ?14, explicit_skill_ids_json = ?15,
+                enabled = ?16, next_run_at = ?17, last_run_at = ?18, last_status = ?19,
+                last_error = ?20, last_session_id = ?21, failure_streak = ?22, updated_at = ?23
              WHERE id = ?1",
             params![
                 job.id,
                 job.name,
                 job.prompt,
                 schedule_json,
+                job.scheduled_at,
                 job.timezone,
                 knowledge_base_ids_json,
                 job.output_mode,
@@ -889,8 +901,9 @@ fn insert_run_slot(
 
 fn map_job_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<ScheduledJob> {
     let schedule_json: String = row.get(3)?;
-    let knowledge_base_ids_json: String = row.get(5)?;
-    let explicit_skill_ids_json: String = row.get(13)?;
+    let scheduled_at: Option<String> = row.get(4)?;
+    let knowledge_base_ids_json: String = row.get(6)?;
+    let explicit_skill_ids_json: String = row.get(14)?;
     let schedule: JobSchedule =
         serde_json::from_str(&schedule_json).unwrap_or(JobSchedule::Daily {
             time: "08:00".to_owned(),
@@ -899,32 +912,33 @@ fn map_job_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<ScheduledJob> {
         serde_json::from_str(&knowledge_base_ids_json).unwrap_or_default();
     let explicit_skill_ids: Vec<String> =
         serde_json::from_str(&explicit_skill_ids_json).unwrap_or_default();
-    let enabled: i64 = row.get(14)?;
+    let enabled: i64 = row.get(15)?;
     Ok(ScheduledJob {
         id: row.get(0)?,
         name: row.get(1)?,
         prompt: row.get(2)?,
         schedule_display: schedule_display(&schedule),
         schedule,
-        timezone: row.get(4)?,
+        scheduled_at,
+        timezone: row.get(5)?,
         knowledge_base_ids,
-        output_mode: row.get(6)?,
-        inbox_knowledge_base_id: row.get(7)?,
-        inbox_folder: row.get(8)?,
-        session_policy: row.get(9)?,
-        continued_session_id: row.get(10)?,
-        model_provider_id: row.get(11)?,
-        model_id: row.get(12)?,
+        output_mode: row.get(7)?,
+        inbox_knowledge_base_id: row.get(8)?,
+        inbox_folder: row.get(9)?,
+        session_policy: row.get(10)?,
+        continued_session_id: row.get(11)?,
+        model_provider_id: row.get(12)?,
+        model_id: row.get(13)?,
         explicit_skill_ids,
         enabled: enabled != 0,
-        next_run_at: row.get(15)?,
-        last_run_at: row.get(16)?,
-        last_status: row.get(17)?,
-        last_error: row.get(18)?,
-        last_session_id: row.get(19)?,
-        failure_streak: row.get(20)?,
-        created_at: row.get(21)?,
-        updated_at: row.get(22)?,
+        next_run_at: row.get(16)?,
+        last_run_at: row.get(17)?,
+        last_status: row.get(18)?,
+        last_error: row.get(19)?,
+        last_session_id: row.get(20)?,
+        failure_streak: row.get(21)?,
+        created_at: row.get(22)?,
+        updated_at: row.get(23)?,
     })
 }
 
@@ -970,6 +984,7 @@ mod tests {
             prompt: "整理笔记".to_owned(),
             schedule_display: schedule_display(&schedule),
             schedule,
+            scheduled_at: None,
             timezone: "local".to_owned(),
             knowledge_base_ids: vec!["kb-a".to_owned()],
             output_mode: "session".to_owned(),
@@ -1080,6 +1095,90 @@ mod tests {
     #[test]
     fn dispatch_tolerance_is_shared_by_all_schedule_kinds() {
         assert_eq!(dispatch_tolerance_secs(), SCHEDULE_DISPATCH_TOLERANCE_SECS);
+    }
+
+    #[test]
+    fn scheduled_at_round_trips_for_agenda_job() {
+        let connection = memory_db();
+        let slot = format_utc(local(2026, 9, 18, 8, 0).with_timezone(&Utc));
+        let mut job = sample_job(JobSchedule::Once { at: slot.clone() }, &slot);
+        job.scheduled_at = Some(slot.clone());
+        insert_scheduled_job_on(&connection, &job).unwrap();
+
+        let stored = get_scheduled_job_on(&connection, "sched-test")
+            .unwrap()
+            .unwrap();
+        assert_eq!(stored.scheduled_at.as_deref(), Some(slot.as_str()));
+    }
+
+    /** 编辑已结束日程时，表单仍会提交日期，不能重置原定时间或重新启用。 */
+    #[test]
+    fn editing_finished_once_job_preserves_calendar_date_and_disabled_state() {
+        for status in ["skipped", "ok"] {
+            let connection = memory_db();
+            let slot_local = local(2026, 9, 18, 8, 0);
+            let slot = format_utc(slot_local.with_timezone(&Utc));
+            let mut job = sample_job(JobSchedule::Once { at: slot.clone() }, &slot);
+            job.scheduled_at = Some(slot.clone());
+            job.next_run_at = None;
+            job.enabled = false;
+            job.last_status = Some(status.to_owned());
+            insert_scheduled_job_on(&connection, &job).unwrap();
+
+            // 编辑器会把 UTC 转成本地 datetime-local，语义相同的时间不算改期。
+            let payload = serde_json::from_value(serde_json::json!({
+                "jobId": job.id,
+                "name": "修改后的任务名称",
+                "schedule": { "type": "once", "at": slot_local.format("%Y-%m-%dT%H:%M").to_string() }
+            }))
+            .unwrap();
+            let saved = update_scheduled_job_on(
+                &connection,
+                payload,
+                slot_local + ChronoDuration::hours(2),
+            )
+            .unwrap();
+
+            assert_eq!(saved.scheduled_at.as_deref(), Some(slot.as_str()));
+            assert!(saved.next_run_at.is_none());
+            assert!(!saved.enabled);
+            assert_eq!(saved.last_status.as_deref(), Some(status));
+            let stored = get_scheduled_job_on(&connection, &job.id).unwrap().unwrap();
+            assert_eq!(stored.scheduled_at, saved.scheduled_at);
+        }
+    }
+
+    /** 更改一次性日程的日期时，日历保存原定时间，即使该日期仍在过去。 */
+    #[test]
+    fn changing_once_date_keeps_calendar_date_independent_of_next_run() {
+        for future in [false, true] {
+            let connection = memory_db();
+            let slot_local = local(2026, 9, 18, 8, 0);
+            let slot = format_utc(slot_local.with_timezone(&Utc));
+            let mut job = sample_job(JobSchedule::Once { at: slot.clone() }, &slot);
+            job.scheduled_at = Some(slot);
+            job.next_run_at = None;
+            job.enabled = false;
+            job.last_status = Some("skipped".to_owned());
+            insert_scheduled_job_on(&connection, &job).unwrap();
+
+            let now = slot_local + ChronoDuration::hours(2);
+            let new_date = now + ChronoDuration::hours(if future { 1 } else { -1 });
+            let new_slot = format_utc(new_date.with_timezone(&Utc));
+            let payload = serde_json::from_value(serde_json::json!({
+                "jobId": job.id,
+                "schedule": { "type": "once", "at": new_slot }
+            }))
+            .unwrap();
+            let saved = update_scheduled_job_on(&connection, payload, now).unwrap();
+
+            assert_eq!(saved.scheduled_at.as_deref(), Some(new_slot.as_str()));
+            assert_eq!(
+                saved.next_run_at.as_deref(),
+                future.then_some(new_slot.as_str())
+            );
+            assert_eq!(saved.enabled, future);
+        }
     }
 
     #[test]
