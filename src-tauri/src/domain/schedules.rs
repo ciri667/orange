@@ -6,13 +6,15 @@ pub const DEFAULT_SCHEDULE_INBOX_FOLDER: &str = "定时产出";
 /** 连续失败达到该次数后自动暂停，避免坏任务反复烧 token。 */
 pub const SCHEDULE_FAILURE_PAUSE_STREAK: i64 = 3;
 
-/** 漏跑补跑窗口下限。 */
-pub const SCHEDULE_CATCH_UP_MIN_SECS: i64 = 120;
+/**
+ * 调度器 tick 容忍窗口。
+ *
+ * 任务不自动补跑：只有距离预定时间不超过这个窗口的拍才会派发；
+ * 超过的拍统一记为 `skipped`（已错过），由用户手动补做。
+ */
+pub const SCHEDULE_DISPATCH_TOLERANCE_SECS: i64 = 90;
 
-/** 漏跑补跑窗口上限，避免合盖一晚连跑多次每日任务。 */
-pub const SCHEDULE_CATCH_UP_MAX_SECS: i64 = 2 * 60 * 60;
-
-/** 定时任务产出方式；首版只跑会话，收件箱写入留给后续阶段。 */
+/** 任务产出方式：会话或收件箱。 */
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub enum ScheduleOutputMode {

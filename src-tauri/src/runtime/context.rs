@@ -318,7 +318,7 @@ fn build_system_prompt(
         }
     }
     if session.schedule_identity.is_some() {
-        parts.push("定时任务限定工作区只读，不生成或应用草稿，不使用外部能力。".into());
+        parts.push("任务限定工作区只读，不生成或应用草稿，不使用外部能力。".into());
     }
     if session.im_identity.is_some() {
         parts

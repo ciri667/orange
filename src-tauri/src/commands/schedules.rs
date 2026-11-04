@@ -16,10 +16,7 @@ pub struct ScheduledTurnOutcome {
 
 #[tauri::command]
 pub async fn list_scheduled_jobs(app: AppHandle) -> Result<Vec<ScheduledJob>, String> {
-    run_blocking("读取定时任务", move || {
-        storage::list_scheduled_jobs(&app)
-    })
-    .await
+    run_blocking("读取任务", move || storage::list_scheduled_jobs(&app)).await
 }
 
 #[tauri::command]
@@ -32,7 +29,7 @@ pub async fn create_scheduled_job(
     app: AppHandle,
     payload: CreateScheduledJobPayload,
 ) -> Result<ScheduledJob, String> {
-    let job = run_blocking("创建定时任务", move || {
+    let job = run_blocking("创建任务", move || {
         storage::create_scheduled_job(&app, payload)
     })
     .await?;
@@ -45,7 +42,7 @@ pub async fn update_scheduled_job(
     payload: UpdateScheduledJobPayload,
 ) -> Result<ScheduledJob, String> {
     let app_for_event = app.clone();
-    let job = run_blocking("更新定时任务", move || {
+    let job = run_blocking("更新任务", move || {
         storage::update_scheduled_job(&app, payload)
     })
     .await?;
@@ -58,7 +55,7 @@ pub async fn delete_scheduled_job(
     app: AppHandle,
     payload: ScheduledJobIdPayload,
 ) -> Result<(), String> {
-    run_blocking("删除定时任务", move || {
+    run_blocking("删除任务", move || {
         storage::delete_scheduled_job(&app, &payload.job_id)
     })
     .await
@@ -70,7 +67,7 @@ pub async fn list_scheduled_job_runs(
     payload: LoadScheduledJobRunsPayload,
 ) -> Result<Vec<ScheduledJobRun>, String> {
     let limit = payload.limit.unwrap_or(20);
-    run_blocking("读取定时任务运行历史", move || {
+    run_blocking("读取任务运行历史", move || {
         storage::list_scheduled_job_runs(&app, &payload.job_id, limit)
     })
     .await
@@ -90,7 +87,7 @@ pub(crate) async fn run_scheduled_job_turn(
     job: ScheduledJob,
 ) -> Result<ScheduledTurnOutcome, String> {
     let snapshot_app = app.clone();
-    let mut snapshot = run_blocking("加载定时任务工作台状态", move || {
+    let mut snapshot = run_blocking("加载任务工作台状态", move || {
         storage::load_workspace_snapshot(&snapshot_app)
     })
     .await?;
@@ -109,7 +106,7 @@ pub(crate) async fn run_scheduled_job_turn(
         return Ok(ScheduledTurnOutcome {
             status: "blocked".to_owned(),
             session_id: None,
-            error: Some("定时任务绑定的知识库已失效。".to_owned()),
+            error: Some("任务绑定的知识库已失效。".to_owned()),
         });
     }
 

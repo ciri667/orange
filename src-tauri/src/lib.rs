@@ -135,7 +135,7 @@ pub fn run() {
             let tray_menu = tauri::menu::Menu::with_items(app, &[&show_item, &quit_item])?;
             let mut tray_builder = tauri::tray::TrayIconBuilder::with_id("orange-im-gateway")
                 .menu(&tray_menu)
-                .tooltip("橘记正在后台运行，IM 与定时任务可用")
+                .tooltip("橘记正在后台运行，IM 与任务可用")
                 .on_menu_event(|app, event| match event.id.as_ref() {
                     TRAY_MENU_SHOW => {
                         // 从托盘恢复窗口时同时请求焦点，避免窗口被其他应用遮挡后像是未响应。

@@ -2,8 +2,7 @@ use super::*;
 use crate::domain::{
     schedule_display, CreateScheduledJobPayload, JobSchedule, JobWeekday, ScheduleOutputMode,
     ScheduleSessionPolicy, ScheduledJob, ScheduledJobRun, UpdateScheduledJobPayload,
-    DEFAULT_SCHEDULE_INBOX_FOLDER, SCHEDULE_CATCH_UP_MAX_SECS, SCHEDULE_CATCH_UP_MIN_SECS,
-    SCHEDULE_FAILURE_PAUSE_STREAK,
+    DEFAULT_SCHEDULE_INBOX_FOLDER, SCHEDULE_DISPATCH_TOLERANCE_SECS, SCHEDULE_FAILURE_PAUSE_STREAK,
 };
 use chrono::{
     DateTime, Datelike, Duration as ChronoDuration, Local, NaiveTime, TimeZone, Timelike, Utc,
@@ -63,6 +62,13 @@ pub struct ClaimedScheduledRun {
     pub scheduled_instant: String,
 }
 
+/** 一次 tick 的认领结果；错过的任务也必须交回调度器广播状态。 */
+#[derive(Debug, Default)]
+pub struct DueScheduledJobs {
+    pub claimed: Vec<ClaimedScheduledRun>,
+    pub skipped: Vec<ScheduledJob>,
+}
+
 /** 解析 HH:MM 时钟。 */
 pub fn parse_hhmm(time: &str) -> Result<NaiveTime, String> {
     let trimmed = time.trim();
@@ -101,15 +107,9 @@ pub fn validate_schedule(schedule: &JobSchedule) -> Result<(), String> {
     Ok(())
 }
 
-/** 漏跑补跑窗口：周期一半，夹在 2 分钟到 2 小时。一次性任务固定 2 分钟宽限。 */
-pub fn catch_up_window_secs(schedule: &JobSchedule) -> i64 {
-    let period_secs = match schedule {
-        JobSchedule::Hourly { interval_hours, .. } => i64::from(*interval_hours.max(&1)) * 3600,
-        JobSchedule::Daily { .. } | JobSchedule::Weekdays { .. } => 24 * 3600,
-        JobSchedule::Weekly { .. } => 7 * 24 * 3600,
-        JobSchedule::Once { .. } => SCHEDULE_CATCH_UP_MIN_SECS,
-    };
-    (period_secs / 2).clamp(SCHEDULE_CATCH_UP_MIN_SECS, SCHEDULE_CATCH_UP_MAX_SECS)
+/** 调度器只派发准点附近的拍；错过统一标记，不自动补跑。 */
+pub fn dispatch_tolerance_secs() -> i64 {
+    SCHEDULE_DISPATCH_TOLERANCE_SECS
 }
 
 /** 计算 `after` 之后的下一次触发（不含 after 本身）。 */
@@ -189,6 +189,7 @@ pub fn create_scheduled_job(
         return Err("一次性任务的时间必须晚于现在。".to_owned());
     }
 
+    let next_run_at = next_run.map(format_utc);
     let output_mode =
         ScheduleOutputMode::parse(payload.output_mode.as_deref().unwrap_or("session"));
     let session_policy =
@@ -225,7 +226,7 @@ pub fn create_scheduled_job(
             .filter(|value| !value.trim().is_empty())
             .collect(),
         enabled: payload.enabled.unwrap_or(true),
-        next_run_at: next_run.map(format_utc),
+        next_run_at,
         last_run_at: None,
         last_status: None,
         last_error: None,
@@ -247,7 +248,16 @@ pub fn update_scheduled_job(
 ) -> Result<ScheduledJob, String> {
     let connection = open_database(app)?;
     let _write_guard = lock_database_writer()?;
-    let mut job = get_scheduled_job_on(&connection, &payload.job_id)?
+    update_scheduled_job_on(&connection, payload, Local::now())
+}
+
+/** 更新任务与重算调度共用同一时刻，便于验证过期日程的编辑行为。 */
+fn update_scheduled_job_on(
+    connection: &Connection,
+    payload: UpdateScheduledJobPayload,
+    now: DateTime<Local>,
+) -> Result<ScheduledJob, String> {
+    let mut job = get_scheduled_job_on(connection, &payload.job_id)?
         .ok_or_else(|| "找不到该定时任务。".to_owned())?;
 
     if let Some(name) = payload.name {
@@ -264,12 +274,19 @@ pub fn update_scheduled_job(
         }
         job.prompt = prompt.to_owned();
     }
+    let was_once = matches!(&job.schedule, JobSchedule::Once { .. });
     let mut schedule_changed = false;
     if let Some(schedule) = payload.schedule {
         validate_schedule(&schedule)?;
+        // 一次性时间允许本地/RFC3339 两种写法；只改显示格式不算改期。
+        schedule_changed = match (&job.schedule, &schedule) {
+            (JobSchedule::Once { at: previous }, JobSchedule::Once { at: next }) => {
+                parse_once_local(previous)? != parse_once_local(next)?
+            }
+            _ => job.schedule != schedule,
+        };
         job.schedule_display = schedule_display(&schedule);
         job.schedule = schedule;
-        schedule_changed = true;
     }
     if let Some(knowledge_base_ids) = payload.knowledge_base_ids {
         if knowledge_base_ids.is_empty() {
@@ -314,14 +331,21 @@ pub fn update_scheduled_job(
     if let Some(enabled) = payload.enabled {
         job.enabled = enabled;
     }
-    if schedule_changed || payload.enabled == Some(true) {
-        job.next_run_at = next_run_after(&job.schedule, Local::now()).map(format_utc);
+    if schedule_changed {
+        job.next_run_at = next_run_after(&job.schedule, now).map(format_utc);
+        // 已错过的日程改期后应重新进入待开始状态；一次性改成周期任务时也应恢复为已安排。
+        if payload.enabled.is_none()
+            && job.next_run_at.is_some()
+            && (was_once || matches!(&job.schedule, JobSchedule::Once { .. }))
+        {
+            job.enabled = true;
+        }
     }
-    if !job.enabled {
-        // 暂停时保留 next_run_at 便于展示，恢复时再重算。
+    if payload.enabled == Some(true) {
+        job.next_run_at = next_run_after(&job.schedule, now).map(format_utc);
     }
-    job.updated_at = format_utc(Utc::now());
-    persist_scheduled_job_on(&connection, &job)?;
+    job.updated_at = format_utc(now.with_timezone(&Utc));
+    persist_scheduled_job_on(connection, &job)?;
     Ok(job)
 }
 
@@ -368,23 +392,23 @@ pub fn list_scheduled_job_runs(
 
 /**
  * 认领到期任务：先写入 run ledger 并推进 next_run_at，再交给调用方执行。
- * 超出补跑窗口的拍记 skipped，不派发。
+ * 超出容忍窗口的拍记 skipped 并返回，调用方负责广播状态。
  */
 pub fn claim_due_jobs(
     connection: &Connection,
     now: DateTime<Utc>,
     limit: usize,
-) -> Result<Vec<ClaimedScheduledRun>, String> {
+) -> Result<DueScheduledJobs, String> {
     if limit == 0 {
-        return Ok(Vec::new());
+        return Ok(DueScheduledJobs::default());
     }
     let now_text = format_utc(now);
     let jobs = list_due_jobs_on(connection, &now_text)?;
-    let mut claimed = Vec::new();
+    let mut result = DueScheduledJobs::default();
     let now_local = now.with_timezone(&Local);
 
     for mut job in jobs {
-        if claimed.len() >= limit {
+        if result.claimed.len() >= limit {
             break;
         }
         let Some(slot) = job.next_run_at.clone() else {
@@ -395,7 +419,7 @@ pub fn claim_due_jobs(
             Err(_) => continue,
         };
         let lag = now.signed_duration_since(slot_instant);
-        let window = ChronoDuration::seconds(catch_up_window_secs(&job.schedule));
+        let window = ChronoDuration::seconds(dispatch_tolerance_secs());
         let following = next_run_after(&job.schedule, now_local).map(format_utc);
         let is_once = matches!(job.schedule, JobSchedule::Once { .. });
 
@@ -416,6 +440,7 @@ pub fn claim_due_jobs(
             job.last_error = Some("超出补跑窗口，已跳到下一拍。".to_owned());
             job.updated_at = now_text.clone();
             persist_scheduled_job_on(connection, &job)?;
+            result.skipped.push(job);
             continue;
         }
 
@@ -430,14 +455,14 @@ pub fn claim_due_jobs(
         }
         job.updated_at = now_text.clone();
         persist_scheduled_job_on(connection, &job)?;
-        claimed.push(ClaimedScheduledRun {
+        result.claimed.push(ClaimedScheduledRun {
             job,
             run_id,
             scheduled_instant: slot,
         });
     }
 
-    Ok(claimed)
+    Ok(result)
 }
 
 /** 立即运行：额外记一拍，不消耗下次调度时间。 */
@@ -457,6 +482,66 @@ pub fn claim_manual_run(
         run_id,
         scheduled_instant: slot,
     })
+}
+
+/**
+ * 应用启动时结算所有已过期的拍。
+ *
+ * 任务不做自动补跑：启动后发现 `next_run_at` 已过期，就把这一拍记为
+ * `skipped`（UI 显示「已错过」），一次性任务停用，周期任务推进到下一次。
+ */
+pub fn settle_missed_jobs_on_start(
+    connection: &Connection,
+    now: DateTime<Utc>,
+) -> Result<Vec<ScheduledJob>, String> {
+    let now_text = format_utc(now);
+    let now_local = now.with_timezone(&Local);
+    let jobs = list_due_jobs_on(connection, &now_text)?;
+    let mut settled = Vec::new();
+
+    for mut job in jobs {
+        let Some(slot) = job.next_run_at.clone() else {
+            continue;
+        };
+
+        // 崩溃恢复时可能还留着运行中的拍，不要把它覆盖成已错过。
+        let existing_status: Option<String> = connection
+            .query_row(
+                "SELECT status FROM scheduled_job_runs WHERE job_id = ?1 AND scheduled_instant = ?2",
+                params![job.id, slot],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(|error| format!("无法检查运行中的任务拍：{error}"))?;
+        if existing_status.as_deref() == Some("running") {
+            continue;
+        }
+
+        let error = "应用启动时已错过预定时间，等待手动补做。";
+        let _ = insert_run_slot(connection, &job.id, &slot, "skipped", Some(error))?;
+        job.last_status = Some("skipped".to_owned());
+        job.last_error = Some(error.to_owned());
+        if matches!(&job.schedule, JobSchedule::Once { .. }) {
+            job.enabled = false;
+            job.next_run_at = None;
+        } else {
+            job.next_run_at = next_run_after(&job.schedule, now_local).map(format_utc);
+        }
+        job.updated_at = now_text.clone();
+        persist_scheduled_job_on(connection, &job)?;
+        settled.push(job);
+    }
+
+    Ok(settled)
+}
+
+pub fn settle_missed_jobs_for_app(
+    app: &AppHandle,
+    now: DateTime<Utc>,
+) -> Result<Vec<ScheduledJob>, String> {
+    let connection = open_database(app)?;
+    let _write_guard = lock_database_writer()?;
+    settle_missed_jobs_on_start(&connection, now)
 }
 
 pub fn finish_scheduled_run(
@@ -507,7 +592,7 @@ pub fn claim_due_jobs_for_app(
     app: &AppHandle,
     now: DateTime<Utc>,
     limit: usize,
-) -> Result<Vec<ClaimedScheduledRun>, String> {
+) -> Result<DueScheduledJobs, String> {
     let connection = open_database(app)?;
     let _write_guard = lock_database_writer()?;
     claim_due_jobs(&connection, now, limit)
@@ -993,20 +1078,37 @@ mod tests {
     }
 
     #[test]
-    fn catch_up_window_clamps_daily_to_two_hours() {
-        let window = catch_up_window_secs(&JobSchedule::Daily {
-            time: "08:00".to_owned(),
-        });
-        assert_eq!(window, SCHEDULE_CATCH_UP_MAX_SECS);
+    fn dispatch_tolerance_is_shared_by_all_schedule_kinds() {
+        assert_eq!(dispatch_tolerance_secs(), SCHEDULE_DISPATCH_TOLERANCE_SECS);
     }
 
     #[test]
-    fn catch_up_window_for_15_minute_like_hourly_uses_floor() {
-        let window = catch_up_window_secs(&JobSchedule::Hourly {
-            interval_hours: 1,
-            days: None,
-        });
-        assert_eq!(window, 1800);
+    fn startup_settlement_marks_overdue_once_job_missed() {
+        let connection = memory_db();
+        let slot_local = local(2026, 9, 18, 8, 0);
+        let slot = format_utc(slot_local.with_timezone(&Utc));
+        let job = sample_job(JobSchedule::Once { at: slot.clone() }, &slot);
+        insert_scheduled_job_on(&connection, &job).unwrap();
+
+        let now = (slot_local + ChronoDuration::hours(2)).with_timezone(&Utc);
+        let settled = settle_missed_jobs_on_start(&connection, now).unwrap();
+        assert_eq!(settled.len(), 1);
+
+        let stored = get_scheduled_job_on(&connection, "sched-test")
+            .unwrap()
+            .unwrap();
+        assert_eq!(stored.last_status.as_deref(), Some("skipped"));
+        assert!(!stored.enabled);
+        assert!(stored.next_run_at.is_none());
+
+        let status: String = connection
+            .query_row(
+                "SELECT status FROM scheduled_job_runs WHERE job_id = 'sched-test'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(status, "skipped");
     }
 
     /** 同一拍第二次认领必须得到空列表。 */
@@ -1023,13 +1125,13 @@ mod tests {
         );
         insert_scheduled_job_on(&connection, &job).unwrap();
 
-        let now = (slot_local + ChronoDuration::minutes(5)).with_timezone(&Utc);
+        let now = (slot_local + ChronoDuration::seconds(30)).with_timezone(&Utc);
         let first = claim_due_jobs(&connection, now, 1).unwrap();
         let second = claim_due_jobs(&connection, now, 1).unwrap();
 
-        assert_eq!(first.len(), 1);
-        assert_eq!(first[0].scheduled_instant, slot);
-        assert!(second.is_empty());
+        assert_eq!(first.claimed.len(), 1);
+        assert_eq!(first.claimed[0].scheduled_instant, slot);
+        assert!(second.claimed.is_empty());
         let stored = get_scheduled_job_on(&connection, "sched-test")
             .unwrap()
             .unwrap();
@@ -1037,7 +1139,71 @@ mod tests {
         assert!(next > now);
     }
 
-    /** 超过 2 小时补跑窗口的每日任务只跳拍，不派发。 */
+    /** 同时到期和执行期间新到期的任务都先认领，等待超过窗口也不能变成 skipped。 */
+    #[test]
+    fn due_batches_are_claimed_before_prior_runs_finish() {
+        let connection = memory_db();
+        let start = local(2026, 9, 18, 8, 0).with_timezone(&Utc);
+        for (id, delay_minutes) in [("first", 0), ("second", 0), ("later", 1)] {
+            let slot = format_utc(start + ChronoDuration::minutes(delay_minutes));
+            let mut job = sample_job(JobSchedule::Once { at: slot.clone() }, &slot);
+            job.id = id.to_owned();
+            insert_scheduled_job_on(&connection, &job).unwrap();
+        }
+
+        let first =
+            claim_due_jobs(&connection, start + ChronoDuration::seconds(30), usize::MAX).unwrap();
+        assert_eq!(first.claimed.len(), 2);
+        // 前一批还未完成时，新到期任务仍然能够被 tick 认领。
+        let later =
+            claim_due_jobs(&connection, start + ChronoDuration::seconds(90), usize::MAX).unwrap();
+        assert_eq!(later.claimed.len(), 1);
+        let after_wait =
+            claim_due_jobs(&connection, start + ChronoDuration::minutes(5), usize::MAX).unwrap();
+        assert!(after_wait.claimed.is_empty());
+        assert!(after_wait.skipped.is_empty());
+
+        for run in first.claimed.into_iter().chain(later.claimed) {
+            let stored = finish_scheduled_run(
+                &connection,
+                &run.run_id,
+                &run.job.id,
+                "ok",
+                None,
+                None,
+                None,
+            )
+            .unwrap();
+            assert_eq!(stored.last_status.as_deref(), Some("ok"));
+        }
+    }
+
+    /** 混合批次既返回准点任务，也返回需要前端同步的已错过任务。 */
+    #[test]
+    fn due_batch_returns_skipped_jobs_alongside_claimed_jobs() {
+        let connection = memory_db();
+        let start = local(2026, 9, 18, 8, 0).with_timezone(&Utc);
+        for (id, delay_minutes) in [("missed", 0), ("on-time", 2)] {
+            let slot = format_utc(start + ChronoDuration::minutes(delay_minutes));
+            let mut job = sample_job(JobSchedule::Once { at: slot.clone() }, &slot);
+            job.id = id.to_owned();
+            insert_scheduled_job_on(&connection, &job).unwrap();
+        }
+
+        let now = start + ChronoDuration::seconds(150);
+        let result = claim_due_jobs(&connection, now, usize::MAX).unwrap();
+        assert_eq!(result.claimed.len(), 1);
+        assert_eq!(result.claimed[0].job.id, "on-time");
+        assert_eq!(result.skipped.len(), 1);
+        assert_eq!(result.skipped[0].id, "missed");
+        assert_eq!(result.skipped[0].last_status.as_deref(), Some("skipped"));
+        assert!(!result.skipped[0].enabled);
+        assert!(result.skipped[0].next_run_at.is_none());
+        let second = claim_due_jobs(&connection, now, usize::MAX).unwrap();
+        assert!(second.skipped.is_empty());
+    }
+
+    /** 超过调度容忍窗口的每日任务只跳拍，不派发，并返回更新后的任务。 */
     #[test]
     fn missed_beyond_catch_up_is_skipped_not_fired() {
         let connection = memory_db();
@@ -1053,7 +1219,9 @@ mod tests {
 
         let now = (slot_local + ChronoDuration::hours(3)).with_timezone(&Utc);
         let claimed = claim_due_jobs(&connection, now, 1).unwrap();
-        assert!(claimed.is_empty());
+        assert!(claimed.claimed.is_empty());
+        assert_eq!(claimed.skipped.len(), 1);
+        assert_eq!(claimed.skipped[0].last_status.as_deref(), Some("skipped"));
 
         let stored = get_scheduled_job_on(&connection, "sched-test")
             .unwrap()
