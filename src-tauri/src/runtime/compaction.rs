@@ -203,8 +203,14 @@ pub(super) fn rebuild_prompt_after_overflow(
     drop_unpaired_trailing_assistant(&mut conversation);
     let session = &snapshot.sessions[session_index];
     let budget_chars = resolve_history_budget_chars(model_context_length);
-    let compacted = if let Some(summary) = session.context_summary.as_ref() {
-        compact_transcript(&conversation, summary, budget_chars)
+    // 没覆盖全部消息时不能压缩，否则中间未进摘要的历史会被直接丢掉。
+    let covered_all = super::summary_covers_all(session);
+    let compacted = if covered_all {
+        session
+            .context_summary
+            .as_ref()
+            .map(|summary| compact_transcript(&conversation, summary, budget_chars))
+            .unwrap_or(conversation)
     } else {
         conversation
     };

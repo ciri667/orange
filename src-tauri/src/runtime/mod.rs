@@ -53,6 +53,20 @@ use tauri::AppHandle;
 const MAX_RECENT_MESSAGES_FOR_SUMMARY: usize = 24;
 
 /**
+ * 一次整理最多串行总结多少批消息。
+ *
+ * 摘要请求只带一批消息；未总结消息很多时必须按“最老优先”分批合并，一直追到最新，
+ * 否则后面的压缩会把没进摘要的中间历史直接丢掉。
+ */
+const MAX_SUMMARY_CHUNKS_PER_UPDATE: usize = 8;
+
+/** 确定性摘要不发网络请求，可以一次追平更多批次，避免超窗兜底时仍压缩不了。 */
+const MAX_DETERMINISTIC_SUMMARY_CHUNKS: usize = 64;
+
+/** 工作记忆切点语义版本；旧版 lastSummarized 不可信，只能从 lastCompacted 继续。 */
+const CONTEXT_SUMMARY_COVERAGE_VERSION: u32 = 2;
+
+/**
  * 交给总结器的单条消息字符上限。
  *
  * 不能复用历史层的 8000 字符：24 条 × 8000 ≈ 19 万字符（约 10 万 token），
@@ -104,6 +118,15 @@ struct ExplicitSkillSelection {
     skills: Vec<AgentSkill>,
     requested_count: usize,
     truncated: bool,
+}
+
+/** 一批待总结的连续消息；摘要成功或确定性兜底后，切点只推进到这批的最后一条。 */
+#[derive(Clone, Debug)]
+struct SummaryChunk {
+    messages: Vec<AgentMessage>,
+    last_message_id: String,
+    /** 这批之后已经没有未总结消息，可以安全压缩 transcript。 */
+    covered_all: bool,
 }
 
 /** 真实 Agent Runtime 的调度结果，包含可持久化快照和本轮请求审计摘要。 */
@@ -420,7 +443,7 @@ pub async fn compact_agent_context_summary(
         });
     }
 
-    let summary_update =
+    let (summary_update, covered_all) =
         match resolve_context_summary_model_selection(&settings, &snapshot.sessions[session_index])
         {
             Ok(selection) => {
@@ -446,31 +469,44 @@ pub async fn compact_agent_context_summary(
                     session_id,
                     reason
                 );
-                update_agent_context_summary_deterministic(
+                let covered_all = ensure_deterministic_summary_covers_all(
                     &mut snapshot,
                     session_index,
                     None,
                     true,
                 );
-                ContextSummaryUpdate::DeterministicFallback(reason)
+                (
+                    ContextSummaryUpdate::DeterministicFallback(reason),
+                    covered_all,
+                )
             }
         };
 
     log::info!(
         target: "agent_runtime",
-        "手动整理会话工作记忆完成：session={} duration_ms={} mode={}",
+        "手动整理会话工作记忆完成：session={} duration_ms={} mode={} covered_all={}",
         session_id,
         started_at.elapsed().as_millis(),
-        summary_update.mode()
+        summary_update.mode(),
+        covered_all
     );
 
-    // 手动整理必须真的丢掉旧历史，因此使用独立的小预算，而不是历史层预算。
-    let compaction = rewrite_stored_transcript(
-        app,
-        &session_id,
-        snapshot.sessions[session_index].context_summary.as_ref(),
-        tail_budget,
-    );
+    // 没覆盖全部消息就压缩 transcript，会把中间未进摘要的历史直接丢掉；宁可这轮不压缩。
+    let compaction = if covered_all {
+        rewrite_stored_transcript(
+            app,
+            &session_id,
+            snapshot.sessions[session_index].context_summary.as_ref(),
+            tail_budget,
+        )
+    } else {
+        log::warn!(
+            target: "agent_runtime",
+            "手动整理未覆盖全部历史，已保留 transcript 不压缩：session={}",
+            session_id
+        );
+        None
+    };
     let (retained_messages, dropped_messages) = compaction
         .map(|compacted| (compacted.retained_messages, compacted.dropped_messages))
         .unwrap_or((0, 0));
@@ -1062,12 +1098,18 @@ async fn run_model_loop(
                         .is_none_or(|model_id| model_id == selected_model_id)
                 {
                     overflow_retried = true;
-                    if snapshot.sessions[session_index].context_summary.is_none() {
-                        update_agent_context_summary_deterministic(
+                    if !summary_covers_all(&snapshot.sessions[session_index])
+                        && !ensure_deterministic_summary_covers_all(
                             &mut snapshot,
                             session_index,
                             Some("模型上下文超出窗口，已压缩后重试。"),
                             true,
+                        )
+                    {
+                        log::warn!(
+                            target: "agent_runtime",
+                            "超窗兜底未能覆盖全部历史，本轮不做破坏性压缩：session={}",
+                            session_id
                         );
                     }
                     let rebuilt = rebuild_prompt_after_overflow(
@@ -1175,12 +1217,18 @@ async fn run_model_loop(
             && !overflow_retried
         {
             overflow_retried = true;
-            if snapshot.sessions[session_index].context_summary.is_none() {
-                update_agent_context_summary_deterministic(
+            if !summary_covers_all(&snapshot.sessions[session_index])
+                && !ensure_deterministic_summary_covers_all(
                     &mut snapshot,
                     session_index,
                     Some("模型输出因长度限制被截断，已压缩后重试。"),
                     true,
+                )
+            {
+                log::warn!(
+                    target: "agent_runtime",
+                    "长度截断兜底未能覆盖全部历史，本轮不做破坏性压缩：session={}",
+                    session_id
                 );
             }
             let rebuilt = rebuild_prompt_after_overflow(
@@ -2402,67 +2450,121 @@ async fn update_agent_context_summary_best_effort(
     session_index: usize,
     failure_reason: Option<&str>,
     update_compacted_marker: bool,
-) -> ContextSummaryUpdate {
+) -> (ContextSummaryUpdate, bool) {
     let started_at = Instant::now();
     let endpoint = model_provider::chat_completions_endpoint(&provider.api_base);
     let session_id = snapshot.sessions[session_index].id.clone();
-    let messages =
-        build_context_summary_model_messages(&snapshot.sessions[session_index], failure_reason);
-    let result = request_context_summary(
-        client,
-        provider,
-        selected_model_id,
-        &endpoint,
-        api_key,
-        &messages,
-    )
-    .await;
+    let mut summary_update = ContextSummaryUpdate::AlreadyCurrent;
+    let mut covered_all = false;
 
-    match result {
-        Ok(summary) => {
-            let summary = normalize_context_summary(
-                summary,
-                &snapshot.sessions[session_index],
-                update_compacted_marker,
-            );
-            let rendered_chars = render_context_summary_body(&summary)
-                .map(|body| body.chars().count())
-                .unwrap_or_default();
-            let field_count = context_summary_field_count(&summary);
-            let updated_at = summary.updated_at.clone();
+    for _ in 0..MAX_SUMMARY_CHUNKS_PER_UPDATE {
+        let Some(chunk) = context_summary_pending_chunk(&snapshot.sessions[session_index]) else {
+            covered_all = true;
+            break;
+        };
+        // 每批只带最老的未总结消息，摘要成功后再推进切点，避免跳过中间历史。
+        let recent_payload = context_summary_payload(&chunk.messages);
+        let messages = build_context_summary_model_messages_with_recent(
+            &snapshot.sessions[session_index],
+            failure_reason,
+            &recent_payload,
+        );
+        let result = request_context_summary(
+            client,
+            provider,
+            selected_model_id,
+            &endpoint,
+            api_key,
+            &messages,
+        )
+        .await;
 
-            snapshot.sessions[session_index].context_summary = Some(summary);
-            snapshot.sessions[session_index].updated_at = format_local_datetime();
-            log::info!(
-                target: "agent_runtime",
-                "会话工作记忆更新成功：session={} duration_ms={} rendered_chars={} field_count={} updated_at={}",
-                session_id,
-                started_at.elapsed().as_millis(),
-                rendered_chars,
-                field_count,
-                updated_at
-            );
-            ContextSummaryUpdate::Model
+        match result {
+            Ok(summary) => {
+                let summary = normalize_context_summary_with_cut(
+                    summary,
+                    &snapshot.sessions[session_index],
+                    Some(&chunk.last_message_id),
+                    update_compacted_marker && chunk.covered_all,
+                );
+                let rendered_chars = render_context_summary_body(&summary)
+                    .map(|body| body.chars().count())
+                    .unwrap_or_default();
+                let field_count = context_summary_field_count(&summary);
+                let updated_at = summary.updated_at.clone();
+
+                snapshot.sessions[session_index].context_summary = Some(summary);
+                snapshot.sessions[session_index].updated_at = format_local_datetime();
+                if summary_update == ContextSummaryUpdate::AlreadyCurrent {
+                    summary_update = ContextSummaryUpdate::Model;
+                }
+                log::info!(
+                    target: "agent_runtime",
+                    "会话工作记忆分片更新成功：session={} duration_ms={} rendered_chars={} field_count={} updated_at={} covered_all={}",
+                    session_id,
+                    started_at.elapsed().as_millis(),
+                    rendered_chars,
+                    field_count,
+                    updated_at,
+                    chunk.covered_all
+                );
+            }
+            Err(error) => {
+                let reason = model_provider::redact_model_error_text(&error);
+                log::warn!(
+                    target: "agent_runtime",
+                    "会话工作记忆模型更新失败，已使用确定性摘要：session={} duration_ms={} failure_reason_chars={} covered_all={} error={}",
+                    session_id,
+                    started_at.elapsed().as_millis(),
+                    failure_reason.map(|reason| reason.chars().count()).unwrap_or_default(),
+                    chunk.covered_all,
+                    reason
+                );
+                apply_deterministic_summary_for_chunk(
+                    snapshot,
+                    session_index,
+                    &chunk,
+                    failure_reason,
+                    update_compacted_marker && chunk.covered_all,
+                );
+                summary_update = ContextSummaryUpdate::DeterministicFallback(reason);
+                // 模型不可用时不要为后续每一批继续等超时；剩余批次直接确定性追平。
+                covered_all = ensure_deterministic_summary_covers_all(
+                    snapshot,
+                    session_index,
+                    failure_reason,
+                    update_compacted_marker,
+                );
+                break;
+            }
         }
-        Err(error) => {
-            let reason = model_provider::redact_model_error_text(&error);
-            log::warn!(
-                target: "agent_runtime",
-                "会话工作记忆模型更新失败，已使用确定性摘要：session={} duration_ms={} failure_reason_chars={} error={}",
-                session_id,
-                started_at.elapsed().as_millis(),
-                failure_reason.map(|reason| reason.chars().count()).unwrap_or_default(),
-                reason
-            );
-            update_agent_context_summary_deterministic(
-                snapshot,
-                session_index,
-                failure_reason,
-                update_compacted_marker,
-            );
-            ContextSummaryUpdate::DeterministicFallback(reason)
+
+        if chunk.covered_all {
+            covered_all = true;
+            break;
         }
     }
+
+    if summary_update == ContextSummaryUpdate::AlreadyCurrent
+        && context_summary_pending_chunk(&snapshot.sessions[session_index]).is_none()
+    {
+        covered_all = true;
+    }
+
+    // 已经覆盖全部消息时，把压缩切点同步到最后一条；否则保持旧切点。
+    if covered_all && update_compacted_marker {
+        if let Some(last_id) = snapshot.sessions[session_index]
+            .messages
+            .last()
+            .map(|message| message.id.clone())
+        {
+            if let Some(summary) = snapshot.sessions[session_index].context_summary.as_mut() {
+                summary.last_compacted_message_id = Some(last_id);
+            }
+        }
+    }
+
+    (summary_update, covered_all)
 }
 
 /**
@@ -2578,7 +2680,7 @@ async fn update_agent_context_summary_after_turn(
     );
 
     if decision.should_compact {
-        update_agent_context_summary_best_effort(
+        let (_summary_update, covered_all) = update_agent_context_summary_best_effort(
             client,
             provider,
             selected_model_id,
@@ -2589,16 +2691,34 @@ async fn update_agent_context_summary_after_turn(
             true,
         )
         .await;
-    } else {
-        update_agent_context_summary_deterministic(snapshot, session_index, failure_reason, false);
+        if !covered_all {
+            log::warn!(
+                target: "agent_runtime",
+                "自动整理未覆盖全部历史，本轮不压缩 transcript：session={}",
+                snapshot.sessions[session_index].id
+            );
+        }
+        return covered_all;
     }
-    decision.should_compact
+    update_agent_context_summary_deterministic(snapshot, session_index, failure_reason, false);
+    false
 }
 
 /** 构造 summary-only 模型请求，不携带工具 schema，不进入用户可见消息列表。 */
+#[cfg(test)]
 fn build_context_summary_model_messages(
     session: &AgentSession,
     failure_reason: Option<&str>,
+) -> Vec<Value> {
+    let recent_messages = context_summary_recent_message_payload(session);
+    build_context_summary_model_messages_with_recent(session, failure_reason, &recent_messages)
+}
+
+/** 构造一次分片摘要请求；recent_payload 只包含本批要总结的消息。 */
+fn build_context_summary_model_messages_with_recent(
+    session: &AgentSession,
+    failure_reason: Option<&str>,
+    recent_payload: &str,
 ) -> Vec<Value> {
     let old_summary = session
         .context_summary
@@ -2606,7 +2726,6 @@ fn build_context_summary_model_messages(
         .map(|summary| serde_json::to_string(summary).unwrap_or_default())
         .filter(|summary| !summary.is_empty())
         .unwrap_or_else(|| "null".to_owned());
-    let recent_messages = context_summary_recent_message_payload(session);
     let pending_change =
         current_pending_change_summary(session).unwrap_or_else(|| "无待确认变更".to_owned());
     let turn_failure = failure_reason
@@ -2622,9 +2741,9 @@ fn build_context_summary_model_messages(
         json!({
             "role": "user",
             "content": format!(
-                "旧工作记忆 JSON：\n{}\n\n最近未整理消息和工具摘要 JSON：\n{}\n\n当前 pending diff 摘要：\n{}\n\n本轮失败摘要：\n{}\n\n请合并为新的工作记忆 JSON。",
+                "旧工作记忆 JSON：\n{}\n\n本批未整理消息和工具摘要 JSON：\n{}\n\n当前 pending diff 摘要：\n{}\n\n本轮失败摘要：\n{}\n\n请合并为新的工作记忆 JSON。lastSummarizedMessageId 必须填本批最后一条消息的 id；如果还有更晚的消息未整理，lastCompactedMessageId 保持旧值。",
                 old_summary,
-                recent_messages,
+                recent_payload,
                 pending_change,
                 turn_failure
             )
@@ -2632,36 +2751,59 @@ fn build_context_summary_model_messages(
     ]
 }
 
-/** 把最近消息压缩成 summary 模型可读 JSON，正文按预算截断且工具只保留摘要。 */
-fn context_summary_recent_message_payload(session: &AgentSession) -> String {
-    let last_compacted_id = session
-        .context_summary
-        .as_ref()
-        .and_then(|summary| summary.last_compacted_message_id.as_deref());
-    let mut messages = session
-        .messages
-        .iter()
-        .skip_while(|message| Some(message.id.as_str()) != last_compacted_id)
-        .skip(if last_compacted_id.is_some() { 1 } else { 0 })
-        .collect::<Vec<_>>();
-
-    if messages.is_empty() {
-        messages = session
-            .messages
-            .iter()
-            .rev()
-            .take(MAX_RECENT_MESSAGES_FOR_SUMMARY)
-            .collect::<Vec<_>>();
-        messages.reverse();
+/** 取最老的一批未总结消息；只有最后一批才允许推进压缩切点。 */
+fn context_summary_pending_chunk(session: &AgentSession) -> Option<SummaryChunk> {
+    if session.messages.is_empty() {
+        return None;
     }
-
-    let payload = messages
-        .into_iter()
-        .rev()
+    let summary = session.context_summary.as_ref();
+    // version < 2 的旧摘要里 lastSummarized 每轮都被写成最新一条，不能作为真实覆盖切点；
+    // 只信任新版本写入的 lastSummarized，否则从 lastCompacted 重新追平。
+    let trustworthy_summarized = summary
+        .filter(|summary| summary.version >= CONTEXT_SUMMARY_COVERAGE_VERSION)
+        .and_then(|summary| summary.last_summarized_message_id.as_deref());
+    let last_message_id = session.messages.last().map(|message| message.id.as_str());
+    // 旧版压缩会把 lastCompacted 直接写到最新一条，但摘要只覆盖了最后 24 条；
+    // 这种切点不可信，宁可从头重新追平，也不能继续跳过中间历史。
+    let legacy_compacted = summary
+        .and_then(|summary| summary.last_compacted_message_id.as_deref())
+        .filter(|id| Some(*id) != last_message_id);
+    let start_id = trustworthy_summarized.or(legacy_compacted);
+    let start_index = start_id
+        .and_then(|id| {
+            session
+                .messages
+                .iter()
+                .position(|message| message.id == id)
+                .map(|index| index + 1)
+        })
+        .unwrap_or(0);
+    let remaining = session.messages.get(start_index..).unwrap_or(&[]);
+    if remaining.is_empty() {
+        return None;
+    }
+    let messages = remaining
+        .iter()
         .take(MAX_RECENT_MESSAGES_FOR_SUMMARY)
-        .collect::<Vec<_>>()
-        .into_iter()
-        .rev()
+        .cloned()
+        .collect::<Vec<_>>();
+    let last_message_id = messages.last()?.id.clone();
+    Some(SummaryChunk {
+        covered_all: start_index + messages.len() >= session.messages.len(),
+        messages,
+        last_message_id,
+    })
+}
+
+/** 当前是否还有未进入摘要的消息；压缩前必须为 false。 */
+pub(super) fn summary_covers_all(session: &AgentSession) -> bool {
+    context_summary_pending_chunk(session).is_none()
+}
+
+/** 把一批消息压缩成 summary 模型可读 JSON，正文按预算截断且工具只保留摘要。 */
+fn context_summary_payload(messages: &[AgentMessage]) -> String {
+    let payload = messages
+        .iter()
         .map(|message| {
             json!({
                 "id": &message.id,
@@ -2690,6 +2832,14 @@ fn context_summary_recent_message_payload(session: &AgentSession) -> String {
         .collect::<Vec<_>>();
 
     serde_json::to_string(&payload).unwrap_or_else(|_| "[]".to_owned())
+}
+
+/** 兼容旧调用：返回最老一批未总结消息的摘要输入。 */
+#[cfg(test)]
+fn context_summary_recent_message_payload(session: &AgentSession) -> String {
+    context_summary_pending_chunk(session)
+        .map(|chunk| context_summary_payload(&chunk.messages))
+        .unwrap_or_else(|| "[]".to_owned())
 }
 
 /** 解析 summary 模型响应；只接受 JSON object，兼容模型误包的 fenced code block。 */
@@ -2778,10 +2928,54 @@ fn extract_json_object_text(content: &str) -> Option<String> {
     (start < end).then(|| trimmed[start..=end].to_owned())
 }
 
-/** 模型总结失败或本地 fallback 时，用确定性规则维护最低可用工作记忆。 */
+/** 模型总结失败或本地 fallback 时，用确定性规则维护最低可用工作记忆。返回是否已覆盖全部消息。 */
 pub(crate) fn update_agent_context_summary_deterministic(
     snapshot: &mut WorkspaceSnapshot,
     session_index: usize,
+    failure_reason: Option<&str>,
+    update_compacted_marker: bool,
+) -> bool {
+    let Some(chunk) = context_summary_pending_chunk(&snapshot.sessions[session_index]) else {
+        return true;
+    };
+    apply_deterministic_summary_for_chunk(
+        snapshot,
+        session_index,
+        &chunk,
+        failure_reason,
+        update_compacted_marker && chunk.covered_all,
+    );
+    chunk.covered_all
+}
+
+/** 用确定性分片摘要追平所有未总结消息；失败/超过批次上限时返回 false。 */
+fn ensure_deterministic_summary_covers_all(
+    snapshot: &mut WorkspaceSnapshot,
+    session_index: usize,
+    failure_reason: Option<&str>,
+    update_compacted_marker: bool,
+) -> bool {
+    for _ in 0..MAX_DETERMINISTIC_SUMMARY_CHUNKS {
+        if summary_covers_all(&snapshot.sessions[session_index]) {
+            return true;
+        }
+        if update_agent_context_summary_deterministic(
+            snapshot,
+            session_index,
+            failure_reason,
+            update_compacted_marker,
+        ) {
+            return true;
+        }
+    }
+    false
+}
+
+/** 对一批消息做确定性摘要；切点只推进到这批的最后一条。 */
+fn apply_deterministic_summary_for_chunk(
+    snapshot: &mut WorkspaceSnapshot,
+    session_index: usize,
+    chunk: &SummaryChunk,
     failure_reason: Option<&str>,
     update_compacted_marker: bool,
 ) {
@@ -2797,11 +2991,11 @@ pub(crate) fn update_agent_context_summary_deterministic(
 
     summary.version = 1;
     summary.updated_at = format_local_datetime();
-    summary.current_goal = latest_user_message(session)
+    summary.current_goal = latest_user_message_in(&chunk.messages)
         .map(|message| truncate_summary_item(&message.content))
         .or(summary.current_goal);
 
-    if let Some(last_assistant) = latest_assistant_message(session) {
+    if let Some(last_assistant) = latest_assistant_message_in(&chunk.messages) {
         append_bounded_unique(
             &mut summary.completed_work,
             truncate_summary_item(&format!("本轮回复：{}", last_assistant.content)),
@@ -2854,9 +3048,13 @@ pub(crate) fn update_agent_context_summary_deterministic(
         );
     }
 
-    merge_recent_citation_notes(&mut summary, session);
-    summary.last_summarized_message_id = session.messages.last().map(|message| message.id.clone());
-    summary = normalize_context_summary(summary, session, update_compacted_marker);
+    merge_citation_notes_from_messages(&mut summary, &chunk.messages);
+    summary = normalize_context_summary_with_cut(
+        summary,
+        session,
+        Some(&chunk.last_message_id),
+        update_compacted_marker,
+    );
 
     let rendered_chars = render_context_summary_body(&summary)
         .map(|body| body.chars().count())
@@ -2872,25 +3070,49 @@ pub(crate) fn update_agent_context_summary_deterministic(
         .unwrap_or("none");
     log::info!(
         target: "agent_runtime",
-        "会话工作记忆确定性更新成功：session={} rendered_chars={} field_count={} updated_at={}",
+        "会话工作记忆确定性分片更新成功：session={} rendered_chars={} field_count={} updated_at={} covered_all={}",
         snapshot.sessions[session_index].id,
         rendered_chars,
         field_count,
-        updated_at
+        updated_at,
+        chunk.covered_all
     );
 }
 
 /** 规范模型或规则生成的工作记忆，统一长度、数量和 pending diff 状态。 */
+#[cfg(test)]
 fn normalize_context_summary(
-    mut summary: AgentContextSummary,
+    summary: AgentContextSummary,
     session: &AgentSession,
     update_compacted_marker: bool,
 ) -> AgentContextSummary {
-    summary.version = if summary.version == 0 {
-        1
-    } else {
-        summary.version
-    };
+    let summarized_through = session
+        .messages
+        .last()
+        .map(|message| message.id.as_str());
+    normalize_context_summary_with_cut(
+        summary,
+        session,
+        summarized_through,
+        update_compacted_marker,
+    )
+}
+
+/**
+ * 规范工作记忆，并把切点设为本次真正总结到的消息。
+ *
+ * lastSummarized 始终推进；lastCompacted 只在“这批已经是最后一批”时才推进，
+ * 防止中间还有没进摘要的消息却被压缩掉。
+ */
+fn normalize_context_summary_with_cut(
+    mut summary: AgentContextSummary,
+    session: &AgentSession,
+    summarized_through: Option<&str>,
+    update_compacted_marker: bool,
+) -> AgentContextSummary {
+    summary.version = summary
+        .version
+        .max(CONTEXT_SUMMARY_COVERAGE_VERSION);
     if summary.updated_at.trim().is_empty() {
         summary.updated_at = format_local_datetime();
     }
@@ -2905,10 +3127,13 @@ fn normalize_context_summary(
     summary.open_questions = normalize_summary_items(summary.open_questions);
     summary.touched_notes = normalize_touched_notes(summary.touched_notes);
     summary.pending_change_summary = current_pending_change_summary(session);
-    summary.last_summarized_message_id = session.messages.last().map(|message| message.id.clone());
+    summary.last_summarized_message_id = summarized_through
+        .map(str::to_owned)
+        .or_else(|| session.messages.last().map(|message| message.id.clone()));
     if update_compacted_marker {
-        summary.last_compacted_message_id =
-            session.messages.last().map(|message| message.id.clone());
+        summary.last_compacted_message_id = summarized_through
+            .map(str::to_owned)
+            .or_else(|| session.messages.last().map(|message| message.id.clone()));
     } else {
         // schema 用空字符串表示「无」，这里收敛回 None，避免空串被当成有效切点。
         summary.last_compacted_message_id = summary
@@ -3004,16 +3229,14 @@ fn append_bounded_unique(items: &mut Vec<String>, item: String) {
     }
 }
 
-/** 把最近消息引用的笔记合并进 touchedNotes，便于后续回合记住读过哪些笔记。 */
-fn merge_recent_citation_notes(summary: &mut AgentContextSummary, session: &AgentSession) {
+/** 把一批消息里引用的笔记合并进 touchedNotes，便于后续回合记住读过哪些笔记。 */
+fn merge_citation_notes_from_messages(
+    summary: &mut AgentContextSummary,
+    messages: &[AgentMessage],
+) {
     let mut notes = summary.touched_notes.clone();
 
-    for message in session
-        .messages
-        .iter()
-        .rev()
-        .take(MAX_RECENT_MESSAGES_FOR_SUMMARY)
-    {
+    for message in messages.iter().rev() {
         if let Some(citations) = &message.citations {
             for citation in citations {
                 notes.push(AgentContextTouchedNote {
@@ -3028,19 +3251,14 @@ fn merge_recent_citation_notes(summary: &mut AgentContextSummary, session: &Agen
     summary.touched_notes = normalize_touched_notes(notes);
 }
 
-/** 查找最新用户消息，供确定性 summary 更新当前目标。 */
-fn latest_user_message(session: &AgentSession) -> Option<&AgentMessage> {
-    session
-        .messages
-        .iter()
-        .rev()
-        .find(|message| message.role == "user")
+/** 查找一批消息中最新的用户消息，供确定性 summary 更新当前目标。 */
+fn latest_user_message_in(messages: &[AgentMessage]) -> Option<&AgentMessage> {
+    messages.iter().rev().find(|message| message.role == "user")
 }
 
-/** 查找最新 assistant 消息，供确定性 summary 记录本轮完成项。 */
-fn latest_assistant_message(session: &AgentSession) -> Option<&AgentMessage> {
-    session
-        .messages
+/** 查找一批消息中最新的 assistant 消息，供确定性 summary 记录完成项。 */
+fn latest_assistant_message_in(messages: &[AgentMessage]) -> Option<&AgentMessage> {
+    messages
         .iter()
         .rev()
         .find(|message| message.role == "assistant")
@@ -5548,6 +5766,89 @@ mod tests {
         assert!(!payload.contains("message-2"));
         assert!(payload.contains("message-3"));
         assert!(payload.contains("message-5"));
+    }
+
+    /** 摘要必须从最老的未总结消息开始；只有覆盖到最新一条才允许推进压缩切点。 */
+    #[test]
+    fn summary_chunks_oldest_messages_and_compacts_only_after_full_coverage() {
+        let mut snapshot = runtime_test_snapshot("正文内容足够用于测试。".to_owned());
+        snapshot.sessions[0].messages = (0..60)
+            .map(|index| {
+                history_test_message(
+                    &format!("message-{index}"),
+                    if index % 2 == 0 { "user" } else { "assistant" },
+                    &format!("消息 {index}"),
+                    None,
+                    Vec::new(),
+                )
+            })
+            .collect();
+
+        let chunk = context_summary_pending_chunk(&snapshot.sessions[0]).unwrap();
+        assert_eq!(chunk.messages.len(), MAX_RECENT_MESSAGES_FOR_SUMMARY);
+        assert_eq!(chunk.messages[0].id, "message-0");
+        assert_eq!(chunk.last_message_id, "message-23");
+        assert!(!chunk.covered_all);
+
+        assert!(!update_agent_context_summary_deterministic(
+            &mut snapshot,
+            0,
+            None,
+            true
+        ));
+        let summary = snapshot.sessions[0].context_summary.as_ref().unwrap();
+        assert_eq!(
+            summary.last_summarized_message_id.as_deref(),
+            Some("message-23")
+        );
+        assert!(summary.last_compacted_message_id.is_none());
+
+        let next = context_summary_pending_chunk(&snapshot.sessions[0]).unwrap();
+        assert_eq!(next.messages[0].id, "message-24");
+        assert_eq!(next.last_message_id, "message-47");
+
+        assert!(ensure_deterministic_summary_covers_all(
+            &mut snapshot, 0, None, true
+        ));
+        let summary = snapshot.sessions[0].context_summary.as_ref().unwrap();
+        assert_eq!(
+            summary.last_summarized_message_id.as_deref(),
+            Some("message-59")
+        );
+        assert_eq!(
+            summary.last_compacted_message_id.as_deref(),
+            Some("message-59")
+        );
+        assert!(summary_covers_all(&snapshot.sessions[0]));
+    }
+
+    /** 旧版把 lastCompacted 写成最后一条时不可信，必须从最早的消息重新追平。 */
+    #[test]
+    fn legacy_summary_at_last_message_restarts_from_the_oldest_chunk() {
+        let mut snapshot = runtime_test_snapshot("正文内容足够用于测试。".to_owned());
+        snapshot.sessions[0].messages = (0..30)
+            .map(|index| {
+                history_test_message(
+                    &format!("message-{index}"),
+                    if index % 2 == 0 { "user" } else { "assistant" },
+                    &format!("消息 {index}"),
+                    None,
+                    Vec::new(),
+                )
+            })
+            .collect();
+        snapshot.sessions[0].context_summary = Some(AgentContextSummary {
+            version: 1,
+            updated_at: "2026-07-08 10:00:00".to_owned(),
+            last_summarized_message_id: Some("message-29".to_owned()),
+            last_compacted_message_id: Some("message-29".to_owned()),
+            ..AgentContextSummary::default()
+        });
+
+        let chunk = context_summary_pending_chunk(&snapshot.sessions[0]).unwrap();
+        assert_eq!(chunk.messages[0].id, "message-0");
+        assert_eq!(chunk.last_message_id, "message-23");
+        assert!(!chunk.covered_all);
     }
 
     /** 模型启用后的配置或请求错误必须进入可见会话消息，不能静默伪装成本地规则回答。 */
