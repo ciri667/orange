@@ -48,6 +48,7 @@ export function AgentTurnTrace({
   startedAtMs,
   status,
   hasLiveAnswer = false,
+  notice,
 }: {
   steps: AgentTraceStep[];
   durationMs?: number;
@@ -62,6 +63,8 @@ export function AgentTurnTrace({
   status: AgentTurnTraceStatus;
   /** 回答区已经有终稿文本时，思考不再带光标，末尾完成工具也不再当「刚完成」摊开。 */
   hasLiveAnswer?: boolean;
+  /** 运行中的临时提示（例如模型服务繁忙时的重试倒计时）。 */
+  notice?: string;
 }) {
   const hasFailedStep = useMemo(
     () => steps.some((step) => step.type === "tool" && step.status === "failed"),
@@ -147,6 +150,12 @@ export function AgentTurnTrace({
         <span className="min-w-0 text-[11px] font-medium text-ink-soft">{metaParts.join(" · ")}</span>
         {resolvedStatus === "running" && <Loader2 className="animate-spin" size={13} />}
       </button>
+
+      {resolvedStatus === "running" && notice ? (
+        <p className="m-0 text-[12px] leading-[1.6] text-warning" role="status" aria-live="polite">
+          {notice}
+        </p>
+      ) : null}
 
       {isExpanded && (
         <div className="grid min-w-0 gap-1.5">

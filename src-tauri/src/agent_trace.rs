@@ -48,6 +48,9 @@ pub struct AgentTurnProgressPayload {
     pub started_at_ms: u64,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub content: Option<String>,
+    /// 运行中的临时提示（例如模型服务重试等待）；不落盘，结束后不再下发。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub notice: Option<String>,
 }
 
 /** 当前 Unix 毫秒时间戳；系统时钟早于 epoch 时退化为 0。 */
@@ -69,6 +72,8 @@ pub struct AgentTurnTracer {
     steps: Vec<AgentTraceStep>,
     status: String,
     content: Option<String>,
+    /** 运行中的临时提示（如模型服务重试等待），不进入最终消息或持久化轨迹。 */
+    notice: Option<String>,
     running_started: HashMap<String, Instant>,
     last_progress_emit: Option<Instant>,
 }
@@ -84,6 +89,7 @@ impl AgentTurnTracer {
             steps: Vec::new(),
             status: "running".to_owned(),
             content: None,
+            notice: None,
             running_started: HashMap::new(),
             last_progress_emit: None,
         }
@@ -157,7 +163,25 @@ impl AgentTurnTracer {
         self.emit_throttled(app, clearing);
     }
 
-    /** 工具调用出现后，把已经流出的回答改记为旁白，避免中间过程留在终稿位置。 */
+    /**
+ * 更新运行中提示。
+ *
+ * 这是纯 UI 状态：只随过程事件下发，不写进 transcript，也不会出现在最终回答里。
+ * 传 `None` 表示清除（请求重新开始或失败/取消后必须清掉）。
+ */
+pub fn set_notice(&mut self, notice: Option<&str>, app: Option<&AppHandle>) {
+    let next = notice
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned);
+    if self.notice == next {
+        return;
+    }
+    self.notice = next;
+    self.emit(app);
+}
+
+/** 工具调用出现后，把已经流出的回答改记为旁白，避免中间过程留在终稿位置。 */
     #[cfg(test)]
     pub fn promote_partial_content_to_narration(&mut self, app: Option<&AppHandle>) {
         let Some(content) = self.content.take() else {
@@ -482,6 +506,7 @@ impl AgentTurnTracer {
             turn_duration_ms: self.duration_ms(),
             started_at_ms: self.started_at_ms,
             content: self.content.clone(),
+            notice: self.notice.clone(),
         };
 
         self.last_progress_emit = Some(Instant::now());

@@ -3,6 +3,7 @@ mod compaction;
 mod context;
 mod dsml;
 mod external_dispatch;
+mod retry;
 mod stream;
 mod subagent;
 mod subagent_personas;
@@ -12,6 +13,7 @@ use cancel::{is_user_abort_error, USER_ABORT_ERROR};
 use compaction::*;
 use context::*;
 use dsml::*;
+use retry::{ModelRequestEvent, ModelRequestFailure};
 use stream::*;
 use tool_budget::{ModelLoopPhase, ToolRoundBudget};
 use tool_results::{append_tool_result_messages, model_tool_result_text};
@@ -1055,8 +1057,19 @@ async fn run_model_loop(
             None,
             image_root.as_deref(),
             cancel,
-            &mut |streamed| {
-                apply_streamed_assistant_progress(tracer, Some(app), streamed);
+            &mut |event| match event {
+                ModelRequestEvent::Streamed(streamed) => {
+                    apply_streamed_assistant_progress(tracer, Some(app), streamed);
+                }
+                ModelRequestEvent::RetryWaiting(notice) => {
+                    let seconds = notice.delay.as_secs().max(1);
+                    let text = format!(
+                        "模型服务暂时不可用，约 {} 秒后进行第 {}/{} 次重试",
+                        seconds, notice.retry_index, notice.max_retries
+                    );
+                    tracer.set_notice(Some(&text), Some(app));
+                }
+                ModelRequestEvent::RetryFinished => tracer.set_notice(None, Some(app)),
             },
         )
         .await
@@ -1131,7 +1144,8 @@ async fn run_model_loop(
                     );
                     continue;
                 }
-                return Err(provider_error::user_facing_provider_error(&error));
+                // 错误文案统一由 run_agent_turn 出口转换，避免同一错误被处理两次。
+                return Err(error);
             }
         };
         record_context_usage(
@@ -1975,8 +1989,14 @@ fn load_enabled_session_kb_memories(
     memories
 }
 
-/** 发送模型请求：配额不重试，超窗 compact 后最多一次，429/5xx 指数退避。 */
-pub(super) async fn send_chat_completion_with_policy(
+/**
+ * 发送模型请求：配额不重试，超窗 compact 后最多一次，429/5xx 指数退避。
+ *
+ * 退避策略集中在 `retry` 模块：优先使用服务端 `Retry-After`，否则按 1→2→4→8→16→30
+ * 秒递增并叠加抖动；累计等待超过预算后返回带重试次数的可读错误。等待期间通过
+ * `on_event` 推送临时提示，让用户知道不是卡死，也可以随时点停止。
+ */
+pub(in crate::runtime) async fn send_chat_completion_with_policy(
     client: &Client,
     provider: &LlmProviderConfig,
     model_id: &str,
@@ -1987,7 +2007,7 @@ pub(super) async fn send_chat_completion_with_policy(
     response_format: Option<&Value>,
     image_root: Option<&std::path::Path>,
     cancel: &AgentCancel,
-    on_progress: &mut impl FnMut(&StreamedAssistant),
+    on_event: &mut impl FnMut(ModelRequestEvent<'_>),
 ) -> Result<Value, String> {
     let hydrated_messages = image_root
         .filter(|_| messages_contain_image_refs(messages))
@@ -1996,8 +2016,9 @@ pub(super) async fn send_chat_completion_with_policy(
         Some(hydrated) => hydrated,
         None => messages,
     };
-    let mut delay = Duration::from_millis(400);
-    let mut retryable_attempts = 0usize;
+    let mut retries = 0u32;
+    let mut waited = Duration::ZERO;
+    let request_window_started = Instant::now();
     loop {
         if cancel.is_aborted() {
             return Err(USER_ABORT_ERROR.to_owned());
@@ -2012,46 +2033,77 @@ pub(super) async fn send_chat_completion_with_policy(
             tool_schemas,
             response_format,
             cancel,
-            on_progress,
+            &mut |streamed| on_event(ModelRequestEvent::Streamed(streamed)),
         )
         .await
         {
-            Ok(value) => return Ok(value),
-            Err(error) => {
+            Ok(value) => {
+                on_event(ModelRequestEvent::RetryFinished);
+                return Ok(value);
+            }
+            Err(failure) => {
+                let error = failure.message;
                 if cancel.is_aborted() || is_user_abort_error(&error) {
+                    on_event(ModelRequestEvent::RetryFinished);
                     return Err(USER_ABORT_ERROR.to_owned());
                 }
                 let status = provider_error::parse_http_status_from_error(&error);
                 let kind = provider_error::classify_provider_error(&error, status);
                 log::info!(
                     target: "agent_runtime",
-                    "模型请求失败分类：kind={:?} http_status={:?} retryable_attempts={}",
+                    "模型请求失败分类：kind={:?} http_status={:?} retries={} waited_ms={} retry_after_ms={}",
                     kind,
                     status,
-                    retryable_attempts
+                    retries,
+                    waited.as_millis(),
+                    failure.retry_after.map(|delay| delay.as_millis()).unwrap_or_default()
                 );
-                match kind {
-                    provider_error::ProviderErrorKind::Abort
-                    | provider_error::ProviderErrorKind::Quota => {
-                        return Err(provider_error::user_facing_provider_error(&error));
-                    }
-                    provider_error::ProviderErrorKind::Overflow => {
-                        return Err(error);
-                    }
-                    provider_error::ProviderErrorKind::Retryable if retryable_attempts < 3 => {
-                        retryable_attempts += 1;
-                        tokio::select! {
-                            biased;
-                            _ = cancel.cancelled() => {
-                                return Err(USER_ABORT_ERROR.to_owned());
-                            }
-                            _ = tokio::time::sleep(delay) => {}
-                        }
-                        delay = delay.saturating_mul(2);
-                        continue;
-                    }
-                    _ => return Err(provider_error::user_facing_provider_error(&error)),
+                // 配额、超窗和其它错误不在这里生成用户文案：调用方会统一转换一次，
+                // 避免错误链上重复加「模型服务暂时不可用」前缀。
+                if kind != provider_error::ProviderErrorKind::Retryable {
+                    on_event(ModelRequestEvent::RetryFinished);
+                    return Err(error);
                 }
+                if retries >= retry::MAX_RETRY_ATTEMPTS
+                    || waited >= retry::TOTAL_WAIT_BUDGET
+                    || request_window_started.elapsed() >= retry::TOTAL_REQUEST_WINDOW
+                {
+                    on_event(ModelRequestEvent::RetryFinished);
+                    return Err(retry::annotate_retry_exhausted(&error, retries, waited));
+                }
+
+                let next_delay =
+                    retry::retry_delay(retries + 1, failure.retry_after, retry::next_jitter());
+                let remaining = retry::TOTAL_WAIT_BUDGET.saturating_sub(waited);
+                if next_delay > remaining {
+                    // 服务端要求的等待已经超出本次预算：提前结束，不假装还能重试。
+                    on_event(ModelRequestEvent::RetryFinished);
+                    return Err(retry::annotate_retry_exhausted(&error, retries, waited));
+                }
+
+                retries += 1;
+                log::info!(
+                    target: "agent_runtime",
+                    "模型请求将重试：retry={}/{} delay_ms={}",
+                    retries,
+                    retry::MAX_RETRY_ATTEMPTS,
+                    next_delay.as_millis()
+                );
+                on_event(ModelRequestEvent::RetryWaiting(retry::RetryNotice {
+                    retry_index: retries,
+                    max_retries: retry::MAX_RETRY_ATTEMPTS,
+                    delay: next_delay,
+                }));
+                tokio::select! {
+                    biased;
+                    _ = cancel.cancelled() => {
+                        on_event(ModelRequestEvent::RetryFinished);
+                        return Err(USER_ABORT_ERROR.to_owned());
+                    }
+                    _ = tokio::time::sleep(next_delay) => {}
+                }
+                waited = waited.saturating_add(next_delay);
+                on_event(ModelRequestEvent::RetryFinished);
             }
         }
     }
@@ -2069,7 +2121,7 @@ async fn send_chat_completion_logged_stream(
     response_format: Option<&Value>,
     cancel: &AgentCancel,
     on_progress: &mut impl FnMut(&StreamedAssistant),
-) -> Result<Value, String> {
+) -> Result<Value, ModelRequestFailure> {
     let started_at = Instant::now();
     let result = send_chat_completion_stream(
         client,
@@ -2093,17 +2145,17 @@ async fn send_chat_completion_logged_stream(
             started_at.elapsed(),
             None,
         ),
-        Err(error) => log_model_request_event(
+        Err(failure) => log_model_request_event(
             provider,
             model_id,
             endpoint,
-            if is_user_abort_error(error) {
+            if is_user_abort_error(&failure.message) {
                 "aborted"
             } else {
                 "failed"
             },
             started_at.elapsed(),
-            Some(error),
+            Some(&failure.message),
         ),
     }
 
@@ -2365,13 +2417,13 @@ async fn send_chat_completion_stream(
     response_format: Option<&Value>,
     cancel: &AgentCancel,
     on_progress: &mut impl FnMut(&StreamedAssistant),
-) -> Result<Value, String> {
+) -> Result<Value, ModelRequestFailure> {
     let mut payload =
         build_chat_completion_payload(model, messages, tool_schemas, response_format, true);
 
     loop {
         if cancel.is_aborted() {
-            return Err(USER_ABORT_ERROR.to_owned());
+            return Err(USER_ABORT_ERROR.into());
         }
         let mut request_builder = client.post(endpoint).json(&payload);
 
@@ -2382,21 +2434,27 @@ async fn send_chat_completion_stream(
         let response = tokio::select! {
             biased;
             _ = cancel.cancelled() => {
-                return Err(USER_ABORT_ERROR.to_owned());
+                return Err(USER_ABORT_ERROR.into());
             }
             result = request_builder.send() => {
-                result.map_err(|error| {
+                result.map_err(|error| ModelRequestFailure::new(
                     model_provider::redact_model_error_text(&format!("无法发送模型请求：{error}"))
-                })?
+                ))?
             }
         };
         let status = response.status();
+        // 429/503 常带 Retry-After；必须在消费 body 之前读，重试策略会优先采用它。
+        let retry_after = response
+            .headers()
+            .get(reqwest::header::RETRY_AFTER)
+            .and_then(|value| value.to_str().ok())
+            .and_then(|value| retry::parse_retry_after(value, std::time::SystemTime::now()));
 
         if !status.is_success() {
             let body = tokio::select! {
                 biased;
                 _ = cancel.cancelled() => {
-                    return Err(USER_ABORT_ERROR.to_owned());
+                    return Err(USER_ABORT_ERROR.into());
                 }
                 body = response.text() => body.unwrap_or_else(|_| String::new()),
             };
@@ -2413,12 +2471,17 @@ async fn send_chat_completion_stream(
                 );
                 continue;
             }
-            return Err(model_provider::redact_model_error_text(&format!(
-                "模型请求失败：HTTP {status} {body}"
-            )));
+            return Err(ModelRequestFailure::with_retry_after(
+                model_provider::redact_model_error_text(&format!(
+                    "模型请求失败：HTTP {status} {body}"
+                )),
+                retry_after,
+            ));
         }
 
-        return read_chat_completion_response(response, on_progress, Some(cancel)).await;
+        return read_chat_completion_response(response, on_progress, Some(cancel))
+            .await
+            .map_err(ModelRequestFailure::new);
     }
 }
 

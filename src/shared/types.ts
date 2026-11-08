@@ -422,6 +422,8 @@ export interface AgentTurnProgressEvent {
   /** 本轮开始的绝对时间（Unix 毫秒）；切换会话导致过程区重挂载时靠它继续计时。 */
   startedAtMs: number;
   content?: string;
+  /** 运行中的临时提示（如模型服务重试等待）；不进入落盘消息。 */
+  notice?: string;
 }
 
 /** 对话图片的持久引用；二进制留在附件目录，会话 JSON 只保存元数据。 */

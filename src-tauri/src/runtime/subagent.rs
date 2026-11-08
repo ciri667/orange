@@ -448,7 +448,11 @@ async fn run_nested_loop(
             None,
             Some(&image_root),
             params.cancel,
-            &mut |streamed| {
+            &mut |event| {
+                // 子 Agent 的重试等待不单独占过程区；父级 task 步骤仍在 running 即可。
+                let super::retry::ModelRequestEvent::Streamed(streamed) = event else {
+                    return;
+                };
                 let progress = stream_ui_progress(streamed);
                 let trace_app = params.emit_progress.then_some(params.app);
                 params.tracer.with_mut(|tracer| {

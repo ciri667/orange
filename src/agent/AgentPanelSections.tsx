@@ -720,6 +720,7 @@ export function AgentMessageList({
           documents={documents}
           liveStatus={liveTurn.status}
           liveStartedAtMs={liveTurn.startedAtMs}
+          liveNotice={liveTurn.notice}
           message={{
             id: liveTurn.liveMessageId,
             role: "assistant",
@@ -753,6 +754,7 @@ function AgentMessageItem({
   documents,
   liveStatus,
   liveStartedAtMs,
+  liveNotice,
   queued = false,
   canEdit = false,
   onEditUserMessage,
@@ -765,6 +767,8 @@ function AgentMessageItem({
   liveStatus?: AgentTurnProgressEvent["status"];
   /** live 气泡的本轮绝对开始时间；落盘消息没有它，直接用最终耗时。 */
   liveStartedAtMs?: number;
+  /** 运行中的临时提示（例如模型服务重试等待）。 */
+  liveNotice?: string;
   /** 尚未进入模型的排队用户消息，只存在于当前界面。 */
   queued?: boolean;
   canEdit?: boolean;
@@ -912,6 +916,7 @@ function AgentMessageItem({
           durationMs={message.turnDurationMs}
           hasLiveAnswer={Boolean(message.content.trim())}
           startedAtMs={liveStartedAtMs}
+          notice={liveNotice}
           status={liveStatus ?? (message.interrupted ? "interrupted" : "completed")}
           steps={message.trace ?? []}
         />
