@@ -945,14 +945,8 @@ async fn run_model_loop(
     let history_pack = model_prompt.history.clone();
     let mut prompt_prefix_len = model_prompt.prefix_len;
     let mut model_messages = model_prompt.messages;
+    // 显式 Skill 的完整 instructions 已在本轮 user 消息里；不要再复制到 system。
     let mut loaded_resources = crate::skills::resources::LoadedResources::default();
-    for skill in &explicit_skills {
-        if let Ok(payload) =
-            crate::skills::resources::read_resource(&available_skills, &skill.id, None)
-        {
-            loaded_resources.remember(&payload);
-        }
-    }
     let endpoint = model_provider::chat_completions_endpoint(&provider.api_base);
     let tool_registry =
         ToolRegistry::for_session(&snapshot.sessions[session_index], &agent_security);

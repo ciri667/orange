@@ -3,6 +3,12 @@ use crate::{domain::AgentSkill, agent_tools::{AgentToolContext, ToolExecutionRes
 use serde_json::{json, Value};
 use std::{fs, path::{Component, Path}};
 
+/** 单个 Skill 资源进入 system 时的字符上限；读取本身仍允许 1 MiB。 */
+const MAX_LOADED_SKILL_CONTENT_CHARS: usize = 12_000;
+
+/** 本回合所有已加载 Skill 资源进入 system 的总字符上限。 */
+const MAX_LOADED_SKILL_SYSTEM_CHARS: usize = 24_000;
+
 /** 显式选择与主动 read 共用解析；所有 Skill 都从 ~/.orange/skills 下的包读取。 */
 pub fn read_resource(skills: &[AgentSkill], id: &str, relative: Option<&str>) -> Result<Value, String> {
     let skill = skills.iter().find(|s| s.id == id && s.enabled).ok_or("Skill 不存在或已禁用")?;
@@ -72,15 +78,46 @@ impl LoadedResources {
         });
         if let Some(system)=messages.first_mut() {
             let original=system["content"].as_str().unwrap_or("").split("\n【本回合已加载 Skill 资源】").next().unwrap_or("").to_owned();
-            system["content"]=json!(if self.0.is_empty() {original} else {format!("{original}\n【本回合已加载 Skill 资源】\n{}",self.0.values().cloned().collect::<Vec<_>>().iter().map(Value::to_string).collect::<Vec<_>>().join("\n"))});
+            let rendered=self.render_for_system();
+            system["content"]=json!(if rendered.is_empty() {original} else {format!("{original}\n【本回合已加载 Skill 资源】\n{rendered}")});
         }
         Ok(())
+    }
+
+    /** 把已加载资源渲染进 system，并按单条/总量预算截断，避免大 Skill 撑爆上下文。 */
+    fn render_for_system(&self) -> String {
+        let mut rendered = Vec::new();
+        let mut used_chars = 0usize;
+        for payload in self.0.values() {
+            let mut value = payload.clone();
+            if let Some(content) = value.get("content").and_then(Value::as_str) {
+                if content.chars().count() > MAX_LOADED_SKILL_CONTENT_CHARS {
+                    value["content"] = json!(crate::agent_tools::execute::truncate_chars(
+                        content,
+                        MAX_LOADED_SKILL_CONTENT_CHARS
+                    ));
+                    value["contentTruncated"] = json!(true);
+                }
+            }
+            let text = value.to_string();
+            let text_chars = text.chars().count();
+            if !rendered.is_empty()
+                && used_chars.saturating_add(text_chars) > MAX_LOADED_SKILL_SYSTEM_CHARS
+            {
+                rendered.push("…（更多 Skill 资源已按上下文预算省略）".to_owned());
+                break;
+            }
+            used_chars = used_chars.saturating_add(text_chars);
+            rendered.push(text);
+        }
+        rendered.join("\n")
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
     #[test]
     fn enabled_builtin_resources_are_readonly_without_fabricated_paths() {
         let mut skills=super::super::built_in_skills();
@@ -106,5 +143,37 @@ mod tests {
         assert!(!loaded.remember(&resource)); assert!(loaded.remember(&resource));
         fs::write(dir.path().join("SKILL.md"),"---\nname: demo\ndescription: test\n---\n更新指令").unwrap();
         assert!(!loaded.remember(&read_resource(&skills,&id,None).unwrap()));
+    }
+
+    /** 大 Skill 内容进 system 前必须截断，不能把 1 MiB 原文直接塞进上下文。 */
+    #[test]
+    fn loaded_resources_are_truncated_before_system_injection() {
+        let mut loaded = LoadedResources::default();
+        loaded.remember(&json!({
+            "skillId": "skill-a",
+            "resource": "SKILL.md",
+            "contentHash": "hash-a",
+            "content": "长指令".repeat(5_000),
+        }));
+        let rendered = loaded.render_for_system();
+        assert!(rendered.contains("contentTruncated"));
+        assert!(rendered.chars().count() < MAX_LOADED_SKILL_CONTENT_CHARS + 1_000);
+    }
+
+    /** 多个大 Skill 同时加载时，system 注入总量也要有上限。 */
+    #[test]
+    fn loaded_resources_total_system_budget_is_bounded() {
+        let mut loaded = LoadedResources::default();
+        for index in 0..2 {
+            loaded.remember(&json!({
+                "skillId": format!("skill-{index}"),
+                "resource": "SKILL.md",
+                "contentHash": format!("hash-{index}"),
+                "content": "长指令".repeat(5_000),
+            }));
+        }
+        let rendered = loaded.render_for_system();
+        assert!(rendered.contains("更多 Skill 资源已按上下文预算省略"));
+        assert!(rendered.chars().count() <= MAX_LOADED_SKILL_SYSTEM_CHARS + 1_000);
     }
 }

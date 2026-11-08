@@ -29,6 +29,12 @@ const MEMORY_DIRECTORY_NAME: &str = "memory";
 /** Skill 摘要目录注入模型的最大字符数，避免用户安装大量 skill 后挤占上下文。 */
 const MAX_SKILL_CATALOG_PROMPT_CHARS: usize = 8_000;
 
+/** 单个显式 Skill 的 instructions 进入本轮 user 时的字符上限。 */
+const MAX_EXPLICIT_SKILL_CONTENT_CHARS: usize = 12_000;
+
+/** 所有显式 Skill 合计注入 user 的字符上限。 */
+const MAX_EXPLICIT_SKILL_PROMPT_CHARS: usize = 24_000;
+
 /** 第三方 skill 安装时保存在 agents 目录中的橘记元数据文件。 */
 pub(super) const ORANGE_INSTALL_METADATA_FILE_NAME: &str = "orange.yaml";
 
@@ -255,11 +261,16 @@ pub fn skill_summary(skills: &[AgentSkill]) -> String {
 
 /** 把单个显式 Skill 包装成本轮 user 消息中的 invocation 块。 */
 pub fn format_skill_invocation(skill: &AgentSkill) -> String {
+    let content = super::resources::read_resource(std::slice::from_ref(skill), &skill.id, None)
+        .ok()
+        .and_then(|value| value["content"].as_str().map(str::to_owned))
+        .unwrap_or_default();
+    let content = truncate_chars(&content, MAX_EXPLICIT_SKILL_CONTENT_CHARS);
     format!(
         "<skill name=\"{}\" location=\"{}\">\n{}\n</skill>",
         skill.name,
         format!("skill:{}", skill.id),
-        super::resources::read_resource(std::slice::from_ref(skill), &skill.id, None).ok().and_then(|v| v["content"].as_str().map(str::to_owned)).unwrap_or_default()
+        content
     )
 }
 
@@ -269,11 +280,20 @@ pub fn explicit_skill_prompt(skills: &[AgentSkill]) -> String {
         return String::new();
     }
 
-    skills
-        .iter()
-        .map(format_skill_invocation)
-        .collect::<Vec<_>>()
-        .join("\n\n")
+    let mut parts = Vec::new();
+    let mut used_chars = 0usize;
+    for skill in skills {
+        let invocation = format_skill_invocation(skill);
+        let invocation_chars = invocation.chars().count();
+        if used_chars > 0 && used_chars + invocation_chars > MAX_EXPLICIT_SKILL_PROMPT_CHARS {
+            parts.push("…（更多显式 Skill 指令已按上下文预算省略）".to_owned());
+            break;
+        }
+        used_chars = used_chars.saturating_add(invocation_chars);
+        parts.push(invocation);
+    }
+
+    parts.join("\n\n")
 }
 
 /** 构造审计可见的显式 Skill 摘要，只记录数量、来源分布和字符数，不保存 instructions 正文。 */
@@ -1379,6 +1399,27 @@ mod tests {
         assert!(prompt.contains(&skill.instructions));
         assert!(!prompt.contains("本轮显式激活的 Skills：无"));
         assert!(explicit_skill_prompt(&[]).is_empty());
+    }
+
+    /** 超大 Skill 的 instructions 不能整段进入 user 消息。 */
+    #[test]
+    fn explicit_skill_prompt_truncates_oversized_instructions() {
+        let dir = tempdir().expect("tempdir");
+        let path = dir.path().join("SKILL.md");
+        fs::write(
+            &path,
+            valid_skill_markdown("demo", "test", &"长指令".repeat(10_000)),
+        )
+        .unwrap();
+        let mut skill = built_in_skills().remove(0);
+        skill.id = "demo".to_owned();
+        skill.name = "demo".to_owned();
+        skill.enabled = true;
+        skill.path = Some(path.to_string_lossy().into_owned());
+
+        let prompt = explicit_skill_prompt(std::slice::from_ref(&skill));
+        assert!(prompt.contains("已截断"));
+        assert!(prompt.chars().count() <= MAX_EXPLICIT_SKILL_CONTENT_CHARS + 200);
     }
 
     /** 从临时目录加载单个自定义 skill，便于验证扫描后的领域模型。 */
