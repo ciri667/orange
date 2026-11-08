@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { BrowserActivity, BrowserFrame, BrowserReceipt, BrowserState } from "../shared/types";
-import { browserActivateTab, browserSetScreencast, browserShowTab, loadBrowserStatus, subscribeBrowserActivity, subscribeBrowserFrames, subscribeBrowserReceipts, subscribeBrowserState } from "../shared/tauriApi";
+import { browserSetScreencast, browserShowTab, loadBrowserStatus, subscribeBrowserActivity, subscribeBrowserFrames, subscribeBrowserReceipts, subscribeBrowserState } from "../shared/tauriApi";
 
 /** 常驻浏览器状态层；切换到会话或终端后仍接收新网页、画面、活动提示和操作凭证。 */
 export function useBrowserWorkspace(selectedTabId: string | null, visible: boolean) {
@@ -30,12 +30,12 @@ export function useBrowserWorkspace(selectedTabId: string | null, visible: boole
     finally { setBusy(false); }
   }, [applyState]);
 
-  /** 用户主动切页先接管；与 Agent 画面跟随分开，避免跟随操作反而取消 Agent。 */
+  /** 用户点击网页页签只是查看，不接管也不中断 Agent 本轮工具。 */
   const selectTab = useCallback((tabId: string) => {
     pendingView.current = tabId;
     setPendingTabId(tabId);
     viewQueue.current = viewQueue.current.catch(() => undefined).then(async () => {
-      try { await runAction(() => browserActivateTab(tabId)); }
+      try { await runAction(() => browserShowTab(tabId)); }
       finally {
         if (pendingView.current === tabId) {
           pendingView.current = null;

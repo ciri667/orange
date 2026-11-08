@@ -8,15 +8,45 @@ use windows_sys::Win32::Foundation::{GetLastError, HWND, LPARAM, LRESULT, WPARAM
 use windows_sys::Win32::System::{LibraryLoader::GetModuleHandleW, Threading::GetCurrentThreadId};
 use windows_sys::Win32::UI::WindowsAndMessaging::*;
 
-pub(super) type InputCallback = Arc<dyn Fn() + Send + Sync>;
+/**
+ * 用户输入意图。
+ *
+ * 只有会改变页面状态的输入才算接管。滚轮只调整视口：用户看着长页面时必然会
+ * 上下滚动，如果这也算接管，Agent 的整轮工具调用会在用户读页面时被误停。
+ */
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum UserInputSignal {
+    /// 点击、按键等会改变页面状态的输入。
+    Operation,
+    /// 滚轮等只改变视口位置的输入。
+    View,
+}
+
+pub(super) type InputCallback = Arc<dyn Fn(UserInputSignal) + Send + Sync>;
 
 thread_local! {
     /// 每个 surface 的钩子有自己的消息线程，避免测试或重建窗口时混用目标 HWND。
     static TARGET: RefCell<Option<(isize, InputCallback)>> = const { RefCell::new(None) };
 }
 
+/** 鼠标按钮是页面操作；滚轮只滚动视口，不撤销 Agent 租约。 */
+fn mouse_signal(message: u32) -> Option<UserInputSignal> {
+    match message {
+        WM_LBUTTONDOWN | WM_RBUTTONDOWN | WM_MBUTTONDOWN | WM_XBUTTONDOWN => {
+            Some(UserInputSignal::Operation)
+        }
+        WM_MOUSEWHEEL | WM_MOUSEHWHEEL => Some(UserInputSignal::View),
+        _ => None,
+    }
+}
+
+/** 键盘一律按页面操作处理：低级钩子无法区分方向键翻页和输入框内移动光标。 */
+fn keyboard_signal(message: u32) -> Option<UserInputSignal> {
+    matches!(message, WM_KEYDOWN | WM_SYSKEYDOWN).then_some(UserInputSignal::Operation)
+}
+
 /** 仅窗口自身及其渲染子窗口的输入可以接管，其他应用和地址栏输入不会误触发。 */
-fn notify_target(window: HWND) {
+fn notify_target(window: HWND, signal: UserInputSignal) {
     TARGET.with(|target| {
         if let Some((root, callback)) = target.borrow().as_ref() {
             let root = *root as HWND;
@@ -24,21 +54,20 @@ fn notify_target(window: HWND) {
                 && unsafe { IsWindowVisible(root) } != 0
                 && (window == root || unsafe { IsChild(root, window) } != 0)
             {
-                callback();
+                callback(signal);
             }
         }
     });
 }
 
 unsafe extern "system" fn mouse_hook(code: i32, message: WPARAM, data: LPARAM) -> LRESULT {
-    if code == HC_ACTION as i32
-        && matches!(message as u32, WM_LBUTTONDOWN | WM_RBUTTONDOWN | WM_MBUTTONDOWN
-            | WM_XBUTTONDOWN | WM_MOUSEWHEEL | WM_MOUSEHWHEEL)
-    {
-        let event = &*(data as *const MSLLHOOKSTRUCT);
-        // CDP 不经过这些钩子；忽略系统注入事件，避免自动化输入反过来撤销自身租约。
-        if event.flags & LLMHF_INJECTED == 0 {
-            notify_target(WindowFromPoint(event.pt));
+    if code == HC_ACTION as i32 {
+        if let Some(signal) = mouse_signal(message as u32) {
+            let event = &*(data as *const MSLLHOOKSTRUCT);
+            // CDP 不经过这些钩子；忽略系统注入事件，避免自动化输入反过来撤销自身租约。
+            if event.flags & LLMHF_INJECTED == 0 {
+                notify_target(WindowFromPoint(event.pt), signal);
+            }
         }
     }
     // 这里只观察，始终放行原始输入及其他应用的钩子。
@@ -46,16 +75,18 @@ unsafe extern "system" fn mouse_hook(code: i32, message: WPARAM, data: LPARAM) -
 }
 
 unsafe extern "system" fn keyboard_hook(code: i32, message: WPARAM, data: LPARAM) -> LRESULT {
-    if code == HC_ACTION as i32 && matches!(message as u32, WM_KEYDOWN | WM_SYSKEYDOWN) {
-        let event = &*(data as *const KBDLLHOOKSTRUCT);
-        if event.flags & LLKHF_INJECTED == 0 {
-            let mut info = GUITHREADINFO {
-                cbSize: std::mem::size_of::<GUITHREADINFO>() as u32,
-                ..Default::default()
-            };
-            // GetFocus 只读当前线程；GetGUIThreadInfo 可取得跨进程的实际前台焦点。
-            if GetGUIThreadInfo(0, &mut info) != 0 {
-                notify_target(info.hwndFocus);
+    if code == HC_ACTION as i32 {
+        if let Some(signal) = keyboard_signal(message as u32) {
+            let event = &*(data as *const KBDLLHOOKSTRUCT);
+            if event.flags & LLKHF_INJECTED == 0 {
+                let mut info = GUITHREADINFO {
+                    cbSize: std::mem::size_of::<GUITHREADINFO>() as u32,
+                    ..Default::default()
+                };
+                // GetFocus 只读当前线程；GetGUIThreadInfo 可取得跨进程的实际前台焦点。
+                if GetGUIThreadInfo(0, &mut info) != 0 {
+                    notify_target(info.hwndFocus, signal);
+                }
             }
         }
     }
@@ -126,7 +157,29 @@ impl Drop for InputObserver {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Mutex;
+
+    /** 滚轮属于查看，点击和按键才需要接管；键盘无法区分翻页与编辑光标。 */
+    #[test]
+    fn wheel_is_view_while_clicks_and_keys_are_operations() {
+        assert_eq!(mouse_signal(WM_MOUSEWHEEL), Some(UserInputSignal::View));
+        assert_eq!(mouse_signal(WM_MOUSEHWHEEL), Some(UserInputSignal::View));
+        assert_eq!(
+            mouse_signal(WM_LBUTTONDOWN),
+            Some(UserInputSignal::Operation)
+        );
+        assert_eq!(
+            mouse_signal(WM_RBUTTONDOWN),
+            Some(UserInputSignal::Operation)
+        );
+        assert_eq!(mouse_signal(WM_MOUSEMOVE), None);
+        assert_eq!(keyboard_signal(WM_KEYDOWN), Some(UserInputSignal::Operation));
+        assert_eq!(
+            keyboard_signal(WM_SYSKEYDOWN),
+            Some(UserInputSignal::Operation)
+        );
+        assert_eq!(keyboard_signal(WM_KEYUP), None);
+    }
 
     /** 真实 HWND 树验证过滤器：外部窗口不接管，目标后代可接管，隐藏后不接管。 */
     #[test]
@@ -139,18 +192,23 @@ mod tests {
             assert!(!root.is_null());
             let child = CreateWindowExW(0, class.as_ptr(), class.as_ptr(), WS_CHILD,
                 0, 0, 100, 100, root, std::ptr::null_mut(), std::ptr::null_mut(), std::ptr::null_mut());
-            let calls = Arc::new(AtomicUsize::new(0));
-            let callback: InputCallback = Arc::new({ let calls = calls.clone(); move || { calls.fetch_add(1, Ordering::SeqCst); } });
+            let calls = Arc::new(Mutex::new(Vec::new()));
+            let callback: InputCallback = Arc::new({
+                let calls = calls.clone();
+                move |signal| calls.lock().unwrap().push(signal)
+            });
             let observer = InputObserver::start(root as isize, callback.clone()).unwrap();
             TARGET.with(|target| *target.borrow_mut() = Some((root as isize, callback)));
             ShowWindow(root, SW_SHOWNOACTIVATE);
-            notify_target(GetDesktopWindow());
-            assert_eq!(calls.load(Ordering::SeqCst), 0);
-            notify_target(child);
-            assert_eq!(calls.load(Ordering::SeqCst), 1);
+            notify_target(GetDesktopWindow(), UserInputSignal::Operation);
+            assert!(calls.lock().unwrap().is_empty());
+            notify_target(child, UserInputSignal::View);
+            assert_eq!(*calls.lock().unwrap(), vec![UserInputSignal::View]);
+            notify_target(child, UserInputSignal::Operation);
+            assert_eq!(calls.lock().unwrap().len(), 2);
             ShowWindow(root, SW_HIDE);
-            notify_target(child);
-            assert_eq!(calls.load(Ordering::SeqCst), 1);
+            notify_target(child, UserInputSignal::Operation);
+            assert_eq!(calls.lock().unwrap().len(), 2);
             TARGET.with(|target| *target.borrow_mut() = None);
             drop(observer);
             DestroyWindow(root);

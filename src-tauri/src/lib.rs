@@ -398,7 +398,6 @@ pub fn run() {
             commands::terminal::terminal_close,
             commands::browser::browser_start,
             commands::browser::browser_create_tab,
-            commands::browser::browser_activate_tab,
             commands::browser::browser_show_tab,
             commands::browser::browser_user_input,
             commands::browser::set_browser_enabled,

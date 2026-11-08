@@ -33,6 +33,17 @@ pub enum BrowserUserInput {
 }
 
 impl BrowserUserInput {
+    /**
+     * 是否代表用户接管。
+     *
+     * 滚轮只改变视口，不改变页面内容：用户看长页面时会持续滚动，
+     * 不能因此中断 Agent 本轮剩余工具。点击、按键和文本输入会修改页面，才算接管。
+     * 方向键与 PageDown 仍按按键处理，因为无法可靠区分「翻页」和「编辑框内移动光标」。
+     */
+    pub fn takes_over_control(&self) -> bool {
+        !matches!(self, Self::Scroll { .. })
+    }
+
     /** 拒绝非有限坐标和无界文本，输入坐标按固定 CSS 视口约束。 */
     pub fn validate(&self) -> Result<(), String> {
         match self {
@@ -168,6 +179,25 @@ pub(super) async fn send_input(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /** 滚轮是查看，不能撤销 Agent；会改页面的输入才接管。 */
+    #[test]
+    fn scrolling_is_viewing_while_clicks_and_typing_take_over() {
+        assert!(!BrowserUserInput::Scroll {
+            x: 10.0,
+            y: 10.0,
+            delta_x: 0.0,
+            delta_y: 120.0
+        }
+        .takes_over_control());
+        assert!(BrowserUserInput::Click { x: 10.0, y: 10.0 }.takes_over_control());
+        assert!(BrowserUserInput::Text { text: "a".into() }.takes_over_control());
+        assert!(BrowserUserInput::Key {
+            key: "Enter".into(),
+            modifiers: 0
+        }
+        .takes_over_control());
+    }
 
     #[test]
     fn rejects_invalid_coordinates_and_unbounded_input() {

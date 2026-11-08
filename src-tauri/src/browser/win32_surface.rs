@@ -147,7 +147,10 @@ impl ChromiumSurface {
             ShowWindow(chrome_hwnd as HWND, SW_HIDE);
         }
         // 不能跨进程 SetWindowSubclass；低级输入钩子在本进程的独立消息线程执行。
-        let callback = INPUT_CALLBACK.get().cloned().unwrap_or_else(|| Arc::new(|| {}));
+        let callback = INPUT_CALLBACK
+            .get()
+            .cloned()
+            .unwrap_or_else(|| Arc::new(|_signal| {}));
         let observer = match InputObserver::start(chrome_hwnd, callback) {
             Ok(observer) => observer,
             Err(error) => {

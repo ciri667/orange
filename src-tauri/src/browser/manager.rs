@@ -23,6 +23,8 @@ use super::policy::{
 };
 use super::session::{BrowserSessionState, FrameSink};
 use super::types::*;
+#[cfg(windows)]
+use super::native_input::UserInputSignal;
 use crate::domain::AgentSession;
 use crate::runtime::AgentCancel;
 
@@ -270,7 +272,7 @@ async fn finish_control(manager: &BrowserManager, session_id: &str) {
     }
 }
 
-/** 用户创建和切换标签也会先接管，避免与 Agent 同时操作不同页面。 */
+/** 用户新建标签或关闭标签会改变会话，先接管，避免与 Agent 同时操作不同页面。 */
 pub async fn user_create_tab(app: &AppHandle) -> Result<BrowserState, String> {
     user_take_over(app, None).await?;
     ensure_browser(app).await?;
@@ -283,21 +285,12 @@ pub async fn user_create_tab(app: &AppHandle) -> Result<BrowserState, String> {
     Ok(browser_status(app).await)
 }
 
-pub async fn user_activate_tab(app: &AppHandle, tab_id: &str) -> Result<BrowserState, String> {
-    user_take_over(app, None).await?;
-    let manager = browser_manager().await;
-    let mut state = manager.state.lock().await;
-    let session = state
-        .as_mut()
-        .ok_or_else(|| "浏览器尚未启动。".to_owned())?;
-    session.activate_tab(tab_id).await?;
-    drop(state);
-    refresh_screencast(app).await?;
-    publish_state(app).await;
-    Ok(browser_status(app).await)
-}
-
-/** 页签查看与接管分离；仅更新实时画面的来源。 */
+/**
+ * 点击网页页签只切换到该页查看，不撤销 Agent 的操作权。
+ *
+ * 这里只改实时画面的来源（visible），不改变 Agent 的默认操作目标（active）；
+ * 新建/关闭标签与手动导航会改变会话状态，仍然走 user_take_over。
+ */
 pub async fn show_tab(app: &AppHandle, tab_id: &str) -> Result<BrowserState, String> {
     let manager = browser_manager().await;
     let mut state = manager.state.lock().await;
@@ -308,7 +301,12 @@ pub async fn show_tab(app: &AppHandle, tab_id: &str) -> Result<BrowserState, Str
     Ok(browser_status(app).await)
 }
 
-/** 每个用户输入都先撤销 Agent 操作权；只发送到当前可见页面。 */
+/**
+ * 每个用户输入都先撤销 Agent 操作权；只发送到当前可见页面。
+ *
+ * 滚动只调整视口，属于查看而不是接管：用户读长页面时会持续滚动，
+ * 不能因此停掉本轮后续工具。点击、按键和文本输入才撤销租约。
+ */
 pub async fn user_input(
     app: &AppHandle,
     tab_id: &str,
@@ -316,7 +314,7 @@ pub async fn user_input(
 ) -> Result<(), String> {
     input.validate()?;
     let manager = browser_manager().await;
-    if revoke_control(manager, None).await {
+    if input.takes_over_control() && revoke_control(manager, None).await {
         set_activity(app, "user-takeover", None).await;
     }
     let mut state = manager.state.lock().await;
@@ -581,8 +579,12 @@ async fn ensure_browser(app: &AppHandle) -> Result<(), String> {
         super::win32_surface::set_user_input_callback(Arc::new({
             let app = app.clone();
             let pending = Arc::new(std::sync::atomic::AtomicBool::new(false));
-            move || {
-                // 连续滚轮/按键合并一次失效操作，不堆积所有页签的状态查询。
+            move |signal| {
+                // 滚轮只是查看：不撤销租约，也不打断 Agent 当前操作。
+                if signal == UserInputSignal::View {
+                    return;
+                }
+                // 连续点击/按键合并一次失效操作，不堆积所有页签的状态查询。
                 if pending.swap(true, std::sync::atomic::Ordering::SeqCst) { return; }
                 let app = app.clone();
                 let pending = pending.clone();

@@ -36,15 +36,10 @@ export async function browserCreateTab(): Promise<BrowserState> {
   return invokeLogged<BrowserState>("browser_create_tab");
 }
 
-/** 查看页签不撤销 Agent 的浏览器控制租约。 */
+/** 查看页签不撤销 Agent 的浏览器控制租约；只有页面操作、导航或新建/关闭标签才接管。 */
 export async function browserShowTab(tabId: string): Promise<BrowserState> {
   if (!isTauriRuntime()) return showMockBrowserTab(tabId);
   return invokeLogged<BrowserState>("browser_show_tab", { tabId });
-}
-
-export async function browserActivateTab(tabId: string): Promise<BrowserState> {
-  if (!isTauriRuntime()) return loadBrowserStatus();
-  return invokeLogged<BrowserState>("browser_activate_tab", { tabId });
 }
 
 /** 用户输入不随 IPC 调用写入日志或 Agent 上下文。 */

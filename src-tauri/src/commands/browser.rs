@@ -25,11 +25,7 @@ pub async fn browser_create_tab(app: AppHandle) -> Result<BrowserState, String> 
     browser::user_create_tab(&app).await
 }
 
-#[tauri::command]
-pub async fn browser_activate_tab(app: AppHandle, tab_id: String) -> Result<BrowserState, String> {
-    browser::user_activate_tab(&app, &tab_id).await
-}
-
+/** 面板点击网页页签只是查看该页，不接管 Agent；新建/关闭标签与手动导航才会接管。 */
 #[tauri::command]
 pub async fn browser_show_tab(app: AppHandle, tab_id: String) -> Result<BrowserState, String> {
     browser::show_tab(&app, &tab_id).await
