@@ -35,6 +35,8 @@ write kind=file 创建 Markdown/TXT，必须提供完整 content 与 targetPath�
 
 工具结果只回 `changeSetId`、`operationId`、摘要和字符数，不回 `original` / `next` 全文；这样大段改写不会撑爆工具结果预算，模型仍能用 operationId 指代待审操作。
 
+普通工具结果超过 9000 字符时按结构裁剪：优先保留 totals、退出码、分页偏移和定位信息，只裁数组项或字符串，并附加 `modelTruncated` / `returned` 标记；浏览器快照因为需要分页 reference 而保持原样。
+
 ## exec
 
 参数为 command、可选 cwd 和 timeoutSeconds。默认 cwd 为当前会话第一个知识库根目录，失效时报错。Windows 优先 PowerShell 7，回退系统 PowerShell；macOS/Linux 优先 Bash，回退 /bin/sh。实际 Shell 会在上下文中声明。
