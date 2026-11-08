@@ -25,8 +25,8 @@ use super::stream::stream_ui_progress;
 use super::subagent_personas::{
     build_subagent_system_prompt, catalog_names, resolve_agent, ResolvedAgent,
 };
-use super::tool_results::append_tool_result_messages;
-use super::{send_chat_completion_with_policy, MAX_INNER_TOOL_ROUNDS, MAX_TOOL_RESULT_CHARS};
+use super::tool_results::{append_tool_result_messages, model_tool_result_text};
+use super::{send_chat_completion_with_policy, MAX_INNER_TOOL_ROUNDS};
 
 /** 顶层可委派，子级深度为 1 时禁止再委派。 */
 pub(super) const MAX_SUBAGENT_DEPTH: u32 = 1;
@@ -421,6 +421,7 @@ async fn run_nested_loop(
         fold_pending_change_into_change_set(&mut params.snapshot.sessions[params.session_index]);
     }
 
+    let mut deferred_tool_images: Vec<Value> = Vec::new();
     for _ in 0..MAX_INNER_TOOL_ROUNDS {
         if params.cancel.is_aborted()
             || crate::operation_approval::check_current(
@@ -432,6 +433,9 @@ async fn run_nested_loop(
             persist_child(params.app, parsed, &model_messages);
             return Ok(aborted_outcome(params.args, Some(&parsed.task_id)));
         }
+
+        // 先补齐上一批工具的图片消息，再发下一次请求，避免 user 消息插进 tool 序列。
+        model_messages.append(&mut deferred_tool_images);
 
         let response = send_chat_completion_with_policy(
             params.client,
@@ -680,10 +684,7 @@ async fn run_nested_loop(
                 }
             }
             nested_steps = nested_steps.saturating_add(1);
-            let tool_result_text = super::context::truncate_tool_result_for_model(
-                &tool_outcome.payload.to_string(),
-                MAX_TOOL_RESULT_CHARS,
-            );
+            let tool_result_text = model_tool_result_text(&tool_outcome.call, &tool_outcome.payload);
             let tool_error = if tool_outcome.call.status == "failed" {
                 Some(tool_outcome.call.summary.clone())
             } else {
@@ -703,7 +704,7 @@ async fn run_nested_loop(
                 last_failed = Some(tool_error);
             }
             citations.extend(tool_outcome.citations);
-            append_tool_result_messages(
+            if let Some(image_message) = append_tool_result_messages(
                 &mut model_messages,
                 model_tool_call
                     .get("id")
@@ -711,7 +712,9 @@ async fn run_nested_loop(
                     .unwrap_or("tool-call"),
                 &tool_result_text,
                 &tool_outcome.payload,
-            );
+            ) {
+                deferred_tool_images.push(image_message);
+            }
         }
     }
 

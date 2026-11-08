@@ -1630,6 +1630,7 @@ pub(super) fn truncate_chars(value: &str, max_chars: usize) -> String {
 }
 
 /** 工具安全帽截断：尽量保持 JSON 完整，并带可执行下一步。 */
+#[cfg(test)]
 pub(super) fn truncate_tool_result_for_model(value: &str, max_chars: usize) -> String {
     if value.chars().count() <= max_chars {
         return value.to_owned();

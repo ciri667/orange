@@ -999,6 +999,8 @@ async fn run_model_loop(
 
     let mut model_round = 0u32;
     let mut tool_budget = ToolRoundBudget::default();
+    // 图片 user 消息必须等本批所有 tool 消息落完再追加，否则会打断 tool 协议。
+    let mut deferred_tool_images: Vec<Value> = Vec::new();
     loop {
         if crate::browser::agent_turn_was_taken_over(&session_id).await {
             tool_budget.stop_for_browser_takeover();
@@ -1026,6 +1028,8 @@ async fn run_model_loop(
                 "content": notice
             }));
         }
+        // 本批工具都结束后再补图片消息，保证 assistant(tool_calls) 后紧跟所有 tool 结果。
+        model_messages.append(&mut deferred_tool_images);
         // 压缩可能丢掉旧 tool/user 消息，已加载指令恢复到当前唯一 system 前缀。
         loaded_resources.restore(app, &mut model_messages)?;
         audit_trail.record_model_request();
@@ -1409,10 +1413,8 @@ async fn run_model_loop(
                         .unwrap_or_else(|poisoned| poisoned.into_inner());
                     for (model_tool_call, tool_outcome) in batch.into_iter().zip(parallel_outcomes)
                     {
-                        let tool_result_text = truncate_tool_result_for_model(
-                            &tool_outcome.payload.to_string(),
-                            MAX_TOOL_RESULT_CHARS,
-                        );
+                        let tool_result_text =
+                            model_tool_result_text(&tool_outcome.call, &tool_outcome.payload);
                         audit_trail.record_sent_fragment(tool_outcome.audit_fragment.clone());
                         citations.extend(tool_outcome.citations.clone());
                         let tool_error = if tool_outcome.call.status == "failed" {
@@ -1652,7 +1654,7 @@ async fn run_model_loop(
                 last_failed_tool_summary = Some(tool_error);
             }
             tool_calls.push(tool_outcome.call);
-            append_tool_result_messages(
+            if let Some(image_message) = append_tool_result_messages(
                 &mut model_messages,
                 model_tool_call
                     .get("id")
@@ -1660,7 +1662,9 @@ async fn run_model_loop(
                     .unwrap_or("tool-call"),
                 &tool_result_text,
                 &tool_outcome.payload,
-            );
+            ) {
+                deferred_tool_images.push(image_message);
+            }
         }
     }
 
