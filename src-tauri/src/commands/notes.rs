@@ -374,15 +374,19 @@ pub async fn save_note_content(
         .iter()
         .position(|note| note.id == payload.note_id)
         .ok_or_else(|| "找不到要保存的笔记".to_owned())?;
-    let knowledge_base = snapshot
-        .knowledge_bases
-        .iter()
-        .find(|item| item.id == snapshot.notes[note_index].knowledge_base_id)
-        .ok_or_else(|| "找不到笔记所属知识库".to_owned())?;
-    let knowledge_base_id = knowledge_base.id.clone();
+    let knowledge_base_id = snapshot.notes[note_index].knowledge_base_id.clone();
+    // 根目录必须以持久化记录为准：快照来自前端，若直接采信其中的 path，
+    // 「相对路径在根内」这条校验就只是在验证前端自己给的边界。
+    let persisted_root = run_blocking("读取知识库根目录", {
+        let app = app.clone();
+        let knowledge_base_id = knowledge_base_id.clone();
+        move || storage::load_knowledge_base_root(&app, &knowledge_base_id)
+    })
+    .await?
+    .ok_or_else(|| "找不到笔记所属知识库".to_owned())?;
     let note_relative_path = snapshot.notes[note_index].path.clone();
     let target_path = storage::resolve_existing_file_inside_root(
-        PathBuf::from(&knowledge_base.path).as_path(),
+        persisted_root.as_path(),
         &note_relative_path,
     )?;
 
