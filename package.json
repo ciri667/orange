@@ -8,6 +8,7 @@
     "dev": "vite --host 0.0.0.0",
     "build": "tsc --noEmit && vite build",
     "preview": "vite preview --host 0.0.0.0",
+    "test:web": "node --test \"src/**/*.test.ts\"",
     "tauri": "tauri",
     "dev:signing:init": "node scripts/macos-dev-signing-init.mjs",
     "icon:macos:generate": "python3 scripts/generate-macos-icon.py",

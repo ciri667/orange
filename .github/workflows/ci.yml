@@ -1,0 +1,93 @@
+name: CI
+
+# 代码提交的最小校验：前端类型检查/构建/测试 + Rust 单元测试。
+# 文档站部署由 docs.yml 负责，两者互不阻塞。
+on:
+  push:
+    branches: [main]
+    paths-ignore:
+      - "docs-site/**"
+      - "docs/**"
+      - "**.md"
+  pull_request:
+    paths-ignore:
+      - "docs-site/**"
+      - "docs/**"
+      - "**.md"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# 同一分支的新提交取消上一次未完成的校验，避免排队浪费。
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  web:
+    name: 前端构建与测试
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          # 前端测试依赖 Node 原生 TypeScript 类型剥离，需要 22.18+。
+          node-version: 22
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Typecheck and build
+        run: npm run build
+
+      - name: Frontend tests
+        run: npm run test:web
+
+  rust:
+    name: Rust 单元测试
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      # tauri::generate_context! 在编译期读取前端产物目录，必须先构建 dist/。
+      - name: Install frontend dependencies
+        run: npm ci
+
+      - name: Build frontend dist
+        run: npm run build
+
+      - name: Install Linux system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev \
+            libayatana-appindicator3-dev \
+            librsvg2-dev \
+            libgtk-3-dev \
+            libxdo-dev \
+            libssl-dev \
+            patchelf
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo registry and target
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri -> target
+
+      # 语音（sherpa-onnx）只在 Windows 上编译，这里不需要预编译库下载。
+      - name: Run Rust tests
+        run: cargo test --manifest-path src-tauri/Cargo.toml
