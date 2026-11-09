@@ -1,4 +1,47 @@
 use super::common::*;
+use std::collections::HashMap;
+use std::sync::{Mutex, OnceLock};
+
+/**
+ * 已通过系统目录对话框确认、但尚未连接的知识库目录。
+ *
+ * `scan_knowledge_base` 需要一个刚生成的 ID 和目录路径，两者都由前端回传。若后端无条件
+ * 接受这对参数，就等于给出一个「读任意目录正文并回传」的入口；而目录选择本应只能来自
+ * 系统对话框。这里把「对话框确实选过这个目录」记录成一次性票据：扫描时按 ID 取出比对，
+ * 用掉即作废。这样既不改变前端协议，也不再依赖前端自觉。
+ */
+fn pending_knowledge_base_selections() -> &'static Mutex<HashMap<String, PathBuf>> {
+    static PENDING: OnceLock<Mutex<HashMap<String, PathBuf>>> = OnceLock::new();
+    PENDING.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/** 登记一个待连接目录；返回给前端的 ID 只能用于这一次扫描。 */
+fn remember_pending_selection(path: &Path) -> Result<String, String> {
+    let id = storage::create_id("kb");
+    let mut pending = pending_knowledge_base_selections()
+        .lock()
+        .map_err(|_| "知识库选择登记表已损坏。".to_owned())?;
+    // 上界保护：正常情况下每个票据都会被紧接着的扫描消费，残留只会来自取消操作。
+    if pending.len() >= 32 {
+        pending.clear();
+    }
+    pending.insert(id.clone(), path.to_path_buf());
+    Ok(id)
+}
+
+/** 取出并作废一个待连接票据；ID 不存在或路径不一致都视为未授权。 */
+fn take_pending_selection(id: &str, path: &Path) -> bool {
+    let Ok(mut pending) = pending_knowledge_base_selections().lock() else {
+        return false;
+    };
+    let Some(recorded) = pending.remove(id) else {
+        return false;
+    };
+    match (fs::canonicalize(&recorded), fs::canonicalize(path)) {
+        (Ok(recorded), Ok(requested)) => recorded == requested,
+        _ => false,
+    }
+}
 
 #[tauri::command]
 pub async fn select_knowledge_base(app: AppHandle) -> Result<KnowledgeBaseSelection, String> {
@@ -32,8 +75,10 @@ pub async fn select_knowledge_base(app: AppHandle) -> Result<KnowledgeBaseSelect
             .await
             .map_err(|error| format!("统计 Markdown 文件时后台任务失败：{error}"))??;
 
+    // ID 与路径在同一个票据里生成，扫描阶段据此确认目录确实来自对话框。
+    let id = remember_pending_selection(&path)?;
     let selection = KnowledgeBaseSelection {
-        id: storage::create_id("kb"),
+        id,
         name,
         path: path.to_string_lossy().to_string(),
         note_count,
@@ -66,6 +111,29 @@ pub async fn scan_knowledge_base(
     let mut snapshot = payload.snapshot;
     let selection = payload.selection;
     let selected_knowledge_base_id = selection.id.clone();
+
+    // 目录必须能追溯到系统选择对话框：用一次性票据把「选过这个目录」这件事钉在
+    // ID 上，而不是让前端各自传一个 ID 和一个路径、后端无条件相信它们配套。
+    // 已连接的知识库走 rescan；这里只接受尚未登记的票据。
+    let persisted_roots = run_blocking("读取知识库列表", {
+        let app = app.clone();
+        move || storage::load_knowledge_base_roots(&app)
+    })
+    .await?;
+    if persisted_roots
+        .iter()
+        .any(|(id, _)| id == &selected_knowledge_base_id)
+    {
+        return Err("该知识库已连接，请改用「重新扫描」。".to_owned());
+    }
+    let requested_path = PathBuf::from(&selection.path);
+    if !take_pending_selection(&selected_knowledge_base_id, &requested_path) {
+        return Err(
+            "该目录未经过系统选择对话框确认，已阻止扫描。请通过「添加知识库」重新选择目录。"
+                .to_owned(),
+        );
+    }
+
     let (knowledge_base, folders, notes, documents) =
         run_blocking("扫描支持文档知识库", move || {
             storage::scan_supported_documents_directory(&selection)
@@ -419,5 +487,63 @@ pub(crate) fn normalize_sessions_after_rescan(
         {
             session.pending_change = None;
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{remember_pending_selection, take_pending_selection};
+
+    /**
+     * 正常流程：对话框登记过的 ID + 同一目录，扫描时应当放行。
+     *
+     * 这条路径是「添加知识库」的唯一合法入口，不能被授权校验误伤。
+     */
+    #[test]
+    fn pending_selection_accepts_the_recorded_directory_once() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let id = remember_pending_selection(dir.path()).expect("remember selection");
+
+        assert!(take_pending_selection(&id, dir.path()));
+        // 票据一次性：第二次必须失败，避免同一 ID 被复用去扫描别的目录。
+        assert!(!take_pending_selection(&id, dir.path()));
+    }
+
+    /**
+     * 伪造 ID：从未经过对话框登记时直接拒绝。
+     *
+     * 这是本次修复的核心——旧实现只信任前端传来的 ID 与路径，等于给出读任意目录的入口。
+     */
+    #[test]
+    fn pending_selection_rejects_unregistered_id() {
+        let dir = tempfile::tempdir().expect("temp dir");
+
+        assert!(!take_pending_selection("kb-forged", dir.path()));
+    }
+
+    /**
+     * 换目录：用登记过的 ID 去扫另一个目录必须拒绝。
+     *
+     * 否则攻击者只要先正常选一次目录拿到 ID，就能拿它去读任意别的路径。
+     */
+    #[test]
+    fn pending_selection_rejects_a_different_directory() {
+        let registered = tempfile::tempdir().expect("registered dir");
+        let other = tempfile::tempdir().expect("other dir");
+        let id = remember_pending_selection(registered.path()).expect("remember selection");
+
+        assert!(!take_pending_selection(&id, other.path()));
+        // 失败的尝试同样作废票据，防止反复试探。
+        assert!(!take_pending_selection(&id, registered.path()));
+    }
+
+    /** 目录已被删除等无法规范化的情形按未授权处理，而不是放行。 */
+    #[test]
+    fn pending_selection_rejects_missing_directory() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let id = remember_pending_selection(dir.path()).expect("remember selection");
+        let missing = dir.path().join("does-not-exist");
+
+        assert!(!take_pending_selection(&id, &missing));
     }
 }
