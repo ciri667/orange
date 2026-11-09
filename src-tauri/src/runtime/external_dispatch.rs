@@ -40,11 +40,32 @@ pub(super) async fn exec(app: &AppHandle, snapshot: &mut WorkspaceSnapshot, inde
         crate::command_exec::execute(command,&cwd,timeout,cancel).await
     }.await;
     // 成功、失败或取消都可能已修改磁盘；不能继续使用调用前的索引或正文。
-    let refresh=crate::file_changes::refresh(app,snapshot);
+    //
+    // 重扫是 WalkDir + 逐文件读取 + 整篇 hash + FTS 重建，必须在阻塞线程池执行：
+    // 直接在 async 函数里同步调用会占住 tokio 工作线程，拖慢同一时刻所有会话的流式输出。
+    let refresh = refresh_snapshot_in_background(app, snapshot).await;
     let mut output=match result {
         Ok(result)=> { let success=result.success(); let summary=if success {"命令执行完成"} else if result.cancelled {"命令已取消，可能已有副作用"} else if result.timed_out {"命令超时，可能已有副作用"} else {"命令执行失败"}; outcome("exec",args,success,json!(result),summary.into()) },
         Err(e)=>failed("exec",args,&e),
     };
-    if let Err(e)=refresh { output.call.status="failed".into(); output.payload["rescanError"]=json!(e); output.call.summary.push_str("；知识库重扫失败，请刷新后再继续"); }
+    match refresh {
+        Ok(updated) => *snapshot = updated,
+        Err(e) => { output.call.status="failed".into(); output.payload["rescanError"]=json!(e); output.call.summary.push_str("；知识库重扫失败，请刷新后再继续"); }
+    }
     output
+}
+
+/** 把 `file_changes::refresh` 放到阻塞线程池，并带回重扫后的快照。 */
+async fn refresh_snapshot_in_background(
+    app: &AppHandle,
+    snapshot: &WorkspaceSnapshot,
+) -> Result<WorkspaceSnapshot, String> {
+    let app = app.clone();
+    let mut owned = snapshot.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        crate::file_changes::refresh(&app, &mut owned)?;
+        Ok::<_, String>(owned)
+    })
+    .await
+    .map_err(|error| format!("知识库重扫的后台任务失败：{error}"))?
 }

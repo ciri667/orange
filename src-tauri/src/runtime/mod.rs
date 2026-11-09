@@ -1617,12 +1617,14 @@ async fn run_model_loop(
                     &snapshot.sessions[session_index],
                 )
             {
-                match crate::file_changes::auto_apply_new(
+                match crate::file_changes::auto_apply_new_in_background(
                     app,
                     &mut snapshot,
                     session_index,
                     &previous_operation_ids,
-                ) {
+                )
+                .await
+                {
                     Ok(Some(selected)) => {
                         tool_result_text =
                             json!({"status":"applied","autoApproved":true,"operationIds":selected})

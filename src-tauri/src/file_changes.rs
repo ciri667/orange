@@ -294,6 +294,50 @@ pub fn apply(app: &AppHandle, session_id: &str, set_id: &str, selected_ids: &[St
     crate::agent_writes::with_write_paths(&[], || apply_locked(app,session_id,set_id,selected_ids))
 }
 
+/**
+ * `auto_apply_new` 的异步包装。
+ *
+ * 与 `apply_in_background` 同理：这个函数在 full-auto 下每个写工具调用后都会跑一次全库重扫。
+ * 克隆快照的代价不小（含全部笔记正文），因此先在当前线程做一次廉价前置判定；
+ * 绝大多数会话（非 full-auto、无待审变更、没有新操作）走不到克隆这一步。
+ */
+pub(crate) async fn auto_apply_new_in_background(
+    app: &AppHandle,
+    snapshot: &mut WorkspaceSnapshot,
+    index: usize,
+    previous: &[String],
+) -> Result<Option<Vec<String>>, String> {
+    if !crate::agent_writes::allows_autonomous_auto_apply(&snapshot.sessions[index]) {
+        return Ok(None);
+    }
+    let Some(set) = snapshot.sessions[index].pending_change_set.as_ref() else {
+        return Ok(None);
+    };
+    let has_new_operations = set
+        .operations
+        .iter()
+        .any(|op| op.status != "completed" && !previous.contains(&op.id));
+    if !has_new_operations {
+        return Ok(None);
+    }
+
+    let app = app.clone();
+    let mut owned = snapshot.clone();
+    let previous = previous.to_vec();
+    let (outcome, updated) = tauri::async_runtime::spawn_blocking(move || {
+        let outcome = auto_apply_new(&app, &mut owned, index, &previous)?;
+        Ok::<_, String>((outcome, owned))
+    })
+    .await
+    .map_err(|error| format!("自动应用文件变更的后台任务失败：{error}"))??;
+
+    // 只有在快照确实被改写时才写回，避免无条件覆盖调用方的其它字段。
+    if outcome.is_some() {
+        *snapshot = updated;
+    }
+    Ok(outcome)
+}
+
 fn apply_locked(app: &AppHandle, session_id: &str, set_id: &str, selected_ids: &[String]) -> Result<WorkspaceSnapshot, String> {
     let mut snapshot = storage::load_workspace_snapshot(app)?;
     let index = snapshot.sessions.iter().position(|s| s.id == session_id).ok_or("会话不存在")?;
