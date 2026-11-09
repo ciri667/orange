@@ -59,7 +59,7 @@ pub async fn run_builtin_command(
             notice: build_session_status_notice(&payload.snapshot),
             snapshot: None,
         }),
-        "new" => create_session_from_command(&app).await,
+        "new" => create_session_from_command(&app, payload.snapshot).await,
         "rename" => rename_session_from_command(&app, payload.snapshot, payload.args).await,
         "compact" => compact_session_from_command(&app, payload.snapshot).await,
         _ => Err(format!("内置指令 {command_id} 尚未实现。")),
@@ -176,15 +176,39 @@ fn build_new_command_session(knowledge_base_id: &str) -> AgentSession {
     }
 }
 
-/** 新建空白会话并直接成为活跃会话；标题先占位，由首条输入补齐。 */
-async fn create_session_from_command(app: &AppHandle) -> Result<BuiltinCommandRunResult, String> {
-    let snapshot_app = app.clone();
-    let mut snapshot = run_blocking("加载工作台快照", move || {
-        storage::load_workspace_snapshot(&snapshot_app)
+/**
+ * 新建空白会话并直接成为活跃会话；标题先占位，由首条输入补齐。
+ *
+ * 直接复用前端传来的工作台快照：`/new` 只新增一条会话，不需要知道磁盘上每个文件
+ * 的当前内容。旧实现每次 `/new` 都调用 `load_workspace_snapshot`，等于为一个空白会话
+ * 全量重扫所有知识库并重算全部文件 hash。
+ *
+ * 安全性不受影响：新会话只写会话表，且 `save_snapshot_session` 会按会话 ID 单独 upsert，
+ * 不会把这份快照里的其它字段写回磁盘。
+ */
+async fn create_session_from_command(
+    app: &AppHandle,
+    snapshot: WorkspaceSnapshot,
+) -> Result<BuiltinCommandRunResult, String> {
+    let mut snapshot = snapshot;
+
+    // 知识库是否存在必须以持久化记录为准，避免用过期/伪造的快照创建指向失效范围的会话。
+    let known_roots = run_blocking("读取知识库列表", {
+        let app = app.clone();
+        move || storage::load_knowledge_base_roots(&app)
     })
     .await?;
-
-    let knowledge_base_id = snapshot.active_knowledge_base_id.clone();
+    let knowledge_base_id = if known_roots
+        .iter()
+        .any(|(id, _)| id == &snapshot.active_knowledge_base_id)
+    {
+        snapshot.active_knowledge_base_id.clone()
+    } else {
+        known_roots
+            .first()
+            .map(|(id, _)| id.clone())
+            .unwrap_or_default()
+    };
     if knowledge_base_id.is_empty() {
         return Err("当前没有可用的知识库，无法新建 Agent 会话。".to_owned());
     }
@@ -192,8 +216,34 @@ async fn create_session_from_command(app: &AppHandle) -> Result<BuiltinCommandRu
     let session = build_new_command_session(&knowledge_base_id);
     let session_id = session.id.clone();
 
-    snapshot.sessions.insert(0, session);
+    snapshot.knowledge_bases = known_roots
+        .iter()
+        .map(|(id, path)| crate::domain::KnowledgeBase {
+            id: id.clone(),
+            name: path
+                .file_name()
+                .and_then(|value| value.to_str())
+                .unwrap_or("本地知识库")
+                .to_owned(),
+            path: path.to_string_lossy().into_owned(),
+            description: String::new(),
+            status: "ready".to_owned(),
+            note_count: 0,
+            document_count: 0,
+            updated_at: storage::format_local_datetime(),
+            is_default: id == &knowledge_base_id,
+            semantic_index_enabled: false,
+            scan_report: None,
+        })
+        .collect();
+    snapshot.active_knowledge_base_id = knowledge_base_id;
+    snapshot.active_note_id.clear();
+    snapshot.active_document_id.clear();
     snapshot.active_session_id = session_id.clone();
+    if !snapshot.sessions.iter().any(|item| item.id == session_id) {
+        snapshot.sessions.insert(0, session);
+    }
+
     let persist_app = app.clone();
     let persist_snapshot = snapshot.clone();
     let persist_session_id = session_id.clone();
