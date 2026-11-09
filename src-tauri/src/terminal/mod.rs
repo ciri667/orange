@@ -132,15 +132,16 @@ fn spawn(cwd: &Path, mut command: CommandBuilder, shell: String, cols: u16, rows
 }
 
 pub fn create(app: &tauri::AppHandle, knowledge_base_id: &str, cols: u16, rows: u16, channel: tauri::ipc::Channel<TerminalEvent>) -> Result<TerminalDescriptor, String> {
-    let snapshot = crate::storage::load_workspace_snapshot(app)?;
-    let knowledge_base = snapshot.knowledge_bases.iter().find(|item| item.id == knowledge_base_id).ok_or("知识库不存在。")?;
+    // 终端只需要工作目录；用 load_workspace_snapshot 会为拿一个路径而全库扫描。
+    let knowledge_base_root = crate::storage::load_knowledge_base_root(app, knowledge_base_id)?
+        .ok_or("知识库不存在。")?;
     let shell = default_shell()?;
     let mut command = CommandBuilder::new(&shell);
     #[cfg(windows)]
     { command.args(["-NoLogo", "-NoProfile"]); }
     #[cfg(unix)]
     { command.arg("-i"); }
-    spawn(Path::new(&knowledge_base.path), command, shell.file_name().unwrap_or_default().to_string_lossy().into_owned(), cols, rows, Arc::new(move |event| { let _ = channel.send(event); }))
+    spawn(&knowledge_base_root, command, shell.file_name().unwrap_or_default().to_string_lossy().into_owned(), cols, rows, Arc::new(move |event| { let _ = channel.send(event); }))
 }
 
 pub fn input(id: &str, data: &str) -> Result<(), String> {

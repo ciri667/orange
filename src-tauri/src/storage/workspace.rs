@@ -1167,6 +1167,48 @@ fn upsert_note_index(transaction: &rusqlite::Transaction<'_>, note: &Note) -> Re
     Ok(())
 }
 
+/**
+ * 只读 SQLite 的已连接知识库根目录，不触碰磁盘。
+ *
+ * `load_workspace_snapshot` 会为每个知识库全量 `WalkDir` + 逐文件读取 + 整篇 hash，
+ * 因此绝不能用在「只需要一个路径」的场景（打开终端、新建会话、授权校验、定时任务）。
+ * 这里返回 `(id, 根目录)`，调用方拿到的仍是权威的持久化记录，只是不再为它重扫全库。
+ */
+pub fn load_knowledge_base_roots(app: &AppHandle) -> Result<Vec<(String, PathBuf)>, String> {
+    let connection = open_database(app)?;
+    let mut statement = connection
+        .prepare("SELECT id, path FROM knowledge_bases ORDER BY rowid")
+        .map_err(|error| format!("无法读取知识库列表：{error}"))?;
+    let rows = statement
+        .query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })
+        .map_err(|error| format!("无法查询知识库列表：{error}"))?;
+
+    let mut roots = Vec::new();
+    for row in rows {
+        let (id, path) = row.map_err(|error| format!("无法解析知识库记录：{error}"))?;
+        roots.push((id, PathBuf::from(path)));
+    }
+
+    Ok(roots)
+}
+
+/**
+ * 单个已连接知识库的根目录；未连接时返回 None。
+ *
+ * 供终端、`/new`、定时任务等「只需要工作目录」的入口使用，避免为了一个路径触发全库扫描。
+ */
+pub fn load_knowledge_base_root(
+    app: &AppHandle,
+    knowledge_base_id: &str,
+) -> Result<Option<PathBuf>, String> {
+    Ok(load_knowledge_base_roots(app)?
+        .into_iter()
+        .find(|(id, _)| id == knowledge_base_id)
+        .map(|(_, path)| path))
+}
+
 pub fn load_workspace_snapshot(app: &AppHandle) -> Result<WorkspaceSnapshot, String> {
     let connection = open_database(app)?;
     let mut statement = connection
