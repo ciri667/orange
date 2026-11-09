@@ -1415,10 +1415,7 @@ async fn run_model_loop(
                         client.clone(),
                     )
                     .await;
-                    *tracer = Arc::try_unwrap(shared)
-                        .unwrap_or_else(|_| panic!("并行子 Agent 结束后过程区仍被持有"))
-                        .into_inner()
-                        .unwrap_or_else(|poisoned| poisoned.into_inner());
+                    *tracer = reclaim_tracer(shared);
                     for (model_tool_call, tool_outcome) in batch.into_iter().zip(parallel_outcomes)
                     {
                         let tool_result_text =
@@ -1568,15 +1565,7 @@ async fn run_model_loop(
                     emit_progress: true,
                 })
                 .await;
-                *tracer = match Arc::try_unwrap(shared) {
-                    Ok(lock) => lock
-                        .into_inner()
-                        .unwrap_or_else(|poisoned| poisoned.into_inner()),
-                    Err(shared) => shared
-                        .lock()
-                        .unwrap_or_else(|poisoned| poisoned.into_inner())
-                        .clone(),
-                };
+                *tracer = reclaim_tracer(shared);
                 outcome
             } else {
                 let mut tool_context = AgentToolContext {
@@ -1737,6 +1726,29 @@ async fn run_model_loop(
         turn_result: AgentTurnResult { snapshot },
         audit_log,
     })
+}
+
+/**
+ * 从共享句柄里取回过程收集器。
+ *
+ * `task` 工具会把 tracer 交给子 Agent 使用。前台子 Agent 结束后 `Arc::try_unwrap`
+ * 通常能拿回唯一所有权；但后台子 Agent（`subagent::spawn_background`）会把克隆长期
+ * 留在自己的任务里，此时取不回所有权属于**正常路径**而不是错误。
+ *
+ * 早期实现用 `panic!` 处理这一分支，等于把一次正常的后台并发升级成整个命令崩溃。
+ * 这里统一为「取不回就克隆一份最新状态继续」，两条子 Agent 路径共用同一语义，
+ * 避免再次出现一处安全、一处 panic 的分叉。
+ */
+fn reclaim_tracer(shared: Arc<Mutex<AgentTurnTracer>>) -> AgentTurnTracer {
+    match Arc::try_unwrap(shared) {
+        Ok(lock) => lock
+            .into_inner()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()),
+        Err(shared) => shared
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone(),
+    }
 }
 
 /** 工具失败时覆盖模型的成功话术，避免 UI 同时展示 failed 轨迹和“已生成”。 */
