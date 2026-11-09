@@ -261,7 +261,26 @@ pub fn load_gateway_status(app: &AppHandle) -> Result<FeishuGatewayStatus, Strin
     state.app_id_configured = !settings.app_id.trim().is_empty();
     state.secret_configured = secret_configured;
 
-    Ok(state.to_status())
+    // 每次读取状态都核对 sidecar 是否还活着，避免界面长期显示「运行中」。
+    // 先经一次解引用把 Guard 变成内部结构体，才能同时借出多个互不重叠的字段。
+    let inner: &mut FeishuGatewayState = &mut state;
+    let detected_exit = super::process::GatewayLiveness {
+        child: &mut inner.child,
+        running: &mut inner.running,
+        connected: &mut inner.connected,
+        last_error: &mut inner.last_error,
+    }
+    .probe();
+    let status = inner.to_status();
+    // 显式结束临界区，后面的日志写入不再持锁。
+    drop(state);
+
+    // 日志写入放在锁外，避免文件 IO 拉长状态锁临界区。
+    if let Some(description) = detected_exit {
+        record_gateway_error(app, &description);
+    }
+
+    Ok(status)
 }
 
 impl FeishuGatewayState {

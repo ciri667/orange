@@ -192,7 +192,22 @@ pub fn load_gateway_status(app: &AppHandle) -> Result<ImGatewayStatus, String> {
         .and_then(ImProviderSettings::to_wecom_config)
         .is_some_and(|config| !config.bot_id.trim().is_empty());
     state.secret_configured = secret_configured;
-    Ok(state.to_status())
+    // 核对 sidecar 存活：进程静默退出后 running 必须变成 false，否则界面会误报「运行中」。
+    // 先经一次解引用把 Guard 变成内部结构体，才能同时借出多个互不重叠的字段。
+    let inner: &mut WecomGatewayState = &mut state;
+    let detected_exit = super::process::GatewayLiveness {
+        child: &mut inner.child,
+        running: &mut inner.running,
+        connected: &mut inner.connected,
+        last_error: &mut inner.last_error,
+    }
+    .probe();
+    let status = inner.to_status();
+    drop(state);
+    if let Some(description) = detected_exit {
+        record_gateway_error(app, &description);
+    }
+    Ok(status)
 }
 
 impl WecomGatewayState {

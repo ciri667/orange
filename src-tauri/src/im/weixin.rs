@@ -174,7 +174,22 @@ pub fn load_gateway_status(app: &AppHandle) -> Result<ImGatewayStatus, String> {
         .and_then(ImProviderSettings::to_weixin_config)
         .is_some_and(|config| !config.account_id.trim().is_empty());
     state.secret_configured = secret_configured;
-    Ok(state.to_status())
+    // 核对 sidecar 存活：进程静默退出（例如会话过期后退出）后必须把 running 置假。
+    // 先经一次解引用把 Guard 变成内部结构体，才能同时借出多个互不重叠的字段。
+    let inner: &mut WeixinGatewayState = &mut state;
+    let detected_exit = super::process::GatewayLiveness {
+        child: &mut inner.child,
+        running: &mut inner.running,
+        connected: &mut inner.connected,
+        last_error: &mut inner.last_error,
+    }
+    .probe();
+    let status = inner.to_status();
+    drop(state);
+    if let Some(description) = detected_exit {
+        record_gateway_error(app, &description);
+    }
+    Ok(status)
 }
 
 /** 启动个人微信扫码登录 sidecar。 */
